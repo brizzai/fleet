@@ -98,7 +98,7 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 	}
 
 	if cursor != nil && !cursorRendered {
-		debuglog.Logger.Warn("cursor NOT rendered",
+		debuglog.Logger.Debug("cursor NOT rendered",
 			"cursor_x", cursor.X, "cursor_y", cursor.Y,
 			"total_lines", len(lines), "start", start,
 			"content_height", contentHeight)

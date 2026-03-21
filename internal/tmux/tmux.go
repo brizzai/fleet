@@ -372,8 +372,11 @@ func (s *Session) PaneCursorPosition() (CursorPosition, error) {
 // For a shell session at a prompt, this returns the shell name (e.g. "zsh", "bash").
 // When a command is running, this returns that command name (e.g. "make", "go").
 func (s *Session) PaneCurrentCommand() string {
-	out, err := exec.Command("tmux", "list-panes", "-t", s.Name, "-F", "#{pane_current_command}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", s.Name, "-F", "#{pane_current_command}").Output()
 	if err != nil {
+		debuglog.Logger.Error("tmux PaneCurrentCommand failed", "session", s.Name, "err", err)
 		return ""
 	}
 	return strings.TrimSpace(string(out))
@@ -383,13 +386,13 @@ func (s *Session) PaneCurrentCommand() string {
 // that writes the last exit code to the session's hook status file.
 func (s *Session) SetupShellExitHook(sessionID string) {
 	hooksDir := shellExitHooksDir()
-	// Use a shell-agnostic approach: set PROMPT_COMMAND for bash, precmd for zsh.
+	// For supported shells, install a hook: use precmd_functions for zsh and PROMPT_COMMAND for bash.
 	// The setup command appends to precmd_functions (zsh) or PROMPT_COMMAND (bash),
 	// then clears the screen so the user sees a clean prompt.
 	// Single command: define hook + register + clear screen, all in one Enter press.
 	setup := fmt.Sprintf(
-		`eval '__bc_hook(){ local rc=$?; printf "{\"exit_code\":%%d}\n" $rc > %s/%s_exit.json; return $rc; }; if [ -n "$ZSH_VERSION" ]; then precmd_functions+=(__bc_hook); else PROMPT_COMMAND="__bc_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; fi' && clear`,
-		hooksDir, sessionID,
+		`mkdir -p '%s' && eval '__bc_hook(){ local rc=$?; printf "{\"exit_code\":%%d}\n" $rc > %s/%s_exit.json; return $rc; }; if [ -n "$ZSH_VERSION" ]; then precmd_functions+=(__bc_hook); else PROMPT_COMMAND="__bc_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; fi' && clear`,
+		hooksDir, hooksDir, sessionID,
 	)
 	_ = s.SendLiteralKeys(setup)
 	_ = s.SendKeys("Enter")
