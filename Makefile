@@ -40,7 +40,7 @@ vet:
 	go vet ./...
 
 install: build
-	cp $(BUILD_DIR)/$(BINARY) ~/.local/bin/
+	install -m 755 $(BUILD_DIR)/$(BINARY) ~/.local/bin/$(BINARY)
 
 setup:
 	pre-commit install

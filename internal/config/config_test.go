@@ -166,6 +166,144 @@ func TestIsTelemetryEnabled(t *testing.T) {
 	})
 }
 
+func TestGetSidebarPct(t *testing.T) {
+	t.Run("nil defaults to 35", func(t *testing.T) {
+		cfg := &Config{}
+		if got := cfg.GetSidebarPct(); got != 35 {
+			t.Errorf("GetSidebarPct() = %d, want 35", got)
+		}
+	})
+
+	t.Run("value within range", func(t *testing.T) {
+		v := 40
+		cfg := &Config{SidebarPct: &v}
+		if got := cfg.GetSidebarPct(); got != 40 {
+			t.Errorf("GetSidebarPct() = %d, want 40", got)
+		}
+	})
+
+	t.Run("min boundary", func(t *testing.T) {
+		v := 20
+		cfg := &Config{SidebarPct: &v}
+		if got := cfg.GetSidebarPct(); got != 20 {
+			t.Errorf("GetSidebarPct() = %d, want 20", got)
+		}
+	})
+
+	t.Run("max boundary", func(t *testing.T) {
+		v := 60
+		cfg := &Config{SidebarPct: &v}
+		if got := cfg.GetSidebarPct(); got != 60 {
+			t.Errorf("GetSidebarPct() = %d, want 60", got)
+		}
+	})
+
+	t.Run("below min clamps to 20", func(t *testing.T) {
+		v := 10
+		cfg := &Config{SidebarPct: &v}
+		if got := cfg.GetSidebarPct(); got != 20 {
+			t.Errorf("GetSidebarPct() = %d, want 20", got)
+		}
+	})
+
+	t.Run("above max clamps to 60", func(t *testing.T) {
+		v := 80
+		cfg := &Config{SidebarPct: &v}
+		if got := cfg.GetSidebarPct(); got != 60 {
+			t.Errorf("GetSidebarPct() = %d, want 60", got)
+		}
+	})
+
+	t.Run("zero clamps to 20", func(t *testing.T) {
+		v := 0
+		cfg := &Config{SidebarPct: &v}
+		if got := cfg.GetSidebarPct(); got != 20 {
+			t.Errorf("GetSidebarPct() = %d, want 20", got)
+		}
+	})
+
+	t.Run("negative clamps to 20", func(t *testing.T) {
+		v := -5
+		cfg := &Config{SidebarPct: &v}
+		if got := cfg.GetSidebarPct(); got != 20 {
+			t.Errorf("GetSidebarPct() = %d, want 20", got)
+		}
+	})
+}
+
+func TestSetSidebarPct(t *testing.T) {
+	t.Run("normal value", func(t *testing.T) {
+		cfg := &Config{}
+		cfg.SetSidebarPct(40)
+		if cfg.SidebarPct == nil || *cfg.SidebarPct != 40 {
+			t.Errorf("expected 40, got %v", cfg.SidebarPct)
+		}
+	})
+
+	t.Run("below min clamps", func(t *testing.T) {
+		cfg := &Config{}
+		cfg.SetSidebarPct(10)
+		if cfg.SidebarPct == nil || *cfg.SidebarPct != 20 {
+			t.Errorf("expected 20, got %v", cfg.SidebarPct)
+		}
+	})
+
+	t.Run("above max clamps", func(t *testing.T) {
+		cfg := &Config{}
+		cfg.SetSidebarPct(75)
+		if cfg.SidebarPct == nil || *cfg.SidebarPct != 60 {
+			t.Errorf("expected 60, got %v", cfg.SidebarPct)
+		}
+	})
+}
+
+func TestStepSidebarPct(t *testing.T) {
+	t.Run("full upward sequence from 20", func(t *testing.T) {
+		cfg := &Config{}
+		cfg.SetSidebarPct(20)
+		// Expected grid: 20, 23, 25, 28, 30, 33, 35, 38, 40, 43, 45, 48, 50, 53, 55, 58, 60
+		expected := []int{23, 25, 28, 30, 33, 35, 38, 40, 43, 45, 48, 50, 53, 55, 58, 60}
+		for i, want := range expected {
+			cfg.StepSidebarPct(1)
+			got := cfg.GetSidebarPct()
+			if got != want {
+				t.Errorf("step %d: got %d, want %d", i+1, got, want)
+			}
+		}
+	})
+
+	t.Run("full downward sequence from 60", func(t *testing.T) {
+		cfg := &Config{}
+		cfg.SetSidebarPct(60)
+		expected := []int{58, 55, 53, 50, 48, 45, 43, 40, 38, 35, 33, 30, 28, 25, 23, 20}
+		for i, want := range expected {
+			cfg.StepSidebarPct(-1)
+			got := cfg.GetSidebarPct()
+			if got != want {
+				t.Errorf("step %d: got %d, want %d", i+1, got, want)
+			}
+		}
+	})
+
+	t.Run("clamps at min", func(t *testing.T) {
+		cfg := &Config{}
+		cfg.SetSidebarPct(20)
+		cfg.StepSidebarPct(-1)
+		if got := cfg.GetSidebarPct(); got != 20 {
+			t.Errorf("got %d, want 20 (clamped at min)", got)
+		}
+	})
+
+	t.Run("clamps at max", func(t *testing.T) {
+		cfg := &Config{}
+		cfg.SetSidebarPct(60)
+		cfg.StepSidebarPct(1)
+		if got := cfg.GetSidebarPct(); got != 60 {
+			t.Errorf("got %d, want 60 (clamped at max)", got)
+		}
+	})
+}
+
 func TestGetEnterMode(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -192,6 +330,7 @@ func TestConfigJSONRoundTrip(t *testing.T) {
 	autoName := true
 	autoUpdate := false
 	copySettings := true
+	sidebarPct := 45
 	original := &Config{
 		TickIntervalSec:    5,
 		DefaultProjectPath: "/home/user/projects",
@@ -201,6 +340,7 @@ func TestConfigJSONRoundTrip(t *testing.T) {
 		AutoUpdate:         &autoUpdate,
 		CopyClaudeSettings: &copySettings,
 		EnterMode:          "split",
+		SidebarPct:         &sidebarPct,
 	}
 
 	data, err := json.Marshal(original)
@@ -236,6 +376,9 @@ func TestConfigJSONRoundTrip(t *testing.T) {
 	}
 	if loaded.EnterMode != original.EnterMode {
 		t.Errorf("EnterMode: got %q, want %q", loaded.EnterMode, original.EnterMode)
+	}
+	if loaded.SidebarPct == nil || *loaded.SidebarPct != *original.SidebarPct {
+		t.Errorf("SidebarPct mismatch")
 	}
 }
 
@@ -287,7 +430,7 @@ func TestConfigOmitEmptyFields(t *testing.T) {
 	}
 
 	// With omitempty, zero-value fields should not be present.
-	for _, key := range []string{"editor", "theme", "default_project_path", "enter_mode"} {
+	for _, key := range []string{"editor", "theme", "default_project_path", "enter_mode", "sidebar_pct"} {
 		if _, ok := raw[key]; ok {
 			t.Errorf("expected %q to be omitted for zero value", key)
 		}
