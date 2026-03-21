@@ -19,6 +19,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "k / ↑", Desc: "Move up", Section: "nav"},
 	{Key: "PgDn", Desc: "Page down", Section: "nav"},
 	{Key: "PgUp", Desc: "Page up", Section: "nav"},
+	{Key: "[ / ]", Desc: "Resize sidebar", Section: "nav"},
 
 	// Session actions.
 	{Key: "Enter", BarKey: "⏎", BarDesc: "Open", Desc: "Attach / toggle group", Section: "session"},
@@ -40,6 +41,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "p", BarKey: "p", BarDesc: "PR", Desc: "Open PR in browser", Section: "session"},
 	{Key: "Y", BarKey: "Y", BarDesc: "Approve", Desc: "Quick approve permission", Section: "session"},
 	{Key: "b", BarKey: "b", BarDesc: "Branch", Desc: "Switch git branch", Section: "session"},
+	{Key: "x", BarKey: "x", BarDesc: "Shell", Desc: "Open shell in session directory", Section: "session"},
 	{Key: "/", BarKey: "/", BarDesc: "Filter", Desc: "Filter sessions", Section: "session"},
 	{Key: "0-9", Desc: "Jump to slot (double-tap to attach)", Section: "session"},
 	{Key: "Alt+0-9", Desc: "Bind/unbind slot (re-press same slot clears it)", Section: "session"},

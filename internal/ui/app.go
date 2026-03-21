@@ -100,6 +100,7 @@ type (
 	previewMsg struct {
 		sessionID string
 		content   string
+		cursor    *tmux.CursorPosition // non-nil only in focus mode
 	}
 	loadSessionsMsg struct {
 		sessions     []*session.Session
@@ -143,6 +144,7 @@ type (
 	discoveryMsg struct {
 		items []discovery.Recent
 	}
+	shellStatusDoneMsg struct{} // signals UI to re-render after shell status update
 )
 
 func spinnerTickCmd() tea.Msg {
@@ -227,8 +229,9 @@ type Home struct {
 	// Focus mode (split view).
 	focusMode     bool
 	controlClient *tmux.ControlClient
-	cachedSidebar string // cached sidebar render for focus mode
-	sidebarDirty  bool   // true when sidebar needs rebuild
+	cachedSidebar string                          // cached sidebar render for focus mode
+	sidebarDirty  bool                            // true when sidebar needs rebuild
+	cursorCache   map[string]*tmux.CursorPosition // session ID -> last known cursor pos
 
 	// Filter.
 	filterInput  textinput.Model
@@ -341,6 +344,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		previewCache:          make(map[string]string),
 		previewCacheTime:      make(map[string]time.Time),
 		repoLastHotAt:         make(map[string]time.Time),
+		cursorCache:           make(map[string]*tmux.CursorPosition),
 		filterInput:           fi,
 		cfg:                   cfg,
 		version:               version,
@@ -739,9 +743,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case shellStatusDoneMsg:
+		// Shell status updated in background — force sidebar redraw.
+		h.sidebarDirty = true
+		return h, nil
+
 	case previewMsg:
 		h.previewCache[msg.sessionID] = msg.content
 		h.previewCacheTime[msg.sessionID] = time.Now()
+		if msg.cursor != nil {
+			h.cursorCache[msg.sessionID] = msg.cursor
+		} else {
+			delete(h.cursorCache, msg.sessionID)
+		}
 		return h, nil
 
 	case workspaceListMsg:
@@ -898,14 +912,14 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.focusMode {
 			return h, h.previewTick() // focus mode has its own faster tick
 		}
-		var previewCmd tea.Cmd
+		var cmds []tea.Cmd
 		if sel := h.selectedSession(); sel != nil && sel.IsAlive() {
-			previewCmd = h.fetchPreview(sel)
+			cmds = append(cmds, h.fetchPreview(sel))
 		}
-		if previewCmd != nil {
-			return h, tea.Batch(previewCmd, h.previewTick())
-		}
-		return h, h.previewTick()
+		// Fast-poll shell session status (500ms vs 2s background worker).
+		cmds = append(cmds, h.updateShellSessionStatuses())
+		cmds = append(cmds, h.previewTick())
+		return h, tea.Batch(cmds...)
 
 	case focusTickMsg:
 		if !h.focusMode {
@@ -1271,9 +1285,9 @@ func (h *Home) renderBody() string {
 		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, "Sessions", statusTitle, h.width, sidebarHeight, h.focusMode))
 		b.WriteString("\n\n")
 
-		s, content := h.selectedPreview()
+		s, content, cursor := h.selectedPreview()
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
-		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode)
+		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode, cursor)
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
@@ -1281,19 +1295,10 @@ func (h *Home) renderBody() string {
 		b.WriteString(RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, h.width, previewHeight, h.focusMode))
 	default: // dual
 		gap := 1 // single-column gap between the two bordered panels
-		// Sidebar wants a ~target absolute width that's comfortable for long
-		// branch names and session titles — so on a Mac 14" (~150 cols) it's
-		// ~40%, on a wide monitor (~250 cols) it shrinks to ~25% so the
-		// preview keeps its share. Cap at 45% of total so it never dominates
-		// a small terminal; floor at 22 cols so the headers don't collapse.
-		const sidebarTargetCols = 65
-		sidebarWidth := sidebarTargetCols
-		if cap := h.width * 45 / 100; sidebarWidth > cap {
-			sidebarWidth = cap
-		}
-		if sidebarWidth < 22 {
-			sidebarWidth = 22
-		}
+		// Sidebar width is user-controllable via [ / ] (persisted as
+		// SidebarPct); sidebarWidth() converts the percentage to columns and
+		// guarantees the preview keeps a usable minimum.
+		sidebarWidth := h.sidebarWidth()
 		previewWidth := h.width - sidebarWidth - gap
 
 		sidebarInnerW := sidebarWidth - 2
@@ -1313,9 +1318,9 @@ func (h *Home) renderBody() string {
 			h.sidebarDirty = false
 		}
 
-		s, content := h.selectedPreview()
+		s, content, cursor := h.selectedPreview()
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
-		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, innerH, h.focusMode)
+		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, innerH, h.focusMode, cursor)
 		previewInner = ensureExactHeight(previewInner, innerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
@@ -1618,6 +1623,20 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "right", "l":
 		h.expandRepoAtCursor()
 		return h, nil
+	case "[":
+		if h.layoutMode() == "dual" {
+			h.cfg.StepSidebarPct(-1)
+			_ = h.cfg.Save()
+			h.sidebarDirty = true
+		}
+		return h, nil
+	case "]":
+		if h.layoutMode() == "dual" {
+			h.cfg.StepSidebarPct(1)
+			_ = h.cfg.Save()
+			h.sidebarDirty = true
+		}
+		return h, nil
 	case "a":
 		// Instant session at current repo path.
 		repoPath := h.resolveCurrentRepo()
@@ -1735,6 +1754,28 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		h.slotAssignExpires = time.Now().Add(2 * time.Second)
 		return h, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return slotAssignTimeoutMsg{} })
+	case "x":
+		s := h.selectedSession()
+		if s == nil {
+			return h, nil
+		}
+		if s.ProjectPath == "" {
+			h.setError(fmt.Errorf("session has no project path"))
+			return h, nil
+		}
+		h.actionLog.Add("open shell", s.ProjectPath, true)
+		analytics.Track(analytics.EventCommandRun, nil)
+		projectPath := s.ProjectPath
+		dirName := filepath.Base(projectPath)
+		shell := session.NewSession("shell: "+dirName, projectPath)
+		shell.Command = "shell"
+		shell.ManuallyRenamed = true
+		return h, func() tea.Msg {
+			if err := shell.Start(); err != nil {
+				return sessionCreateResultMsg{err: err}
+			}
+			return sessionCreateResultMsg{session: shell}
+		}
 	case "/":
 		h.filterActive = true
 		h.filterInput.Focus()
@@ -2757,8 +2798,20 @@ func (h *Home) fetchPreviewFresh(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
 	return func() tea.Msg {
-		content, _ := ts.CapturePaneFresh()
-		return previewMsg{sessionID: id, content: content}
+		// Run capture and cursor fetch in parallel to halve latency.
+		var content string
+		var cursor *tmux.CursorPosition
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if pos, err := ts.PaneCursorPosition(); err == nil {
+				cursor = &pos
+			}
+		}()
+		content, _ = ts.CapturePaneFresh()
+		wg.Wait()
+		return previewMsg{sessionID: id, content: content, cursor: cursor}
 	}
 }
 
@@ -3934,12 +3987,51 @@ func copyClaudeSettingsFile(srcRepo, dstRepo string) {
 	}
 }
 
+// updateShellSessionStatuses runs a fast status check on all shell sessions.
+// Called from previewTick (500ms) for responsive running/idle detection.
+func (h *Home) updateShellSessionStatuses() tea.Cmd {
+	h.workerMu.Lock()
+	var shells []*session.Session
+	for _, s := range h.sessions {
+		if s.IsShellSession() && s.IsAlive() {
+			shells = append(shells, s)
+		}
+	}
+	h.workerMu.Unlock()
+
+	if len(shells) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		for _, s := range shells {
+			oldStatus := s.GetStatus()
+			s.UpdateStatus()
+			newStatus := s.GetStatus()
+			if oldStatus != newStatus {
+				_ = h.storage.UpdateStatus(s.ID, string(newStatus))
+			}
+		}
+		return shellStatusDoneMsg{}
+	}
+}
+
 func (h *Home) fetchPreview(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
 	return func() tea.Msg {
-		content, _ := ts.CapturePane()
-		return previewMsg{sessionID: id, content: content}
+		var content string
+		var cursor *tmux.CursorPosition
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if pos, err := ts.PaneCursorPosition(); err == nil {
+				cursor = &pos
+			}
+		}()
+		content, _ = ts.CapturePane()
+		wg.Wait()
+		return previewMsg{sessionID: id, content: content, cursor: cursor}
 	}
 }
 
@@ -4206,6 +4298,23 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 	return h, h.fetchPreviewForSelected()
 }
 
+// sidebarWidth computes the sidebar width for dual-pane layout.
+// It enforces a minimum of 20 columns for the sidebar and 30 for the preview.
+func (h *Home) sidebarWidth() int {
+	sw := h.width * h.cfg.GetSidebarPct() / 100
+	if sw < 20 {
+		sw = 20
+	}
+	// Ensure preview gets at least 30 columns (width - sidebar - 3 for separator).
+	if h.width-sw-3 < 30 {
+		sw = h.width - 33
+	}
+	if sw < 20 {
+		sw = 20
+	}
+	return sw
+}
+
 func (h *Home) selectedSession() *session.Session {
 	if h.cursor < 0 || h.cursor >= len(h.flatItems) || h.flatItems[h.cursor].IsRepoHeader {
 		return nil
@@ -4213,13 +4322,14 @@ func (h *Home) selectedSession() *session.Session {
 	return h.flatItems[h.cursor].Session
 }
 
-func (h *Home) selectedPreview() (*session.Session, string) {
+func (h *Home) selectedPreview() (*session.Session, string, *tmux.CursorPosition) {
 	s := h.selectedSession()
 	if s == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	content := h.previewCache[s.ID]
-	return s, content
+	cursor := h.cursorCache[s.ID]
+	return s, content, cursor
 }
 
 // repoInfoFromSnap returns repo info for the selected session using a snapshot

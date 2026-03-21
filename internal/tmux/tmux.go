@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -342,6 +344,64 @@ func (s *Session) PaneDeadInfo() (dead bool, exitStatus, exitSignal string, ok b
 		return false, "", "", false
 	}
 	return parts[0] == "1", parts[1], parts[2], true
+}
+
+// CursorPosition holds the cursor location within a tmux pane.
+type CursorPosition struct {
+	X int // 0-based column
+	Y int // 0-based row
+}
+
+// PaneCursorPosition returns the cursor position within the pane.
+func (s *Session) PaneCursorPosition() (CursorPosition, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", s.Name,
+		"-F", "#{cursor_x} #{cursor_y}").Output()
+	if err != nil {
+		return CursorPosition{}, fmt.Errorf("cursor position failed: %w", err)
+	}
+	var x, y int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &x, &y); err != nil {
+		return CursorPosition{}, fmt.Errorf("parse cursor position: %w", err)
+	}
+	return CursorPosition{X: x, Y: y}, nil
+}
+
+// PaneCurrentCommand returns the name of the process currently running in the pane.
+// For a shell session at a prompt, this returns the shell name (e.g. "zsh", "bash").
+// When a command is running, this returns that command name (e.g. "make", "go").
+func (s *Session) PaneCurrentCommand() string {
+	out, err := exec.Command("tmux", "list-panes", "-t", s.Name, "-F", "#{pane_current_command}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// SetupShellExitHook injects a precmd/PROMPT_COMMAND hook into the shell session
+// that writes the last exit code to the session's hook status file.
+func (s *Session) SetupShellExitHook(sessionID string) {
+	hooksDir := shellExitHooksDir()
+	// Use a shell-agnostic approach: set PROMPT_COMMAND for bash, precmd for zsh.
+	// The setup command appends to precmd_functions (zsh) or PROMPT_COMMAND (bash),
+	// then clears the screen so the user sees a clean prompt.
+	// Single command: define hook + register + clear screen, all in one Enter press.
+	setup := fmt.Sprintf(
+		`eval '__bc_hook(){ local rc=$?; printf "{\"exit_code\":%%d}\n" $rc > %s/%s_exit.json; return $rc; }; if [ -n "$ZSH_VERSION" ]; then precmd_functions+=(__bc_hook); else PROMPT_COMMAND="__bc_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; fi' && clear`,
+		hooksDir, sessionID,
+	)
+	_ = s.SendLiteralKeys(setup)
+	_ = s.SendKeys("Enter")
+}
+
+// shellExitHooksDir returns the hooks directory path.
+func shellExitHooksDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), ".config", "fleet", "hooks")
+	}
+	return filepath.Join(home, ".config", "fleet", "hooks")
 }
 
 // Exists checks if the tmux session is alive.

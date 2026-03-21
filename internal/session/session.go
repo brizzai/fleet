@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,6 +58,8 @@ type Session struct {
 	TitleGenerated        bool
 	PromptCount           int
 	ForkFromID            string // Transient: if set, start with --resume <id> --fork-session (cleared after start)
+	Command               string // If set, run this shell command instead of Claude.
+	ShellExitCode         int    // Last exit code from shell session (0 = success).
 
 	hookStatus       string
 	hookUpdatedAt    time.Time
@@ -96,6 +99,11 @@ func NewSession(title, projectPath string) *Session {
 	}
 }
 
+// IsShellSession returns true if this session runs a shell command instead of an agent.
+func (s *Session) IsShellSession() bool {
+	return s.Command != ""
+}
+
 // buildAgentCmd returns the launch command for this session's agent, with
 // optional resume/fork details. ClaudeSessionID stores the agent's own
 // conversation id (Claude or Codex) captured from hooks.
@@ -124,20 +132,30 @@ func (s *Session) sessionEnv() []string {
 	}
 }
 
-// Start launches the Claude Code session in tmux.
+// Start launches the session in tmux (Claude or shell command).
 func (s *Session) Start() error {
-	debuglog.Logger.Info("session start", "id", s.ID, "title", s.Title, "path", s.ProjectPath)
+	debuglog.Logger.Info("session start", "id", s.ID, "title", s.Title, "path", s.ProjectPath, "command", s.Command)
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.mu.Unlock()
 
-	cmd := s.buildAgentCmd()
+	var cmd string
+	if s.IsShellSession() {
+		// Shell session: start with user's shell, no command sent.
+		cmd = ""
+	} else {
+		cmd = s.buildAgentCmd()
+	}
 	if err := s.tmuxSession.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
 		debuglog.Logger.Error("session start failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
+	}
+
+	if s.IsShellSession() {
+		s.tmuxSession.SetupShellExitHook(s.ID)
 	}
 
 	s.mu.Lock()
@@ -314,13 +332,22 @@ func (s *Session) Restart() error {
 	s.deathRecorded = false
 	s.mu.Unlock()
 
-	cmd := s.buildAgentCmd()
+	var cmd string
+	if s.IsShellSession() {
+		cmd = ""
+	} else {
+		cmd = s.buildAgentCmd()
+	}
 	if err := newTmux.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
 		debuglog.Logger.Error("session restart failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
+	}
+
+	if s.IsShellSession() {
+		s.tmuxSession.SetupShellExitHook(s.ID)
 	}
 
 	s.mu.Lock()
@@ -330,17 +357,22 @@ func (s *Session) Restart() error {
 	return nil
 }
 
-// RespawnClaude restarts the claude process in an existing tmux session.
+// RespawnClaude restarts the process in an existing tmux session.
 func (s *Session) RespawnClaude() error {
 	resuming := s.ClaudeSessionID != ""
-	debuglog.Logger.Info("session respawn", "id", s.ID, "title", s.Title, "resuming", resuming)
+	debuglog.Logger.Info("session respawn", "id", s.ID, "title", s.Title, "resuming", resuming, "command", s.Command)
 	s.clearHookState()
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
 	s.mu.Unlock()
 
-	cmd := s.buildAgentCmd()
+	var cmd string
+	if s.IsShellSession() {
+		cmd = ""
+	} else {
+		cmd = s.buildAgentCmd()
+	}
 	if err := s.tmuxSession.RespawnPane(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
@@ -352,6 +384,9 @@ func (s *Session) RespawnClaude() error {
 	// Reset to a baseline status bar; the UI worker will re-apply with
 	// active fleet theme + live state on the next tick.
 	s.tmuxSession.ApplyStatusBar(tmux.StatusBarOpts{})
+	if s.IsShellSession() {
+		s.tmuxSession.SetupShellExitHook(s.ID)
+	}
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
@@ -395,6 +430,12 @@ func (s *Session) UpdateStatus() {
 		s.SetStatus(StatusError)
 		log.Debug("status: pane dead", "old", oldStatus, "new", StatusError)
 		s.triggerCrashDump("pane_dead")
+		return
+	}
+
+	// Shell sessions: detect status from tmux pane_current_command + exit code file.
+	if s.IsShellSession() {
+		s.updateShellStatus(oldStatus, log)
 		return
 	}
 
@@ -847,6 +888,64 @@ func (s *Session) updateStatusFromPane(oldStatus Status, log *slog.Logger) {
 	}
 }
 
+// updateShellStatus detects status for shell sessions using tmux pane_current_command
+// and reads exit codes from the hook file written by the precmd/PROMPT_COMMAND hook.
+func (s *Session) updateShellStatus(oldStatus Status, log *slog.Logger) {
+	currentCmd := s.tmuxSession.PaneCurrentCommand()
+	log.Debug("shell status check", "pane_current_command", currentCmd)
+
+	// Compare against the session's actual shell, not a hardcoded list.
+	// e.g., if $SHELL is /bin/zsh, only "zsh" means idle — "bash" means running.
+	userShell := strings.TrimPrefix(filepath.Base(os.Getenv("SHELL")), "-")
+	if userShell == "" {
+		userShell = "zsh" // fallback
+	}
+	cmd := strings.TrimPrefix(filepath.Base(currentCmd), "-")
+	isShellPrompt := cmd == userShell || currentCmd == ""
+
+	// Read exit code from hook file if available.
+	exitFile := shellExitFilePath(s.ID)
+	if data, err := os.ReadFile(exitFile); err == nil {
+		var result struct {
+			ExitCode int `json:"exit_code"`
+		}
+		if err := json.Unmarshal(data, &result); err == nil {
+			s.mu.Lock()
+			s.ShellExitCode = result.ExitCode
+			s.mu.Unlock()
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if isShellPrompt {
+		// At shell prompt — command finished (or no command run yet).
+		if s.ShellExitCode != 0 {
+			s.Status = StatusError
+		} else {
+			s.Status = StatusIdle
+		}
+	} else {
+		// A command is actively running.
+		s.Status = StatusRunning
+		s.ShellExitCode = 0 // Reset while running.
+	}
+
+	if s.Status != oldStatus {
+		log.Info("shell status changed", "old", oldStatus, "new", s.Status, "command", currentCmd, "exitCode", s.ShellExitCode)
+	}
+}
+
+// shellExitFilePath returns the path to the shell exit code file for a session.
+func shellExitFilePath(sessionID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), ".config", "brizz-code", "hooks", sessionID+"_exit.json")
+	}
+	return filepath.Join(home, ".config", "brizz-code", "hooks", sessionID+"_exit.json")
+}
+
 // ToRow converts to a storage row.
 func (s *Session) ToRow() *SessionRow {
 	s.mu.RLock()
@@ -867,6 +966,7 @@ func (s *Session) ToRow() *SessionRow {
 		FirstPrompt:     s.FirstPrompt,
 		TitleGenerated:  s.TitleGenerated,
 		PromptCount:     s.PromptCount,
+		Command:         s.Command,
 	}
 }
 
@@ -942,6 +1042,7 @@ func FromRow(row *SessionRow) *Session {
 		FirstPrompt:     row.FirstPrompt,
 		TitleGenerated:  row.TitleGenerated,
 		PromptCount:     row.PromptCount,
+		Command:         row.Command,
 		tmuxSession:     ts,
 	}
 }
