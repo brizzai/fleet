@@ -2904,6 +2904,16 @@ func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Remove hook status file.
+	if err := os.Remove(filepath.Join(hooks.GetHooksDir(), msg.id+".json")); err != nil && !os.IsNotExist(err) {
+		debuglog.Logger.Error("failed to remove hook status file", "id", msg.id, "err", err)
+	}
+
+	// Remove shell exit code file (no-op for non-shell sessions).
+	if err := os.Remove(session.ShellExitFilePath(msg.id)); err != nil && !os.IsNotExist(err) {
+		debuglog.Logger.Error("failed to remove shell exit file", "id", msg.id, "err", err)
+	}
+
 	// Remove from in-memory session list.
 	var remaining []*session.Session
 	for _, sess := range h.sessions {

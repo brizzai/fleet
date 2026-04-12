@@ -144,8 +144,10 @@ func (s *Session) Start() error {
 		// Shell session: start with user's shell, no command sent.
 		cmd = ""
 		// Clear stale exit code from previous run.
+		s.mu.Lock()
 		s.ShellExitCode = 0
-		_ = os.Remove(shellExitFilePath(s.ID))
+		s.mu.Unlock()
+		_ = os.Remove(ShellExitFilePath(s.ID))
 	} else {
 		cmd = s.buildAgentCmd()
 	}
@@ -338,8 +340,10 @@ func (s *Session) Restart() error {
 	var cmd string
 	if s.IsShellSession() {
 		cmd = ""
+		s.mu.Lock()
 		s.ShellExitCode = 0
-		_ = os.Remove(shellExitFilePath(s.ID))
+		s.mu.Unlock()
+		_ = os.Remove(ShellExitFilePath(s.ID))
 	} else {
 		cmd = s.buildAgentCmd()
 	}
@@ -375,6 +379,10 @@ func (s *Session) RespawnClaude() error {
 	var cmd string
 	if s.IsShellSession() {
 		cmd = ""
+		s.mu.Lock()
+		s.ShellExitCode = 0
+		s.mu.Unlock()
+		_ = os.Remove(ShellExitFilePath(s.ID))
 	} else {
 		cmd = s.buildAgentCmd()
 	}
@@ -909,20 +917,21 @@ func (s *Session) updateShellStatus(oldStatus Status, log *slog.Logger) {
 	isShellPrompt := cmd == userShell || currentCmd == ""
 
 	// Read exit code from hook file if available.
-	exitFile := shellExitFilePath(s.ID)
+	var exitCode int
+	exitFile := ShellExitFilePath(s.ID)
 	if data, err := os.ReadFile(exitFile); err == nil {
 		var result struct {
 			ExitCode int `json:"exit_code"`
 		}
 		if err := json.Unmarshal(data, &result); err == nil {
-			s.mu.Lock()
-			s.ShellExitCode = result.ExitCode
-			s.mu.Unlock()
+			exitCode = result.ExitCode
 		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.ShellExitCode = exitCode
 
 	if isShellPrompt {
 		// At shell prompt — command finished (or no command run yet).
@@ -942,8 +951,8 @@ func (s *Session) updateShellStatus(oldStatus Status, log *slog.Logger) {
 	}
 }
 
-// shellExitFilePath returns the path to the shell exit code file for a session.
-func shellExitFilePath(sessionID string) string {
+// ShellExitFilePath returns the path to the shell exit code file for a session.
+func ShellExitFilePath(sessionID string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), ".config", "brizz-code", "hooks", sessionID+"_exit.json")

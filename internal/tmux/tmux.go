@@ -281,7 +281,9 @@ func (s *Session) RespawnPane(command string, env ...string) error {
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
-	args = append(args, command)
+	if command != "" {
+		args = append(args, command)
+	}
 	cmd := exec.Command("tmux", args...)
 	if err := cmd.Run(); err != nil {
 		debuglog.Logger.Error("tmux respawn failed", "session", s.Name, "err", err)
