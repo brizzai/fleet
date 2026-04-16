@@ -20,6 +20,34 @@ import (
 
 const terminalStyleReset = "\x1b]8;;\x1b\\\x1b[0m\x1b[24m\x1b[39m\x1b[49m"
 
+// ctrlQSequences enumerates every byte pattern a terminal may emit for Ctrl+Q.
+// The bare control byte is the common case; the CSI variants appear when the
+// terminal has switched to CSI-u or xterm's modifyOtherKeys reporting (tmux
+// enables this via `extended-keys on`, which oh-my-tmux turns on for
+// iTerm2/mintty/xterm).
+var ctrlQSequences = [][]byte{
+	{17},                     // plain Ctrl+Q (ASCII DC1)
+	[]byte("\x1b[113;5u"),    // CSI-u / libtickit / kitty keyboard
+	[]byte("\x1b[27;5;113~"), // xterm modifyOtherKeys
+}
+
+// findCtrlQ returns the byte offset of the earliest Ctrl+Q sequence in buf
+// and the length of that sequence. Returns (-1, 0) when none is present.
+func findCtrlQ(buf []byte) (int, int) {
+	idx, length := -1, 0
+	for _, seq := range ctrlQSequences {
+		i := bytes.Index(buf, seq)
+		if i < 0 {
+			continue
+		}
+		if idx < 0 || i < idx {
+			idx = i
+			length = len(seq)
+		}
+	}
+	return idx, length
+}
+
 // Attach attaches to the tmux session with full PTY support.
 // Ctrl+Q detaches and returns to the caller. Ctrl+b d also works (tmux native).
 func (s *Session) Attach(ctx context.Context) error {
@@ -97,7 +125,7 @@ func (s *Session) Attach(ctx context.Context) error {
 		}
 	}()
 
-	// Goroutine: read stdin, intercept Ctrl+Q (ASCII 17), forward rest to PTY.
+	// Goroutine: read stdin, intercept Ctrl+Q (raw ASCII 17 or CSI-u / modifyOtherKeys encodings), forward rest to PTY.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -148,8 +176,8 @@ func forwardStdinToPTY(ptmx *os.File, startTime time.Time, controlSeqTimeout tim
 			continue
 		}
 
-		// Check for Ctrl+Q (ASCII 17).
-		if idx := bytes.IndexByte(buf[:n], 17); idx >= 0 {
+		// Check for Ctrl+Q in any encoding the terminal might use.
+		if idx, _ := findCtrlQ(buf[:n]); idx >= 0 {
 			if idx > 0 {
 				if _, werr := ptmx.Write(buf[:idx]); werr != nil {
 					select {
