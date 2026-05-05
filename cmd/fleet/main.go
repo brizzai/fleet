@@ -11,6 +11,7 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/migration"
+	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/ui"
@@ -84,6 +85,7 @@ func runTUI() {
 
 	debuglog.Init()
 	defer debuglog.Close()
+	perfwatch.Init()
 	debuglog.Logger.Info("fleet TUI starting", "version", version)
 
 	if err := tmux.IsTmuxAvailable(); err != nil {

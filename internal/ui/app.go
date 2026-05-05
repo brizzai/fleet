@@ -21,6 +21,7 @@ import (
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/naming"
+	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -254,6 +255,8 @@ func (h *Home) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	tok := perfwatch.MarkUpdateStart(fmt.Sprintf("%T", msg))
+	defer perfwatch.MarkUpdateEnd(tok)
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
@@ -1984,37 +1987,34 @@ func (h *Home) handlePendingDeleteExpire(msg pendingDeleteExpireMsg) (tea.Model,
 	return h, h.finalizeDelete(pd)
 }
 
-// finalizeDelete performs the actual cleanup (tmux kill, hook removal, workspace destruction).
+// finalizeDelete schedules cleanup (tmux kill, hook removal, optional
+// workspace destruction) on a background goroutine. All steps shell out or
+// hit the filesystem, so they must stay off the Bubble Tea Update loop —
+// otherwise an undo-window expiry blocks keystroke processing for the
+// duration of `tmux kill-session`.
 func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
-	debuglog.Logger.Info("finalizing delete", "id", pd.Session.ID, "title", pd.Session.Title)
+	return func() tea.Msg {
+		debuglog.Logger.Info("finalizing delete", "id", pd.Session.ID, "title", pd.Session.Title)
 
-	// Kill tmux session if alive.
-	if pd.Session.IsAlive() {
-		if err := pd.Session.Kill(); err != nil {
-			debuglog.Logger.Error("failed to kill tmux session", "id", pd.Session.ID, "err", err)
-		}
-	}
-
-	// Remove hook status file.
-	if err := os.Remove(filepath.Join(hooks.GetHooksDir(), pd.Session.ID+".json")); err != nil && !os.IsNotExist(err) {
-		debuglog.Logger.Error("failed to remove hook status file", "id", pd.Session.ID, "err", err)
-	}
-
-	// If workspace destroy requested, do it async.
-	if pd.DestroyWS && pd.WorkspaceName != "" {
-		repoPath := pd.RepoPath
-		wsName := pd.WorkspaceName
-		sid := pd.Session.ID
-		provider := workspace.ResolveProvider(repoPath)
-		if provider != nil && provider.CanDestroy() {
-			return func() tea.Msg {
-				err := provider.Destroy(repoPath, wsName)
-				return workspaceDestroyResultMsg{sessionID: sid, err: err}
+		if pd.Session.IsAlive() {
+			if err := pd.Session.Kill(); err != nil {
+				debuglog.Logger.Error("failed to kill tmux session", "id", pd.Session.ID, "err", err)
 			}
 		}
-	}
 
-	return nil
+		if err := os.Remove(filepath.Join(hooks.GetHooksDir(), pd.Session.ID+".json")); err != nil && !os.IsNotExist(err) {
+			debuglog.Logger.Error("failed to remove hook status file", "id", pd.Session.ID, "err", err)
+		}
+
+		if pd.DestroyWS && pd.WorkspaceName != "" {
+			provider := workspace.ResolveProvider(pd.RepoPath)
+			if provider != nil && provider.CanDestroy() {
+				err := provider.Destroy(pd.RepoPath, pd.WorkspaceName)
+				return workspaceDestroyResultMsg{sessionID: pd.Session.ID, err: err}
+			}
+		}
+		return nil
+	}
 }
 
 // finalizeAllPendingDeletes cleans up all pending deletes synchronously (called on quit).
