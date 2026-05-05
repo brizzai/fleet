@@ -137,7 +137,9 @@ func MarkUpdateEnd(t UpdateToken) {
 	if ms := dur.Milliseconds(); ms > maxUpdateMs.Load() {
 		maxUpdateMs.Store(ms)
 	}
-	if dur >= stallThreshold {
+	// Counter mirrors the WARN log threshold (≥100ms), not the stall-dump
+	// threshold (≥500ms). The skill surfaces this as "Updates >100ms".
+	if dur >= slowLogThreshold {
 		slowUpdates.Add(1)
 	}
 
@@ -275,23 +277,20 @@ func heartbeatLoop() {
 		{Name: "/cpu/classes/idle:cpu-seconds"},
 	}
 	metrics.Read(samples)
-	lastTotal := samples[0].Value.Float64()
-	lastIdle := samples[1].Value.Float64()
+	lastTotal, lastIdle, cpuOK := readCPUSamples(samples)
 	lastWall := time.Now()
 
 	t := time.NewTicker(heartbeatInterval)
 	defer t.Stop()
 	for now := range t.C {
 		metrics.Read(samples)
-		total := samples[0].Value.Float64()
-		idle := samples[1].Value.Float64()
+		total, idle, ok := readCPUSamples(samples)
 		wall := now.Sub(lastWall).Seconds()
-		var pct float64
-		if wall > 0 {
+		pct := -1.0 // sentinel: CPU metric unavailable on this runtime
+		if ok && cpuOK && wall > 0 {
 			pct = ((total - lastTotal) - (idle - lastIdle)) / wall * 100
 		}
-		lastTotal = total
-		lastIdle = idle
+		lastTotal, lastIdle, cpuOK = total, idle, ok
 		lastWall = now
 
 		var ms runtime.MemStats
@@ -306,6 +305,19 @@ func heartbeatLoop() {
 			"max_update_ms", maxUpdateMs.Load(),
 		)
 	}
+}
+
+// readCPUSamples returns total/idle CPU seconds, or ok=false when the runtime
+// doesn't expose these metrics as Float64 (e.g. metric removed or renamed in a
+// future Go release). Calling Float64() on a non-Float64 sample panics.
+func readCPUSamples(samples []metrics.Sample) (total, idle float64, ok bool) {
+	if len(samples) < 2 {
+		return 0, 0, false
+	}
+	if samples[0].Value.Kind() != metrics.KindFloat64 || samples[1].Value.Kind() != metrics.KindFloat64 {
+		return 0, 0, false
+	}
+	return samples[0].Value.Float64(), samples[1].Value.Float64(), true
 }
 
 func signalLoop() {

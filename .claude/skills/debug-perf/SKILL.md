@@ -33,7 +33,7 @@ grep "perfwatch: enabled" ~/.config/fleet/debug.log | tail -1
 ```
 
 If empty, instruct the user:
-```
+```text
 Re-launch with: FLEET_DEBUG=1 ./build/fleet
 Reproduce the freeze, then run /debug-perf again.
 ```

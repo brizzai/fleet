@@ -139,7 +139,12 @@ type Home struct {
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingDeletes    []PendingDelete     // undo stack for deferred deletions
-	pinnedRepos       map[string]bool     // pinned repo paths (persist in SQLite)
+	// finalizingDeletes holds entries whose undo window has expired but whose
+	// background cleanup (tmux kill, hook removal, workspace destroy) is still
+	// running. Quit drains both this list and pendingDeletes so an in-flight
+	// kill isn't lost when fleet exits mid-cleanup.
+	finalizingDeletes []PendingDelete
+	pinnedRepos       map[string]bool // pinned repo paths (persist in SQLite)
 
 	repoExpanded     map[string]bool // repo path -> expanded state
 	previewCache     map[string]string
@@ -255,8 +260,10 @@ func (h *Home) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	tok := perfwatch.MarkUpdateStart(fmt.Sprintf("%T", msg))
-	defer perfwatch.MarkUpdateEnd(tok)
+	if perfwatch.Enabled() {
+		tok := perfwatch.MarkUpdateStart(fmt.Sprintf("%T", msg))
+		defer perfwatch.MarkUpdateEnd(tok)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
@@ -578,9 +585,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			workspaceName: msg.info.Name,
 		})
 
-	case workspaceDestroyResultMsg:
-		if msg.err != nil {
-			h.setError(fmt.Errorf("workspace destroy: %w", msg.err))
+	case deleteCleanupDoneMsg:
+		for i, pd := range h.finalizingDeletes {
+			if pd.Session.ID == msg.sessionID {
+				h.finalizingDeletes = append(h.finalizingDeletes[:i], h.finalizingDeletes[i+1:]...)
+				break
+			}
+		}
+		if msg.workspaceErr != nil {
+			h.setError(fmt.Errorf("workspace destroy: %w", msg.workspaceErr))
 		}
 		return h, nil
 
@@ -1983,6 +1996,9 @@ func (h *Home) handlePendingDeleteExpire(msg pendingDeleteExpireMsg) (tea.Model,
 
 	pd := h.pendingDeletes[idx]
 	h.pendingDeletes = append(h.pendingDeletes[:idx], h.pendingDeletes[idx+1:]...)
+	// Move into finalizingDeletes so an in-flight cleanup is visible to
+	// finalizeAllPendingDeletes if the user quits mid-finalize.
+	h.finalizingDeletes = append(h.finalizingDeletes, pd)
 
 	return h, h.finalizeDelete(pd)
 }
@@ -1991,7 +2007,8 @@ func (h *Home) handlePendingDeleteExpire(msg pendingDeleteExpireMsg) (tea.Model,
 // workspace destruction) on a background goroutine. All steps shell out or
 // hit the filesystem, so they must stay off the Bubble Tea Update loop —
 // otherwise an undo-window expiry blocks keystroke processing for the
-// duration of `tmux kill-session`.
+// duration of `tmux kill-session`. Always returns deleteCleanupDoneMsg so
+// the entry can be removed from finalizingDeletes.
 func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 	return func() tea.Msg {
 		debuglog.Logger.Info("finalizing delete", "id", pd.Session.ID, "title", pd.Session.Title)
@@ -2006,20 +2023,26 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 			debuglog.Logger.Error("failed to remove hook status file", "id", pd.Session.ID, "err", err)
 		}
 
+		var workspaceErr error
 		if pd.DestroyWS && pd.WorkspaceName != "" {
 			provider := workspace.ResolveProvider(pd.RepoPath)
 			if provider != nil && provider.CanDestroy() {
-				err := provider.Destroy(pd.RepoPath, pd.WorkspaceName)
-				return workspaceDestroyResultMsg{sessionID: pd.Session.ID, err: err}
+				workspaceErr = provider.Destroy(pd.RepoPath, pd.WorkspaceName)
 			}
 		}
-		return nil
+		return deleteCleanupDoneMsg{sessionID: pd.Session.ID, workspaceErr: workspaceErr}
 	}
 }
 
-// finalizeAllPendingDeletes cleans up all pending deletes synchronously (called on quit).
+// finalizeAllPendingDeletes synchronously drains both pendingDeletes (undo
+// window still open) and finalizingDeletes (cleanup goroutine in flight) on
+// quit. Re-running cleanup on a finalizing entry is safe — `tmux kill-session`
+// on a missing session and os.Remove on a missing file are both idempotent
+// (we already check os.IsNotExist), and provider.Destroy is best-effort.
 func (h *Home) finalizeAllPendingDeletes() {
-	for _, pd := range h.pendingDeletes {
+	all := append([]PendingDelete(nil), h.pendingDeletes...)
+	all = append(all, h.finalizingDeletes...)
+	for _, pd := range all {
 		debuglog.Logger.Info("finalizing pending delete on quit", "id", pd.Session.ID, "title", pd.Session.Title)
 		if pd.Session.IsAlive() {
 			if err := pd.Session.Kill(); err != nil {
@@ -2040,6 +2063,7 @@ func (h *Home) finalizeAllPendingDeletes() {
 		}
 	}
 	h.pendingDeletes = nil
+	h.finalizingDeletes = nil
 }
 
 // buildUndoFlashMessage builds the flash message for the undo prompt.
