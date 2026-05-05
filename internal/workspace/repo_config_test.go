@@ -132,6 +132,16 @@ func TestIgnorePatterns(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid globs dropped at load time", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"pr_checks":{"ignore":["[","good","[bad"]}}`)
+		got := IgnorePatterns(repo)
+		want := []string{"good"}
+		if !equalStrings(got, want) {
+			t.Errorf("got %v, want %v (invalid globs should be filtered)", got, want)
+		}
+	})
+
 	t.Run("workspace and pr_checks coexist", func(t *testing.T) {
 		repo := t.TempDir()
 		writeFile(t, repo, ".fleet.json", `{"workspace":{"create":"mk"},"pr_checks":{"ignore":["x"]}}`)

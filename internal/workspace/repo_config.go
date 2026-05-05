@@ -3,6 +3,7 @@ package workspace
 import (
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -116,8 +117,8 @@ func preferredConfig(repoPath, preferredName, legacyName string) RepoWorkspaceCo
 // parse is logged and treated as "exists with empty config" (true) — the user's
 // intent to override is honored even if their JSON is wrong, and the warning
 // surfaces the parse failure in debug.log.
-func loadRepoConfig(path string) (RepoWorkspaceConfig, bool) {
-	data, err := os.ReadFile(path)
+func loadRepoConfig(configPath string) (RepoWorkspaceConfig, bool) {
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return RepoWorkspaceConfig{}, false
@@ -126,14 +127,35 @@ func loadRepoConfig(path string) (RepoWorkspaceConfig, bool) {
 		// "exists with empty config" so the documented presence-wins behavior
 		// holds — falling through to .bc.json would silently break it.
 		debuglog.Logger.Warn("workspace: failed to read repo config; treating as empty override",
-			"path", path, "err", err)
+			"path", configPath, "err", err)
 		return RepoWorkspaceConfig{}, true
 	}
 	var cfg RepoWorkspaceConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		debuglog.Logger.Warn("workspace: failed to parse repo config; treating as empty override",
-			"path", path, "err", err)
+			"path", configPath, "err", err)
 		return RepoWorkspaceConfig{}, true
 	}
+	cfg.PRChecks.Ignore = validateGlobs(cfg.PRChecks.Ignore, configPath)
 	return cfg, true
+}
+
+// validateGlobs returns the subset of patterns that path.Match accepts as
+// well-formed. Bad patterns are warn-logged once (here, at load time) with the
+// originating config path; this keeps the runtime matcher in internal/github
+// free of repeated log spam every refresh cycle.
+func validateGlobs(patterns []string, configPath string) []string {
+	if len(patterns) == 0 {
+		return patterns
+	}
+	out := patterns[:0:len(patterns)]
+	for _, p := range patterns {
+		if _, err := path.Match(p, ""); err != nil {
+			debuglog.Logger.Warn("workspace: dropping invalid pr_checks.ignore glob",
+				"path", configPath, "pattern", p, "err", err)
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

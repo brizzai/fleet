@@ -178,17 +178,12 @@ func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 }
 
 // matchesAnyPattern reports whether name matches any of the path.Match globs in
-// patterns. Bad globs are warn-logged and skipped — never fail-closed, so a
-// typo in one pattern doesn't poison the whole ignore list.
+// patterns. Bad globs are silently skipped here as defense-in-depth — they're
+// validated and warn-logged once at config load (workspace.validateGlobs), so
+// nothing malformed should reach this hot path under normal flow.
 func matchesAnyPattern(name string, patterns []string) bool {
 	for _, p := range patterns {
-		matched, err := path.Match(p, name)
-		if err != nil {
-			debuglog.Logger.Warn("github: bad ignore pattern; skipping",
-				"pattern", p, "err", err)
-			continue
-		}
-		if matched {
+		if matched, err := path.Match(p, name); err == nil && matched {
 			return true
 		}
 	}
