@@ -553,6 +553,49 @@ func TestScenarioWaitingFirstTickPaneRunning(t *testing.T) {
 	})
 }
 
+func TestScenarioAskUserQuestionNavigationStaysWaiting(t *testing.T) {
+	// Regression: Claude's AskUserQuestion tool keeps the prompt open while the
+	// user navigates with Tab/arrow keys. Each keystroke mutates pane content
+	// (cursor moves, checkbox toggles), so the hash drifts on every tick.
+	// Before the fix, applyHookWaiting's "content changed → assume running"
+	// override fired on each drift, flipping status to running for ≥15s. The
+	// user only saw "waiting" again once they paused for the full cooldown.
+	//
+	// Fix: detectWaiting matches the AskUserQuestion footer ("Tab to switch
+	// questions" + "Esc to cancel"), so paneStatus=Waiting through navigation.
+	// applyHookWaiting suppresses the running override when paneStatus=Waiting
+	// because the prompt is clearly still on screen.
+	// Captured from snapshot 2026-05-05T15-38-57_lets-start-brainstorming-ideas.
+	fixture := "pane_waiting_askuserquestion_checkbox_focus.txt"
+	if _, err := os.Stat(filepath.Join("testdata", fixture)); err != nil {
+		t.Skipf("fixture %s not available", fixture)
+	}
+
+	// Plain-text variants that share the AskUserQuestion footer but differ in
+	// the checkbox row above it — simulates the user pressing Tab to toggle
+	// which question is selected. Both must be detected as waiting; only the
+	// hash changes.
+	stackFocus := "Round 3: Architecture\n☒ Stack  ☐ Process model  ☐ V1 scope\nEnter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel\n"
+	processFocus := "Round 3: Architecture\n☐ Stack  ☒ Process model  ☐ V1 scope\nEnter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel\n"
+
+	runScenario(t, Scenario{
+		Name: "AskUserQuestion navigation: hook=waiting + drifting hash → stays waiting",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", Pane: "@fixture:" + fixture}, // real ANSI capture
+			{At: 3 * time.Second, Pane: stackFocus},               // first plain-text view
+			{At: 6 * time.Second, Pane: processFocus},             // user Tab'd to next question, hash drifts
+			{At: 9 * time.Second, Pane: stackFocus},               // Tab'd back, hash drifts again
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},
+			{At: 3 * time.Second, Expected: StatusWaiting},  // before fix: flipped to running on hash drift
+			{At: 6 * time.Second, Expected: StatusWaiting},  // before fix: still running (15s cooldown)
+			{At: 9 * time.Second, Expected: StatusWaiting},  // before fix: still running
+			{At: 25 * time.Second, Expected: StatusWaiting}, // long after any cooldown
+		},
+	})
+}
+
 func TestScenarioStaleWaitingWithActiveSpinner(t *testing.T) {
 	// Regression: user approves a PermissionRequest and Claude starts working.
 	// No UserPromptSubmit fires for permission grants, so the hook stays "waiting".

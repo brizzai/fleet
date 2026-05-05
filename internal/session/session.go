@@ -513,10 +513,21 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 			s.lastContentChangeAt = time.Now()
 		}
 	} else if hash != s.lastContentHash {
-		// Content changed — user acted on the prompt.
+		// Content changed — refresh hash so the next tick measures from the new baseline.
+		s.lastContentHash = hash
+		// If pane still structurally shows a waiting prompt (e.g. the user is
+		// navigating Claude's AskUserQuestion dialog with arrow/Tab keys, which
+		// mutates checkbox/cursor cells without leaving the prompt), keep
+		// status=waiting. The override below assumes hash drift means "user
+		// approved and Claude resumed", but that's wrong when the prompt is
+		// still on screen. Don't bump lastContentChangeAt either — that would
+		// extend the running cooldown for every keystroke.
+		if paneStatus == StatusWaiting {
+			return
+		}
+		// Pane no longer confirms waiting — user likely approved/escaped.
 		// Transition to running (approval is the most common action).
 		// Hooks will correct to the right status within milliseconds.
-		s.lastContentHash = hash
 		s.lastContentChangeAt = time.Now()
 		s.Status = StatusRunning
 		log.Info("content changed while waiting, assuming running")
@@ -926,6 +937,22 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 		trimmedLine := strings.TrimSpace(recentLines[i])
 		if strings.HasPrefix(trimmedLine, "│") && strings.Contains(trimmedLine, "Waiting for team lead") {
 			log.Debug("detectStatus: matched team waiting box", "line", trimmedLine)
+			return StatusWaiting
+		}
+	}
+
+	// Structural check: AskUserQuestion tool dialog.
+	// The footer "Tab to switch questions" only appears in this tool's UI —
+	// no other Claude prompt has tabs between questions. Pair with "Esc to cancel"
+	// to avoid matching conversation text that mentions tabs.
+	// The cursor `❯` and numbered options here are unstable as the user navigates
+	// (Tab moves focus to checkbox-style question rows where `❯` disappears),
+	// so the menu structural check above misses these states. The footer is
+	// rendered identically on every tick regardless of which question has focus.
+	for i := 0; i < bottomN; i++ {
+		lower := strings.ToLower(recentLines[i])
+		if strings.Contains(lower, "tab to switch questions") && strings.Contains(lower, "esc to cancel") {
+			log.Debug("detectStatus: matched askuserquestion footer")
 			return StatusWaiting
 		}
 	}

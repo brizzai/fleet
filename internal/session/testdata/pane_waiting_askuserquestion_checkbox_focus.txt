@@ -1,0 +1,56 @@
+
+  Let me dispatch a research agent to dig deep on Conductor + adjacent products in the background while we continue brainstorming.
+
+[38;5;114m⏺[39m [1mAgent[0m(Research Conductor + competitor landscape)
+[38;5;246m  ⎿  [39mBackgrounded agent[38;5;246m (↓ to manage · ctrl+o to expand)[39m
+
+[38;5;231m⏺[39m Research is running. While that cooks, let me dig into what I see in the Conductor screenshot and ask sharper questions.
+
+  [1mRound 2: Layout & multi-session UX[0m (the core thing you said sells you on desktop)
+
+[38;5;231m⏺ [39mUser answered Claude's questions:
+[38;5;246m  ⎿  · When you said 'tabs' — do you mean Conductor-style (multiple sessions tabbed inside one workspace) or browser-style (top-level tabs across everything)? → (notes only)[39m
+     [38;5;246m· What does 'I hate Conductor's worktree-only feel' mean to you specifically? → 1. forces worktrees, i like to work on my own ~/code/brizzai sometimes, 2. the UI feels kinda wierd, and it connects wierdly to claude, i like the claude TUI, not sure what elwse, (status grouping is optional there...[39m
+     [38;5;246m· When multiple sessions are visible at once, what should happen with input focus and the embedded terminal? → not sure one session at a time, or each pane with its own input[39m
+     [38;5;246m· How important is keeping the embedded view a real tmux session (vs. just spawning Claude Code as a subprocess directly)? → i tend to tmux, 1 i like the claude code tui, 2 i think it might be very hard to "proxy" claude code, but i might be wrong about it, cuz it has advaantages[39m
+
+[38;5;231m⏺[39m Sharp — that crystallizes a really interesting design principle that's actually [1mopposite[0m to Conductor's bet:
+
+  [2m▎[0m [1;3mConductor reimplements Claude's chat UI in native components (their own message bubbles, mentions, model selector, slash commands).[0;3m That's why it "connects weirdly to claude" — they're proxying it.[0m
+  [2m▎[0m
+  [2m▎[0m [1;3mYou want to preserve the actual Claude Code TUI[0;3m as the source of truth, and build a beautiful workspace shell around it.[0m
+
+  That means the desktop app is closer to "iTerm2 with elite workspace management" than "Conductor clone." The embedded view is a real terminal rendering a real tmux session running real Claude. We only build native UI for things [3moutside[0m the Claude pane: sidebar, tabs, diff panel, dev server panel, PR flow,
+  notifications.
+
+  This is actually much more achievable and more Yuval-flavored. Let me drill into the architecture next.
+
+  [1mRound 3: Architecture & stack[0m
+[38;5;246m  ⎿  [38;5;211mInvalid tool parameters[39m
+
+[38;5;246m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m←  ☒ Stack [38;5;16m[48;5;153m ☐ Process model [39m[49m ☐ V1 scope  ☐ Docs location  ✔ Submit  →
+
+[1m[38;5;231mProcess architecture — how do the Go core and the UI talk?[0m
+
+[38;5;246m 1.[1m[38;5;153m Long-running Go daemon + [0m     [38;5;246m┌──────────────────────────────────────────────────────────────────┐[39m
+   [1m[38;5;153mUI client (Recommended)[0m        [38;5;246m│ [39mfleet daemon (Go)[38;5;246m                                                │[39m
+[38;5;246m 2.[39m Embed Go core into UI         [38;5;246m│[39m    ├─ SQLite, hooks, tmux, git, gh[38;5;246m                          [39m     [38;5;246m│[39m
+   process via FFI                [38;5;246m│[39m    ├─ chrome-host[38;5;246m                                                │[39m
+[38;5;246m 3.[39m Spawn Go subprocess per UI    [38;5;246m│[39m    └─ socket: ~/.config/fleet/daemon.sock                        [38;5;246m│[39m
+    launch                        [38;5;246m│[39m [38;5;246m                               [39m                                  [38;5;246m│[39m
+[38;5;246m 4.[39m Rewrite core in Swift/Rust    [38;5;246m│[39m Clients:                                                         [38;5;246m│[39m
+                                  [38;5;246m│[39m    • Desktop.app (Swift)  ─────┐[38;5;246m               [39m                  [38;5;246m│[39m
+                                  [38;5;246m│[39m    • fleet TUI (Go)       ─────┼──> daemon                       [38;5;246m│[39m
+                                  [38;5;246m│[39m    • fleet CLI (Go)       ─────┘[38;5;246m           [39m                      [38;5;246m│[39m
+                                  [38;5;246m└──────────────────────────────────────────────────────────────────┘[39m
+
+                                  [38;5;153mNotes:[39m [3m[38;5;246mpress n to add notes[0m
+
+[38;5;246m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel[39m
+
+
+
