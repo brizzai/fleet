@@ -18,6 +18,7 @@ package perfwatch
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -298,7 +299,7 @@ func heartbeatLoop() {
 
 		debuglog.Logger.Debug("perfwatch heartbeat",
 			"goroutines", runtime.NumGoroutine(),
-			"cpu_pct", fmt.Sprintf("%.1f", pct),
+			"cpu_pct", math.Round(pct*10)/10, // numeric float64 (sentinel -1.0 = unavailable) so structured-log filtering can compare against thresholds
 			"heap_kb", ms.HeapAlloc/1024,
 			"updates_total", totalUpdates.Load(),
 			"updates_slow", slowUpdates.Load(),

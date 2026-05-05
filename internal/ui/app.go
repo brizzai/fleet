@@ -2036,13 +2036,14 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 
 // finalizeAllPendingDeletes synchronously drains both pendingDeletes (undo
 // window still open) and finalizingDeletes (cleanup goroutine in flight) on
-// quit. Re-running cleanup on a finalizing entry is safe — `tmux kill-session`
-// on a missing session and os.Remove on a missing file are both idempotent
-// (we already check os.IsNotExist), and provider.Destroy is best-effort.
+// quit. tmux kill and hook-file removal are idempotent and run for both lists.
+// Workspace Destroy is NOT idempotent (GitWorktreeProvider.Destroy errors when
+// the worktree is already gone, and a concurrent run would race with the
+// in-flight goroutine's `git worktree remove`), so it only runs for
+// pendingDeletes — finalizingDeletes entries already have a goroutine
+// responsible for the destroy.
 func (h *Home) finalizeAllPendingDeletes() {
-	all := append([]PendingDelete(nil), h.pendingDeletes...)
-	all = append(all, h.finalizingDeletes...)
-	for _, pd := range all {
+	finalize := func(pd PendingDelete, destroyWorkspace bool) {
 		debuglog.Logger.Info("finalizing pending delete on quit", "id", pd.Session.ID, "title", pd.Session.Title)
 		if pd.Session.IsAlive() {
 			if err := pd.Session.Kill(); err != nil {
@@ -2052,8 +2053,7 @@ func (h *Home) finalizeAllPendingDeletes() {
 		if err := os.Remove(filepath.Join(hooks.GetHooksDir(), pd.Session.ID+".json")); err != nil && !os.IsNotExist(err) {
 			debuglog.Logger.Error("failed to remove hook status file on quit", "id", pd.Session.ID, "err", err)
 		}
-		// Best-effort workspace destruction on quit.
-		if pd.DestroyWS && pd.WorkspaceName != "" {
+		if destroyWorkspace && pd.DestroyWS && pd.WorkspaceName != "" {
 			provider := workspace.ResolveProvider(pd.RepoPath)
 			if provider != nil && provider.CanDestroy() {
 				if err := provider.Destroy(pd.RepoPath, pd.WorkspaceName); err != nil {
@@ -2061,6 +2061,13 @@ func (h *Home) finalizeAllPendingDeletes() {
 				}
 			}
 		}
+	}
+
+	for _, pd := range h.pendingDeletes {
+		finalize(pd, true)
+	}
+	for _, pd := range h.finalizingDeletes {
+		finalize(pd, false)
 	}
 	h.pendingDeletes = nil
 	h.finalizingDeletes = nil
