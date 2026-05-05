@@ -2343,7 +2343,7 @@ drainPriority:
 		h.workerMu.Unlock()
 
 		if h.ghAvailable && (info.LastPRRefresh.IsZero() || time.Since(info.LastPRRefresh) > 60*time.Second) {
-			git.RefreshPRInfo(info, repo)
+			git.RefreshPRInfo(info, repo, workspace.IgnorePatterns(repo))
 		}
 
 		h.workerMu.Lock()

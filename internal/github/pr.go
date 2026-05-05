@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path"
 	"strings"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -45,7 +46,10 @@ type statusCheckEntry struct {
 }
 
 // GetPRForBranch returns the PR associated with the current branch, or nil if none.
-func GetPRForBranch(repoPath, branch string) (*PR, error) {
+// ignorePatterns are path.Match globs applied to check names; matching checks are
+// dropped from the rollup before CI status is derived (lets repos suppress noisy
+// gates without affecting real check failures).
+func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, error) {
 	if branch == "" || branch == "HEAD" {
 		return nil, nil
 	}
@@ -72,7 +76,7 @@ func GetPRForBranch(repoPath, branch string) (*PR, error) {
 		URL:               resp.URL,
 		State:             resp.State,
 		ReviewDecision:    resp.ReviewDecision,
-		CIStatus:          deriveCIStatus(resp.StatusCheckRollup),
+		CIStatus:          deriveCIStatus(resp.StatusCheckRollup, ignorePatterns),
 		UnresolvedThreads: getUnresolvedThreadCount(repoPath, resp.Number, resp.URL),
 		HasConflicts:      resp.Mergeable == "CONFLICTING",
 	}
@@ -137,7 +141,8 @@ func getUnresolvedThreadCount(repoPath string, prNumber int, prURL string) int {
 }
 
 // deriveCIStatus determines overall CI status from status check rollup.
-func deriveCIStatus(checks []statusCheckEntry) string {
+// Checks whose name matches any ignorePatterns glob are dropped before rollup.
+func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 	if len(checks) == 0 {
 		return ""
 	}
@@ -148,6 +153,9 @@ func deriveCIStatus(checks []statusCheckEntry) string {
 	for _, check := range checks {
 		// Skip ghost entries with no name (null checks from GitHub API).
 		if check.Name == "" {
+			continue
+		}
+		if matchesAnyPattern(check.Name, ignorePatterns) {
 			continue
 		}
 		conclusion := strings.ToUpper(check.Conclusion)
@@ -167,4 +175,22 @@ func deriveCIStatus(checks []statusCheckEntry) string {
 		return "PENDING"
 	}
 	return "SUCCESS"
+}
+
+// matchesAnyPattern reports whether name matches any of the path.Match globs in
+// patterns. Bad globs are warn-logged and skipped — never fail-closed, so a
+// typo in one pattern doesn't poison the whole ignore list.
+func matchesAnyPattern(name string, patterns []string) bool {
+	for _, p := range patterns {
+		matched, err := path.Match(p, name)
+		if err != nil {
+			debuglog.Logger.Warn("github: bad ignore pattern; skipping",
+				"pattern", p, "err", err)
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
