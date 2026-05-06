@@ -1019,6 +1019,25 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, -1)
 		h.syncViewport()
 		return h, h.fetchPreviewForSelected()
+	case "pgdown":
+		target := h.cursor + h.sidebarVisibleRows()
+		if target > len(h.flatItems)-1 {
+			target = len(h.flatItems) - 1
+		}
+		if target < 0 {
+			target = 0
+		}
+		h.cursor = target
+		h.syncViewport()
+		return h, h.fetchPreviewForSelected()
+	case "pgup":
+		target := h.cursor - h.sidebarVisibleRows()
+		if target < 0 {
+			target = 0
+		}
+		h.cursor = target
+		h.syncViewport()
+		return h, h.fetchPreviewForSelected()
 	case "enter":
 		// Toggle repo group or attach session.
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
@@ -2665,6 +2684,18 @@ func (h *Home) rebuildSessionMap() {
 	}
 }
 
+// sidebarVisibleRows returns the number of session rows visible in the sidebar.
+// Subtracts the panel chrome (title + underline = 2) and reserves 2 rows for
+// the scroll indicators RenderSidebar (sidebar.go) may add at top/bottom — so
+// the cursor stays in view even at the list edges.
+func (h *Home) sidebarVisibleRows() int {
+	v := h.height - 2 - helpBarHeight - 4
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
 func (h *Home) syncViewport() {
 	if len(h.flatItems) == 0 {
 		return
@@ -2676,11 +2707,7 @@ func (h *Home) syncViewport() {
 	if h.cursor >= len(h.flatItems) {
 		h.cursor = len(h.flatItems) - 1
 	}
-	// Calculate visible height for sidebar (subtract title + underline).
-	contentHeight := h.height - 2 - helpBarHeight - 2
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
+	contentHeight := h.sidebarVisibleRows()
 	prevOffset := h.viewOffset
 	// Scroll to keep cursor visible.
 	if h.cursor < h.viewOffset {
