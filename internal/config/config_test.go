@@ -54,6 +54,35 @@ func TestIsAutoUpdateEnabled(t *testing.T) {
 			t.Error("expected false")
 		}
 	})
+
+	t.Run("FLEET_AUTO_UPDATE_DISABLED overrides config=true", func(t *testing.T) {
+		t.Setenv("FLEET_AUTO_UPDATE_DISABLED", "1")
+		v := true
+		cfg := &Config{AutoUpdate: &v}
+		if cfg.IsAutoUpdateEnabled() {
+			t.Error("env var should override config=true")
+		}
+	})
+
+	t.Run("FLEET_AUTO_UPDATE_DISABLED accepts truthy values", func(t *testing.T) {
+		for _, val := range []string{"1", "true", "TRUE", "yes", "y", "on"} {
+			t.Setenv("FLEET_AUTO_UPDATE_DISABLED", val)
+			cfg := &Config{}
+			if cfg.IsAutoUpdateEnabled() {
+				t.Errorf("value %q should disable auto-update", val)
+			}
+		}
+	})
+
+	t.Run("FLEET_AUTO_UPDATE_DISABLED ignores non-truthy values", func(t *testing.T) {
+		for _, val := range []string{"", "0", "false", "no", "off", "garbage"} {
+			t.Setenv("FLEET_AUTO_UPDATE_DISABLED", val)
+			cfg := &Config{} // default true
+			if !cfg.IsAutoUpdateEnabled() {
+				t.Errorf("value %q should NOT disable auto-update (default true)", val)
+			}
+		}
+	})
 }
 
 func TestGetEditor(t *testing.T) {

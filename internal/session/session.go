@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/tmux"
 )
 
@@ -59,6 +61,8 @@ type Session struct {
 
 	lastContentHash     string
 	lastContentChangeAt time.Time
+
+	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 
 	tmuxSession  *tmux.Session
 	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
@@ -221,6 +225,13 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 		s.lastContentHash = ""
 		s.lastContentChangeAt = time.Time{}
 		s.hookOverriddenAt = time.Time{} // allow fresh evaluation of new hook
+		// A non-dead hook means Claude is alive again. Re-arm the crash-dump
+		// trigger so the NEXT real death gets a dump even if a prior false
+		// transition (e.g. brief stale-hook flash before this fresh hook
+		// landed) already consumed the once-per-life dump quota.
+		if hs.Status != "" && hs.Status != "dead" {
+			s.deathRecorded = false
+		}
 	}
 	s.hookStatus = hs.Status
 	s.hookUpdatedAt = hs.UpdatedAt
@@ -247,11 +258,18 @@ func (s *Session) Restart() error {
 		_ = s.tmuxSession.Kill()
 	}
 
+	// Drop the previous Claude's hook state. Without this, fleet's status worker
+	// can read the old file's status=dead before the new Claude has fired any
+	// hook event, which flips the freshly-restarted session straight back to
+	// error and triggers a misleading crash dump.
+	s.clearHookState()
+
 	// Recreate tmux session with same config.
 	s.tmuxSession = tmux.NewSession(s.Title, s.ProjectPath)
 	s.mu.Lock()
 	s.TmuxSessionName = s.tmuxSession.Name
 	s.Status = StatusStarting
+	s.deathRecorded = false
 	s.mu.Unlock()
 
 	cmd := s.buildClaudeCmd()
@@ -274,8 +292,10 @@ func (s *Session) Restart() error {
 func (s *Session) RespawnClaude() error {
 	resuming := s.ClaudeSessionID != ""
 	debuglog.Logger.Info("session respawn", "id", s.ID, "title", s.Title, "resuming", resuming)
+	s.clearHookState()
 	s.mu.Lock()
 	s.Status = StatusStarting
+	s.deathRecorded = false
 	s.mu.Unlock()
 
 	cmd := s.buildClaudeCmd()
@@ -297,6 +317,23 @@ func (s *Session) RespawnClaude() error {
 	return nil
 }
 
+// clearHookState drops the previous Claude process's hook state — both the
+// in-memory cache and the on-disk status file at
+// ~/.config/fleet/hooks/<id>.json. Called before relaunching Claude so the
+// worker doesn't trust the dead Claude's last hook ("dead", "waiting", etc.)
+// during the gap between tmux respawn and the new Claude's first hook event.
+func (s *Session) clearHookState() {
+	s.mu.Lock()
+	s.hookStatus = ""
+	s.hookUpdatedAt = time.Time{}
+	s.hookOverriddenAt = time.Time{}
+	s.mu.Unlock()
+	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
+	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
+		debuglog.Logger.Warn("session: clear hook file failed", "id", s.ID, "path", hookFile, "err", err)
+	}
+}
+
 // UpdateStatus detects the session status from pane content.
 func (s *Session) UpdateStatus() {
 	log := debuglog.Logger.With("session", s.ID, "title", s.Title)
@@ -305,6 +342,7 @@ func (s *Session) UpdateStatus() {
 	if !s.IsAlive() {
 		s.SetStatus(StatusError)
 		log.Debug("status: not alive", "old", oldStatus, "new", StatusError)
+		s.triggerCrashDump("tmux_gone")
 		return
 	}
 
@@ -312,6 +350,7 @@ func (s *Session) UpdateStatus() {
 	if s.getCapturer().IsPaneDead() {
 		s.SetStatus(StatusError)
 		log.Debug("status: pane dead", "old", oldStatus, "new", StatusError)
+		s.triggerCrashDump("pane_dead")
 		return
 	}
 
@@ -341,24 +380,32 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		paneStatus = detectStatus(paneContent, log)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	hookSaysDead := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	switch hookStatus {
-	case "running":
-		s.applyHookRunning(oldStatus, paneContent, paneStatus, log)
-	case "waiting":
-		s.applyHookWaiting(paneContent, paneStatus, log)
-	case "finished":
-		s.applyHookFinished(paneStatus, log)
-	case "dead":
-		s.lastContentHash = ""
-		s.lastContentChangeAt = time.Time{}
-		s.Status = StatusError
-	}
+		switch hookStatus {
+		case "running":
+			s.applyHookRunning(oldStatus, paneContent, paneStatus, log)
+		case "waiting":
+			s.applyHookWaiting(paneContent, paneStatus, log)
+		case "finished":
+			s.applyHookFinished(paneStatus, log)
+		case "dead":
+			s.lastContentHash = ""
+			s.lastContentChangeAt = time.Time{}
+			s.Status = StatusError
+			hookSaysDead = true
+		}
 
-	if s.Status != oldStatus {
-		log.Info("status changed (hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus, "hookAge", hookAge.Round(time.Millisecond))
+		if s.Status != oldStatus {
+			log.Info("status changed (hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus, "hookAge", hookAge.Round(time.Millisecond))
+		}
+	}()
+
+	if hookSaysDead {
+		s.triggerCrashDump("hook_dead")
 	}
 }
 
@@ -836,12 +883,17 @@ func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
 	//   "· Clauding… (53s · ↓ 749 tokens)"                                    — standard
 	//   "· Gesticulating… (5m 42s · ↓ 4.2k tokens · thinking with high effort)" — extended thinking
 	// Both contain `tokens` and `· ↓`/`· ↑` inside a trailing ")".
-	// The `)` suffix + `tokens` + arrow marker combo is specific enough to avoid
-	// false-positives from conversation text — safe to scan all 50 recent lines.
-	// (Unlike raw spinner chars, which false-positive on CLI tool output.)
-	// Scanning all lines is important because plan execution pushes the activity
-	// line far from the bottom as checklist items expand below it.
-	for _, line := range recentLines {
+	//
+	// Scanned in the bottom 20 lines (not all 50): plan execution can push the
+	// activity line down via checklist items rendered below it (deepest known
+	// case lands at recentLines[14]), so the limit accommodates that with
+	// headroom. Scanning all 50 false-positives on quoted activity lines that
+	// can land in scrollback when Claude's prior response embeds an example
+	// pane capture or crash-dump snippet — those satisfy every textual guard
+	// (`)` suffix, `tokens`, `· ↓`/`· ↑`, real duration string) but are not
+	// live indicators.
+	whimsicalN := min(20, len(recentLines))
+	for _, line := range recentLines[:whimsicalN] {
 		if isWhimsicalActivity(line) {
 			log.Debug("detectStatus: matched whimsical activity pattern", "line", strings.TrimRight(line, " \t"))
 			return StatusRunning

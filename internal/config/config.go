@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
@@ -30,11 +31,27 @@ func (c *Config) IsAutoNameEnabled() bool {
 }
 
 // IsAutoUpdateEnabled returns whether auto-update is enabled (default: true).
+// FLEET_AUTO_UPDATE_DISABLED takes precedence over the config file when truthy
+// (1/true/yes/y/on) — useful for running a local dev build without the
+// auto-updater overwriting it with the latest release.
 func (c *Config) IsAutoUpdateEnabled() bool {
+	if isTruthyEnv(os.Getenv("FLEET_AUTO_UPDATE_DISABLED")) {
+		return false
+	}
 	if c.AutoUpdate == nil {
 		return true
 	}
 	return *c.AutoUpdate
+}
+
+// isTruthyEnv returns true for common truthy values (1, true, yes, y, on).
+func isTruthyEnv(v string) bool {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // DefaultConfigPath returns the default config file path.

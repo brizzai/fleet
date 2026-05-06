@@ -19,6 +19,8 @@ type hookPayload struct {
 	Source        string          `json:"source"`
 	Matcher       json.RawMessage `json:"matcher,omitempty"`
 	Prompt        string          `json:"prompt,omitempty"`
+	// Reason is set on SessionEnd: "clear", "logout", "prompt_input_exit", "other".
+	Reason string `json:"reason,omitempty"`
 }
 
 // mapEventToStatus maps a Claude Code hook event to a fleet status string.
@@ -132,6 +134,7 @@ func handleHookHandler() {
 		Timestamp:   time.Now().Unix(),
 		UserPrompt:  userPrompt,
 		PromptCount: promptCount,
+		Reason:      payload.Reason,
 	}
 
 	if err := hooks.WriteStatusFile(hooksDir, instanceID, sf); err != nil {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -42,6 +43,11 @@ const (
 	minDumpGap         = 1500 * time.Millisecond
 	recentMsgRing      = 32
 	blockProfileRateNs = int64(time.Millisecond) // record blocks >= 1ms
+	// updateStormRate triggers a snapshot when sustained Update() throughput
+	// over one heartbeat interval exceeds this (msgs/sec). Catches tea.Cmd
+	// loops that flood the loop without any single Update going slow — the
+	// watchdog can't see those because elapsed never crosses stallThreshold.
+	updateStormRate = 200
 )
 
 var (
@@ -252,14 +258,9 @@ func watchdogLoop() {
 		if elapsed < stallThreshold {
 			continue
 		}
-
-		dumpMu.Lock()
-		if time.Since(lastDumpAt) < minDumpGap {
-			dumpMu.Unlock()
+		if !claimDump() {
 			continue
 		}
-		lastDumpAt = time.Now()
-		dumpMu.Unlock()
 
 		msg := "unknown"
 		if p := updateMsgType.Load(); p != nil {
@@ -267,6 +268,19 @@ func watchdogLoop() {
 		}
 		Snapshot(fmt.Sprintf("update_stall_%s_%dms", msg, elapsed.Milliseconds()))
 	}
+}
+
+// claimDump returns true if no other dump fired within the last minDumpGap.
+// Shared by the stall watchdog and the heartbeat storm detector so concurrent
+// failure modes don't pile up dumps on disk.
+func claimDump() bool {
+	dumpMu.Lock()
+	defer dumpMu.Unlock()
+	if time.Since(lastDumpAt) < minDumpGap {
+		return false
+	}
+	lastDumpAt = time.Now()
+	return true
 }
 
 func heartbeatLoop() {
@@ -280,6 +294,7 @@ func heartbeatLoop() {
 	metrics.Read(samples)
 	lastTotal, lastIdle, cpuOK := readCPUSamples(samples)
 	lastWall := time.Now()
+	lastUpdateCount := totalUpdates.Load()
 
 	t := time.NewTicker(heartbeatInterval)
 	defer t.Stop()
@@ -294,6 +309,13 @@ func heartbeatLoop() {
 		lastTotal, lastIdle, cpuOK = total, idle, ok
 		lastWall = now
 
+		updateCount := totalUpdates.Load()
+		updateRate := 0.0
+		if wall > 0 {
+			updateRate = float64(updateCount-lastUpdateCount) / wall
+		}
+		lastUpdateCount = updateCount
+
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
 
@@ -301,10 +323,19 @@ func heartbeatLoop() {
 			"goroutines", runtime.NumGoroutine(),
 			"cpu_pct", math.Round(pct*10)/10, // numeric float64 (sentinel -1.0 = unavailable) so structured-log filtering can compare against thresholds
 			"heap_kb", ms.HeapAlloc/1024,
-			"updates_total", totalUpdates.Load(),
+			"sys_free_mb", systemFreeMB(), // -1 if vm_stat unavailable; near-zero = imminent Jetsam OOM kill
+			"updates_total", updateCount,
+			"updates_per_sec", math.Round(updateRate*10)/10,
 			"updates_slow", slowUpdates.Load(),
 			"max_update_ms", maxUpdateMs.Load(),
 		)
+
+		// Storm detector: a tea.Cmd that re-arms without throttling can flood
+		// the loop without any single Update going slow, so the watchdog never
+		// fires. Snapshot once so the recent-message ring captures the culprit.
+		if updateRate > updateStormRate && claimDump() {
+			Snapshot(fmt.Sprintf("update_storm_%dpersec", int(updateRate)))
+		}
 	}
 }
 
@@ -327,6 +358,47 @@ func signalLoop() {
 	for range ch {
 		Snapshot("manual_sigusr1")
 	}
+}
+
+// systemFreeMB returns macOS-wide free memory in MB. Returns -1 on any error.
+// Implementation shells out to vm_stat once per heartbeat (~5ms) and parses
+// the page size from its header line + the "Pages free" field. Fleet is
+// macOS-only; on other platforms this still works if vm_stat is shimmed,
+// otherwise returns -1.
+//
+// Why this matters: when this drops toward 0, macOS Jetsam will start killing
+// user processes — Claude Code child processes are prime targets due to their
+// large in-memory KV cache. Crash dumps cross-reference this trail to confirm
+// OOM-kill diagnoses.
+func systemFreeMB() int64 {
+	out, err := exec.Command("vm_stat").Output()
+	if err != nil {
+		return -1
+	}
+	pageSize := int64(4096) // x86 default
+	var freePages int64 = -1
+	for _, line := range strings.Split(string(out), "\n") {
+		if i := strings.Index(line, "page size of "); i >= 0 {
+			rest := line[i+len("page size of "):]
+			var n int64
+			if _, err := fmt.Sscanf(rest, "%d", &n); err == nil && n > 0 {
+				pageSize = n
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "Pages free:") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "Pages free:"))
+			rest = strings.TrimSuffix(rest, ".")
+			var n int64
+			if _, err := fmt.Sscanf(rest, "%d", &n); err == nil {
+				freePages = n
+			}
+		}
+	}
+	if freePages < 0 {
+		return -1
+	}
+	return freePages * pageSize / (1024 * 1024)
 }
 
 func sanitizeFilename(s string) string {

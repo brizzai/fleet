@@ -14,6 +14,10 @@ type StatusFile struct {
 	Timestamp   int64  `json:"ts"`
 	UserPrompt  string `json:"user_prompt,omitempty"`
 	PromptCount int    `json:"prompt_count,omitempty"`
+	// Reason is forwarded from Claude Code's SessionEnd hook payload
+	// ("clear", "logout", "prompt_input_exit", "other"). "other" combined with
+	// no exit info typically means the process was killed externally.
+	Reason string `json:"reason,omitempty"`
 }
 
 // WriteStatusFile atomically writes a status file to the hooks directory.
