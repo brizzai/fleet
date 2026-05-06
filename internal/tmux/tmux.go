@@ -86,11 +86,16 @@ func (s *Session) Start(command string, env ...string) error {
 	debuglog.Logger.Info("tmux session started", "session", s.Name, "workdir", s.WorkDir)
 
 	// Batch set options.
+	// remain-on-exit keeps the dead pane around so the crash dump can read
+	// `pane_dead_status` (exit code) and `pane_dead_signal` (terminating
+	// signal). Without this we just see "tmux session gone" with no clue
+	// what killed claude.
 	optArgs := []string{
 		"set-option", "-t", s.Name, "mouse", "on", ";",
 		"set-option", "-t", s.Name, "history-limit", "10000", ";",
 		"set-option", "-t", s.Name, "escape-time", "10", ";",
-		"set-option", "-t", s.Name, "allow-passthrough", "on",
+		"set-option", "-t", s.Name, "allow-passthrough", "on", ";",
+		"set-option", "-t", s.Name, "remain-on-exit", "on",
 	}
 	optCmd := exec.Command("tmux", optArgs...)
 	_ = optCmd.Run() // Best effort.
