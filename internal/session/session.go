@@ -264,16 +264,18 @@ func (s *Session) Restart() error {
 	// error and triggers a misleading crash dump.
 	s.clearHookState()
 
-	// Recreate tmux session with same config.
-	s.tmuxSession = tmux.NewSession(s.Title, s.ProjectPath)
+	// Recreate tmux session with same config. Mutate s.tmuxSession under
+	// s.mu so concurrent triggerCrashDump readers see a consistent pointer.
+	newTmux := tmux.NewSession(s.Title, s.ProjectPath)
 	s.mu.Lock()
-	s.TmuxSessionName = s.tmuxSession.Name
+	s.tmuxSession = newTmux
+	s.TmuxSessionName = newTmux.Name
 	s.Status = StatusStarting
 	s.deathRecorded = false
 	s.mu.Unlock()
 
 	cmd := s.buildClaudeCmd()
-	if err := s.tmuxSession.Start(cmd, s.sessionEnv()...); err != nil {
+	if err := newTmux.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()

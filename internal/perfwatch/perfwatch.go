@@ -98,7 +98,8 @@ func Init() {
 		return
 	}
 	stallDir = filepath.Join(home, ".config", "fleet", "stalls")
-	if err := os.MkdirAll(stallDir, 0755); err != nil {
+	// 0700: snapshots include goroutine stacks + block/mutex profiles.
+	if err := os.MkdirAll(stallDir, 0700); err != nil {
 		debuglog.Logger.Error("perfwatch: mkdir stalls", "err", err)
 		return
 	}
@@ -173,7 +174,8 @@ func Snapshot(reason string) string {
 	safe := sanitizeFilename(reason)
 	path := filepath.Join(stallDir, ts+"_"+safe+".txt")
 
-	f, err := os.Create(path)
+	// 0600: snapshot contents are user-private (goroutine stacks etc.).
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		debuglog.Logger.Error("perfwatch: create snapshot", "err", err, "path", path)
 		return ""

@@ -19,6 +19,11 @@ const (
 	captureCacheTTL = 400 * time.Millisecond
 	captureTimeout  = 3 * time.Second
 	sessionCacheTTL = 2 * time.Second
+	// listPanesTimeout caps tmux list-panes shell-outs from IsPaneDead /
+	// PaneDeadInfo. list-panes is much cheaper than capture-pane, so 2s is
+	// generous; the cap exists so an unresponsive tmux server can't hang the
+	// status worker (called once per session per tick).
+	listPanesTimeout = 2 * time.Second
 )
 
 // Session represents a tmux session managed by fleet.
@@ -157,7 +162,9 @@ func (s *Session) RespawnPane(command string, env ...string) error {
 
 // IsPaneDead checks if the pane's process has exited.
 func (s *Session) IsPaneDead() bool {
-	out, err := exec.Command("tmux", "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}").Output()
 	if err != nil {
 		debuglog.Logger.Error("tmux IsPaneDead check failed", "session", s.Name, "err", err)
 		return false
@@ -183,7 +190,9 @@ func (s *Session) CachedPane() string {
 // when non-zero (137-128=9 SIGKILL → OOM/manual kill, 134-128=6 SIGABRT →
 // panic, 139-128=11 SIGSEGV).
 func (s *Session) PaneDeadInfo() (dead bool, exitStatus, exitSignal string, ok bool) {
-	out, err := exec.Command("tmux", "list-panes", "-t", s.Name+":0.0",
+	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", s.Name+":0.0",
 		"-F", "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}").Output()
 	if err != nil {
 		return false, "", "", false

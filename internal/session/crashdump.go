@@ -2,8 +2,10 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,11 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 )
+
+// crashdumpTmuxTimeout caps any tmux shell-out from the crash-dump path. A
+// hung tmux during repeated crashes would otherwise pile up stuck goroutines.
+// Mirrors the captureTimeout pattern in tmux.Session.CapturePane.
+const crashdumpTmuxTimeout = 3 * time.Second
 
 // triggerCrashDump captures forensic state for a session that just died and
 // writes it to ~/.config/fleet/crashes/. Called once per death — guarded by
@@ -40,14 +47,19 @@ func (s *Session) triggerCrashDump(reason string) {
 	tmuxName := s.TmuxSessionName
 	id := s.ID
 	title := s.Title
+	// Snapshot the *tmux.Session pointer under the lock — Restart() swaps
+	// s.tmuxSession concurrently (with s.mu held during the swap), so reading
+	// it after Unlock would race with subsequent restarts and could capture
+	// the replacement session's cached pane instead of the dead one.
+	tmuxSession := s.tmuxSession
 	s.mu.Unlock()
 
 	// Snapshot the cached pane content NOW (before the goroutine fires) — by
 	// the time the goroutine runs, tmux may already have GC'd the session and
 	// the cache reflects the moment of death.
 	var cachedPane string
-	if s.tmuxSession != nil {
-		cachedPane = s.tmuxSession.CachedPane()
+	if tmuxSession != nil {
+		cachedPane = tmuxSession.CachedPane()
 	}
 
 	go writeCrashDump(id, title, tmuxName, reason, cachedPane)
@@ -66,7 +78,8 @@ func writeCrashDump(sessionID, title, tmuxName, reason, cachedPane string) {
 		return
 	}
 	dir := filepath.Join(home, ".config", "fleet", "crashes")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// 0700: dumps include raw pane content (code, prompts, occasional secrets).
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		debuglog.Logger.Error("crashdump: mkdir failed", "dir", dir, "err", err)
 		return
 	}
@@ -83,12 +96,16 @@ func writeCrashDump(sessionID, title, tmuxName, reason, cachedPane string) {
 	fmt.Fprintf(&buf, "captured_at:    %s\n", now.Format(time.RFC3339))
 
 	// Tmux exit info — only meaningful with remain-on-exit on.
-	if dead, status, signal, ok := tmuxPaneDeadInfo(tmuxName); ok {
+	if dead, status, signal, infoErr := tmuxPaneDeadInfo(tmuxName); infoErr == nil {
 		fmt.Fprintf(&buf, "tmux_dead:      %t\n", dead)
 		fmt.Fprintf(&buf, "exit_status:    %s\n", emptyDash(status))
 		fmt.Fprintf(&buf, "exit_signal:    %s%s\n", emptyDash(signal), signalNote(signal))
 	} else {
-		fmt.Fprintf(&buf, "tmux_dead:      tmux session no longer exists (GC'd before dump)\n")
+		// Most common cause is the tmux session being GC'd before the dump
+		// runs (only window, only command exited). Other causes: tmux not on
+		// PATH, transient tmux server failure, or list-panes output that
+		// doesn't match the expected 3-field format.
+		fmt.Fprintf(&buf, "tmux_dead:      unavailable (%v)\n", infoErr)
 	}
 
 	// Hook file — Claude Code's SessionEnd payload.
@@ -129,29 +146,36 @@ func writeCrashDump(sessionID, title, tmuxName, reason, cachedPane string) {
 		fmt.Fprintf(&buf, "(no heartbeats found — perfwatch may be disabled; relaunch with FLEET_DEBUG=1)\n")
 	}
 
-	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+	// 0600: contents are user-private (pane raw text + hook context).
+	if err := os.WriteFile(path, buf.Bytes(), 0600); err != nil {
 		debuglog.Logger.Error("crashdump: write failed", "path", path, "err", err)
 		return
 	}
 	debuglog.Logger.Warn("crashdump: written", "path", path, "id", sessionID, "reason", reason)
 }
 
-func tmuxPaneDeadInfo(tmuxName string) (dead bool, status, signal string, ok bool) {
+// tmuxPaneDeadInfo queries tmux for pane death info. Returns an error rather
+// than a bool ok so writeCrashDump can surface the *cause* of failure (tmux
+// missing, server gone, malformed output) instead of a one-size-fits-all
+// "session GC'd" message.
+func tmuxPaneDeadInfo(tmuxName string) (dead bool, status, signal string, err error) {
 	out, err := exec.Command("tmux", "list-panes", "-t", tmuxName+":0.0",
 		"-F", "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}").Output()
 	if err != nil {
-		return false, "", "", false
+		return false, "", "", fmt.Errorf("tmux list-panes: %w", err)
 	}
 	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 3)
 	if len(parts) != 3 {
-		return false, "", "", false
+		return false, "", "", fmt.Errorf("unexpected list-panes output: %q", string(out))
 	}
-	return parts[0] == "1", parts[1], parts[2], true
+	return parts[0] == "1", parts[1], parts[2], nil
 }
 
 func capturePaneRaw(tmuxName string, lines int) (string, error) {
 	// -e preserves ANSI; -S -N starts N lines back from the bottom of history.
-	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p", "-e",
+	ctx, cancel := context.WithTimeout(context.Background(), crashdumpTmuxTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", tmuxName, "-p", "-e",
 		"-S", fmt.Sprintf("-%d", lines)).Output()
 	if err != nil {
 		return "", err
@@ -172,16 +196,49 @@ func readHookFile(home, sessionID string) (*hooks.StatusFile, error) {
 	return &hf, nil
 }
 
+// heartbeatTailWindow caps how many bytes we read from the end of debug.log
+// when extracting the last few heartbeat lines. With FLEET_DEBUG=1 the log
+// can grow to MBs; allocating that just to find ~6 short lines is wasteful,
+// especially since crash dumps tend to fire under memory pressure. 64KB
+// comfortably covers ~6 heartbeats * ~300 bytes each plus headroom.
+const heartbeatTailWindow = 64 * 1024
+
 // tailPerfwatchHeartbeats returns the last n "perfwatch heartbeat" lines from
 // the debug log, oldest first. Returns "" if the log can't be read or no
-// heartbeats are present.
+// heartbeats are present. Reads only the trailing heartbeatTailWindow bytes
+// of the log to avoid loading multi-MB logs into memory.
 func tailPerfwatchHeartbeats(n int) string {
-	data, err := os.ReadFile(debuglog.LogPath())
+	f, err := os.Open(debuglog.LogPath())
 	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	size := stat.Size()
+	readLen := int64(heartbeatTailWindow)
+	var seekedIntoLine bool
+	if size > readLen {
+		if _, err := f.Seek(-readLen, io.SeekEnd); err != nil {
+			return ""
+		}
+		seekedIntoLine = true
+	} else {
+		readLen = size
+	}
+	data := make([]byte, readLen)
+	if _, err := io.ReadFull(f, data); err != nil {
 		return ""
 	}
 	// Walk lines from the end, picking the last n that contain "perfwatch heartbeat".
 	all := bytes.Split(data, []byte("\n"))
+	// If we seeked into the middle of a line, the first element is a partial —
+	// drop it so we don't match against truncated content.
+	if seekedIntoLine && len(all) > 0 {
+		all = all[1:]
+	}
 	var picked []string
 	for i := len(all) - 1; i >= 0 && len(picked) < n; i-- {
 		line := string(all[i])
