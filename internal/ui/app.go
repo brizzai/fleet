@@ -2684,6 +2684,26 @@ func (h *Home) rebuildSessionMap() {
 	}
 }
 
+// sidebarListHeight returns the height of the sidebar panel in the current
+// layout — i.e. the value View() passes to RenderSidebar as `height`, before
+// chrome rows (title + underline) and scroll indicators are subtracted.
+// Stacked mode gives the sidebar ~55% of the content area; single/dual give
+// it the full content area. Mirrors the arithmetic in View() (app.go:794+).
+func (h *Home) sidebarListHeight() int {
+	contentHeight := h.height - 2 - helpBarHeight
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	if h.layoutMode() == "stacked" {
+		sh := (contentHeight * 55) / 100
+		if sh < 3 {
+			sh = 3
+		}
+		return sh
+	}
+	return contentHeight
+}
+
 // sidebarMinVisibleRows is the conservative lower bound on visible session rows
 // in the sidebar — it assumes both scroll indicators are drawn, so the value
 // holds even mid-scroll. Used by syncViewport to anchor the cursor before
@@ -2691,7 +2711,7 @@ func (h *Home) rebuildSessionMap() {
 // Subtracts panel chrome (title + underline = 2) and reserves 2 rows for the
 // indicators RenderSidebar may add at top/bottom.
 func (h *Home) sidebarMinVisibleRows() int {
-	v := h.height - 2 - helpBarHeight - 4
+	v := h.sidebarListHeight() - 4
 	if v < 1 {
 		v = 1
 	}
@@ -2703,7 +2723,7 @@ func (h *Home) sidebarMinVisibleRows() int {
 // page-jump moves a full panel; syncViewport handles anchoring if the target
 // would otherwise sit on an indicator row.
 func (h *Home) sidebarPanelRows() int {
-	v := h.height - 2 - helpBarHeight - 2
+	v := h.sidebarListHeight() - 2
 	if v < 1 {
 		v = 1
 	}
