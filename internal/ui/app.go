@@ -1020,7 +1020,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, h.fetchPreviewForSelected()
 	case "pgdown":
-		target := h.cursor + h.sidebarVisibleRows()
+		target := h.cursor + h.sidebarPanelRows()
 		if target > len(h.flatItems)-1 {
 			target = len(h.flatItems) - 1
 		}
@@ -1031,7 +1031,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, h.fetchPreviewForSelected()
 	case "pgup":
-		target := h.cursor - h.sidebarVisibleRows()
+		target := h.cursor - h.sidebarPanelRows()
 		if target < 0 {
 			target = 0
 		}
@@ -2684,12 +2684,26 @@ func (h *Home) rebuildSessionMap() {
 	}
 }
 
-// sidebarVisibleRows returns the number of session rows visible in the sidebar.
-// Subtracts the panel chrome (title + underline = 2) and reserves 2 rows for
-// the scroll indicators RenderSidebar (sidebar.go) may add at top/bottom — so
-// the cursor stays in view even at the list edges.
-func (h *Home) sidebarVisibleRows() int {
+// sidebarMinVisibleRows is the conservative lower bound on visible session rows
+// in the sidebar — it assumes both scroll indicators are drawn, so the value
+// holds even mid-scroll. Used by syncViewport to anchor the cursor before
+// RenderSidebar (sidebar.go) decides which indicators to draw.
+// Subtracts panel chrome (title + underline = 2) and reserves 2 rows for the
+// indicators RenderSidebar may add at top/bottom.
+func (h *Home) sidebarMinVisibleRows() int {
 	v := h.height - 2 - helpBarHeight - 4
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
+// sidebarPanelRows is the actual sidebar panel height in rows, before any
+// scroll indicators are drawn. Used as the PgUp/PgDn page step so a single
+// page-jump moves a full panel; syncViewport handles anchoring if the target
+// would otherwise sit on an indicator row.
+func (h *Home) sidebarPanelRows() int {
+	v := h.height - 2 - helpBarHeight - 2
 	if v < 1 {
 		v = 1
 	}
@@ -2707,7 +2721,7 @@ func (h *Home) syncViewport() {
 	if h.cursor >= len(h.flatItems) {
 		h.cursor = len(h.flatItems) - 1
 	}
-	contentHeight := h.sidebarVisibleRows()
+	contentHeight := h.sidebarMinVisibleRows()
 	prevOffset := h.viewOffset
 	// Scroll to keep cursor visible.
 	if h.cursor < h.viewOffset {
