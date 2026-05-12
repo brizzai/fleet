@@ -1,11 +1,106 @@
 package session
 
 import (
+	"io"
 	"log/slog"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestApplyHookFinished_StaleHookPreservesAck is a regression test for the
+// "I attach to a session, exit, and it's still on finished" bug found via
+// /debug-status on 2026-05-12.
+//
+// The activity guard inside applyHookFinished is meant to suppress the
+// finished/waiting flicker during Claude's 1-2s post-Stop wrap-up writes.
+// It used to fire on ANY fresh tmux activity, even when the underlying hook
+// event was minutes old. So after the user attached (which bumps tmux
+// activity) and the daemon acked the session into Idle, the next worker
+// observation would re-enter the guard, set Status=Running, and clobber
+// Acknowledged=false. When the guard expired, the session settled back to
+// Finished — silently erasing the user's acknowledgement.
+//
+// Fix: gate the guard on hookAge (only enter when the Stop event is recent)
+// and, even when it fires, only clear Acknowledged when transitioning out
+// of Waiting (the legitimate stale-waiting rescue case the guard exists for).
+func TestApplyHookFinished_StaleHookPreservesAck(t *testing.T) {
+	cases := []struct {
+		name           string
+		prev           Status
+		acked          bool
+		hookAge        time.Duration
+		paneStatus     Status
+		freshActivity  bool
+		wantStatus     Status
+		wantAcked      bool
+	}{
+		{
+			name:          "user attached + acked; stale hook + fresh activity → preserve idle/ack",
+			prev:          StatusIdle,
+			acked:         true,
+			hookAge:       60 * time.Second, // way past the 5s gate
+			paneStatus:    StatusFinished,
+			freshActivity: true,
+			wantStatus:    StatusIdle,
+			wantAcked:     true,
+		},
+		{
+			name:          "unacked finished; stale hook + fresh activity → stay finished, ack untouched",
+			prev:          StatusFinished,
+			acked:         false,
+			hookAge:       60 * time.Second,
+			paneStatus:    StatusFinished,
+			freshActivity: true,
+			wantStatus:    StatusFinished,
+			wantAcked:     false,
+		},
+		{
+			name:          "fresh stop event + waiting prev → legitimate stale-waiting rescue clears ack",
+			prev:          StatusWaiting,
+			acked:         true,
+			hookAge:       500 * time.Millisecond, // fresh
+			paneStatus:    StatusFinished,
+			freshActivity: true,
+			wantStatus:    StatusRunning,
+			wantAcked:     false, // intentional: user just answered a prompt
+		},
+		{
+			name:          "fresh stop event + idle prev (user attached) → still don't clobber ack",
+			prev:          StatusIdle,
+			acked:         true,
+			hookAge:       500 * time.Millisecond, // fresh, but prev is Idle (post-attach)
+			paneStatus:    StatusFinished,
+			freshActivity: true,
+			wantStatus:    StatusRunning, // guard parks at running for the flicker window
+			wantAcked:     true,          // but ack survives so the eventual settle goes to Idle
+		},
+	}
+
+	silent := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Session{
+				Status:       tc.prev,
+				Acknowledged: tc.acked,
+			}
+			if tc.freshActivity {
+				now := time.Now().Unix()
+				s.activityFn = func() (int64, bool) { return now, true }
+			}
+			s.applyHookFinished(tc.paneStatus, tc.hookAge, silent)
+
+			if s.Status != tc.wantStatus {
+				t.Errorf("Status = %q, want %q", s.Status, tc.wantStatus)
+			}
+			if s.Acknowledged != tc.wantAcked {
+				t.Errorf("Acknowledged = %v, want %v", s.Acknowledged, tc.wantAcked)
+			}
+		})
+	}
+}
 
 func TestStripANSI(t *testing.T) {
 	tests := []struct {

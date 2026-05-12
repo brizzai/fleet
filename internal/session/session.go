@@ -65,8 +65,21 @@ type Session struct {
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 
 	tmuxSession  *tmux.Session
-	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
+	paneCapturer PaneCapturer            // optional override for testing; if nil, uses tmuxSession
+	activityFn   func() (int64, bool)    // optional override for testing; if nil, uses tmuxSession.GetActivity()
 	mu           sync.RWMutex
+}
+
+// getActivity reads tmux's window_activity timestamp, going through the test
+// override if set. Returns (unix_seconds, ok).
+func (s *Session) getActivity() (int64, bool) {
+	if s.activityFn != nil {
+		return s.activityFn()
+	}
+	if s.tmuxSession == nil {
+		return 0, false
+	}
+	return s.tmuxSession.GetActivity()
 }
 
 // NewSession creates a new session for the given project path.
@@ -214,10 +227,7 @@ func (s *Session) PendingRecheckDelay() time.Duration {
 	if currentStatus == StatusFinished || currentStatus == StatusIdle {
 		return 0
 	}
-	if s.tmuxSession == nil {
-		return 0
-	}
-	activity, ok := s.tmuxSession.GetActivity()
+	activity, ok := s.getActivity()
 	if !ok {
 		return 0
 	}
@@ -464,7 +474,7 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		case "waiting":
 			s.applyHookWaiting(paneContent, paneStatus, log)
 		case "finished":
-			s.applyHookFinished(paneStatus, log)
+			s.applyHookFinished(paneStatus, hookAge, log)
 		case "dead":
 			s.lastContentHash = ""
 			s.lastContentChangeAt = time.Time{}
@@ -668,7 +678,7 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 
 // applyHookFinished handles hook status "finished" with pane override for active spinners.
 // Must be called with s.mu held.
-func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
+func (s *Session) applyHookFinished(paneStatus Status, hookAge time.Duration, log *slog.Logger) {
 	s.lastContentHash = ""
 	s.lastContentChangeAt = time.Time{}
 	if paneStatus == StatusRunning {
@@ -682,23 +692,36 @@ func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
 	// Activity guard. Claude's TUI keeps writing for ~1-2s after Stop fires
 	// (final response text, status indicator). During this window, the
 	// pane content is unreliable for distinguishing finished vs. waiting,
-	// so we don't trust paneStatus here. But we DO trust the hook itself —
-	// Stop only fires after the user's input has been consumed. So if
-	// `Status` was `waiting`, we know it's stale. Show `running` as an
-	// intermediate state so the user gets immediate feedback that their
-	// input landed; PendingRecheckDelay in service.go re-runs UpdateStatus
-	// after the guard expires, and by then we can trust paneStatus to
-	// distinguish the normal finish from a sub-agent waiting case.
-	if s.tmuxSession != nil {
-		if activity, ok := s.tmuxSession.GetActivity(); ok {
-			if time.Since(time.Unix(activity, 0)) < finishedActivityGuard {
+	// so we suppress paneStatus and park at running until the writes settle.
+	//
+	// The guard is meaningful ONLY when the Stop event is recent — for older
+	// hook events, fresh tmux activity is incidental (user attach, daemon
+	// pane scans, terminal redraws) and entering the guard would falsely
+	// flip the session to running and clobber `Acknowledged`. Gate on
+	// hookAge so the guard only fires on a real wrap-up window.
+	if hookAge < finishedActivityGuard+2*time.Second {
+		if activity, ok := s.getActivity(); ok {
+			elapsed := time.Since(time.Unix(activity, 0))
+			if elapsed < finishedActivityGuard {
 				if s.Status != StatusRunning {
+					prev := s.Status
 					log.Info("hook says finished, activity fresh — showing running until guard expires",
-						"prev", s.Status, "paneStatus", paneStatus)
+						"prev", prev, "paneStatus", paneStatus, "elapsed", elapsed, "hookAge", hookAge)
 					s.Status = StatusRunning
-					s.Acknowledged = false
+					// Clear Acknowledged only on the legitimate stale-waiting
+					// rescue (user just answered a prompt; new turn starting).
+					// Coming from Idle (post-attach) or Finished (post-Stop)
+					// is not a new turn — preserve ack so the sidebar doesn't
+					// re-promote the session to "needs attention".
+					if prev == StatusWaiting {
+						s.Acknowledged = false
+					}
 				}
 				return
+			}
+			if s.Status == StatusRunning {
+				log.Info("activity guard expired — settling status",
+					"elapsed", elapsed, "paneStatus", paneStatus)
 			}
 		}
 	}

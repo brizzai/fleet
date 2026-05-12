@@ -772,6 +772,16 @@ func (s *SessionService) statusWorkerCycle(fast bool) {
 		}
 		cycleEntry.Duration = time.Since(startedAt)
 		s.recordCycle(cycleEntry)
+		if cycleEntry.StatusChangedCount > 0 || cycleEntry.HookSyncedCount > 0 || cycleEntry.Duration > 200*time.Millisecond {
+			debuglog.Logger.Info("worker cycle",
+				"kind", cycleEntry.Kind,
+				"dur", cycleEntry.Duration,
+				"priority", cycleEntry.PriorityCount,
+				"roundRobin", cycleEntry.RoundRobinCount,
+				"hookSynced", cycleEntry.HookSyncedCount,
+				"changed", cycleEntry.StatusChangedCount,
+			)
+		}
 	}()
 
 	tmux.RefreshSessionCache()
