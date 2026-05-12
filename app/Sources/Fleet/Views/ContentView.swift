@@ -26,6 +26,22 @@ struct ContentView: View {
         } message: { session in
             Text("\(session.title) will be removed. The tmux pane is killed.")
         }
+        .sheet(isPresented: $model.presentingNewSession) {
+            NewSessionSheet(model: model)
+        }
+        .sheet(isPresented: $model.presentingNewWorktree) {
+            if let root = model.cursorRepoRoot {
+                NewWorktreeSheet(model: model, repoRoot: root)
+            } else {
+                // Defensive: the menu item is gated on cursorRepoRoot, but
+                // a hotkey collision could still trigger this branch.
+                VStack(spacing: 12) {
+                    Text("Select a repo first.")
+                    Button("OK") { model.presentingNewWorktree = false }
+                }
+                .padding(40)
+            }
+        }
     }
 
     private var deletionBinding: Binding<Bool> {

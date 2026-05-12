@@ -22,9 +22,44 @@ final class AppModel {
     private(set) var slotBindings: [Int: String] = [:]
 
     // ─── UI state ────────────────────────────────────────────────────
-    var selectedSessionID: String? {
+    // `selection` is the source of truth for the sidebar's current row. It
+    // can refer to either a session (default) or a repo header (so Cmd-N
+    // can target the repo even when no session in it is highlighted).
+    // `selectedSessionID` is a back-compat computed accessor for the views
+    // that only care about session selection.
+    var selection: Selection? {
         didSet { onSelectionChange(from: oldValue) }
     }
+
+    var selectedSessionID: String? {
+        get {
+            if case .session(let id) = selection { return id }
+            return nil
+        }
+        set {
+            if let id = newValue {
+                selection = .session(id)
+            } else if case .session = selection {
+                selection = nil
+            }
+        }
+    }
+
+    /// The repo Cmd-N targets. Mirrors the TUI's `a → n` fallback at
+    /// `internal/ui/app.go:1068-1080`: if a session is highlighted, use
+    /// its repo; if a repo header is highlighted, use that repo; else nil
+    /// (which makes Cmd-N fall through to the path-picker sheet).
+    var cursorRepoRoot: String? {
+        switch selection {
+        case .session(let id):
+            return sessionsByID[id]?.repoRoot
+        case .repo(let root):
+            return root
+        case .none:
+            return nil
+        }
+    }
+
     var filterText: String = ""
 
     // Pending rename session id; SidebarView swaps the row for a TextField
@@ -33,6 +68,15 @@ final class AppModel {
 
     // Pending delete confirmation. SwiftUI binds to this for the .alert.
     var pendingDeletion: Session?
+
+    // Sheet visibility (driven by FleetCommands menu items + Cmd-shortcuts).
+    var presentingNewSession: Bool = false
+    var presentingNewWorktree: Bool = false
+
+    // Async-creation placeholders (worktree only). Rendered in the sidebar
+    // under the matching repo until the new session arrives via the stream
+    // or the 30s stale guard drops the entry.
+    private(set) var pendingCreations: [PendingCreation] = []
 
     // ─── Connection state ────────────────────────────────────────────
     private(set) var connectionState: ConnectionState = .connecting
@@ -44,6 +88,7 @@ final class AppModel {
 
     // ─── Lifecycle ───────────────────────────────────────────────────
     private var runnerTask: Task<Void, Never>?
+    private var pendingGuardTask: Task<Void, Never>?
     private(set) var mutator: Mutator?
 
     func start() {
@@ -51,11 +96,28 @@ final class AppModel {
         runnerTask = Task { [self] in
             await DaemonClientRunner.run(model: self)
         }
+        pendingGuardTask = Task { [weak self] in
+            await Self.runPendingGuard(model: self)
+        }
     }
 
     func stop() {
         runnerTask?.cancel()
         runnerTask = nil
+        pendingGuardTask?.cancel()
+        pendingGuardTask = nil
+    }
+
+    /// Background loop that drops worktree placeholders that haven't been
+    /// reconciled within 30 seconds. The daemon may have failed to spawn
+    /// the session and never sent us a SessionUpdate; without this guard
+    /// the spinner row would stay forever.
+    private static func runPendingGuard(model: AppModel?) async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            await model?.dropStalePendingCreations()
+        }
     }
 
     // ─── Derived views (consumed by the sidebar) ─────────────────────
@@ -112,11 +174,12 @@ final class AppModel {
 
     func applySession(_ session: Session) {
         sessionsByID[session.id] = session
+        reconcilePendingCreations(against: session)
     }
 
     func removeSession(id: String) {
         sessionsByID.removeValue(forKey: id)
-        if selectedSessionID == id { selectedSessionID = nil }
+        if selectedSessionID == id { selection = nil }
     }
 
     /// Drops any cached sessions whose IDs were not delivered by the
@@ -126,7 +189,7 @@ final class AppModel {
             sessionsByID.removeValue(forKey: id)
         }
         if let sel = selectedSessionID, !seenIDs.contains(sel) {
-            selectedSessionID = nil
+            selection = nil
         }
     }
 
@@ -148,6 +211,23 @@ final class AppModel {
         self.slotBindings = bindings
     }
 
+    /// Mutates the in-memory bindings map to mirror the daemon's eviction
+    /// rules (storage.go:360 — `DELETE WHERE slot=? OR session_id=?`),
+    /// keeping the sidebar `[N]` badge snappy without waiting for the next
+    /// 5s ListSlotBindings refresh.
+    private func locallyApplyBind(slot: Int, sessionID: String) {
+        var next = slotBindings
+        for (s, sid) in next where sid == sessionID { next.removeValue(forKey: s) }
+        next[slot] = sessionID
+        slotBindings = next
+    }
+
+    private func locallyApplyUnbind(slot: Int) {
+        var next = slotBindings
+        next.removeValue(forKey: slot)
+        slotBindings = next
+    }
+
     // ─── Mutator wiring (set by DaemonClientRunner) ──────────────────
 
     func attach(mutator: Mutator?) {
@@ -156,8 +236,12 @@ final class AppModel {
 
     // ─── Selection side-effect: ack on focus ─────────────────────────
 
-    private func onSelectionChange(from old: String?) {
-        guard let id = selectedSessionID, id != old,
+    private func onSelectionChange(from old: Selection?) {
+        // Ack-on-focus fires only when the selection transitions into a
+        // *new* session that is finished + unacknowledged. Repo-header
+        // selections never trigger an ack.
+        guard case .session(let id) = selection,
+              old != .session(id),
               let session = sessionsByID[id],
               session.status == .finished, !session.acknowledged
         else { return }
@@ -222,6 +306,132 @@ final class AppModel {
                 try await m.pinRepo(root: root)
             }
         }
+    }
+
+    // ─── Creation ────────────────────────────────────────────────────
+
+    /// Cmd-N when a repo or session is in the cursor. Title is derived
+    /// from the repo's basename (matches TUI `app.go:1068-1080`).
+    func dispatchCreateAtCursor() async {
+        guard let m = mutator else { return }
+        guard let root = cursorRepoRoot else {
+            // No cursor → fall through to the path-picker sheet, mirroring
+            // the TUI's `a → n` fallback.
+            presentingNewSession = true
+            return
+        }
+        let title = (root as NSString).lastPathComponent
+        await run(label: "create session") {
+            let new = try await m.createSession(title: title, projectPath: root)
+            self.selection = .session(new.id)
+        }
+    }
+
+    /// Cmd-Shift-N: user typed/picked a path in the New Session sheet.
+    func dispatchCreateAtPath(_ path: String) async {
+        guard let m = mutator else { return }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let resolved = (trimmed as NSString).expandingTildeInPath
+        let title = (resolved as NSString).lastPathComponent
+        await run(label: "create session") {
+            let new = try await m.createSession(title: title, projectPath: resolved)
+            self.selection = .session(new.id)
+        }
+    }
+
+    /// Cmd-Opt-N: user submitted the New Worktree sheet. Adds a placeholder
+    /// row immediately so the sheet can dismiss without leaving the user
+    /// staring at an unchanged sidebar while the daemon clones the worktree.
+    func dispatchCreateWorktree(repoRoot: String,
+                                baseBranch: String,
+                                newBranch: String) async {
+        guard let m = mutator else { return }
+        let trimmedBase = baseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedNew = newBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBase.isEmpty, !trimmedNew.isEmpty else { return }
+
+        let placeholder = PendingCreation(
+            id: UUID().uuidString,
+            repoRoot: repoRoot,
+            displayName: trimmedNew,
+            kind: .worktree,
+            startedAt: Date()
+        )
+        pendingCreations.append(placeholder)
+
+        do {
+            _ = try await m.createWorkspace(
+                repoRoot: repoRoot,
+                name: trimmedNew,
+                baseBranch: trimmedBase,
+                newBranch: trimmedNew
+            )
+            // Don't drop the placeholder here — wait for the SessionUpdate
+            // stream to deliver the real row, then `reconcilePendingCreations`
+            // removes our placeholder. If the daemon never delivers, the
+            // 30s pending-guard cleans up.
+        } catch {
+            pendingCreations.removeAll { $0.id == placeholder.id }
+            showErrorToast("create worktree: \(error)")
+        }
+    }
+
+    // ─── Slot bindings ───────────────────────────────────────────────
+
+    /// Cmd-Opt+0..9: bind currently-selected session into `slot`. If that
+    /// slot already holds the selected session, toggle to unbind instead
+    /// (matches TUI `app.go:2216-2218`). Daemon evicts conflicts;
+    /// `locallyApplyBind` keeps the badge snappy until the next refresh.
+    func dispatchBindSelected(toSlot slot: Int) async {
+        guard let m = mutator, let id = selectedSessionID else { return }
+        if slotBindings[slot] == id {
+            await run(label: "unbind slot") {
+                try await m.unbindSlot(slot)
+                self.locallyApplyUnbind(slot: slot)
+            }
+        } else {
+            await run(label: "bind slot") {
+                try await m.bindSlot(slot: slot, sessionID: id)
+                self.locallyApplyBind(slot: slot, sessionID: id)
+            }
+        }
+    }
+
+    /// Cmd+0..9: select the session bound to `slot`, no-op if unbound.
+    /// Selection change auto-fires ack-on-focus from the existing didSet.
+    func dispatchJumpToSlot(_ slot: Int) {
+        guard let id = slotBindings[slot] else { return }
+        selection = .session(id)
+    }
+
+    // ─── Pending-creation reconciliation ─────────────────────────────
+
+    /// Called from `applySession` on every stream message. A pending
+    /// worktree placeholder is removed when a real session shows up under
+    /// the same repo with a matching workspace name (the daemon uses the
+    /// new-branch field as the workspace name, so they line up 1:1).
+    private func reconcilePendingCreations(against session: Session) {
+        guard !pendingCreations.isEmpty else { return }
+        let matchedID = pendingCreations.first(where: { p in
+            p.repoRoot == session.repoRoot
+                && (p.displayName == session.workspaceName || p.displayName == session.title)
+        })?.id
+        guard let matchedID else { return }
+        pendingCreations.removeAll { $0.id == matchedID }
+        // Auto-select the freshly-created session so the user lands on it.
+        selection = .session(session.id)
+    }
+
+    /// 30-second guard: drop placeholders whose `startedAt` is too old, so
+    /// a daemon-side failure doesn't leave a permanent spinner row.
+    private func dropStalePendingCreations() {
+        guard !pendingCreations.isEmpty else { return }
+        let cutoff = Date().addingTimeInterval(-30)
+        let stale = pendingCreations.filter { $0.startedAt < cutoff }
+        guard !stale.isEmpty else { return }
+        pendingCreations.removeAll { p in stale.contains(where: { $0.id == p.id }) }
+        showErrorToast("worktree creation timed out — check fleet daemon logs")
     }
 
     // Cmd-Shift-D: capture the daemon's status-detection snapshot and dump

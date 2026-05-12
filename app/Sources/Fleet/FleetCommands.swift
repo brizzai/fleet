@@ -1,20 +1,38 @@
 import SwiftUI
 
-// FleetCommands wires the macOS menu bar's "Session" menu and exposes the
-// V1 mutation shortcuts: ⌘Y approve, ⌘R restart, ⌘⇧R rename, ⌘⌫ delete. Each
-// item is enabled only when a session is selected, and Approve additionally
-// requires the session to be in the Waiting state — matching the TUI's
-// gating so users can't fire `y\r` at a Running pane and pollute it.
+// FleetCommands wires the macOS menu bar's "Session" + "Slots" menus and
+// exposes the V1 keyboard shortcuts. Items follow the gating used by the
+// TUI: Approve only when Waiting; Bind/Restart/Rename/Delete only when a
+// session is selected; New Session always available (falls back to the
+// path-picker sheet if no cursor repo is set).
 struct FleetCommands: Commands {
     @Bindable var model: AppModel
 
     var body: some Commands {
         // Empty File menu (drop the default New / Open / Save chrome — the
-        // app has no documents, only sessions, and "New Session" lives in
-        // the Session menu).
+        // app has no documents, only sessions, and creation lives in the
+        // Session menu).
         CommandGroup(replacing: .newItem) {}
 
         CommandMenu("Session") {
+            Button("New Session") {
+                Task { await model.dispatchCreateAtCursor() }
+            }
+            .keyboardShortcut("n", modifiers: .command)
+
+            Button("New Session at Path…") {
+                model.presentingNewSession = true
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+
+            Button("New Worktree Session…") {
+                model.presentingNewWorktree = true
+            }
+            .keyboardShortcut("n", modifiers: [.command, .option])
+            .disabled(model.cursorRepoRoot == nil)
+
+            Divider()
+
             Button("Approve") {
                 Task { await model.dispatchQuickApprove() }
             }
@@ -44,6 +62,57 @@ struct FleetCommands: Commands {
             }
             .keyboardShortcut("d", modifiers: [.command, .shift])
         }
+
+        CommandMenu("Slots") {
+            // Cmd+0..9 — jump to whatever session is bound to that slot.
+            // No-op silently when the slot is unbound (matches TUI).
+            Section("Jump") {
+                ForEach(slotOrder, id: \.self) { slot in
+                    Button(jumpLabel(for: slot)) {
+                        model.dispatchJumpToSlot(slot)
+                    }
+                    .keyboardShortcut(KeyEquivalent(slotKeyChar(slot)),
+                                      modifiers: .command)
+                }
+            }
+
+            // Cmd-Opt+0..9 — bind selected session to that slot. Re-press
+            // on the same slot toggles unbind. Daemon evicts conflicts.
+            Section("Bind Selected To") {
+                ForEach(slotOrder, id: \.self) { slot in
+                    Button(bindLabel(for: slot)) {
+                        Task { await model.dispatchBindSelected(toSlot: slot) }
+                    }
+                    .keyboardShortcut(KeyEquivalent(slotKeyChar(slot)),
+                                      modifiers: [.command, .option])
+                    .disabled(!hasSelection)
+                }
+            }
+        }
+    }
+
+    // Slots are displayed 1..9 then 0 to match Cmd+1..9, Cmd+0 conventions
+    // (Safari / Chrome tab switching).
+    private let slotOrder: [Int] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]
+
+    private func slotKeyChar(_ slot: Int) -> Character {
+        Character("\(slot)")
+    }
+
+    private func jumpLabel(for slot: Int) -> String {
+        if let id = model.slotBindings[slot],
+           let session = model.sessionsByID[id] {
+            return "Slot \(slot) — \(session.title)"
+        }
+        return "Slot \(slot) (unbound)"
+    }
+
+    private func bindLabel(for slot: Int) -> String {
+        if model.slotBindings[slot] != nil,
+           model.slotBindings[slot] == model.selectedSessionID {
+            return "Slot \(slot) (unbind)"
+        }
+        return "Slot \(slot)"
     }
 
     private var hasSelection: Bool {

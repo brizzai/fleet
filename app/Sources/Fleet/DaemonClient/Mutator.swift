@@ -67,6 +67,89 @@ final class Mutator: Sendable {
         _ = try await client.unpinRepo(req)
     }
 
+    // ─── Creation ────────────────────────────────────────────────────
+    // CreateSession is synchronous: the daemon allocates the SQLite row,
+    // spawns tmux + claude, and returns the populated `Session` proto in
+    // <100ms. The new row also arrives via ListSessions stream — caller
+    // can ignore the return value if it wants to wait for stream delivery.
+    @discardableResult
+    func createSession(title: String,
+                       projectPath: String,
+                       workspaceName: String = "",
+                       forkFromID: String = "") async throws -> Session {
+        var req = FleetCreateSessionRequest()
+        req.title = title
+        req.projectPath = projectPath
+        req.workspaceName = workspaceName
+        req.forkFromID = forkFromID
+        let proto = try await client.createSession(req)
+        return Convert.toSession(proto)
+    }
+
+    struct WorkspaceList {
+        var workspaces: [WorkspaceEntry]
+        var providerName: String
+    }
+
+    struct WorkspaceEntry: Identifiable, Hashable {
+        var id: String { name }
+        let name: String
+        let path: String
+        let branch: String
+        let status: String
+    }
+
+    func listWorkspaces(repoRoot: String) async throws -> WorkspaceList {
+        var req = FleetListWorkspacesRequest()
+        req.repoRoot = repoRoot
+        let resp = try await client.listWorkspaces(req)
+        let entries = resp.workspaces.map { w in
+            WorkspaceEntry(name: w.name, path: w.path, branch: w.branch, status: w.status)
+        }
+        return WorkspaceList(workspaces: entries, providerName: resp.providerName)
+    }
+
+    // CreateWorkspace returns immediately with a `pending_id` — the actual
+    // git-worktree clone + session spawn happens after, and arrives via the
+    // session/repo streams. Callers should drop a PendingCreation row in
+    // the sidebar and reconcile when the new session shows up.
+    @discardableResult
+    func createWorkspace(repoRoot: String,
+                         name: String,
+                         baseBranch: String,
+                         newBranch: String) async throws -> String {
+        var req = FleetCreateWorkspaceRequest()
+        req.repoRoot = repoRoot
+        req.name = name
+        req.baseBranch = baseBranch
+        req.newBranch = newBranch
+        let resp = try await client.createWorkspace(req)
+        return resp.pendingID
+    }
+
+    // ─── Slot bindings ───────────────────────────────────────────────
+    // Daemon-side semantics (storage.go:348-367): a single bind RPC evicts
+    // any prior occupant of that slot AND any prior slot of that session,
+    // so callers don't need to clean up before binding.
+    func bindSlot(slot: Int, sessionID: String) async throws {
+        var req = FleetBindSlotRequest()
+        req.slot = Int32(slot)
+        req.sessionID = sessionID
+        _ = try await client.bindSlot(req)
+    }
+
+    func unbindSlot(_ slot: Int) async throws {
+        var req = FleetUnbindSlotRequest()
+        req.slot = Int32(slot)
+        _ = try await client.unbindSlot(req)
+    }
+
+    // ─── Config ──────────────────────────────────────────────────────
+    // Read-only; used by NewSessionSheet to pre-fill the path field.
+    func getConfig() async throws -> FleetConfig {
+        try await client.getConfig(Google_Protobuf_Empty())
+    }
+
     // ─── Diagnostics ─────────────────────────────────────────────────
     // GetDiagnostics is read-only and lives here purely so consumers have
     // a single object to call into. Returns the markdown blob the daemon
