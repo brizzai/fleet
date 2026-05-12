@@ -17,6 +17,8 @@ var allKeyBindings = []KeyBinding{
 	// Navigation.
 	{Key: "j / ↓", BarKey: "↑↓", BarDesc: "Nav", Desc: "Move down", Section: "nav"},
 	{Key: "k / ↑", Desc: "Move up", Section: "nav"},
+	{Key: "PgDn", Desc: "Page down", Section: "nav"},
+	{Key: "PgUp", Desc: "Page up", Section: "nav"},
 
 	// Session actions.
 	{Key: "Enter", BarKey: "⏎", BarDesc: "Open", Desc: "Attach / toggle group", Section: "session"},

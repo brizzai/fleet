@@ -20,6 +20,7 @@ import (
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
+	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/service"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -137,7 +138,12 @@ type Home struct {
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingDeletes    []PendingDelete     // undo stack for deferred deletions
-	pinnedRepos       map[string]bool     // pinned repo paths (persist in SQLite)
+	// finalizingDeletes holds entries whose undo window has expired but whose
+	// background cleanup (tmux kill, hook removal, workspace destroy) is still
+	// running. Quit drains both this list and pendingDeletes so an in-flight
+	// kill isn't lost when fleet exits mid-cleanup.
+	finalizingDeletes []PendingDelete
+	pinnedRepos       map[string]bool // pinned repo paths (persist in SQLite)
 
 	repoExpanded     map[string]bool // repo path -> expanded state
 	previewCache     map[string]string
@@ -273,6 +279,10 @@ func (h *Home) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if perfwatch.Enabled() {
+		tok := perfwatch.MarkUpdateStart(fmt.Sprintf("%T", msg))
+		defer perfwatch.MarkUpdateEnd(tok)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
@@ -551,9 +561,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			workspaceName: msg.info.Name,
 		})
 
-	case workspaceDestroyResultMsg:
-		if msg.err != nil {
-			h.setError(fmt.Errorf("workspace destroy: %w", msg.err))
+	case deleteCleanupDoneMsg:
+		for i, pd := range h.finalizingDeletes {
+			if pd.Session.ID == msg.sessionID {
+				h.finalizingDeletes = append(h.finalizingDeletes[:i], h.finalizingDeletes[i+1:]...)
+				break
+			}
+		}
+		if msg.workspaceErr != nil {
+			h.setError(fmt.Errorf("workspace destroy: %w", msg.workspaceErr))
 		}
 		return h, nil
 
@@ -1027,6 +1043,25 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, h.fetchPreviewForSelected()
 	case "k", "up":
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, -1)
+		h.syncViewport()
+		return h, h.fetchPreviewForSelected()
+	case "pgdown":
+		target := h.cursor + h.sidebarPanelRows()
+		if target > len(h.flatItems)-1 {
+			target = len(h.flatItems) - 1
+		}
+		if target < 0 {
+			target = 0
+		}
+		h.cursor = target
+		h.syncViewport()
+		return h, h.fetchPreviewForSelected()
+	case "pgup":
+		target := h.cursor - h.sidebarPanelRows()
+		if target < 0 {
+			target = 0
+		}
+		h.cursor = target
 		h.syncViewport()
 		return h, h.fetchPreviewForSelected()
 	case "enter":
@@ -1963,46 +1998,54 @@ func (h *Home) handlePendingDeleteExpire(msg pendingDeleteExpireMsg) (tea.Model,
 
 	pd := h.pendingDeletes[idx]
 	h.pendingDeletes = append(h.pendingDeletes[:idx], h.pendingDeletes[idx+1:]...)
+	// Move into finalizingDeletes so an in-flight cleanup is visible to
+	// finalizeAllPendingDeletes if the user quits mid-finalize.
+	h.finalizingDeletes = append(h.finalizingDeletes, pd)
 
 	return h, h.finalizeDelete(pd)
 }
 
-// finalizeDelete performs the actual cleanup (tmux kill, hook removal, workspace destruction).
+// finalizeDelete schedules cleanup (tmux kill, hook removal, optional
+// workspace destruction) on a background goroutine. All steps shell out or
+// hit the filesystem, so they must stay off the Bubble Tea Update loop —
+// otherwise an undo-window expiry blocks keystroke processing for the
+// duration of `tmux kill-session`. Always returns deleteCleanupDoneMsg so
+// the entry can be removed from finalizingDeletes.
 func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
-	debuglog.Logger.Info("finalizing delete", "id", pd.Session.ID, "title", pd.Session.Title)
+	return func() tea.Msg {
+		debuglog.Logger.Info("finalizing delete", "id", pd.Session.ID, "title", pd.Session.Title)
 
-	// Kill tmux session if alive.
-	if pd.Session.IsAlive() {
-		if err := pd.Session.Kill(); err != nil {
-			debuglog.Logger.Error("failed to kill tmux session", "id", pd.Session.ID, "err", err)
-		}
-	}
-
-	// Remove hook status file.
-	if err := os.Remove(filepath.Join(hooks.GetHooksDir(), pd.Session.ID+".json")); err != nil && !os.IsNotExist(err) {
-		debuglog.Logger.Error("failed to remove hook status file", "id", pd.Session.ID, "err", err)
-	}
-
-	// If workspace destroy requested, do it async.
-	if pd.DestroyWS && pd.WorkspaceName != "" {
-		repoPath := pd.RepoPath
-		wsName := pd.WorkspaceName
-		sid := pd.Session.ID
-		provider := workspace.ResolveProvider(repoPath)
-		if provider != nil && provider.CanDestroy() {
-			return func() tea.Msg {
-				err := provider.Destroy(repoPath, wsName)
-				return workspaceDestroyResultMsg{sessionID: sid, err: err}
+		if pd.Session.IsAlive() {
+			if err := pd.Session.Kill(); err != nil {
+				debuglog.Logger.Error("failed to kill tmux session", "id", pd.Session.ID, "err", err)
 			}
 		}
-	}
 
-	return nil
+		if err := os.Remove(filepath.Join(hooks.GetHooksDir(), pd.Session.ID+".json")); err != nil && !os.IsNotExist(err) {
+			debuglog.Logger.Error("failed to remove hook status file", "id", pd.Session.ID, "err", err)
+		}
+
+		var workspaceErr error
+		if pd.DestroyWS && pd.WorkspaceName != "" {
+			provider := workspace.ResolveProvider(pd.RepoPath)
+			if provider != nil && provider.CanDestroy() {
+				workspaceErr = provider.Destroy(pd.RepoPath, pd.WorkspaceName)
+			}
+		}
+		return deleteCleanupDoneMsg{sessionID: pd.Session.ID, workspaceErr: workspaceErr}
+	}
 }
 
-// finalizeAllPendingDeletes cleans up all pending deletes synchronously (called on quit).
+// finalizeAllPendingDeletes synchronously drains both pendingDeletes (undo
+// window still open) and finalizingDeletes (cleanup goroutine in flight) on
+// quit. tmux kill and hook-file removal are idempotent and run for both lists.
+// Workspace Destroy is NOT idempotent (GitWorktreeProvider.Destroy errors when
+// the worktree is already gone, and a concurrent run would race with the
+// in-flight goroutine's `git worktree remove`), so it only runs for
+// pendingDeletes — finalizingDeletes entries already have a goroutine
+// responsible for the destroy.
 func (h *Home) finalizeAllPendingDeletes() {
-	for _, pd := range h.pendingDeletes {
+	finalize := func(pd PendingDelete, destroyWorkspace bool) {
 		debuglog.Logger.Info("finalizing pending delete on quit", "id", pd.Session.ID, "title", pd.Session.Title)
 		if pd.Session.IsAlive() {
 			if err := pd.Session.Kill(); err != nil {
@@ -2012,8 +2055,7 @@ func (h *Home) finalizeAllPendingDeletes() {
 		if err := os.Remove(filepath.Join(hooks.GetHooksDir(), pd.Session.ID+".json")); err != nil && !os.IsNotExist(err) {
 			debuglog.Logger.Error("failed to remove hook status file on quit", "id", pd.Session.ID, "err", err)
 		}
-		// Best-effort workspace destruction on quit.
-		if pd.DestroyWS && pd.WorkspaceName != "" {
+		if destroyWorkspace && pd.DestroyWS && pd.WorkspaceName != "" {
 			provider := workspace.ResolveProvider(pd.RepoPath)
 			if provider != nil && provider.CanDestroy() {
 				if err := provider.Destroy(pd.RepoPath, pd.WorkspaceName); err != nil {
@@ -2022,7 +2064,15 @@ func (h *Home) finalizeAllPendingDeletes() {
 			}
 		}
 	}
+
+	for _, pd := range h.pendingDeletes {
+		finalize(pd, true)
+	}
+	for _, pd := range h.finalizingDeletes {
+		finalize(pd, false)
+	}
 	h.pendingDeletes = nil
+	h.finalizingDeletes = nil
 }
 
 // buildUndoFlashMessage builds the flash message for the undo prompt.
@@ -2355,6 +2405,52 @@ func (h *Home) rebuildSessionMap() {
 	}
 }
 
+// sidebarListHeight returns the height of the sidebar panel in the current
+// layout — i.e. the value View() passes to RenderSidebar as `height`, before
+// chrome rows (title + underline) and scroll indicators are subtracted.
+// Stacked mode gives the sidebar ~55% of the content area; single/dual give
+// it the full content area. Mirrors the arithmetic in View() (app.go:794+).
+func (h *Home) sidebarListHeight() int {
+	contentHeight := h.height - 2 - helpBarHeight
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	if h.layoutMode() == "stacked" {
+		sh := (contentHeight * 55) / 100
+		if sh < 3 {
+			sh = 3
+		}
+		return sh
+	}
+	return contentHeight
+}
+
+// sidebarMinVisibleRows is the conservative lower bound on visible session rows
+// in the sidebar — it assumes both scroll indicators are drawn, so the value
+// holds even mid-scroll. Used by syncViewport to anchor the cursor before
+// RenderSidebar (sidebar.go) decides which indicators to draw.
+// Subtracts panel chrome (title + underline = 2) and reserves 2 rows for the
+// indicators RenderSidebar may add at top/bottom.
+func (h *Home) sidebarMinVisibleRows() int {
+	v := h.sidebarListHeight() - 4
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
+// sidebarPanelRows is the actual sidebar panel height in rows, before any
+// scroll indicators are drawn. Used as the PgUp/PgDn page step so a single
+// page-jump moves a full panel; syncViewport handles anchoring if the target
+// would otherwise sit on an indicator row.
+func (h *Home) sidebarPanelRows() int {
+	v := h.sidebarListHeight() - 2
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
 func (h *Home) syncViewport() {
 	if len(h.flatItems) == 0 {
 		return
@@ -2366,11 +2462,7 @@ func (h *Home) syncViewport() {
 	if h.cursor >= len(h.flatItems) {
 		h.cursor = len(h.flatItems) - 1
 	}
-	// Calculate visible height for sidebar (subtract title + underline).
-	contentHeight := h.height - 2 - helpBarHeight - 2
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
+	contentHeight := h.sidebarMinVisibleRows()
 	prevOffset := h.viewOffset
 	// Scroll to keep cursor visible.
 	if h.cursor < h.viewOffset {

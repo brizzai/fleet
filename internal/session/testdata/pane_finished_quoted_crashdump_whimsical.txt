@@ -1,0 +1,56 @@
+  captured_at:    2026-05-06T12:02:37+03:00
+  tmux_dead:      true
+  exit_status:    -
+  exit_signal:    9 (SIGKILL — likely OOM/Jetsam or external kill)
+  hook_event:     SessionEnd
+  hook_reason:    other
+  hook_status:    dead
+  hook_ts:        2026-05-06T12:02:36+03:00
+
+  === pane (last 200 lines, raw ANSI) ===
+  ✽ Filling SessionService gaps (3a)… (11m 4s · ↓47.0k tokens · almost done thinking)
+  [shell prompt now visible since pane survived via remain-on-exit]
+  Killed: 9
+  yuvalhayke@…$
+
+  === recent perfwatch heartbeats (system context) ===
+  …heartbeat goroutines=22 cpu_pct=18.5 sys_free_mb=125 …
+  …heartbeat goroutines=22 cpu_pct=24.9 sys_free_mb=83 …
+  …heartbeat goroutines=22 cpu_pct=33.0 sys_free_mb=41 …
+  …heartbeat goroutines=22 cpu_pct=37.1 sys_free_mb=12 ← collapse
+
+  Single file → diagnosis trivial: [38;5;153msignal=9[39m + [38;5;153msys_free_mb[39m collapsing = Jetsam OOM. [38;5;153msignal=6[39m + clean memory = Claude panic. [38;5;153msignal=0[39m/[38;5;153mhook_reason=logout[39m = clean [38;5;153m/exit[39m.
+
+  [1mSummary of changes[0m
+
+  - [38;5;153minternal/tmux/tmux.go[39m — [38;5;153mremain-on-exit on[39m per-session + [38;5;153mPaneDeadInfo()[39m method
+  - [38;5;153minternal/hooks/status_file.go[39m + [38;5;153mcmd/fleet/hook_handler.go[39m — pass through SessionEnd [38;5;153mreason[39m
+  - [38;5;153minternal/session/session.go[39m — [38;5;153mdeathRecorded[39m flag + [38;5;153mtriggerCrashDump[39m calls in all three death paths; reset on Restart/RespawnClaude; refactored locking in [38;5;153mupdateStatusFromHook[39m to safely defer the trigger
+  - [38;5;153minternal/session/crashdump.go[39m (new) — async dump writer
+  - [38;5;153minternal/perfwatch/perfwatch.go[39m — [38;5;153msys_free_mb[39m field via vm_stat shellout
+  - [38;5;153mchangelog/unreleased/crash-dump-on-session-death.md[39m
+
+  Relaunch with [38;5;153mFLEET_DEBUG=1 FLEET_AUTO_UPDATE_DISABLED=1 ./build/fleet[39m to activate.
+
+[38;5;246m✻[39m [38;5;246mCogitated for 7m 23s[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mok running?[39m
+[49m
+[38;5;114m⏺[39m [1mBash[0m(pgrep -af 'build/fleet$' | head -3; echo "---"; ps -p $(pgrep -f 'build/fleet$' | head -1) -o pid,etime,command 2>&1; echo "--- env ---"; ps eww -p $(pgrep -f '…)
+[38;5;246m  ⎿  [39m82122
+     ---
+       PID ELAPSED COMMAND
+     [2m… +12 lines (ctrl+o to expand)[0m
+[38;5;246m  ⎿  Allowed by auto mode classifier[39m
+
+[38;5;231m⏺[39m Running and fully wired. PID 82122, 18s old, both env vars set, no auto-update, perfwatch alive with the new [38;5;153msys_free_mb[39m field flowing — currently 63–85 MB free (still tight, system is under pressure, so Jetsam risk remains real). Crash dumps will land in [38;5;153m~/.config/fleet/crashes/[39m next time anything dies.
+
+[38;5;246m✻[39m [38;5;246mCogitated for 14s[39m
+
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ [7mc[0;2mommit this[0m
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [36m󰧑 Opus 4.7 (1M context)[38;5;246m [90m│[38;5;246m [32m██░░░░░░░░[38;5;246m [90m│[38;5;246m [32m29%[38;5;246m [90m│[38;5;246m [35m󰍛 290.0k/1000k[38;5;246m [90m│[38;5;246m [33m feat/perfwatch-stall-detection[38;5;246m [90m│[38;5;246m [1m[37m  brizz-code[0m
+  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · PR[39m [4m[38;5;220m]8;id=n98mia;https://github.com/brizzai/fleet/pull/67\#67[0m]8;;\
+
+

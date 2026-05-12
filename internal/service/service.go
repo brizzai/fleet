@@ -17,6 +17,7 @@ import (
 	"github.com/brizzai/fleet/internal/naming"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
+	"github.com/brizzai/fleet/internal/workspace"
 )
 
 const (
@@ -983,7 +984,7 @@ func (s *SessionService) repoWorkerCycle() {
 	s.mu.Unlock()
 
 	if s.ghAvailable && (info.LastPRRefresh.IsZero() || time.Since(info.LastPRRefresh) > prTTL) {
-		git.RefreshPRInfo(info, repo)
+		git.RefreshPRInfo(info, repo, workspace.IgnorePatterns(repo))
 	}
 
 	s.mu.Lock()

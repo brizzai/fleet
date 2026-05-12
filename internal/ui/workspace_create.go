@@ -40,9 +40,13 @@ type (
 		pendingID string
 		repoPath  string
 	}
-	workspaceDestroyResultMsg struct {
-		sessionID string
-		err       error
+	// deleteCleanupDoneMsg fires when finalizeDelete's background cleanup
+	// (tmux kill, hook removal, optional workspace destroy) completes. The
+	// Update handler uses sessionID to drop the entry from finalizingDeletes;
+	// workspaceErr surfaces destroy failures to the user.
+	deleteCleanupDoneMsg struct {
+		sessionID    string
+		workspaceErr error
 	}
 )
 

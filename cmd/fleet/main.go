@@ -13,6 +13,7 @@ import (
 	"github.com/brizzai/fleet/internal/daemonclient"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/migration"
+	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/service"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -98,6 +99,7 @@ func runTUI() {
 
 	debuglog.Init()
 	defer debuglog.Close()
+	perfwatch.Init()
 	debuglog.Logger.Info("fleet TUI starting", "version", version)
 
 	// Stage 0 PR 5: TUI defaults to driving sessions through the daemon

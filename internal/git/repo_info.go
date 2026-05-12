@@ -30,8 +30,11 @@ func RefreshGitInfo(repoPath string) *RepoInfo {
 
 // RefreshPRInfo fetches PR info via gh CLI and updates the RepoInfo.
 // Slower operation (~200ms, network call).
-func RefreshPRInfo(info *RepoInfo, repoPath string) {
-	pr, err := github.GetPRForBranch(repoPath, info.Branch)
+// ignorePatterns is the per-repo CI-check ignore list (path.Match globs);
+// caller is responsible for loading it (typically via workspace.IgnorePatterns)
+// to keep this package free of a workspace-package dependency.
+func RefreshPRInfo(info *RepoInfo, repoPath string, ignorePatterns []string) {
+	pr, err := github.GetPRForBranch(repoPath, info.Branch, ignorePatterns)
 	if err != nil {
 		debuglog.Logger.Debug("RefreshPRInfo failed", "path", repoPath, "branch", info.Branch, "error", err)
 	}

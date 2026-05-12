@@ -19,6 +19,11 @@ const (
 	captureCacheTTL = 400 * time.Millisecond
 	captureTimeout  = 3 * time.Second
 	sessionCacheTTL = 2 * time.Second
+	// listPanesTimeout caps tmux list-panes shell-outs from IsPaneDead /
+	// PaneDeadInfo. list-panes is much cheaper than capture-pane, so 2s is
+	// generous; the cap exists so an unresponsive tmux server can't hang the
+	// status worker (called once per session per tick).
+	listPanesTimeout = 2 * time.Second
 )
 
 // Session represents a tmux session managed by fleet.
@@ -86,11 +91,16 @@ func (s *Session) Start(command string, env ...string) error {
 	debuglog.Logger.Info("tmux session started", "session", s.Name, "workdir", s.WorkDir)
 
 	// Batch set options.
+	// remain-on-exit keeps the dead pane around so the crash dump can read
+	// `pane_dead_status` (exit code) and `pane_dead_signal` (terminating
+	// signal). Without this we just see "tmux session gone" with no clue
+	// what killed claude.
 	optArgs := []string{
 		"set-option", "-t", s.Name, "mouse", "on", ";",
 		"set-option", "-t", s.Name, "history-limit", "10000", ";",
 		"set-option", "-t", s.Name, "escape-time", "10", ";",
-		"set-option", "-t", s.Name, "allow-passthrough", "on",
+		"set-option", "-t", s.Name, "allow-passthrough", "on", ";",
+		"set-option", "-t", s.Name, "remain-on-exit", "on",
 	}
 	optCmd := exec.Command("tmux", optArgs...)
 	_ = optCmd.Run() // Best effort.
@@ -152,12 +162,46 @@ func (s *Session) RespawnPane(command string, env ...string) error {
 
 // IsPaneDead checks if the pane's process has exited.
 func (s *Session) IsPaneDead() bool {
-	out, err := exec.Command("tmux", "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}").Output()
 	if err != nil {
 		debuglog.Logger.Error("tmux IsPaneDead check failed", "session", s.Name, "err", err)
 		return false
 	}
 	return strings.TrimSpace(string(out)) == "1"
+}
+
+// CachedPane returns the most recent pane content captured by CapturePane,
+// regardless of cache TTL. Useful for crash dumps where the live tmux session
+// may already be gone. Returns "" if nothing has been captured yet.
+func (s *Session) CachedPane() string {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.cacheContent
+}
+
+// PaneDeadInfo returns whether the pane is dead, plus the exit status and
+// signal that killed it (only meaningful with remain-on-exit set when the
+// pane terminated). Returns ok=false if the tmux session no longer exists.
+//
+// Exit status is the integer returned by the process (typical: 0 clean, 1
+// generic error). Signal is the POSIX number that terminated the process
+// when non-zero (137-128=9 SIGKILL → OOM/manual kill, 134-128=6 SIGABRT →
+// panic, 139-128=11 SIGSEGV).
+func (s *Session) PaneDeadInfo() (dead bool, exitStatus, exitSignal string, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", s.Name+":0.0",
+		"-F", "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}").Output()
+	if err != nil {
+		return false, "", "", false
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 3)
+	if len(parts) != 3 {
+		return false, "", "", false
+	}
+	return parts[0] == "1", parts[1], parts[2], true
 }
 
 // Exists checks if the tmux session is alive.

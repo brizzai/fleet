@@ -93,6 +93,83 @@ func TestResolveProvider(t *testing.T) {
 	})
 }
 
+func TestIgnorePatterns(t *testing.T) {
+	t.Run("no config returns nil", func(t *testing.T) {
+		repo := t.TempDir()
+		if got := IgnorePatterns(repo); got != nil {
+			t.Errorf("got %v, want nil", got)
+		}
+	})
+
+	t.Run("reads from .fleet.json", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"pr_checks":{"ignore":["minimum-review/*","gitStream.cm"]}}`)
+		got := IgnorePatterns(repo)
+		want := []string{"minimum-review/*", "gitStream.cm"}
+		if !equalStrings(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("base + local merge additively with dedupe", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"pr_checks":{"ignore":["a","b"]}}`)
+		writeFile(t, repo, ".fleet.local.json", `{"pr_checks":{"ignore":["b","c"]}}`)
+		got := IgnorePatterns(repo)
+		want := []string{"a", "b", "c"}
+		if !equalStrings(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("legacy .bc.json honored", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".bc.json", `{"pr_checks":{"ignore":["legacy/*"]}}`)
+		got := IgnorePatterns(repo)
+		want := []string{"legacy/*"}
+		if !equalStrings(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("invalid globs dropped at load time", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"pr_checks":{"ignore":["[","good","[bad"]}}`)
+		got := IgnorePatterns(repo)
+		want := []string{"good"}
+		if !equalStrings(got, want) {
+			t.Errorf("got %v, want %v (invalid globs should be filtered)", got, want)
+		}
+	})
+
+	t.Run("workspace and pr_checks coexist", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"workspace":{"create":"mk"},"pr_checks":{"ignore":["x"]}}`)
+		if got := IgnorePatterns(repo); !equalStrings(got, []string{"x"}) {
+			t.Errorf("ignore: got %v, want [x]", got)
+		}
+		sp, ok := ResolveProvider(repo).(*ShellProvider)
+		if !ok {
+			t.Fatalf("got %T, want *ShellProvider", sp)
+		}
+		if sp.CreateCmd != "mk" {
+			t.Errorf("CreateCmd: got %q, want mk", sp.CreateCmd)
+		}
+	})
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
