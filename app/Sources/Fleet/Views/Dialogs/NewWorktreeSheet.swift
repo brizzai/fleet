@@ -126,16 +126,22 @@ struct NewWorktreeSheet: View {
     }
 
     private func attach(to entry: Mutator.WorkspaceEntry) {
-        // The TUI's `w` flow lets the user pick an existing worktree to
-        // attach to its session. The session's id isn't on Workspace —
-        // we look it up by (repoRoot, workspaceName) in the local cache.
-        let match = model.allSessions.first(where: {
-            $0.repoRoot == repoRoot && $0.workspaceName == entry.name
-        })
+        // Picking an existing worktree should "open" it: jump to the live
+        // session if one already exists, otherwise spawn a fresh session at
+        // the worktree's path (matches TUI `app.go:478-483`). Matching by
+        // projectPath rather than repoRoot — `git rev-parse --show-toplevel`
+        // inside a worktree returns the worktree path, so a worktree session's
+        // `repoRoot` does NOT equal the parent repo we have in `repoRoot`.
+        let match = model.allSessions.first(where: { $0.projectPath == entry.path })
         if let session = match {
+            FleetLog.info("worktree picker: attaching to existing session id=\(session.id) path=\(entry.path)")
             model.selection = .session(session.id)
+            dismiss()
+            return
         }
+        FleetLog.info("worktree picker: no session for worktree path=\(entry.path) — creating new session")
         dismiss()
+        Task { await model.dispatchCreateAtPath(entry.path) }
     }
 
     private func submit() {

@@ -13,6 +13,7 @@ import (
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/service"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/workspace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -411,6 +412,77 @@ func (c *Client) UnpinRepo(path string) error {
 	delete(c.pinned, path)
 	c.mu.Unlock()
 	c.notify(service.Event{Type: service.EventSessionsChanged})
+	return nil
+}
+
+// ── Workspaces ─────────────────────────────────────────────────────────────
+
+// ListWorkspaces forwards to the daemon. The provider name is passed through
+// untouched. Returns an empty slice (not nil) on success with no workspaces.
+func (c *Client) ListWorkspaces(repoRoot string) ([]workspace.WorkspaceInfo, string, error) {
+	ctx, cancel := c.callCtx()
+	defer cancel()
+	debuglog.Logger.Info("daemonclient: ListWorkspaces", "repoRoot", repoRoot)
+	resp, err := c.api.ListWorkspaces(ctx, &fleetv1.ListWorkspacesRequest{RepoRoot: repoRoot})
+	if err != nil {
+		debuglog.Logger.Error("daemonclient: ListWorkspaces failed", "repoRoot", repoRoot, "err", err)
+		return nil, "", err
+	}
+	out := make([]workspace.WorkspaceInfo, 0, len(resp.GetWorkspaces()))
+	for _, w := range resp.GetWorkspaces() {
+		out = append(out, workspace.WorkspaceInfo{
+			Name:   w.GetName(),
+			Path:   w.GetPath(),
+			Branch: w.GetBranch(),
+			Status: w.GetStatus(),
+		})
+	}
+	debuglog.Logger.Info("daemonclient: ListWorkspaces ok", "repoRoot", repoRoot, "count", len(out), "provider", resp.GetProviderName())
+	return out, resp.GetProviderName(), nil
+}
+
+// CreateWorkspace forwards to the daemon. The daemon-side handler creates
+// both the workspace and a session pointing at it (see SessionService for the
+// rationale). The session arrives via the ListSessions stream — we don't
+// optimistically insert it here because we don't have its ID yet (the proto
+// returns only the Workspace).
+func (c *Client) CreateWorkspace(repoRoot, name, baseBranch, newBranch string) (*workspace.WorkspaceInfo, *session.Session, error) {
+	ctx, cancel := c.callCtx()
+	defer cancel()
+	debuglog.Logger.Info("daemonclient: CreateWorkspace", "repoRoot", repoRoot, "name", name, "baseBranch", baseBranch, "newBranch", newBranch)
+	resp, err := c.api.CreateWorkspace(ctx, &fleetv1.CreateWorkspaceRequest{
+		RepoRoot:   repoRoot,
+		Name:       name,
+		BaseBranch: baseBranch,
+		NewBranch:  newBranch,
+	})
+	if err != nil {
+		debuglog.Logger.Error("daemonclient: CreateWorkspace failed", "repoRoot", repoRoot, "name", name, "err", err)
+		return nil, nil, err
+	}
+	w := resp.GetWorkspace()
+	if w == nil {
+		debuglog.Logger.Warn("daemonclient: CreateWorkspace returned nil workspace", "repoRoot", repoRoot, "name", name)
+		return nil, nil, nil
+	}
+	debuglog.Logger.Info("daemonclient: CreateWorkspace ok", "name", w.GetName(), "path", w.GetPath(), "branch", w.GetBranch())
+	return &workspace.WorkspaceInfo{
+		Name:   w.GetName(),
+		Path:   w.GetPath(),
+		Branch: w.GetBranch(),
+		Status: w.GetStatus(),
+	}, nil, nil
+}
+
+func (c *Client) DestroyWorkspace(repoRoot, name string) error {
+	ctx, cancel := c.callCtx()
+	defer cancel()
+	debuglog.Logger.Info("daemonclient: DestroyWorkspace", "repoRoot", repoRoot, "name", name)
+	if _, err := c.api.DestroyWorkspace(ctx, &fleetv1.DestroyWorkspaceRequest{RepoRoot: repoRoot, Name: name}); err != nil {
+		debuglog.Logger.Error("daemonclient: DestroyWorkspace failed", "repoRoot", repoRoot, "name", name, "err", err)
+		return err
+	}
+	debuglog.Logger.Info("daemonclient: DestroyWorkspace ok", "repoRoot", repoRoot, "name", name)
 	return nil
 }
 

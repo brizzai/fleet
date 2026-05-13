@@ -8,8 +8,18 @@ import (
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/service"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/workspace"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func convertWorkspace(w workspace.WorkspaceInfo) *fleetv1.Workspace {
+	return &fleetv1.Workspace{
+		Name:   w.Name,
+		Path:   w.Path,
+		Branch: w.Branch,
+		Status: w.Status,
+	}
+}
 
 // convertSession projects a *session.Session into its proto wire form.
 // hook_status is left empty here — the daemon doesn't currently surface the

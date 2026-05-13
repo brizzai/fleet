@@ -297,6 +297,71 @@ func (s *Server) UnpinRepo(_ context.Context, req *fleetv1.UnpinRepoRequest) (*e
 	return &emptypb.Empty{}, nil
 }
 
+// ── Workspaces ─────────────────────────────────────────────────────────────
+
+func (s *Server) ListWorkspaces(_ context.Context, req *fleetv1.ListWorkspacesRequest) (*fleetv1.ListWorkspacesResponse, error) {
+	debuglog.Logger.Info("rpc: ListWorkspaces", "repoRoot", req.GetRepoRoot())
+	if req.GetRepoRoot() == "" {
+		return nil, status.Error(codes.InvalidArgument, "repo_root is required")
+	}
+	infos, providerName, err := s.svc.ListWorkspaces(req.GetRepoRoot())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list workspaces: %v", err)
+	}
+	out := &fleetv1.ListWorkspacesResponse{
+		Workspaces:   make([]*fleetv1.Workspace, 0, len(infos)),
+		ProviderName: providerName,
+	}
+	for _, w := range infos {
+		out.Workspaces = append(out.Workspaces, convertWorkspace(w))
+	}
+	debuglog.Logger.Info("rpc: ListWorkspaces ok", "repoRoot", req.GetRepoRoot(), "count", len(out.Workspaces))
+	return out, nil
+}
+
+// CreateWorkspace creates the workspace and a session pointing at it in one
+// shot — see SessionService.CreateWorkspace for why it's combined. The
+// proto's optional `pending_id` is left empty: the daemon does the work
+// synchronously, and the new session reaches the client via the ListSessions
+// stream rather than a follow-up notification keyed on pending_id.
+func (s *Server) CreateWorkspace(_ context.Context, req *fleetv1.CreateWorkspaceRequest) (*fleetv1.CreateWorkspaceResponse, error) {
+	debuglog.Logger.Info("rpc: CreateWorkspace", "repoRoot", req.GetRepoRoot(), "name", req.GetName(), "baseBranch", req.GetBaseBranch(), "newBranch", req.GetNewBranch())
+	if req.GetRepoRoot() == "" {
+		return nil, status.Error(codes.InvalidArgument, "repo_root is required")
+	}
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	info, sess, err := s.svc.CreateWorkspace(req.GetRepoRoot(), req.GetName(), req.GetBaseBranch(), req.GetNewBranch())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "create workspace: %v", err)
+	}
+	if info == nil {
+		return nil, status.Error(codes.Internal, "create workspace: provider returned nil info")
+	}
+	if sess != nil {
+		debuglog.Logger.Info("rpc: CreateWorkspace ok", "name", info.Name, "path", info.Path, "sessionID", sess.ID)
+	} else {
+		debuglog.Logger.Info("rpc: CreateWorkspace ok (no session)", "name", info.Name, "path", info.Path)
+	}
+	return &fleetv1.CreateWorkspaceResponse{Workspace: convertWorkspace(*info)}, nil
+}
+
+func (s *Server) DestroyWorkspace(_ context.Context, req *fleetv1.DestroyWorkspaceRequest) (*emptypb.Empty, error) {
+	debuglog.Logger.Info("rpc: DestroyWorkspace", "repoRoot", req.GetRepoRoot(), "name", req.GetName())
+	if req.GetRepoRoot() == "" {
+		return nil, status.Error(codes.InvalidArgument, "repo_root is required")
+	}
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	if err := s.svc.DestroyWorkspace(req.GetRepoRoot(), req.GetName()); err != nil {
+		return nil, status.Errorf(codes.Internal, "destroy workspace: %v", err)
+	}
+	debuglog.Logger.Info("rpc: DestroyWorkspace ok", "repoRoot", req.GetRepoRoot(), "name", req.GetName())
+	return &emptypb.Empty{}, nil
+}
+
 // ── Slot bindings ──────────────────────────────────────────────────────────
 
 func (s *Server) ListSlotBindings(_ context.Context, _ *emptypb.Empty) (*fleetv1.ListSlotBindingsResponse, error) {

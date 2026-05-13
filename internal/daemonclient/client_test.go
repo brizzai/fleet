@@ -14,6 +14,7 @@ import (
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/service"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/workspace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
@@ -267,6 +268,21 @@ func (f *fakeSvc) UnpinRepo(path string) error {
 	f.notify(service.Event{Type: service.EventGitInfoChanged})
 	return nil
 }
+
+func (f *fakeSvc) ListWorkspaces(_ string) ([]workspace.WorkspaceInfo, string, error) {
+	return []workspace.WorkspaceInfo{}, "git-worktree", nil
+}
+
+func (f *fakeSvc) CreateWorkspace(repoRoot, name, _, newBranch string) (*workspace.WorkspaceInfo, *session.Session, error) {
+	info := &workspace.WorkspaceInfo{Name: name, Path: repoRoot + "-" + name, Branch: newBranch}
+	sess, err := f.CreateSession(name, info.Path, name)
+	if err != nil {
+		return info, nil, err
+	}
+	return info, sess, nil
+}
+
+func (f *fakeSvc) DestroyWorkspace(_ string, _ string) error { return nil }
 
 func (f *fakeSvc) SnapshotForUndo(id string) (*session.SessionRow, error) {
 	if s := f.GetSession(id); s != nil {

@@ -346,10 +346,16 @@ final class AppModel {
     func dispatchCreateWorktree(repoRoot: String,
                                 baseBranch: String,
                                 newBranch: String) async {
-        guard let m = mutator else { return }
+        guard let m = mutator else {
+            FleetLog.warn("dispatchCreateWorktree: no mutator (daemon link down?)")
+            return
+        }
         let trimmedBase = baseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedNew = newBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedBase.isEmpty, !trimmedNew.isEmpty else { return }
+        guard !trimmedBase.isEmpty, !trimmedNew.isEmpty else {
+            FleetLog.warn("dispatchCreateWorktree: empty input — base=\(trimmedBase) new=\(trimmedNew)")
+            return
+        }
 
         let placeholder = PendingCreation(
             id: UUID().uuidString,
@@ -359,6 +365,7 @@ final class AppModel {
             startedAt: Date()
         )
         pendingCreations.append(placeholder)
+        FleetLog.info("dispatchCreateWorktree: placeholder added pendingID=\(placeholder.id) repoRoot=\(repoRoot) displayName=\(trimmedNew)")
 
         do {
             _ = try await m.createWorkspace(
@@ -367,11 +374,13 @@ final class AppModel {
                 baseBranch: trimmedBase,
                 newBranch: trimmedNew
             )
+            FleetLog.info("dispatchCreateWorktree: RPC returned ok pendingID=\(placeholder.id) (waiting for stream to deliver session)")
             // Don't drop the placeholder here — wait for the SessionUpdate
             // stream to deliver the real row, then `reconcilePendingCreations`
             // removes our placeholder. If the daemon never delivers, the
             // 30s pending-guard cleans up.
         } catch {
+            FleetLog.error("dispatchCreateWorktree: RPC failed pendingID=\(placeholder.id) err=\(error)")
             pendingCreations.removeAll { $0.id == placeholder.id }
             showErrorToast("create worktree: \(error)")
         }
@@ -408,17 +417,24 @@ final class AppModel {
     // ─── Pending-creation reconciliation ─────────────────────────────
 
     /// Called from `applySession` on every stream message. A pending
-    /// worktree placeholder is removed when a real session shows up under
-    /// the same repo with a matching workspace name (the daemon uses the
-    /// new-branch field as the workspace name, so they line up 1:1).
+    /// worktree placeholder is removed when a real session shows up with a
+    /// matching workspace name (the daemon uses the new-branch field as the
+    /// workspace name, so they line up 1:1). We deliberately do NOT match on
+    /// `repoRoot`: `git rev-parse --show-toplevel` from inside a worktree
+    /// returns the worktree's own path, not the parent repo, so the pending
+    /// placeholder and the new session would never agree on repoRoot.
     private func reconcilePendingCreations(against session: Session) {
         guard !pendingCreations.isEmpty else { return }
-        let matchedID = pendingCreations.first(where: { p in
-            p.repoRoot == session.repoRoot
-                && (p.displayName == session.workspaceName || p.displayName == session.title)
-        })?.id
-        guard let matchedID else { return }
-        pendingCreations.removeAll { $0.id == matchedID }
+        let matched = pendingCreations.first(where: { p in
+            p.displayName == session.workspaceName || p.displayName == session.title
+        })
+        guard let matched else {
+            let pendingList = pendingCreations.map { $0.displayName }.joined(separator: ",")
+            FleetLog.debug("reconcile: no match for session id=\(session.id) workspace=\(session.workspaceName) title=\(session.title) — pending=[\(pendingList)]")
+            return
+        }
+        FleetLog.info("reconcile: matched pendingID=\(matched.id) displayName=\(matched.displayName) -> sessionID=\(session.id)")
+        pendingCreations.removeAll { $0.id == matched.id }
         // Auto-select the freshly-created session so the user lands on it.
         selection = .session(session.id)
     }

@@ -3,6 +3,7 @@ package service
 import (
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/workspace"
 )
 
 // Service is the abstract surface both the in-process SessionService and the
@@ -40,6 +41,13 @@ type Service interface {
 	UnbindSlot(slot int) error
 	PinRepo(path string) error
 	UnpinRepo(path string) error
+
+	// Workspaces. CreateWorkspace also spawns a session pointing at the new
+	// workspace path — daemon clients can't easily sequence two RPCs without
+	// risking an orphan worktree if the second call fails.
+	ListWorkspaces(repoRoot string) ([]workspace.WorkspaceInfo, string, error)
+	CreateWorkspace(repoRoot, name, baseBranch, newBranch string) (*workspace.WorkspaceInfo, *session.Session, error)
+	DestroyWorkspace(repoRoot, name string) error
 
 	// Undo-delete.
 	SnapshotForUndo(id string) (*session.SessionRow, error)

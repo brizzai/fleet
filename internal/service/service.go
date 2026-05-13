@@ -612,6 +612,93 @@ func (s *SessionService) UnpinRepo(path string) error {
 	return nil
 }
 
+// ListWorkspaces resolves the workspace provider for repoRoot and lists its
+// workspaces. The provider name (`git-worktree` or `shell`) is returned so
+// clients can render provider-specific affordances. Returns an empty slice
+// (not nil) when the provider returns no workspaces.
+func (s *SessionService) ListWorkspaces(repoRoot string) ([]workspace.WorkspaceInfo, string, error) {
+	provider := workspace.ResolveProvider(repoRoot)
+	providerName := workspace.ProviderName(provider)
+	debuglog.Logger.Info("ListWorkspaces", "repoRoot", repoRoot, "provider", providerName)
+	infos, err := provider.List(repoRoot)
+	if err != nil {
+		debuglog.Logger.Error("ListWorkspaces failed", "repoRoot", repoRoot, "provider", providerName, "err", err)
+		return nil, providerName, err
+	}
+	if infos == nil {
+		infos = []workspace.WorkspaceInfo{}
+	}
+	debuglog.Logger.Info("ListWorkspaces ok", "repoRoot", repoRoot, "provider", providerName, "count", len(infos))
+	return infos, providerName, nil
+}
+
+// CreateWorkspace creates a new workspace via the resolved provider and
+// immediately spawns a session pointing at the new workspace path. Combined
+// here (rather than as two RPCs) so a daemon caller can't leave an orphan
+// worktree if session creation fails. The created session is returned for
+// optimistic local insertion; observers also receive an EventSessionsChanged
+// from CreateSession's normal notify path.
+func (s *SessionService) CreateWorkspace(repoRoot, name, baseBranch, newBranch string) (*workspace.WorkspaceInfo, *session.Session, error) {
+	provider := workspace.ResolveProvider(repoRoot)
+	providerName := workspace.ProviderName(provider)
+	debuglog.Logger.Info("CreateWorkspace", "repoRoot", repoRoot, "name", name, "baseBranch", baseBranch, "newBranch", newBranch, "provider", providerName)
+	if !provider.CanCreate() {
+		err := fmt.Errorf("workspace provider for %q has no create command", repoRoot)
+		debuglog.Logger.Error("CreateWorkspace: provider cannot create", "repoRoot", repoRoot, "provider", providerName)
+		return nil, nil, err
+	}
+	info, err := provider.Create(repoRoot, name, newBranch, baseBranch)
+	if err != nil {
+		debuglog.Logger.Error("CreateWorkspace: provider.Create failed", "repoRoot", repoRoot, "name", name, "newBranch", newBranch, "err", err)
+		return nil, nil, err
+	}
+	if info == nil {
+		debuglog.Logger.Error("CreateWorkspace: provider returned nil info", "repoRoot", repoRoot, "name", name)
+		return nil, nil, fmt.Errorf("workspace provider returned nil info")
+	}
+	debuglog.Logger.Info("CreateWorkspace: workspace ready, spawning session", "name", name, "path", info.Path)
+	if s.cfg != nil && s.cfg.IsCopyClaudeSettingsEnabled() && !provider.IsCustom() {
+		workspace.CopyClaudeSettings(repoRoot, info.Path)
+	}
+	sess, err := s.CreateSession(name, info.Path, name)
+	if err != nil {
+		debuglog.Logger.Error("CreateWorkspace: CreateSession failed, rolling back worktree", "name", name, "path", info.Path, "err", err)
+		// Best-effort rollback: tear the brand-new worktree back down so the
+		// user can retry without a stranded directory. Failure is logged but
+		// not surfaced — the session-create error is the headline.
+		if provider.CanDestroy() {
+			if rmErr := provider.Destroy(repoRoot, name); rmErr != nil {
+				debuglog.Logger.Warn("CreateWorkspace: rollback destroy failed", "name", name, "err", rmErr)
+			} else {
+				debuglog.Logger.Info("CreateWorkspace: rollback destroy ok", "name", name)
+			}
+		}
+		return info, nil, err
+	}
+	debuglog.Logger.Info("CreateWorkspace ok", "name", name, "path", info.Path, "sessionID", sess.ID, "sessionTitle", sess.Title)
+	return info, sess, nil
+}
+
+// DestroyWorkspace removes the workspace via the resolved provider. Caller is
+// responsible for stopping or deleting any sessions still using the workspace
+// — the provider's `git worktree remove --force` will succeed but leave those
+// sessions pointing at a dead path.
+func (s *SessionService) DestroyWorkspace(repoRoot, name string) error {
+	provider := workspace.ResolveProvider(repoRoot)
+	providerName := workspace.ProviderName(provider)
+	debuglog.Logger.Info("DestroyWorkspace", "repoRoot", repoRoot, "name", name, "provider", providerName)
+	if !provider.CanDestroy() {
+		debuglog.Logger.Error("DestroyWorkspace: provider cannot destroy", "repoRoot", repoRoot, "provider", providerName)
+		return fmt.Errorf("workspace provider for %q has no destroy command", repoRoot)
+	}
+	if err := provider.Destroy(repoRoot, name); err != nil {
+		debuglog.Logger.Error("DestroyWorkspace failed", "repoRoot", repoRoot, "name", name, "err", err)
+		return err
+	}
+	debuglog.Logger.Info("DestroyWorkspace ok", "repoRoot", repoRoot, "name", name)
+	return nil
+}
+
 // SnapshotForUndo returns a row snapshot of the live session for later
 // restore via RestoreDeleted. Caller is responsible for snapshotting BEFORE
 // calling DeleteSession.

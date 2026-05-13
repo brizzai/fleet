@@ -14,6 +14,7 @@ import (
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/service"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/workspace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -26,13 +27,19 @@ import (
 // transitions via Add/Update/Remove, then call notify() to fan out to
 // subscribers exactly the way SessionService does.
 type fakeService struct {
-	mu        sync.Mutex
-	sessions  []*session.Session
-	gitInfo   map[string]*git.RepoInfo
-	pinned    map[string]bool
-	slots     map[int]string
-	observers []service.Observer
+	mu         sync.Mutex
+	sessions   []*session.Session
+	gitInfo    map[string]*git.RepoInfo
+	pinned     map[string]bool
+	slots      map[int]string
+	observers  []service.Observer
+	workspaces map[string][]workspace.WorkspaceInfo
+	wsCreates  []wsCreateCall
+	wsDestroys []wsDestroyCall
 }
+
+type wsCreateCall struct{ repoRoot, name, baseBranch, newBranch string }
+type wsDestroyCall struct{ repoRoot, name string }
 
 func newFakeService() *fakeService {
 	return &fakeService{
@@ -234,6 +241,51 @@ func (f *fakeService) UnpinRepo(path string) error {
 	delete(f.pinned, path)
 	f.mu.Unlock()
 	f.notify(service.Event{Type: service.EventGitInfoChanged})
+	return nil
+}
+
+func (f *fakeService) ListWorkspaces(repoRoot string) ([]workspace.WorkspaceInfo, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.workspaces == nil {
+		return []workspace.WorkspaceInfo{}, "git-worktree", nil
+	}
+	out := append([]workspace.WorkspaceInfo(nil), f.workspaces[repoRoot]...)
+	if out == nil {
+		out = []workspace.WorkspaceInfo{}
+	}
+	return out, "git-worktree", nil
+}
+
+func (f *fakeService) CreateWorkspace(repoRoot, name, baseBranch, newBranch string) (*workspace.WorkspaceInfo, *session.Session, error) {
+	f.mu.Lock()
+	f.wsCreates = append(f.wsCreates, wsCreateCall{repoRoot, name, baseBranch, newBranch})
+	info := workspace.WorkspaceInfo{Name: name, Path: repoRoot + "-" + name, Branch: newBranch}
+	if f.workspaces == nil {
+		f.workspaces = map[string][]workspace.WorkspaceInfo{}
+	}
+	f.workspaces[repoRoot] = append(f.workspaces[repoRoot], info)
+	f.mu.Unlock()
+	sess, err := f.CreateSession(name, info.Path, name)
+	if err != nil {
+		return &info, nil, err
+	}
+	return &info, sess, nil
+}
+
+func (f *fakeService) DestroyWorkspace(repoRoot, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.wsDestroys = append(f.wsDestroys, wsDestroyCall{repoRoot, name})
+	if f.workspaces != nil {
+		out := f.workspaces[repoRoot][:0]
+		for _, w := range f.workspaces[repoRoot] {
+			if w.Name != name {
+				out = append(out, w)
+			}
+		}
+		f.workspaces[repoRoot] = out
+	}
 	return nil
 }
 
@@ -540,16 +592,69 @@ func TestServer_Unimplemented_StillStubbed(t *testing.T) {
 	client, stop := startTestServer(t, fake)
 	defer stop()
 
-	// Workspace / Config / HookEvent surfaces remain stubbed after PR 5;
-	// guard against accidental implementation that would break existing
-	// clients before they're ready.
+	// Config / HookEvent surfaces remain stubbed after PR 5; guard against
+	// accidental implementation that would break existing clients before
+	// they're ready. Workspaces are wired (see TestServer_Workspaces below).
 	_, err := client.GetConfig(context.Background(), nil)
 	if status.Code(err) != codes.Unimplemented {
 		t.Errorf("GetConfig: want Unimplemented, got %v", err)
 	}
-	_, err = client.ListWorkspaces(context.Background(), &fleetv1.ListWorkspacesRequest{RepoRoot: "/tmp"})
-	if status.Code(err) != codes.Unimplemented {
-		t.Errorf("ListWorkspaces: want Unimplemented, got %v", err)
+}
+
+func TestServer_Workspaces(t *testing.T) {
+	fake := newFakeService()
+	fake.workspaces = map[string][]workspace.WorkspaceInfo{
+		"/r": {{Name: "wt-a", Path: "/r-wt-a", Branch: "feat/a"}},
+	}
+	client, stop := startTestServer(t, fake)
+	defer stop()
+
+	listResp, err := client.ListWorkspaces(context.Background(), &fleetv1.ListWorkspacesRequest{RepoRoot: "/r"})
+	if err != nil {
+		t.Fatalf("ListWorkspaces: %v", err)
+	}
+	if got := len(listResp.GetWorkspaces()); got != 1 {
+		t.Fatalf("ListWorkspaces: want 1 workspace, got %d", got)
+	}
+	if got := listResp.GetProviderName(); got != "git-worktree" {
+		t.Errorf("ListWorkspaces: want provider git-worktree, got %q", got)
+	}
+	if got := listResp.GetWorkspaces()[0].GetName(); got != "wt-a" {
+		t.Errorf("ListWorkspaces: name=%q, want wt-a", got)
+	}
+
+	createResp, err := client.CreateWorkspace(context.Background(), &fleetv1.CreateWorkspaceRequest{
+		RepoRoot: "/r", Name: "wt-b", BaseBranch: "main", NewBranch: "feat/b",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	if got := createResp.GetWorkspace().GetName(); got != "wt-b" {
+		t.Errorf("CreateWorkspace: name=%q, want wt-b", got)
+	}
+	if len(fake.wsCreates) != 1 || fake.wsCreates[0].name != "wt-b" {
+		t.Errorf("CreateWorkspace: did not call service: %+v", fake.wsCreates)
+	}
+
+	if _, err := client.DestroyWorkspace(context.Background(), &fleetv1.DestroyWorkspaceRequest{RepoRoot: "/r", Name: "wt-a"}); err != nil {
+		t.Fatalf("DestroyWorkspace: %v", err)
+	}
+	if len(fake.wsDestroys) != 1 || fake.wsDestroys[0].name != "wt-a" {
+		t.Errorf("DestroyWorkspace: did not call service: %+v", fake.wsDestroys)
+	}
+
+	// InvalidArgument paths.
+	_, err = client.ListWorkspaces(context.Background(), &fleetv1.ListWorkspacesRequest{})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("ListWorkspaces empty repo_root: want InvalidArgument, got %v", err)
+	}
+	_, err = client.CreateWorkspace(context.Background(), &fleetv1.CreateWorkspaceRequest{Name: "x"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("CreateWorkspace empty repo_root: want InvalidArgument, got %v", err)
+	}
+	_, err = client.DestroyWorkspace(context.Background(), &fleetv1.DestroyWorkspaceRequest{RepoRoot: "/r"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("DestroyWorkspace empty name: want InvalidArgument, got %v", err)
 	}
 }
 

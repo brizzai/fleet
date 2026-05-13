@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,39 @@ import (
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
+
+// CopyClaudeSettings copies .claude/settings.local.json from srcRepo to
+// dstRepo. Best-effort: if the source file is missing, it's a no-op; mkdir or
+// write failures are logged but don't surface as errors. Used after creating a
+// worktree so the new working copy inherits the parent's local Claude config.
+func CopyClaudeSettings(srcRepo, dstRepo string) {
+	srcFile := filepath.Join(srcRepo, ".claude", "settings.local.json")
+	data, err := os.ReadFile(srcFile)
+	if err != nil {
+		return
+	}
+	dstDir := filepath.Join(dstRepo, ".claude")
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		debuglog.Logger.Error("copyClaudeSettings: failed to create .claude dir", "dst", dstDir, "err", err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dstDir, "settings.local.json"), data, 0600); err != nil {
+		debuglog.Logger.Error("copyClaudeSettings: failed to write settings file", "dst", dstRepo, "err", err)
+	}
+}
+
+// ProviderName returns a stable string label for a provider, suitable for the
+// `provider_name` field of ListWorkspacesResponse. Mac UI uses it to decide
+// whether to show "git-worktree" or "shell" hints.
+func ProviderName(p Provider) string {
+	if p == nil {
+		return ""
+	}
+	if p.IsCustom() {
+		return "shell"
+	}
+	return "git-worktree"
+}
 
 // WorkspaceInfo represents a workspace from the provider.
 type WorkspaceInfo struct {
