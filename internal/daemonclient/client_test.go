@@ -10,6 +10,7 @@ import (
 	"time"
 
 	fleetv1 "github.com/brizzai/fleet/gen/proto/fleet/v1"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/daemonsrv"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/service"
@@ -283,6 +284,23 @@ func (f *fakeSvc) CreateWorkspace(repoRoot, name, _, newBranch string) (*workspa
 }
 
 func (f *fakeSvc) DestroyWorkspace(_ string, _ string) error { return nil }
+
+func (f *fakeSvc) GetConfig() (*config.Config, error) {
+	return &config.Config{Theme: "tokyo-night"}, nil
+}
+
+func (f *fakeSvc) UpdateConfig(updates *fleetv1.Config) (*config.Config, error) {
+	an := updates.GetAutoNameSessions()
+	cc := updates.GetCopyClaudeSettings()
+	return &config.Config{
+		TickIntervalSec:    int(updates.GetTickIntervalSec()),
+		DefaultProjectPath: updates.GetDefaultProjectPath(),
+		Editor:             updates.GetEditor(),
+		Theme:              updates.GetTheme(),
+		AutoNameSessions:   &an,
+		CopyClaudeSettings: &cc,
+	}, nil
+}
 
 func (f *fakeSvc) SnapshotForUndo(id string) (*session.SessionRow, error) {
 	if s := f.GetSession(id); s != nil {

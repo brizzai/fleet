@@ -63,6 +63,37 @@ struct FleetCommands: Commands {
             .keyboardShortcut("d", modifiers: [.command, .shift])
         }
 
+        CommandGroup(after: .appSettings) {
+            Button("Settings…") {
+                model.presentingSettings = true
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+
+        CommandMenu("View") {
+            Button("Command Palette…") {
+                model.presentingPalette = true
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+
+            Button("Filter Sessions") {
+                model.requestFilterFocus()
+            }
+            .keyboardShortcut("f", modifiers: .command)
+
+            Divider()
+
+            Button("Bug Report…") {
+                model.presentingBugReport = true
+            }
+            .keyboardShortcut("b", modifiers: [.command, .shift])
+
+            Button("Keyboard Shortcuts") {
+                model.presentingHelp = true
+            }
+            .keyboardShortcut("/", modifiers: [.command, .shift])
+        }
+
         CommandMenu("Slots") {
             // Cmd+0..9 — jump to whatever session is bound to that slot.
             // No-op silently when the slot is unbound (matches TUI).

@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	fleetv1 "github.com/brizzai/fleet/gen/proto/fleet/v1"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/service"
@@ -11,6 +12,23 @@ import (
 	"github.com/brizzai/fleet/internal/workspace"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// convertConfig projects the daemon's config.Config onto the proto Config
+// message. Proto exposes a subset of fields — AutoUpdate, EnterMode, and
+// Telemetry stay client-private since Mac doesn't render them.
+func convertConfig(c *config.Config) *fleetv1.Config {
+	if c == nil {
+		return &fleetv1.Config{}
+	}
+	return &fleetv1.Config{
+		TickIntervalSec:    int32(c.TickIntervalSec),
+		DefaultProjectPath: c.DefaultProjectPath,
+		Editor:             c.Editor,
+		Theme:              c.Theme,
+		AutoNameSessions:   c.IsAutoNameEnabled(),
+		CopyClaudeSettings: c.IsCopyClaudeSettingsEnabled(),
+	}
+}
 
 func convertWorkspace(w workspace.WorkspaceInfo) *fleetv1.Workspace {
 	return &fleetv1.Workspace{

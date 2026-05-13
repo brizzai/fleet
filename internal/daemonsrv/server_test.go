@@ -11,6 +11,7 @@ import (
 	"time"
 
 	fleetv1 "github.com/brizzai/fleet/gen/proto/fleet/v1"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/service"
 	"github.com/brizzai/fleet/internal/session"
@@ -36,6 +37,7 @@ type fakeService struct {
 	workspaces map[string][]workspace.WorkspaceInfo
 	wsCreates  []wsCreateCall
 	wsDestroys []wsDestroyCall
+	cfg        *config.Config
 }
 
 type wsCreateCall struct{ repoRoot, name, baseBranch, newBranch string }
@@ -317,6 +319,49 @@ func (f *fakeService) SoftRestore(_ *session.Session, _ *session.SessionRow) err
 	return nil
 }
 
+func (f *fakeService) GetConfig() (*config.Config, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cfg == nil {
+		return &config.Config{Theme: "tokyo-night"}, nil
+	}
+	cp := *f.cfg
+	return &cp, nil
+}
+
+func (f *fakeService) UpdateConfig(updates *fleetv1.Config) (*config.Config, error) {
+	if t := updates.GetTheme(); t != "" {
+		switch t {
+		case "tokyo-night", "catppuccin-mocha", "rose-pine", "nord", "gruvbox":
+		default:
+			return nil, errors.New("unknown theme " + t)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cfg == nil {
+		f.cfg = &config.Config{}
+	}
+	if v := updates.GetTickIntervalSec(); v > 0 {
+		f.cfg.TickIntervalSec = int(v)
+	}
+	if v := updates.GetDefaultProjectPath(); v != "" {
+		f.cfg.DefaultProjectPath = v
+	}
+	if v := updates.GetEditor(); v != "" {
+		f.cfg.Editor = v
+	}
+	if v := updates.GetTheme(); v != "" {
+		f.cfg.Theme = v
+	}
+	an := updates.GetAutoNameSessions()
+	f.cfg.AutoNameSessions = &an
+	cc := updates.GetCopyClaudeSettings()
+	f.cfg.CopyClaudeSettings = &cc
+	cp := *f.cfg
+	return &cp, nil
+}
+
 // Compile-time check.
 var _ service.Service = (*fakeService)(nil)
 
@@ -587,17 +632,49 @@ func TestServer_SoftDelete_NotFound(t *testing.T) {
 	}
 }
 
-func TestServer_Unimplemented_StillStubbed(t *testing.T) {
+func TestServer_GetConfig(t *testing.T) {
+	fake := newFakeService()
+	an := true
+	fake.cfg = &config.Config{Theme: "gruvbox", Editor: "vim", TickIntervalSec: 3, AutoNameSessions: &an}
+	client, stop := startTestServer(t, fake)
+	defer stop()
+
+	cfg, err := client.GetConfig(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if cfg.GetTheme() != "gruvbox" {
+		t.Errorf("GetConfig: theme=%q, want gruvbox", cfg.GetTheme())
+	}
+	if cfg.GetEditor() != "vim" {
+		t.Errorf("GetConfig: editor=%q, want vim", cfg.GetEditor())
+	}
+	if cfg.GetTickIntervalSec() != 3 {
+		t.Errorf("GetConfig: tick=%d, want 3", cfg.GetTickIntervalSec())
+	}
+}
+
+func TestServer_UpdateConfig(t *testing.T) {
 	fake := newFakeService()
 	client, stop := startTestServer(t, fake)
 	defer stop()
 
-	// Config / HookEvent surfaces remain stubbed after PR 5; guard against
-	// accidental implementation that would break existing clients before
-	// they're ready. Workspaces are wired (see TestServer_Workspaces below).
-	_, err := client.GetConfig(context.Background(), nil)
-	if status.Code(err) != codes.Unimplemented {
-		t.Errorf("GetConfig: want Unimplemented, got %v", err)
+	resp, err := client.UpdateConfig(context.Background(), &fleetv1.UpdateConfigRequest{
+		Config: &fleetv1.Config{Theme: "nord", Editor: "code", TickIntervalSec: 5, AutoNameSessions: true},
+	})
+	if err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	if resp.GetTheme() != "nord" {
+		t.Errorf("UpdateConfig: theme=%q, want nord", resp.GetTheme())
+	}
+
+	// Validation: unknown theme name → InvalidArgument.
+	_, err = client.UpdateConfig(context.Background(), &fleetv1.UpdateConfigRequest{
+		Config: &fleetv1.Config{Theme: "not-a-theme"},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("UpdateConfig invalid theme: want InvalidArgument, got %v", err)
 	}
 }
 

@@ -13,6 +13,7 @@ import SwiftUI
 // opened in either client is reachable from the other.
 struct TerminalPaneView: NSViewRepresentable {
     let session: Session?
+    let theme: ThemePalette
 
     // SwiftTerm has no built-in concept of internal padding, so we wrap it
     // in an NSView that insets the terminal by `padding` on every edge.
@@ -27,7 +28,7 @@ struct TerminalPaneView: NSViewRepresentable {
         container.wantsLayer = true
         // Match the terminal's native background so the padding doesn't
         // show as a visible seam if the terminal redraws lazily.
-        container.layer?.backgroundColor = TokyoNight.background.cgColor
+        container.layer?.backgroundColor = theme.terminalBackground.cgColor
 
         let term = LocalProcessTerminalView(frame: .zero)
         term.translatesAutoresizingMaskIntoConstraints = false
@@ -40,13 +41,14 @@ struct TerminalPaneView: NSViewRepresentable {
         term.allowMouseReporting = false
         term.optionAsMetaKey = true
 
-        // Placeholder palette — Tokyo Night. Real visual system comes from
-        // the UX designer; this just stops us from looking like a 1990s xterm.
-        term.installColors(TokyoNight.ansi())
-        term.nativeBackgroundColor = TokyoNight.background
-        term.nativeForegroundColor = TokyoNight.foreground
-        term.caretColor = TokyoNight.cursor
-        term.selectedTextBackgroundColor = TokyoNight.selectionBackground
+        // Colors come from the user's selected palette. SwiftTerm doesn't
+        // expose a clean live-recolor API, so theme changes recreate the
+        // NSViewRepresentable via .id() at the call site.
+        term.installColors(theme.ansi())
+        term.nativeBackgroundColor = theme.terminalBackground
+        term.nativeForegroundColor = theme.terminalForeground
+        term.caretColor = theme.terminalCursor
+        term.selectedTextBackgroundColor = theme.terminalSelectionBackground
 
         container.addSubview(term)
         NSLayoutConstraint.activate([

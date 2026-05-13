@@ -7,12 +7,19 @@ import SwiftUI
 // selectable row. Spacing + indentation give the visual hierarchy back.
 struct SidebarView: View {
     @Bindable var model: AppModel
+    @FocusState private var filterFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             filterBar
             Divider()
             sessionList
+        }
+        .onChange(of: model.filterFocusRequest) { _, requested in
+            if requested {
+                filterFocused = true
+                model.consumeFilterFocusRequest()
+            }
         }
     }
 
@@ -22,6 +29,22 @@ struct SidebarView: View {
                 .foregroundStyle(.secondary)
             TextField("Filter sessions", text: $model.filterText)
                 .textFieldStyle(.plain)
+                .focused($filterFocused)
+                .onSubmit { filterFocused = false }
+                .onKeyPress(.escape) {
+                    model.filterText = ""
+                    filterFocused = false
+                    return .handled
+                }
+            if !model.filterText.isEmpty {
+                Button {
+                    model.filterText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

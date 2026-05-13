@@ -362,6 +362,44 @@ func (s *Server) DestroyWorkspace(_ context.Context, req *fleetv1.DestroyWorkspa
 	return &emptypb.Empty{}, nil
 }
 
+// ── Config ─────────────────────────────────────────────────────────────────
+
+func (s *Server) GetConfig(_ context.Context, _ *emptypb.Empty) (*fleetv1.Config, error) {
+	debuglog.Logger.Info("rpc: GetConfig")
+	cfg, err := s.svc.GetConfig()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get config: %v", err)
+	}
+	return convertConfig(cfg), nil
+}
+
+func (s *Server) UpdateConfig(_ context.Context, req *fleetv1.UpdateConfigRequest) (*fleetv1.Config, error) {
+	debuglog.Logger.Info("rpc: UpdateConfig", "theme", req.GetConfig().GetTheme(), "editor", req.GetConfig().GetEditor())
+	cfg, err := s.svc.UpdateConfig(req.GetConfig())
+	if err != nil {
+		// "unknown theme" comes back as a plain error from the service. Map it
+		// to InvalidArgument so the client can render a precise toast instead
+		// of "internal".
+		if isValidationErr(err) {
+			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+		}
+		return nil, status.Errorf(codes.Internal, "update config: %v", err)
+	}
+	debuglog.Logger.Info("rpc: UpdateConfig ok", "theme", cfg.Theme)
+	return convertConfig(cfg), nil
+}
+
+// isValidationErr returns true for known user-input validation failures from
+// the service layer (currently only the unknown-theme check). Lives here so
+// the gRPC layer owns the error code mapping.
+func isValidationErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return len(msg) >= len("unknown theme") && msg[:len("unknown theme")] == "unknown theme"
+}
+
 // ── Slot bindings ──────────────────────────────────────────────────────────
 
 func (s *Server) ListSlotBindings(_ context.Context, _ *emptypb.Empty) (*fleetv1.ListSlotBindingsResponse, error) {

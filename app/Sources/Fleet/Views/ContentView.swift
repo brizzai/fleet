@@ -58,6 +58,18 @@ struct ContentView: View {
                 .padding(40)
             }
         }
+        .sheet(isPresented: $model.presentingSettings) {
+            SettingsSheet(model: model)
+        }
+        .sheet(isPresented: $model.presentingPalette) {
+            CommandPaletteSheet(model: model)
+        }
+        .sheet(isPresented: $model.presentingBugReport) {
+            BugReportSheet(model: model)
+        }
+        .sheet(isPresented: $model.presentingHelp) {
+            HelpSheet(model: model)
+        }
     }
 
     private var deletionBinding: Binding<Bool> {
@@ -70,7 +82,7 @@ struct ContentView: View {
     @ViewBuilder
     private var errorToast: some View {
         if let msg = model.errorToast {
-            bannerRow(text: msg, tint: .red)
+            bannerRow(text: msg, tint: model.currentTheme.redColor)
                 .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
@@ -79,9 +91,9 @@ struct ContentView: View {
     private var disconnectBanner: some View {
         switch model.connectionState {
         case .reconnecting:
-            bannerRow(text: "Daemon disconnected — reconnecting…", tint: .orange)
+            bannerRow(text: "Daemon disconnected — reconnecting…", tint: model.currentTheme.orangeColor)
         case .disconnected:
-            bannerRow(text: model.lastError ?? "Daemon unavailable.", tint: .red)
+            bannerRow(text: model.lastError ?? "Daemon unavailable.", tint: model.currentTheme.redColor)
         case .connecting, .connected:
             EmptyView()
         }
@@ -106,9 +118,13 @@ struct ContentView: View {
     private var detailPane: some View {
         if let id = model.selectedSessionID,
            let session = model.sessionsByID[id] {
-            if session.isAlive, let _ = session.tmuxName {
-                TerminalPaneView(session: session)
-                    .id(session.id)  // force a fresh NSViewRepresentable on session swap
+            if session.isAlive, session.tmuxName != nil {
+                TerminalPaneView(session: session, theme: model.currentTheme)
+                    // .id keys force a fresh NSViewRepresentable when EITHER
+                    // the session OR the theme changes — SwiftTerm has no
+                    // clean live-recolor API, so a recreate is cheaper than
+                    // a complex stateful recolor path.
+                    .id("\(session.id)-\(model.currentTheme.name)")
             } else {
                 deadSessionPlaceholder(session: session)
             }
@@ -126,9 +142,11 @@ struct ContentView: View {
                 .font(.title3)
             Text("This session's tmux pane is no longer alive.")
                 .foregroundStyle(.secondary)
-            Text("Restart will be available in the next slice.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            Button("Restart Session") {
+                Task { await model.dispatchRestart(sessionID: session.id) }
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .controlSize(.large)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

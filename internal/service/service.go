@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	fleetv1 "github.com/brizzai/fleet/gen/proto/fleet/v1"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
@@ -31,7 +32,12 @@ const (
 // Service interface) consume it through the Observer pattern.
 type SessionService struct {
 	storage *session.StateDB
-	cfg     *config.Config
+
+	// Config — guarded by cfgMu. UpdateConfig mutates fields the worker reads
+	// (TickIntervalSec, IsAutoNameEnabled, IsCopyClaudeSettingsEnabled), so
+	// concurrent reads from cycle goroutines need protection.
+	cfgMu sync.RWMutex
+	cfg   *config.Config
 
 	// Session state — guarded by mu.
 	mu           sync.RWMutex
@@ -657,7 +663,7 @@ func (s *SessionService) CreateWorkspace(repoRoot, name, baseBranch, newBranch s
 		return nil, nil, fmt.Errorf("workspace provider returned nil info")
 	}
 	debuglog.Logger.Info("CreateWorkspace: workspace ready, spawning session", "name", name, "path", info.Path)
-	if s.cfg != nil && s.cfg.IsCopyClaudeSettingsEnabled() && !provider.IsCustom() {
+	if cfg := s.snapConfig(); cfg.IsCopyClaudeSettingsEnabled() && !provider.IsCustom() {
 		workspace.CopyClaudeSettings(repoRoot, info.Path)
 	}
 	sess, err := s.CreateSession(name, info.Path, name)
@@ -677,6 +683,87 @@ func (s *SessionService) CreateWorkspace(repoRoot, name, baseBranch, newBranch s
 	}
 	debuglog.Logger.Info("CreateWorkspace ok", "name", name, "path", info.Path, "sessionID", sess.ID, "sessionTitle", sess.Title)
 	return info, sess, nil
+}
+
+// GetConfig returns a snapshot copy of the live config so callers can render
+// settings without racing the worker's reads.
+func (s *SessionService) GetConfig() (*config.Config, error) {
+	return s.snapConfig(), nil
+}
+
+// snapConfig returns a value-copy of the live config under cfgMu. Worker code
+// that reads cfg fields between potential UpdateConfig writes should call
+// this once and use the returned snapshot for the rest of the operation.
+func (s *SessionService) snapConfig() *config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfg == nil {
+		return &config.Config{}
+	}
+	cp := *s.cfg
+	return &cp
+}
+
+// UpdateConfig applies the proto Config fields onto the live config and
+// persists to disk. Returns the updated snapshot. Empty/zero proto fields are
+// treated as "no change" since proto3 primitives lack field presence — Mac
+// clients send the full current value for every field they want to keep, and
+// theme names empty out means "no change", not "clear theme".
+//
+// Validation: theme name must match a known palette. Editor / project path
+// pass through unchecked.
+func (s *SessionService) UpdateConfig(updates *fleetv1.Config) (*config.Config, error) {
+	if updates == nil {
+		return s.GetConfig()
+	}
+
+	if t := updates.GetTheme(); t != "" {
+		if !isKnownTheme(t) {
+			return nil, fmt.Errorf("unknown theme %q", t)
+		}
+	}
+
+	s.cfgMu.Lock()
+	if s.cfg == nil {
+		s.cfg = &config.Config{}
+	}
+	if v := updates.GetTickIntervalSec(); v > 0 {
+		s.cfg.TickIntervalSec = int(v)
+	}
+	if v := updates.GetDefaultProjectPath(); v != "" {
+		s.cfg.DefaultProjectPath = v
+	}
+	if v := updates.GetEditor(); v != "" {
+		s.cfg.Editor = v
+	}
+	if v := updates.GetTheme(); v != "" {
+		s.cfg.Theme = v
+	}
+	// Bool fields don't have presence; the Mac client always sends the
+	// intended value when the user toggles them.
+	an := updates.GetAutoNameSessions()
+	s.cfg.AutoNameSessions = &an
+	cc := updates.GetCopyClaudeSettings()
+	s.cfg.CopyClaudeSettings = &cc
+	snap := *s.cfg
+	s.cfgMu.Unlock()
+
+	if err := snap.Save(); err != nil {
+		debuglog.Logger.Error("UpdateConfig: save failed", "err", err)
+		return nil, err
+	}
+	debuglog.Logger.Info("UpdateConfig ok", "theme", snap.Theme, "editor", snap.Editor, "tick", snap.TickIntervalSec)
+	return &snap, nil
+}
+
+// isKnownTheme accepts the same 5 names the TUI's PaletteByName recognises.
+// Listed inline instead of importing internal/ui to avoid a TUI→service cycle.
+func isKnownTheme(name string) bool {
+	switch name {
+	case "tokyo-night", "catppuccin-mocha", "rose-pine", "nord", "gruvbox":
+		return true
+	}
+	return false
 }
 
 // DestroyWorkspace removes the workspace via the resolved provider. Caller is
@@ -770,7 +857,7 @@ func (s *SessionService) OnFirstPrompt(id, prompt string) {
 		sess.FirstPrompt = prompt
 		_ = s.storage.UpdateFirstPrompt(id, prompt)
 	}
-	if sess.ManuallyRenamed || sess.TitleGenerated || !s.cfg.IsAutoNameEnabled() {
+	if sess.ManuallyRenamed || sess.TitleGenerated || !s.snapConfig().IsAutoNameEnabled() {
 		return
 	}
 	title := naming.GenerateTitle(prompt)
@@ -797,7 +884,7 @@ func (s *SessionService) OnPromptCount(id string, count int) {
 	}
 	sess.PromptCount = count
 	_ = s.storage.UpdatePromptCount(id, count)
-	if !s.cfg.IsAutoNameEnabled() || sess.ManuallyRenamed || sess.ClaudeSessionName != "" {
+	if !s.snapConfig().IsAutoNameEnabled() || sess.ManuallyRenamed || sess.ClaudeSessionName != "" {
 		return
 	}
 	if sess.TitleGenerated {
@@ -810,8 +897,8 @@ func (s *SessionService) OnPromptCount(id string, count int) {
 
 func (s *SessionService) statusWorker() {
 	interval := defaultTickInterval
-	if s.cfg != nil && s.cfg.TickIntervalSec > 0 {
-		interval = time.Duration(s.cfg.TickIntervalSec) * time.Second
+	if cfg := s.snapConfig(); cfg.TickIntervalSec > 0 {
+		interval = time.Duration(cfg.TickIntervalSec) * time.Second
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -911,7 +998,7 @@ func (s *SessionService) statusWorkerCycle(fast bool) {
 			}
 			if sess.PromptCount != oldPromptCount {
 				_ = s.storage.UpdatePromptCount(sess.ID, sess.PromptCount)
-				if s.cfg.IsAutoNameEnabled() && sess.TitleGenerated && !sess.ManuallyRenamed && sess.ClaudeSessionName == "" {
+				if s.snapConfig().IsAutoNameEnabled() && sess.TitleGenerated && !sess.ManuallyRenamed && sess.ClaudeSessionName == "" {
 					sess.TitleGenerated = false
 					_ = s.storage.ResetTitleGenerated(sess.ID)
 				}
@@ -931,7 +1018,7 @@ func (s *SessionService) statusWorkerCycle(fast bool) {
 
 	// Auto-name reads JSONL files; skip on the fast path so hook events
 	// don't pay that cost.
-	if !fast && s.cfg.IsAutoNameEnabled() {
+	if !fast && s.snapConfig().IsAutoNameEnabled() {
 		for _, sess := range sessions {
 			if sess.ManuallyRenamed {
 				continue
@@ -1039,8 +1126,8 @@ func (s *SessionService) repoWorker() {
 	}()
 
 	interval := defaultTickInterval
-	if s.cfg != nil && s.cfg.TickIntervalSec > 0 {
-		interval = time.Duration(s.cfg.TickIntervalSec) * time.Second
+	if cfg := s.snapConfig(); cfg.TickIntervalSec > 0 {
+		interval = time.Duration(cfg.TickIntervalSec) * time.Second
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

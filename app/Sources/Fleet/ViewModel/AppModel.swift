@@ -72,6 +72,37 @@ final class AppModel {
     // Sheet visibility (driven by FleetCommands menu items + Cmd-shortcuts).
     var presentingNewSession: Bool = false
     var presentingNewWorktree: Bool = false
+    var presentingSettings: Bool = false
+    var presentingPalette: Bool = false
+    var presentingBugReport: Bool = false
+    var presentingHelp: Bool = false
+
+    // Cmd-F sets this; SidebarSearchField watches it via .onChange and pulls
+    // focus into its TextField. Reset to false from there so subsequent
+    // Cmd-F presses re-trigger focus even when it was never lost.
+    var filterFocusRequest: Bool = false
+
+    // ─── Config + theme ──────────────────────────────────────────────
+    // Loaded from the daemon after the gRPC link is up. Editing happens
+    // through dispatchUpdateConfig which round-trips via the daemon's
+    // UpdateConfig RPC so multiple clients stay in sync.
+    private(set) var currentConfig: AppConfig = .defaults
+
+    /// Resolved palette for the current theme name. SwiftUI re-renders
+    /// dependents when currentConfig changes since this is computed.
+    var currentTheme: ThemePalette {
+        Theme.byName(currentConfig.theme)
+    }
+
+    // ─── Action log + error history ──────────────────────────────────
+    // Mirrors the TUI's actionlog.go (100-entry ring) and errors.go (50-entry
+    // ring). Bug report dialog reads both for "Recent Actions" and "Recent
+    // Errors". Action entries are appended at dispatch start and settled
+    // (success/fail) at completion via completeLastAction.
+    private(set) var actionLog: [ActionEntry] = []
+    private(set) var errorHistory: [ErrorEntry] = []
+    private static let actionLogCap = 100
+    private static let errorHistoryCap = 50
 
     // Async-creation placeholders (worktree only). Rendered in the sidebar
     // under the matching repo until the new session arrives via the stream
@@ -232,6 +263,106 @@ final class AppModel {
 
     func attach(mutator: Mutator?) {
         self.mutator = mutator
+        if mutator != nil {
+            Task { await self.loadConfig() }
+        }
+    }
+
+    /// Pulls the daemon's current config and stashes it on currentConfig.
+    /// Called once after the gRPC link comes up, and again after every
+    /// successful UpdateConfig so the local snapshot reflects what was
+    /// persisted (including any server-side defaults applied).
+    func loadConfig() async {
+        guard let m = mutator else { return }
+        do {
+            let proto = try await m.getConfig()
+            self.currentConfig = AppConfig(proto: proto)
+            FleetLog.info("loadConfig: theme=\(currentConfig.theme) editor=\(currentConfig.editor) tick=\(currentConfig.tickIntervalSec)")
+        } catch {
+            FleetLog.warn("loadConfig: \(error)")
+        }
+    }
+
+    /// Live-preview a theme without persisting. SettingsSheet calls this on
+    /// Picker change so chrome + SwiftTerm re-render immediately; Cancel
+    /// reverts via another previewTheme call before the sheet dismisses.
+    func previewTheme(_ name: String) {
+        guard currentConfig.theme != name else { return }
+        currentConfig.theme = name
+    }
+
+    /// Persist the edited config via the daemon. Caller (SettingsSheet)
+    /// supplies the full intended state — UpdateConfig treats empty/zero
+    /// proto fields as "no change", so the Mac client always sends the
+    /// current value for every field it wants to keep.
+    func dispatchUpdateConfig(_ next: AppConfig) async {
+        guard let m = mutator else { return }
+        recordAction("settings", detail: "theme=\(next.theme)")
+        do {
+            let resp = try await m.updateConfig(next.toProto)
+            self.currentConfig = AppConfig(proto: resp)
+            completeLastAction(success: true)
+            FleetLog.info("dispatchUpdateConfig: ok theme=\(currentConfig.theme)")
+        } catch {
+            completeLastAction(success: false)
+            showErrorToast("update config: \(error)", context: "settings")
+        }
+    }
+
+    /// Palette-only command "Reload All Sessions": restart every dead/error
+    /// session. Mirrors the TUI's `reload_all` palette entry.
+    func dispatchReloadAllSessions() async {
+        guard let m = mutator else { return }
+        let dead = sessionsByID.values.filter { !$0.isAlive || $0.status == .error }
+        guard !dead.isEmpty else {
+            FleetLog.info("dispatchReloadAllSessions: nothing to reload")
+            return
+        }
+        recordAction("reload all", detail: "\(dead.count) session(s)")
+        var failures = 0
+        for sess in dead {
+            do {
+                try await m.restart(sessionID: sess.id)
+            } catch {
+                failures += 1
+                FleetLog.warn("reload-all: restart failed id=\(sess.id) err=\(error)")
+            }
+        }
+        if failures == 0 {
+            completeLastAction(success: true)
+        } else {
+            completeLastAction(success: false)
+            showErrorToast("reload all: \(failures) failure(s)", context: "palette")
+        }
+    }
+
+    /// Cmd-F: ask the sidebar's search field to grab focus. SidebarSearchField
+    /// watches filterFocusRequest via .onChange and resets the flag when it
+    /// receives focus so subsequent Cmd-F presses re-trigger.
+    func requestFilterFocus() {
+        filterFocusRequest = true
+    }
+
+    func consumeFilterFocusRequest() {
+        filterFocusRequest = false
+    }
+
+    // ─── Action log helpers ──────────────────────────────────────────
+
+    /// Append a pending entry; settle later via completeLastAction. Looking
+    /// up "the last entry I appended" by index isn't multi-actor safe, but
+    /// AppModel is @MainActor so every dispatcher serializes through here.
+    func recordAction(_ action: String, detail: String = "") {
+        actionLog.append(ActionEntry(action: action, detail: detail))
+        if actionLog.count > Self.actionLogCap {
+            actionLog.removeFirst(actionLog.count - Self.actionLogCap)
+        }
+    }
+
+    func completeLastAction(success: Bool) {
+        guard let i = actionLog.indices.last else { return }
+        guard actionLog[i].success == nil else { return }
+        actionLog[i].success = success
     }
 
     // ─── Selection side-effect: ack on focus ─────────────────────────
@@ -496,20 +627,31 @@ final class AppModel {
     // ─── Toast helpers ───────────────────────────────────────────────
 
     private func run(label: String, op: () async throws -> Void) async {
+        recordAction(label)
         do {
             try await op()
+            completeLastAction(success: true)
         } catch {
-            showErrorToast("\(label): \(error)")
+            completeLastAction(success: false)
+            showErrorToast("\(label): \(error)", context: label)
         }
     }
 
-    func showErrorToast(_ message: String) {
+    func showErrorToast(_ message: String, context: String = "") {
         self.errorToast = message
+        appendErrorHistory(message: message, context: context)
         errorToastClearer?.cancel()
         errorToastClearer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }
             self?.clearErrorToast()
+        }
+    }
+
+    private func appendErrorHistory(message: String, context: String) {
+        errorHistory.append(ErrorEntry(message: message, context: context))
+        if errorHistory.count > Self.errorHistoryCap {
+            errorHistory.removeFirst(errorHistory.count - Self.errorHistoryCap)
         }
     }
 

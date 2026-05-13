@@ -156,9 +156,22 @@ final class Mutator: Sendable {
     }
 
     // ─── Config ──────────────────────────────────────────────────────
-    // Read-only; used by NewSessionSheet to pre-fill the path field.
+    // GetConfig returns the daemon's current config. Used by NewSessionSheet
+    // for path pre-fill and by SettingsSheet for the editable surface.
     func getConfig() async throws -> FleetConfig {
         try await client.getConfig(Google_Protobuf_Empty())
+    }
+
+    // UpdateConfig persists changes via the daemon. Caller sends the full
+    // current value for every field they want to keep — proto3 primitives
+    // lack field presence, so zero/empty values on the wire are treated as
+    // "no change" on the daemon side (theme is the exception: validated
+    // against the known palette names, InvalidArgument on miss).
+    @discardableResult
+    func updateConfig(_ cfg: FleetConfig) async throws -> FleetConfig {
+        var req = FleetUpdateConfigRequest()
+        req.config = cfg
+        return try await client.updateConfig(req)
     }
 
     // ─── Diagnostics ─────────────────────────────────────────────────

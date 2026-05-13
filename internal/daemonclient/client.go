@@ -8,6 +8,7 @@ import (
 	"time"
 
 	fleetv1 "github.com/brizzai/fleet/gen/proto/fleet/v1"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
@@ -472,6 +473,53 @@ func (c *Client) CreateWorkspace(repoRoot, name, baseBranch, newBranch string) (
 		Branch: w.GetBranch(),
 		Status: w.GetStatus(),
 	}, nil, nil
+}
+
+// ── Config ─────────────────────────────────────────────────────────────────
+
+func (c *Client) GetConfig() (*config.Config, error) {
+	ctx, cancel := c.callCtx()
+	defer cancel()
+	debuglog.Logger.Info("daemonclient: GetConfig")
+	resp, err := c.api.GetConfig(ctx, &emptypb.Empty{})
+	if err != nil {
+		debuglog.Logger.Error("daemonclient: GetConfig failed", "err", err)
+		return nil, err
+	}
+	return protoConfigToConfig(resp), nil
+}
+
+func (c *Client) UpdateConfig(updates *fleetv1.Config) (*config.Config, error) {
+	ctx, cancel := c.callCtx()
+	defer cancel()
+	debuglog.Logger.Info("daemonclient: UpdateConfig", "theme", updates.GetTheme(), "editor", updates.GetEditor())
+	resp, err := c.api.UpdateConfig(ctx, &fleetv1.UpdateConfigRequest{Config: updates})
+	if err != nil {
+		debuglog.Logger.Error("daemonclient: UpdateConfig failed", "err", err)
+		return nil, err
+	}
+	debuglog.Logger.Info("daemonclient: UpdateConfig ok", "theme", resp.GetTheme())
+	return protoConfigToConfig(resp), nil
+}
+
+// protoConfigToConfig is the inverse of daemonsrv.convertConfig — used by
+// in-process callers that hold a daemonclient.Client. We carry the bool
+// fields as plain *bool so the receiver can pass the result back to TUI
+// helpers like IsAutoNameEnabled / IsCopyClaudeSettingsEnabled.
+func protoConfigToConfig(p *fleetv1.Config) *config.Config {
+	if p == nil {
+		return &config.Config{}
+	}
+	an := p.GetAutoNameSessions()
+	cc := p.GetCopyClaudeSettings()
+	return &config.Config{
+		TickIntervalSec:    int(p.GetTickIntervalSec()),
+		DefaultProjectPath: p.GetDefaultProjectPath(),
+		Editor:             p.GetEditor(),
+		Theme:              p.GetTheme(),
+		AutoNameSessions:   &an,
+		CopyClaudeSettings: &cc,
+	}
 }
 
 func (c *Client) DestroyWorkspace(repoRoot, name string) error {

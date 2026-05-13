@@ -1,6 +1,8 @@
 package service
 
 import (
+	fleetv1 "github.com/brizzai/fleet/gen/proto/fleet/v1"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -54,6 +56,12 @@ type Service interface {
 	SoftDelete(id string) (*session.SessionRow, error)
 	RestoreDeleted(row *session.SessionRow) error
 	SoftRestore(sess *session.Session, row *session.SessionRow) error
+
+	// Config — read/write the user config file via the daemon so multiple
+	// clients (TUI + Mac) share one source of truth. Proto Config message
+	// exposes a subset of config.Config fields; the rest stay client-private.
+	GetConfig() (*config.Config, error)
+	UpdateConfig(updates *fleetv1.Config) (*config.Config, error)
 
 	// Auto-naming hooks.
 	OnFirstPrompt(id, prompt string)
