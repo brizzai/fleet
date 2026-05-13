@@ -276,6 +276,26 @@ final class AppModel {
         }
     }
 
+    /// Delete the session AND tear down its underlying workspace (e.g.
+    /// `git worktree remove`). Mirrors the TUI's `Y` choice on the delete
+    /// confirm dialog. Session deletion runs first so the worktree isn't
+    /// in use when the provider's destroy command fires; if the destroy
+    /// fails the session is already gone — the user gets a toast and can
+    /// `git worktree remove` by hand.
+    func dispatchDeleteAndDestroyWorkspace(sessionID: String, repoRoot: String, workspaceName: String) async {
+        guard let m = mutator else { return }
+        guard !workspaceName.isEmpty, !repoRoot.isEmpty else {
+            FleetLog.warn("dispatchDeleteAndDestroyWorkspace: missing repoRoot or workspaceName, falling back to plain delete")
+            await dispatchDelete(sessionID: sessionID)
+            return
+        }
+        FleetLog.info("dispatchDeleteAndDestroyWorkspace: sessionID=\(sessionID) repoRoot=\(repoRoot) workspaceName=\(workspaceName)")
+        await run(label: "delete + destroy workspace") {
+            try await m.delete(sessionID: sessionID)
+            try await m.destroyWorkspace(repoRoot: repoRoot, name: workspaceName)
+        }
+    }
+
     func dispatchRestart(sessionID: String) async {
         guard let m = mutator else { return }
         await run(label: "restart") {

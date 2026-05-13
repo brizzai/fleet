@@ -127,6 +127,17 @@ final class Mutator: Sendable {
         return resp.pendingID
     }
 
+    // DestroyWorkspace asks the daemon to remove the underlying worktree
+    // (or run the custom shell-out destroy command). Caller is responsible
+    // for stopping/deleting any sessions that point at the workspace first
+    // — `git worktree remove --force` succeeds but leaves orphaned panes.
+    func destroyWorkspace(repoRoot: String, name: String) async throws {
+        var req = FleetDestroyWorkspaceRequest()
+        req.repoRoot = repoRoot
+        req.name = name
+        _ = try await client.destroyWorkspace(req)
+    }
+
     // ─── Slot bindings ───────────────────────────────────────────────
     // Daemon-side semantics (storage.go:348-367): a single bind RPC evicts
     // any prior occupant of that slot AND any prior slot of that session,

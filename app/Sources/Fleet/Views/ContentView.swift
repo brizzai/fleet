@@ -23,8 +23,24 @@ struct ContentView: View {
                 model.pendingDeletion = nil
                 Task { await model.dispatchDelete(sessionID: id) }
             }
+            // Worktree sessions get a second destructive button that also
+            // tears down the worktree on disk. Mirrors the TUI's `Y` option
+            // on the delete confirm dialog (`internal/ui/app.go:1417-1432`).
+            if !session.workspaceName.isEmpty {
+                Button("Delete + destroy worktree", role: .destructive) {
+                    let id = session.id
+                    let root = session.repoRoot
+                    let ws = session.workspaceName
+                    model.pendingDeletion = nil
+                    Task { await model.dispatchDeleteAndDestroyWorkspace(sessionID: id, repoRoot: root, workspaceName: ws) }
+                }
+            }
         } message: { session in
-            Text("\(session.title) will be removed. The tmux pane is killed.")
+            if session.workspaceName.isEmpty {
+                Text("\(session.title) will be removed. The tmux pane is killed.")
+            } else {
+                Text("\(session.title) will be removed. The tmux pane is killed. Choose 'Delete + destroy worktree' to also remove the underlying git worktree (\(session.workspaceName)).")
+            }
         }
         .sheet(isPresented: $model.presentingNewSession) {
             NewSessionSheet(model: model)
