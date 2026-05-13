@@ -2870,6 +2870,7 @@ func (h *Home) buildPaletteCommands() []PaletteCommand {
 		{ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
 		{ID: "help", Name: "Help", Shortcut: "?"},
 		{ID: "reload_all", Name: "Reload All Sessions"},
+		{ID: "mark_all_read", Name: "Mark All as Read"},
 		{ID: "quit", Name: "Quit", Shortcut: "q"},
 	}
 }
@@ -2969,6 +2970,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "reload_all":
 		analytics.Track(analytics.EventReloadAll, nil)
 		return h, h.reloadAll()
+	case "mark_all_read":
+		analytics.Track(analytics.EventMarkAllRead, nil)
+		h.markAllAsRead()
+		return h, nil
 	case "quit":
 		return h, tea.Quit
 	}
@@ -3035,6 +3040,27 @@ func (h *Home) reloadAll() tea.Cmd {
 			errors:    errors,
 		}
 	}
+}
+
+// markAllAsRead acknowledges all finished sessions, transitioning them to idle.
+func (h *Home) markAllAsRead() {
+	var count int
+	for _, s := range h.sessions {
+		if s.GetStatus() != session.StatusFinished {
+			continue
+		}
+		s.Acknowledge()
+		if err := h.storage.SetAcknowledged(s.ID, true); err != nil {
+			debuglog.Logger.Error("storage: SetAcknowledged", "id", s.ID, "err", err)
+		}
+		count++
+	}
+	if count == 0 {
+		h.setInfo("No finished sessions")
+		return
+	}
+	h.rebuildFlatItems()
+	h.setInfo(fmt.Sprintf("Marked %d sessions as read", count))
 }
 
 // ensureExactHeight pads or truncates content to exactly n lines.

@@ -21,4 +21,5 @@ const (
 	EventBugReportOpened  = "bug_report_opened"
 	EventCommandPalette   = "command_palette"
 	EventReloadAll        = "reload_all"
+	EventMarkAllRead      = "mark_all_read"
 )
