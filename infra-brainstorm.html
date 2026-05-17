@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Fleet — Infra Brainstorm (Critics Reconciled)</title>
+<style>
+  :root {
+    --bg: #1a1b26;
+    --surface: #24283b;
+    --surface-2: #2f334d;
+    --text: #c0caf5;
+    --muted: #9aa5ce;
+    --dim: #565f89;
+    --accent: #7aa2f7;
+    --green: #9ece6a;
+    --yellow: #e0af68;
+    --orange: #ff9e64;
+    --red: #f7768e;
+    --purple: #bb9af7;
+    --border: #3b4261;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 40px 20px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  header {
+    text-align: center;
+    margin-bottom: 32px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 32px; margin: 0 0 8px; color: var(--accent); }
+  .subtitle { color: var(--muted); font-size: 15px; }
+  .meta-tag {
+    display: inline-block;
+    margin-top: 12px;
+    padding: 4px 12px;
+    background: var(--purple);
+    color: var(--bg);
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  .callout {
+    background: var(--surface);
+    border-left: 4px solid var(--purple);
+    padding: 18px 22px;
+    border-radius: 6px;
+    margin-bottom: 32px;
+  }
+  .callout h2 { margin-top: 0; font-size: 18px; color: var(--purple); }
+  .callout p { margin: 8px 0; color: var(--muted); }
+  .callout ul { margin: 8px 0; padding-left: 20px; color: var(--muted); }
+  .callout li { margin: 4px 0; }
+  .callout strong { color: var(--text); }
+
+  .critics-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  .critic {
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 18px 22px;
+    border-top: 3px solid;
+  }
+  .critic.pragmatist { border-color: var(--orange); }
+  .critic.veteran { border-color: var(--accent); }
+  .critic h3 { margin: 0 0 8px; font-size: 15px; }
+  .critic.pragmatist h3 { color: var(--orange); }
+  .critic.veteran h3 { color: var(--accent); }
+  .critic p { color: var(--muted); font-size: 13.5px; margin: 4px 0; }
+  .critic ul { margin: 6px 0; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
+  .critic li { margin: 2px 0; }
+  .critic strong { color: var(--text); }
+
+  .tier {
+    margin-bottom: 32px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .tier-header {
+    padding: 16px 24px;
+    font-weight: 600;
+    font-size: 17px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .tier-s .tier-header { background: linear-gradient(90deg, rgba(247,118,142,.2), transparent); border-bottom: 1px solid var(--red); }
+  .tier-a .tier-header { background: linear-gradient(90deg, rgba(224,175,104,.2), transparent); border-bottom: 1px solid var(--yellow); }
+  .tier-later .tier-header { background: linear-gradient(90deg, rgba(158,206,106,.2), transparent); border-bottom: 1px solid var(--green); }
+  .tier-pkg .tier-header { background: linear-gradient(90deg, rgba(187,154,247,.2), transparent); border-bottom: 1px solid var(--purple); }
+  .tier-defer .tier-header { background: linear-gradient(90deg, rgba(86,95,137,.2), transparent); border-bottom: 1px solid var(--dim); }
+  .tier-frame .tier-header { background: linear-gradient(90deg, rgba(122,162,247,.2), transparent); border-bottom: 1px solid var(--accent); }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .badge-s { background: var(--red); color: var(--bg); }
+  .badge-a { background: var(--yellow); color: var(--bg); }
+  .badge-later { background: var(--green); color: var(--bg); }
+  .badge-pkg { background: var(--purple); color: var(--bg); }
+  .badge-defer { background: var(--dim); color: var(--text); }
+  .badge-frame { background: var(--accent); color: var(--bg); }
+
+  .card {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card:last-child { border-bottom: none; }
+  .card h3 {
+    margin: 0 0 6px;
+    font-size: 16px;
+    color: var(--text);
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .card .num {
+    color: var(--dim);
+    font-size: 14px;
+    font-weight: 500;
+    min-width: 22px;
+  }
+  .card .summary {
+    color: var(--muted);
+    margin: 8px 0;
+    font-size: 14.5px;
+  }
+  .card .label {
+    color: var(--dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    font-weight: 600;
+    margin-top: 10px;
+    margin-bottom: 2px;
+  }
+  .card .pay {
+    color: var(--green);
+    font-size: 13.5px;
+    font-style: italic;
+  }
+  .card .cost {
+    color: var(--orange);
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .stacks {
+    display: inline-flex;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .stack {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .stack.go { color: #88c0d0; }
+  .stack.swift { color: #ff9e64; }
+  .stack.both { color: var(--purple); }
+  .stack.repo { color: var(--green); }
+  .stack.new { background: var(--red); color: var(--bg); }
+  .stack.promoted { background: var(--yellow); color: var(--bg); }
+
+  .top5 {
+    background: var(--surface);
+    border: 2px solid var(--purple);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 40px 0 24px;
+  }
+  .top5 h2 { margin-top: 0; color: var(--purple); }
+  .top5 ol { padding-left: 24px; }
+  .top5 li { margin: 10px 0; color: var(--muted); }
+  .top5 strong { color: var(--text); }
+  .top5 .old-top5 {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border);
+    color: var(--dim);
+    font-size: 13px;
+  }
+  .top5 .old-top5 strong { color: var(--muted); }
+
+  code {
+    background: var(--surface-2);
+    color: var(--orange);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+  }
+
+  table.pkgs {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 14px;
+  }
+  table.pkgs th {
+    text-align: left;
+    padding: 10px 12px;
+    color: var(--dim);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.pkgs td {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    vertical-align: top;
+  }
+  table.pkgs td:first-child {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    color: var(--orange);
+    white-space: nowrap;
+  }
+  table.pkgs td:last-child {
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  table.pkgs tr:last-child td { border-bottom: none; }
+  table.pkgs a { color: var(--orange); text-decoration: none; }
+  table.pkgs a:hover { text-decoration: underline; }
+  .verdict-keep { color: var(--green); }
+  .verdict-split { color: var(--yellow); }
+  .verdict-defer { color: var(--dim); }
+  .verdict-promote { color: var(--red); }
+
+  .pkg-section-title {
+    margin: 20px 24px 4px;
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+
+  .frame-q {
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .frame-q:last-child { border-bottom: none; }
+  .frame-q h3 {
+    margin: 0 0 8px;
+    color: var(--accent);
+    font-size: 15px;
+  }
+  .frame-q p {
+    color: var(--muted);
+    margin: 6px 0;
+    font-size: 14px;
+  }
+
+  footer {
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--dim);
+    font-size: 13px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Fleet — Infra Brainstorm</h1>
+  <div class="subtitle">Reconciled after two independent critics pushed back</div>
+  <div class="meta-tag">V2 — RESILIENCE-FIRST</div>
+</header>
+
+<div class="callout">
+  <h2>What the critics changed</h2>
+  <p>The original brainstorm was <strong>biased toward dev-velocity</strong> (CI, registries, tests, refactors) and missed <strong>production resilience entirely</strong>. Both critics — independently — flagged the same omissions.</p>
+  <p><strong>The big rebalance:</strong> half the original Tier S/A is paint for a solo dev pre-distribution. What actually matters: db corruption protection, daemon-dies-while-Mac-attached, distribution path. None were in V1.</p>
+  <ul>
+    <li><strong>Promoted to Tier S:</strong> daemon singleton lock, db backup + integrity check, Mac top-level reconnect, crash-loop guard, <code>fleet doctor</code>, Sparkle path scaffolding</li>
+    <li><strong>Demoted to Later:</strong> action registry, AppModel split, app.go decomposition, snapshot tests, theme catalog, daemon-side analytics</li>
+    <li><strong>Defer (cargo cult):</strong> mprocs / watchexec / act / mise, swift-snapshot-testing, full OpenTelemetry, gofumpt + goimports-reviser, mockery</li>
+    <li><strong>Split decisions to flag:</strong> protovalidate (transformative vs cargo cult), swift-dependencies (real DI vs TCA-adjacent), request IDs (promote vs defer)</li>
+  </ul>
+</div>
+
+<div class="critics-grid">
+  <div class="critic pragmatist">
+    <h3>Critic 1 — The Pragmatist</h3>
+    <p><em>Lens: solo dev, pre-distribution, every infra hour is a feature hour lost.</em></p>
+    <p><strong>Verdict:</strong> Original top-5 = ~2 weeks. Cost of skipping all 5 for 3 months = ~5–8 hours. The math doesn't work.</p>
+    <ul>
+      <li>Action registry is "exactly the kind of premature abstraction your own CLAUDE.md warns against"</li>
+      <li>OTel + protovalidate + swift-dependencies = "fancier slog" / cargo cult for a one-person shop</li>
+      <li>What's missing: <strong>SQLite schema-version + write-conflict audit</strong></li>
+    </ul>
+  </div>
+  <div class="critic veteran">
+    <h3>Critic 2 — The Veteran</h3>
+    <p><em>Lens: shipped two-stack Go-daemon + Mac apps before; knows what bites at month 6.</em></p>
+    <p><strong>Verdict:</strong> Brainstorm is "dev-velocity, not production-resilience." The biggest 6-month risks aren't on the list at all.</p>
+    <ul>
+      <li>No daemon singleton lock → two daemons can briefly open the same SQLite. <strong>#1 silent corruption vector.</strong></li>
+      <li>Mac has stream-level reconnect but no <strong>top-level transport reconnect</strong>. Daemon crash = Mac app dead until relaunch.</li>
+      <li>Distribution (Sparkle) should be a <strong>column, not a row</strong> — it gates "do you have Mac users at all"</li>
+    </ul>
+  </div>
+</div>
+
+<!-- TIER S -->
+<div class="tier tier-s">
+  <div class="tier-header">
+    <span class="badge badge-s">TIER S</span>
+    <span>Resilience first — what'll bite before any dev-velocity issue does</span>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">1.</span>Daemon singleton lock + db integrity + nightly backup <span class="stacks"><span class="stack new">NEW</span><span class="stack go">Go</span></span></h3>
+    <div class="summary"><code>PrepareSocket</code> in <code>internal/daemonsrv/socket.go:38-60</code> handles the socket file, but there's no <code>flock</code> on <code>state.db</code>. If two <code>fleet daemon</code> invocations race (or daemon + <code>--standalone</code> TUI race), both briefly open the same SQLite. modernc/sqlite WAL with <code>busy_timeout=5000</code> serializes writes, but you've got two <code>SessionService</code> instances racing tmux state. Plus: no <code>PRAGMA integrity_check</code> on open, no rotating backup.</div>
+    <div class="label">Fix</div>
+    <div class="summary"><code>flock</code> on <code>state.db</code> + pidfile, <code>integrity_check</code> on open, copy <code>state.db</code> → <code>state.db.bak-&lt;date&gt;</code> on daemon start (keep last 3). Sub-MB file.</div>
+    <div class="label">Why it pays off — <span class="cost">~1 day</span></div>
+    <div class="pay">The only failure mode on this list that can <strong>destroy user data</strong>. Everything else is recoverable.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">2.</span>Mac top-level reconnect + crash-loop guard <span class="stacks"><span class="stack new">NEW</span><span class="stack swift">Swift</span></span></h3>
+    <div class="summary"><code>DaemonClient.swift:22-71</code> exits the <code>withGRPCClient</code> closure on disconnect and sets <code>.disconnected</code> — user must relaunch the app. Stream-level reconnect in <code>StreamConsumers.swift</code> only handles in-stream errors. If <code>fleet daemon</code> crashes, the Mac app is dead until quit-relaunch. <strong>P0 before any user sees this.</strong> Also: <code>internal/daemonclient/autospawn.go:30-46</code> has no crash-loop guard — daemon dying repeatedly = infinite respawn from every launch.</div>
+    <div class="label">Fix</div>
+    <div class="summary">Wrap <code>DaemonClientRunner.run</code> in a top-level retry <code>Task</code> with exp-backoff. ~50 lines. Add crash-loop guard: if daemon dies 3× in 60s, surface the actual crash and stop respawning.</div>
+    <div class="label">Why it pays off — <span class="cost">~0.5 day</span></div>
+    <div class="pay">Without this, the Mac app is a demo, not a shipped product.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">3.</span><code>fleet doctor</code> subcommand <span class="stacks"><span class="stack new">NEW</span><span class="stack go">Go</span></span></h3>
+    <div class="summary">Single command that prints: daemon alive? socket path? db size + integrity? tmux sessions found? hook files in dir? config dir perms? <code>$PATH</code> has <code>gh</code>? Chrome NMH installed?</div>
+    <div class="label">Why it pays off — <span class="cost">~0.5 day</span></div>
+    <div class="pay">You'll write this anyway the third time a user hits a bug. Build it once, save N support cycles later.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">4.</span><code>make dev</code> + <code>make reset</code> + tiny Swift CI <span class="stacks"><span class="stack repo">Repo</span></span></h3>
+    <div class="summary"><strong>Scoped down from V1.</strong> No mprocs. Just a bash script that runs daemon + Mac watcher. <code>make reset</code> is 3 lines (backup + rm <code>~/.config/fleet/</code>). Mac CI = commit <code>Package.resolved</code> + 6-line GH Actions workflow running <code>swift build</code> + <code>swift-format lint</code>. That's it.</div>
+    <div class="label">Why it pays off — <span class="cost">~30 min</span></div>
+    <div class="pay">Three-process dev loop becomes one terminal. <code>make reset</code> used weekly. Both critics agree this is real.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">5.</span>Sparkle path scaffolding now <span class="stacks"><span class="stack promoted">PROMOTED B→S</span><span class="stack swift">Swift</span></span></h3>
+    <div class="summary">Veteran flagged: Sparkle in Tier B treated it as quality-of-life. It isn't — it's the gate to "do you have Mac users at all." Without auto-update, every bug fix means a manual download. The day you put the Mac app in front of someone, you need it.</div>
+    <div class="label">Fix (scaffolding now, ship later)</div>
+    <div class="summary">Add Sparkle dep + <code>.app</code> bundle scaffolding + xcodebuild archive step in Makefile. Don't ship updates yet — but stop pretending the app is "almost a real app."</div>
+    <div class="label">Why it pays off — <span class="cost">~1 day</span></div>
+    <div class="pay">Distribution is the unlock. Every other Mac improvement is gated on this.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">6.</span>Snapshot proto unification <span class="stacks"><span class="stack both">Both</span></span></h3>
+    <div class="summary">From V1: two snapshot formats (TUI dir-of-files vs Mac markdown blob). Define a <code>Snapshot</code> proto, both clients write the same shape, extend <code>debug-status</code> skill to handle either source. Pragmatist gave this 7/10 — small effort, real payoff.</div>
+    <div class="label">Why it pays off — <span class="cost">~2 hours</span></div>
+    <div class="pay">When Mac users hit bugs, the AI debugging workflow you built for the TUI just works.</div>
+  </div>
+</div>
+
+<!-- TIER A -->
+<div class="tier tier-a">
+  <div class="tier-header">
+    <span class="badge badge-a">TIER A</span>
+    <span>High leverage, near-term — pick up after Tier S lands</span>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">7.</span>Request IDs + per-client trace field <span class="stacks"><span class="stack both">Both</span></span></h3>
+    <div class="summary"><em>Critics split:</em> pragmatist says 3/10 urgency (you've triaged 0 cross-client bugs so far); veteran says promote because <strong>every support email is detective work without it</strong>. With a real TUI user base on Homebrew + Mac app coming, side with veteran. Just don't over-build: <code>request_id</code> UUID + <code>client</code> field in every log line. Skip OTel for now.</div>
+    <div class="label">Why it pays off — <span class="cost">~1 day</span></div>
+    <div class="pay">First bug from a real user, you'll know which process did what.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">8.</span>Schema versioning + migration playbook <span class="stacks"><span class="stack new">NEW</span><span class="stack go">Go</span></span></h3>
+    <div class="summary">Pragmatist's catch: you already have <code>internal/migration/migrate.go</code> for the rename. Mac app now reads same db via daemon. What happens when a user with v2.1.0 (TUI-only) pulls down a daemon binary that opens their db with a new column? Add <code>schema_version</code> table + a one-page playbook for column additions.</div>
+    <div class="label">Why it pays off — <span class="cost">~0.5 day</span></div>
+    <div class="pay">Prevents the second category of "destroys user data" bug.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">9.</span>Kill-daemon-while-attached chaos test <span class="stacks"><span class="stack new">NEW</span><span class="stack repo">Repo</span></span></h3>
+    <div class="summary">Pragmatist's ask: a deliberate test that kills the daemon mid-stream while Mac is attached. Confirms #2 actually works. Could be as simple as a shell script: launch daemon, launch Mac, <code>kill -9</code> the daemon, watch Mac recover. Manual today, scriptable later.</div>
+    <div class="label">Why it pays off — <span class="cost">~0.5 day</span></div>
+    <div class="pay">Verifies the fix; documents the contract.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">10.</span>swift-async-algorithms adoption <span class="stacks"><span class="stack swift">Swift</span></span></h3>
+    <div class="summary">Both critics flagged this as the one Swift package that's genuinely useful (not cargo cult). Cleaner stream consumer in <code>StreamConsumers.swift</code>, free debounce on filter input via <code>debounce</code>/<code>throttle</code>/<code>merge</code>.</div>
+    <div class="label">Why it pays off — <span class="cost">~1 day to adopt</span></div>
+    <div class="pay">Replaces hand-rolled timer patterns. Code shrinks.</div>
+  </div>
+
+  <div class="card">
+    <h3><span class="num">11.</span>Logging vocabulary doc (skip the sweep) <span class="stacks"><span class="stack both">Both</span></span></h3>
+    <div class="summary">From V1, scoped down. Pragmatist: "doc is fine (30 min), sweeping 247 logger calls is paint." Agree. Write a one-pager: <code>session_id</code>, <code>request_id</code>, <code>rpc</code>, <code>client</code>, <code>err</code>. Future code follows it; existing code stays.</div>
+    <div class="label">Why it pays off — <span class="cost">~30 min</span></div>
+    <div class="pay">Substrate for future log search without retroactive churn.</div>
+  </div>
+</div>
+
+<!-- FRAMING QUESTIONS -->
+<div class="tier tier-frame">
+  <div class="tier-header">
+    <span class="badge badge-frame">FRAMING QUESTIONS</span>
+    <span>The veteran's "questions you should be asking but aren't"</span>
+  </div>
+
+  <div class="frame-q">
+    <h3>Do TUI and Mac app share <em>state</em>, or share <em>tmux</em>?</h3>
+    <p>Right now they share state via the daemon: same SQLite, same session list. But nobody runs TUI + Mac simultaneously on the same machine — the Mac app is the TUI's <strong>successor</strong>, not its peer.</p>
+    <p>If you decided "they're independent apps that both happen to drive tmux," half the Tier S evaporates: no action registry, no shared-db corruption, no daemon SPOF. The flip side: future CLI ecosystem (<code>fleet api</code>, MCP servers, Raycast extension) loses its integration point.</p>
+    <p><strong>Worth a day writing down: "why do we have a daemon, and what does each consumer actually need from it?"</strong></p>
+  </div>
+
+  <div class="frame-q">
+    <h3>Is the in-process service fallback worth maintaining?</h3>
+    <p><code>cmd/fleet/main.go:318-347</code> — TUI degrades gracefully to in-process <code>service.SessionService</code> if daemon spawn fails. Mac doesn't. This is a <strong>contract surprise</strong>: same backend, different failure semantics.</p>
+    <p>Worse: every new daemon-side feature (CreateWorkspace, soft-delete tombstones) gets implemented twice (in <code>SessionService</code> + <code>daemonclient.Client</code>). Same drift problem as the action registry, invisible because both are Go.</p>
+    <p><strong>Pick a side:</strong> kill the fallback (commit to daemon-always) OR commit to always-fallback (Mac learns to spawn its own daemon). The current both-paths arrangement is the worst of both worlds.</p>
+  </div>
+
+  <div class="frame-q">
+    <h3>When does Mac distribution start?</h3>
+    <p>Sparkle, codesign, notarize, DMG. Until one person who isn't you can install + auto-update the Mac app, all the rest of this is academic.</p>
+    <p>Distribution should be a <strong>column in this brainstorm, not a row</strong>. Every Tier S item is worth asking: "does this matter before or after first external user?"</p>
+  </div>
+</div>
+
+<!-- LATER -->
+<div class="tier tier-later">
+  <div class="tier-header">
+    <span class="badge badge-later">LATER</span>
+    <span>Real ideas, but not now. Revisit when the trigger condition hits.</span>
+  </div>
+
+  <div class="card">
+    <h3>Action registry <span class="stacks"><span class="stack repo">Repo</span></span></h3>
+    <div class="summary"><strong>Trigger:</strong> second contributor, OR Mac surpasses TUI in action count, OR a user reports a drift bug. Today both lists are 14–21 entries you maintain alone. Pragmatist: "exactly the kind of premature abstraction your own CLAUDE.md warns against."</div>
+  </div>
+
+  <div class="card">
+    <h3>Split AppModel + decompose app.go <span class="stacks"><span class="stack both">Both</span></span></h3>
+    <div class="summary"><strong>Trigger:</strong> AppModel hits 1200+ LOC OR you start fighting SwiftUI re-renders. Veteran: don't split early, "ruthlessly remove code" — same trap that produced app.go's bloat isn't avoided by splitting, only by deleting.</div>
+  </div>
+
+  <div class="card">
+    <h3>Mockable Mutator + Mac unit tests <span class="stacks"><span class="stack swift">Swift</span></span></h3>
+    <div class="summary"><strong>Trigger:</strong> AppModel stops changing weekly (probably slice 6–7). Pragmatist: "testing churning code is throwaway work." The simple <code>protocol DaemonMutating</code> + <code>FakeDaemonClient</code> is the right shape — no swift-dependencies needed.</div>
+  </div>
+
+  <div class="card">
+    <h3>Theme catalog / SwiftUI snapshot tests / Activity inspector <span class="stacks"><span class="stack swift">Swift</span></span></h3>
+    <div class="summary"><strong>Trigger:</strong> design churn slows. Veteran on snapshot tests: "great for design-heavy apps; you have 6 sheets and Apple Previews give you 80%." Activity inspector is a feature wearing infra clothing.</div>
+  </div>
+
+  <div class="card">
+    <h3>Daemon-side analytics, stricter linters, sentinel errors, skills <span class="stacks"><span class="stack go">Go</span></span></h3>
+    <div class="summary">All real. None bite this quarter. Revisit when current sprint settles.</div>
+  </div>
+</div>
+
+<!-- PACKAGES -->
+<div class="tier tier-pkg">
+  <div class="tier-header">
+    <span class="badge badge-pkg">PACKAGES &amp; TOOLS</span>
+    <span>Pruned to what would actually get used</span>
+  </div>
+
+  <div class="pkg-section-title">Swift — keep</div>
+  <div style="padding: 0 24px 8px;">
+    <table class="pkgs">
+      <thead><tr><th>Package</th><th>Why</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><a href="https://github.com/apple/swift-async-algorithms" target="_blank">swift-async-algorithms</a></td>
+          <td>Both critics: actually useful. <code>debounce</code>/<code>throttle</code>/<code>merge</code> for AsyncSequence. Cleaner stream consumer.</td>
+          <td class="verdict-keep">KEEP</td>
+        </tr>
+        <tr>
+          <td><a href="https://sparkle-project.org/" target="_blank">Sparkle</a></td>
+          <td>Veteran promoted: the gate to Mac users, not a polish item. Scaffold now.</td>
+          <td class="verdict-promote">PROMOTE</td>
+        </tr>
+        <tr>
+          <td><a href="https://www.swift.org/blog/swift-testing-released/" target="_blank">swift-testing</a></td>
+          <td>Free with Swift 6 — flip the switch when you start writing tests. No cost to having it ready.</td>
+          <td class="verdict-keep">KEEP</td>
+        </tr>
+        <tr>
+          <td><a href="https://github.com/swiftlang/swift-format" target="_blank">swift-format</a></td>
+          <td>Free with toolchain. Wire into the 6-line Mac CI in Tier S #4.</td>
+          <td class="verdict-keep">KEEP</td>
+        </tr>
+        <tr>
+          <td><a href="https://github.com/apple/swift-log" target="_blank">swift-log</a></td>
+          <td>Already transitive via grpc-swift. Adopt as <code>FleetLog</code> backend when you wire request IDs (#7).</td>
+          <td class="verdict-keep">KEEP</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pkg-section-title">Swift — disputed (decide later)</div>
+  <div style="padding: 0 24px 8px;">
+    <table class="pkgs">
+      <thead><tr><th>Package</th><th>The split</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><a href="https://github.com/pointfreeco/swift-dependencies" target="_blank">swift-dependencies</a></td>
+          <td>Veteran: transformative for testability. Pragmatist: TCA-adjacent cargo cult — plain protocols are enough.</td>
+          <td class="verdict-split">DECIDE WHEN TESTING</td>
+        </tr>
+        <tr>
+          <td><a href="https://github.com/pointfreeco/swift-snapshot-testing" target="_blank">swift-snapshot-testing</a></td>
+          <td>Both: skip for now. Use Apple Previews. Baselines go stale under churn.</td>
+          <td class="verdict-defer">DEFER</td>
+        </tr>
+        <tr>
+          <td><a href="https://github.com/apple/swift-collections" target="_blank">swift-collections</a> (Deque)</td>
+          <td>Veteran: paint at N=50–100. Pragmatist: useful eventually. Array is fine today.</td>
+          <td class="verdict-defer">DEFER</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pkg-section-title">Go — keep</div>
+  <div style="padding: 0 24px 8px;">
+    <table class="pkgs">
+      <thead><tr><th>Package</th><th>Why</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><a href="https://github.com/grpc-ecosystem/go-grpc-middleware" target="_blank">go-grpc-middleware/v2</a></td>
+          <td>Drop-in interceptors for request IDs (#7) + recovery. Saves writing 50 lines.</td>
+          <td class="verdict-keep">KEEP</td>
+        </tr>
+        <tr>
+          <td><a href="https://github.com/google/go-cmp" target="_blank">google/go-cmp</a></td>
+          <td>Rich diffs in tests — when you have tests. Cheap to add anytime.</td>
+          <td class="verdict-keep">KEEP</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pkg-section-title">Go — disputed</div>
+  <div style="padding: 0 24px 8px;">
+    <table class="pkgs">
+      <thead><tr><th>Package</th><th>The split</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><a href="https://github.com/bufbuild/protovalidate" target="_blank">protovalidate-go</a></td>
+          <td>Veteran: <strong>the one transformative pick</strong> — proto becomes source of truth for invariants. Pragmatist: "solving a problem you don't have" — validation today is "this string isn't empty."</td>
+          <td class="verdict-split">DECIDE WHEN PROTO GROWS</td>
+        </tr>
+        <tr>
+          <td><a href="https://github.com/stretchr/testify" target="_blank">testify</a></td>
+          <td>Both: useful, but only when you write Go tests for the daemon. Defer until then.</td>
+          <td class="verdict-defer">DEFER</td>
+        </tr>
+        <tr>
+          <td><a href="https://github.com/cli/safeexec" target="_blank">cli/safeexec</a></td>
+          <td>Both: marginal. You already solved <code>$PATH</code> in <code>CommandRunner</code>; <code>internal/github/pr.go</code> would barely benefit.</td>
+          <td class="verdict-defer">DEFER</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pkg-section-title">Defer — both critics agree</div>
+  <div style="padding: 0 24px 16px; color: var(--muted); font-size: 13.5px; line-height: 1.7;">
+    <strong style="color: var(--text);">otelgrpc / full OpenTelemetry</strong> — overkill for a local single-process daemon. Just put <code>request_id</code> in slog fields.<br>
+    <strong style="color: var(--text);">mprocs / watchexec / act / mise</strong> — "tools I heard about on HN." <code>make dev</code> + a bash script is enough. <code>act</code> specifically diverges from real GitHub runners.<br>
+    <strong style="color: var(--text);">gofumpt / goimports-reviser</strong> — zero bug-prevention value.<br>
+    <strong style="color: var(--text);">buf breaking in CI</strong> — for multi-team consumers. You're one person with two clients you control; you'd <code>--force</code> it anyway.<br>
+    <strong style="color: var(--text);">mockery, viper, golang-migrate, connect-go</strong> — already in V1's defer list. Stay there.
+  </div>
+</div>
+
+<!-- TOP 5 -->
+<div class="top5">
+  <h2>New top 5 — resilience first</h2>
+  <ol>
+    <li><strong>Daemon singleton lock + db integrity + nightly backup</strong> — 1 day. Only failure mode that destroys user data.</li>
+    <li><strong>Mac top-level reconnect + crash-loop guard</strong> — 0.5 day. P0 before any user sees the Mac app.</li>
+    <li><strong><code>make dev</code> + <code>make reset</code> + 6-line Swift CI</strong> — 30 min. Saves time forever.</li>
+    <li><strong><code>fleet doctor</code> subcommand</strong> — 0.5 day. You'll write it the third time anyway.</li>
+    <li><strong>Request IDs + per-client trace field</strong> — 1 day. First real-user bug, you'll know which process did what.</li>
+  </ol>
+  <p style="color: var(--muted); margin-top: 14px;">~3 days of work. Then answer the framing questions before deciding what's next.</p>
+
+  <div class="old-top5">
+    <strong>V1 top 5 (for comparison):</strong> Mac CI · make dev · action registry · Mac tests · request IDs. <em>~2 weeks of dev-velocity work. Both critics flagged the imbalance.</em>
+  </div>
+</div>
+
+<footer>
+  Fleet infra brainstorm V2 — reconciled 2026-05-15<br>
+  Two independent critics, one solo developer, three days of resilience work to do.<br>
+  Stacks: <span style="color: #88c0d0;">Go</span> · <span style="color: #ff9e64;">Swift</span> · <span style="color: var(--purple);">Both</span> · <span style="color: var(--green);">Repo</span>
+</footer>
+
+</div>
+</body>
+</html>
