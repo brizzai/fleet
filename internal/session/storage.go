@@ -21,6 +21,7 @@ type SessionRow struct {
 	ID              string
 	Title           string
 	ProjectPath     string
+	Agent           string
 	Status          string
 	TmuxSession     string
 	CreatedAt       time.Time
@@ -151,6 +152,14 @@ func (s *StateDB) migrate() error {
 			return err
 		}
 	}
+	// Add agent column if missing (which coding agent the session runs).
+	if !s.hasColumn("sessions", "agent") {
+		_, err = s.db.Exec(`ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'`)
+		if err != nil {
+			debuglog.Logger.Error("migration failed: add agent column", "error", err)
+			return err
+		}
+	}
 
 	_, err = s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS slot_bindings (
@@ -199,10 +208,10 @@ func (s *StateDB) hasColumn(table, column string) bool {
 // SaveSession inserts or replaces a session row.
 func (s *StateDB) SaveSession(row *SessionRow) error {
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO sessions (id, title, project_path, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		row.ID, row.Title, row.ProjectPath, row.Status, row.TmuxSession,
+		row.ID, row.Title, row.ProjectPath, row.Agent, row.Status, row.TmuxSession,
 		row.CreatedAt.Unix(), row.LastAccessed.Unix(), boolToInt(row.Acknowledged),
 		row.ClaudeSessionID, row.WorkspaceName,
 		boolToInt(row.ManuallyRenamed), row.FirstPrompt, boolToInt(row.TitleGenerated),
@@ -217,7 +226,7 @@ func (s *StateDB) SaveSession(row *SessionRow) error {
 // LoadSessions returns all sessions ordered by creation time.
 func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, project_path, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count
+		SELECT id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count
 		FROM sessions ORDER BY created_at
 	`)
 	if err != nil {
@@ -231,7 +240,7 @@ func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 		var r SessionRow
 		var createdAt, lastAccessed int64
 		var ack, manuallyRenamed, titleGenerated int
-		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount); err != nil {
 			debuglog.Logger.Error("failed to scan session row", "error", err)
 			return nil, err
 		}

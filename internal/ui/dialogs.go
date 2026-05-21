@@ -6,16 +6,19 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
+// An empty agent means "use the configured default" (resolved in handleSessionCreate).
 type sessionCreateMsg struct {
 	path          string
 	title         string
 	workspaceName string
+	agent         agent.Type
 }
 
 // forkSessionMsg is sent when the user forks an existing session.
@@ -24,6 +27,7 @@ type forkSessionMsg struct {
 	path                  string
 	title                 string
 	workspaceName         string
+	agent                 agent.Type // inherited from the parent session
 }
 
 // NewSessionDialog handles the new session creation flow with directory autocomplete.

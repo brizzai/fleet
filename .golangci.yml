@@ -54,7 +54,7 @@ linters:
         linters:
           - errcheck
       # Best-effort hook injection on startup
-      - text: "Error return value of `.*InjectClaudeHooks"
+      - text: "Error return value of `.*Inject(Claude|Codex)Hooks"
         linters:
           - errcheck
     paths:
