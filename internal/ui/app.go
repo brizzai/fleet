@@ -1452,7 +1452,11 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 // an empty worktree header the worker never refreshes it, so fall back to a direct
 // git check — cheap, and only on the keypress that opens the delete dialog.
 func (h *Home) repoIsWorktree(repoPath string) bool {
-	if info := h.gitInfoCache[repoPath]; info != nil {
+	// Snapshot under workerMu — the status worker writes gitInfoCache concurrently.
+	h.workerMu.Lock()
+	info := h.gitInfoCache[repoPath]
+	h.workerMu.Unlock()
+	if info != nil {
 		return info.IsWorktreeRepo
 	}
 	return git.IsWorktree(repoPath)
