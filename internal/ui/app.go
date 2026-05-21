@@ -1447,19 +1447,15 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	return nil
 }
 
-// repoIsWorktree reports whether a repo group is a git worktree fleet can destroy.
-// Avoids new blocking I/O: it prefers session metadata, falling back to the cached
-// git info populated by the worker.
+// repoIsWorktree reports whether a repo group is a git worktree. Uses the cached
+// git info when available (populated by the worker for repos with sessions); for
+// an empty worktree header the worker never refreshes it, so fall back to a direct
+// git check — cheap, and only on the keypress that opens the delete dialog.
 func (h *Home) repoIsWorktree(repoPath string) bool {
-	for _, s := range h.sessions {
-		if session.GetRepoRoot(s.ProjectPath) == repoPath {
-			return s.WorkspaceName != "" && workspace.ResolveProvider(repoPath).CanDestroy()
-		}
-	}
 	if info := h.gitInfoCache[repoPath]; info != nil {
 		return info.IsWorktreeRepo
 	}
-	return false
+	return git.IsWorktree(repoPath)
 }
 
 // unpinRepoHeader unpins a repo from the sidebar and fixes the cursor.
@@ -1520,7 +1516,12 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 			dm.repoPath = msg.repoPath
 			if msg.destroyWorkspace {
 				dm.destroyWorkspace = true
+				// Destroy matches the worktree by path, but finalizeDelete guards on a
+				// non-empty name; fall back to the dir basename when unset.
 				dm.workspaceName = s.WorkspaceName
+				if dm.workspaceName == "" {
+					dm.workspaceName = filepath.Base(msg.repoPath)
+				}
 			}
 		}
 		_, cmd := h.deferDelete(dm)
