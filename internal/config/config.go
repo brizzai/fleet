@@ -20,6 +20,15 @@ type Config struct {
 	CopyClaudeSettings *bool  `json:"copy_claude_settings,omitempty"`
 	EnterMode          string `json:"enter_mode,omitempty"` // "attach" or "split"
 	Telemetry          *bool  `json:"telemetry,omitempty"`
+	DefaultAgent       string `json:"default_agent,omitempty"` // "claude" or "codex"
+}
+
+// GetDefaultAgent returns the default coding agent for new sessions ("claude" or "codex").
+func (c *Config) GetDefaultAgent() string {
+	if c.DefaultAgent == "codex" {
+		return "codex"
+	}
+	return "claude"
 }
 
 // IsAutoNameEnabled returns whether auto-naming is enabled (default: true).

@@ -2,7 +2,7 @@
 
 > This file provides context for AI-assisted development with Claude Code.
 
-TUI tool for managing multiple Claude Code sessions in parallel using tmux.
+TUI tool for managing multiple Claude Code and OpenAI Codex sessions in parallel using tmux.
 
 ## Tech Stack
 - Go 1.26+, Bubble Tea + Lipgloss, tmux, SQLite (WAL mode)
@@ -78,7 +78,7 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Sessions grouped by git repo root in sidebar with tree lines (├─/└─)
 - Status: Running, Waiting, Finished, Idle, Error, Starting
 - Status icons: ● (running/finished), ◐ (waiting), ○ (idle/starting), ✕ (error)
-- Keybindings: j/k nav, Enter attach, Space jump to next waiting/finished, a new session (instant, repo-scoped), n new session (any repo, path autocomplete), w new worktree session (base branch + new branch), d delete (Y to also destroy workspace, D to also remove repo), z undo delete (5s window), r restart, R rename, e editor, p open PR in browser, Y quick approve (waiting sessions), / filter, : or Ctrl+P command palette, S settings, ! bug report/diagnostics, ? help, q quit
+- Keybindings: j/k nav, Enter attach, Space jump to next waiting/finished, a new session (instant, repo-scoped, default agent), A new session with agent picker (Claude/Codex), n new session (any repo, path autocomplete), w new worktree session (base branch + new branch), d delete (Y to also destroy workspace, D to also remove repo), z undo delete (5s window), r restart, R rename, e editor, p open PR in browser, Y quick approve (waiting sessions), / filter, : or Ctrl+P command palette, S settings, ! bug report/diagnostics, ? help, q quit
 - Session hotkeys (RTS-style): `Alt+0-9` (or `=` then digit) binds the selected session to a slot; re-pressing `Alt+<N>` on a session already in slot N unbinds; `==` then digit clears any slot; plain `0-9` jumps to the bound session (double-tap within 400ms also attaches); `[N]` badge in sidebar marks bound sessions; bindings persist in SQLite `slot_bindings` table (FK cascade on session delete)
 - Command palette (: / Ctrl+P): fuzzy-searchable list of all actions; palette-only commands include "Reload All Sessions" (restarts all dead/error sessions)
 - Undo delete: `z` key restores last deleted session within 5s window (stacked — multiple deletes each undoable). Tmux kept alive during window for full restore.
@@ -104,14 +104,17 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Worktree creation copies `.claude/settings.local.json` from source repo (configurable via `copy_claude_settings`, default true)
 - `.fleet.json` / `.fleet.local.json` in repo root (legacy `.bc.json` / `.bc.local.json` still read): `{"workspace": {"list": "cmd", "create": "cmd {{name}} {{branch}}", "destroy": "cmd {{name}}"}}`
 - `.fleet.json` / `.fleet.local.json` may also set `{"pr_checks": {"ignore": ["glob", ...]}}` to drop matching CI checks from the PR-badge rollup (path.Match globs; lists from both files merge additively; opt-in, empty by default)
-- Claude session resume: captures Claude session_id from hooks, uses `claude --resume <id>` on restart
+- Multi-agent: per-session agent (Claude or Codex), chosen at creation (`A` key picker or `default_agent` config used by `a`). Stored in SQLite `agent` column; `internal/agent` owns binary name + launch command (`claude` / `codex resume <id>` / `codex fork <id>`).
+- Codex status: driven entirely by Codex hooks (no pane scraping); same pipeline as Claude — `fleet hook-handler` is agent-neutral (`hook_event_name`/`session_id`/`prompt` match Claude). Hooks installed to `~/.codex/hooks.json` (`InjectCodexHooks`, only when `codex` on PATH). Codex has no SessionEnd → `dead` from tmux pane-death. Claude pane heuristics never run for Codex sessions.
+- Codex trust: dir-trust pre-seeded to `~/.codex/config.toml` (`[projects."<path>"] trust_level="trusted"`, via `EnsureCodexDirTrust`) before launch; hook-trust is a one-time global TUI prompt the user accepts on first Codex launch (persists in config.toml `[hooks.state]`).
+- Session resume: captures the agent's session_id from hooks, uses `claude --resume <id>` / `codex resume <id>` on restart
 - Editor: config.editor > $EDITOR > "code" (VS Code)
 - Themes: tokyo-night (default), catppuccin-mocha, rose-pine, nord, gruvbox — configurable via settings (S key)
 - Settings dialog: S key opens settings overlay, live theme preview, auto-name toggle, copy .claude toggle, auto-saves on close
 - Bug report: `!` key opens dialog showing error history, action log, system diagnostics; `g` opens GitHub issue with pre-filled markdown via `gh issue create --web`
 - Error history: ring buffer (max 50) of errors that flash for 5s — persists for bug reporting
 - Action log: ring buffer (max 100) of user actions (attach, delete, restart, editor, approve, etc.) for "steps to reproduce"
-- Diagnostics: app version, macOS version, tmux/claude/gh versions, config, last 100 lines of debug.log; home dir sanitized to `~`
+- Diagnostics: app version, macOS version, tmux/claude/codex/gh versions, config, last 100 lines of debug.log; home dir sanitized to `~`
 - Auto-naming: sessions auto-titled from user prompt via smart heuristic (filler stripping, word-boundary truncation)
 - Auto-naming pipeline: UserPromptSubmit hook → status file → HookWatcher → Session.FirstPrompt → worker cycle → naming.GenerateTitle
 - Retitle: after 3 prompts, title regenerated from latest prompt (better reflects session scope)
@@ -124,4 +127,4 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Chrome extension ID: `haphpcoecelhofejcklinnlbfijgdnih` (stable via `key` in manifest.json)
 - Extension commands: `open_or_focus`, `close_tab`, `create_tab_group`, `ping`
 - Service worker reconnects to native host on disconnect (2s delay)
-- Claude Code only, Mac only
+- Claude Code + OpenAI Codex, Mac only

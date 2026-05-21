@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -40,6 +41,7 @@ type Session struct {
 	ID                    string
 	Title                 string
 	ProjectPath           string
+	Agent                 agent.Type // which coding agent runs in this session (claude/codex)
 	Status                Status
 	TmuxSessionName       string
 	CreatedAt             time.Time
@@ -85,15 +87,14 @@ func NewSession(title, projectPath string) *Session {
 	}
 }
 
-// buildClaudeCmd returns the claude command with optional --resume/--fork-session flags.
-func (s *Session) buildClaudeCmd() string {
-	cmd := "claude"
-	if s.ForkFromID != "" {
-		cmd += fmt.Sprintf(" --resume %s --fork-session", s.ForkFromID)
-	} else if s.ClaudeSessionID != "" {
-		cmd += fmt.Sprintf(" --resume %s", s.ClaudeSessionID)
-	}
-	return cmd
+// buildAgentCmd returns the launch command for this session's agent, with
+// optional resume/fork details. ClaudeSessionID stores the agent's own
+// conversation id (Claude or Codex) captured from hooks.
+func (s *Session) buildAgentCmd() string {
+	return agent.Parse(string(s.Agent)).BuildLaunchCmd(agent.LaunchOpts{
+		ResumeID: s.ClaudeSessionID,
+		ForkID:   s.ForkFromID,
+	})
 }
 
 // sessionEnv returns the env vars to set on the tmux session for this fleet session.
@@ -111,7 +112,7 @@ func (s *Session) Start() error {
 	s.Status = StatusStarting
 	s.mu.Unlock()
 
-	cmd := s.buildClaudeCmd()
+	cmd := s.buildAgentCmd()
 	if err := s.tmuxSession.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
@@ -274,7 +275,7 @@ func (s *Session) Restart() error {
 	s.deathRecorded = false
 	s.mu.Unlock()
 
-	cmd := s.buildClaudeCmd()
+	cmd := s.buildAgentCmd()
 	if err := newTmux.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
@@ -300,7 +301,7 @@ func (s *Session) RespawnClaude() error {
 	s.deathRecorded = false
 	s.mu.Unlock()
 
-	cmd := s.buildClaudeCmd()
+	cmd := s.buildAgentCmd()
 	if err := s.tmuxSession.RespawnPane(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
@@ -364,12 +365,57 @@ func (s *Session) UpdateStatus() {
 	hasHook := hookStatus != "" && !s.hookUpdatedAt.IsZero()
 	s.mu.RUnlock()
 
+	// Codex status is hook-driven only. Its TUI differs from Claude's, so the
+	// Claude pane heuristics below would false-positive — never run them.
+	if s.Agent == agent.Codex {
+		if hasHook {
+			s.updateStatusFromHookNoPane(oldStatus, hookStatus, log)
+		}
+		// No hook yet: leave status as-is and await the SessionStart hook.
+		return
+	}
+
 	if hasHook {
 		s.updateStatusFromHook(oldStatus, hookStatus, hookAge, log)
 		return
 	}
 
 	s.updateStatusFromPane(oldStatus, log)
+}
+
+// updateStatusFromHookNoPane applies hook status directly, with no pane
+// inspection. Used for agents (Codex) whose hooks are authoritative and whose
+// TUI doesn't match Claude's pane patterns.
+func (s *Session) updateStatusFromHookNoPane(oldStatus Status, hookStatus string, log *slog.Logger) {
+	hookSaysDead := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		switch hookStatus {
+		case "running":
+			s.Status = StatusRunning
+			s.Acknowledged = false
+		case "waiting":
+			s.Status = StatusWaiting
+			s.Acknowledged = false
+		case "finished":
+			if s.Acknowledged {
+				s.Status = StatusIdle
+			} else {
+				s.Status = StatusFinished
+			}
+		case "dead":
+			s.Status = StatusError
+			hookSaysDead = true
+		}
+		if s.Status != oldStatus {
+			log.Info("status changed (codex hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus)
+		}
+	}()
+
+	if hookSaysDead {
+		s.triggerCrashDump("hook_dead")
+	}
 }
 
 // updateStatusFromHook applies hook-based status with pane overrides.
@@ -691,6 +737,7 @@ func (s *Session) ToRow() *SessionRow {
 		ID:              s.ID,
 		Title:           s.Title,
 		ProjectPath:     s.ProjectPath,
+		Agent:           string(s.Agent),
 		Status:          string(s.Status),
 		TmuxSession:     s.TmuxSessionName,
 		CreatedAt:       s.CreatedAt,
@@ -761,6 +808,7 @@ func FromRow(row *SessionRow) *Session {
 		ID:              row.ID,
 		Title:           row.Title,
 		ProjectPath:     row.ProjectPath,
+		Agent:           agent.Parse(row.Agent),
 		Status:          status,
 		TmuxSessionName: row.TmuxSession,
 		CreatedAt:       row.CreatedAt,

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/chrome"
 	"github.com/brizzai/fleet/internal/config"
@@ -136,6 +137,7 @@ type Home struct {
 	createWorkspaceDialog *CreateWorkspaceDialog
 	branchDialog          *BranchCheckoutDialog
 	commandPalette        *CommandPaletteDialog
+	sessionCreateDialog   *SessionCreateDialog
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingDeletes    []PendingDelete     // undo stack for deferred deletions
@@ -232,6 +234,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string) *Home
 		createWorkspaceDialog: NewCreateWorkspaceDialog(),
 		branchDialog:          NewBranchCheckoutDialog(),
 		commandPalette:        NewCommandPaletteDialog(),
+		sessionCreateDialog:   NewSessionCreateDialog(),
 		bugReport:             NewBugReportDialog(),
 		previewCache:          make(map[string]string),
 		previewCacheTime:      make(map[string]time.Time),
@@ -287,6 +290,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.createWorkspaceDialog.SetSize(msg.Width, msg.Height)
 		h.branchDialog.SetSize(msg.Width, msg.Height)
 		h.commandPalette.SetSize(msg.Width, msg.Height)
+		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
 		return h, nil
@@ -328,9 +332,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h.handleSessionCreate(msg)
 
 	case forkSessionMsg:
+		ag := msg.agent
+		if ag == "" {
+			ag = agent.Parse(h.cfg.GetDefaultAgent())
+		}
+		if ag == agent.Codex {
+			if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), msg.path); err != nil {
+				debuglog.Logger.Error("codex dir trust seeding failed", "path", msg.path, "err", err)
+			}
+		}
 		s := session.NewSession(msg.title, msg.path)
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
+		s.Agent = ag
 		return h, func() tea.Msg {
 			if err := s.Start(); err != nil {
 				return sessionCreateResultMsg{err: err}
@@ -775,6 +789,9 @@ func (h *Home) renderBody() string {
 	if h.commandPalette.IsVisible() {
 		return h.commandPalette.View()
 	}
+	if h.sessionCreateDialog.IsVisible() {
+		return h.sessionCreateDialog.View()
+	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
 	}
@@ -959,6 +976,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.commandPalette = dialog
 		return h, cmd
 	}
+	if h.sessionCreateDialog.IsVisible() {
+		dialog, cmd := h.sessionCreateDialog.Update(msg)
+		h.sessionCreateDialog = dialog
+		return h, cmd
+	}
 	if h.newDialog.IsVisible() {
 		dialog, cmd := h.newDialog.Update(msg)
 		h.newDialog = dialog
@@ -1103,6 +1125,15 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			path:  repoPath,
 			title: repoName,
 		})
+	case "A":
+		// Session creation dialog with agent picker.
+		repoPath := h.resolveCurrentRepo()
+		if repoPath == "" {
+			h.newDialog.Show()
+			return h, nil
+		}
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		return h, nil
 	case "n":
 		// New session at any repo path.
 		h.newDialog.Show()
@@ -1329,13 +1360,26 @@ func (a attachCmd) SetStdout(w io.Writer) {}
 func (a attachCmd) SetStderr(w io.Writer) {}
 
 func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
+	// Empty agent → configured default.
+	ag := msg.agent
+	if ag == "" {
+		ag = agent.Parse(h.cfg.GetDefaultAgent())
+	}
+	if _, err := exec.LookPath(ag.Binary()); err != nil {
+		h.setError(fmt.Errorf("%s CLI not found — install %s to create sessions", ag.Binary(), ag.DisplayName()))
 		return h, nil
 	}
-	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path)
+	// Codex prompts to trust a new directory on first launch; pre-seed trust so
+	// the session opens straight to the prompt.
+	if ag == agent.Codex {
+		if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), msg.path); err != nil {
+			debuglog.Logger.Error("codex dir trust seeding failed", "path", msg.path, "err", err)
+		}
+	}
+	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path, "agent", ag)
 	s := session.NewSession(msg.title, msg.path)
 	s.WorkspaceName = msg.workspaceName
+	s.Agent = ag
 	return h, func() tea.Msg {
 		if err := s.Start(); err != nil {
 			debuglog.Logger.Error("session Start() failed", "title", msg.title, "path", msg.path, "err", err)
@@ -1486,12 +1530,14 @@ func (h *Home) forkSelected() tea.Cmd {
 	claudeSessionID := s.ClaudeSessionID
 	path := s.ProjectPath
 	workspaceName := s.WorkspaceName
+	parentAgent := s.Agent
 	return func() tea.Msg {
 		return forkSessionMsg{
 			parentClaudeSessionID: claudeSessionID,
 			path:                  path,
 			title:                 title,
 			workspaceName:         workspaceName,
+			agent:                 parentAgent,
 		}
 	}
 }
@@ -2818,6 +2864,11 @@ func (h *Home) loadSessions() tea.Msg {
 	// These block but run in the tea.Cmd goroutine, not Update().
 	configDir := hooks.GetClaudeConfigDir()
 	hooks.InjectClaudeHooks(configDir)
+	// Install Codex hooks too, but only if Codex is present — never create
+	// ~/.codex for users who don't have it.
+	if _, err := exec.LookPath("codex"); err == nil {
+		hooks.InjectCodexHooks(hooks.GetCodexConfigDir())
+	}
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()
 
@@ -2855,6 +2906,7 @@ func (h *Home) buildPaletteCommands() []PaletteCommand {
 		{ID: "focus", Name: "Focus Preview", Shortcut: "Tab"},
 		{ID: "jump_next", Name: "Jump to Next Waiting", Shortcut: "Space"},
 		{ID: "new_session", Name: "New Session", Shortcut: "a"},
+		{ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -2900,6 +2952,14 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 			path:  repoPath,
 			title: filepath.Base(repoPath),
 		})
+	case "new_session_pick":
+		repoPath := h.resolveCurrentRepo()
+		if repoPath == "" {
+			h.newDialog.Show()
+			return h, nil
+		}
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		return h, nil
 	case "new_repo":
 		h.newDialog.Show()
 		return h, nil
