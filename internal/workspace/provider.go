@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -73,26 +74,51 @@ func (g *GitWorktreeProvider) Create(repoPath, name, branch, baseBranch string) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Build args: git worktree add <path> -b <branch> [<start-point>]
-	args := []string{"-C", repoPath, "worktree", "add", path, "-b", branch}
-	if baseBranch != "" {
-		args = append(args, baseBranch)
-	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		debuglog.Logger.Debug("git worktree add with -b failed, retrying without -b", "name", name, "branch", branch, "err", strings.TrimSpace(string(out)))
-		// Branch might already exist — retry without -b.
-		args2 := []string{"-C", repoPath, "worktree", "add", path, branch}
-		cmd2 := exec.CommandContext(ctx, "git", args2...)
-		if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-			// Return the more informative error.
-			errMsg := strings.TrimSpace(string(out))
-			if errMsg == "" {
-				errMsg = strings.TrimSpace(string(out2))
-			}
-			debuglog.Logger.Error("git worktree create failed", "name", name, "branch", branch, "err", errMsg)
-			return nil, fmt.Errorf("git worktree add: %s", errMsg)
+	// runAdd runs `git worktree add [extra...] <path> -b <branch> [base]`,
+	// retrying without -b if the branch already exists.
+	runAdd := func(extra ...string) error {
+		head := append([]string{"-C", repoPath, "worktree", "add"}, extra...)
+		args := append(append([]string{}, head...), path, "-b", branch)
+		if baseBranch != "" {
+			args = append(args, baseBranch)
 		}
+		if out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err != nil {
+			debuglog.Logger.Debug("git worktree add with -b failed, retrying without -b", "name", name, "branch", branch, "err", strings.TrimSpace(string(out)))
+			// Branch might already exist — retry without -b.
+			args2 := append(append([]string{}, head...), path, branch)
+			if out2, err2 := exec.CommandContext(ctx, "git", args2...).CombinedOutput(); err2 != nil {
+				// Return the more informative error.
+				errMsg := strings.TrimSpace(string(out))
+				if errMsg == "" {
+					errMsg = strings.TrimSpace(string(out2))
+				}
+				debuglog.Logger.Error("git worktree create failed", "name", name, "branch", branch, "err", errMsg)
+				return fmt.Errorf("git worktree add: %s", errMsg)
+			}
+		}
+		return nil
+	}
+
+	if usesGitCrypt(ctx, repoPath) {
+		// git-crypt (through 0.8.0) locates its key via `git rev-parse --git-dir`,
+		// which for a new worktree resolves to .git/worktrees/<id> — a private git
+		// dir with no git-crypt key. A normal `worktree add` therefore fails the
+		// smudge filter mid-checkout. Work around it: create without checkout, link
+		// the shared git-crypt dir into the worktree's private git dir, then check
+		// out so the smudge filter can find the key.
+		if err := runAdd("--no-checkout"); err != nil {
+			return nil, err
+		}
+		if err := linkGitCrypt(ctx, path); err != nil {
+			debuglog.Logger.Error("git-crypt worktree link failed", "name", name, "path", path, "err", err)
+			return nil, fmt.Errorf("git-crypt worktree setup: %w", err)
+		}
+		if out, err := exec.CommandContext(ctx, "git", "-C", path, "checkout").CombinedOutput(); err != nil {
+			debuglog.Logger.Error("git-crypt worktree checkout failed", "name", name, "path", path, "err", strings.TrimSpace(string(out)))
+			return nil, fmt.Errorf("git worktree checkout: %s", strings.TrimSpace(string(out)))
+		}
+	} else if err := runAdd(); err != nil {
+		return nil, err
 	}
 
 	debuglog.Logger.Info("git worktree created", "name", name, "branch", branch, "path", path)
@@ -101,6 +127,43 @@ func (g *GitWorktreeProvider) Create(repoPath, name, branch, baseBranch string) 
 		Path:   path,
 		Branch: branch,
 	}, nil
+}
+
+// usesGitCrypt reports whether the repo has an initialized (unlocked) git-crypt
+// key in its shared git dir. Only then does the worktree smudge filter need help.
+func usesGitCrypt(ctx context.Context, repoPath string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return false
+	}
+	common := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(repoPath, common)
+	}
+	info, err := os.Stat(filepath.Join(common, "git-crypt", "keys"))
+	return err == nil && info.IsDir()
+}
+
+// linkGitCrypt symlinks the shared git-crypt key dir into a worktree's private
+// git dir, so git-crypt (which resolves keys via --git-dir) can find the key
+// when checking out the worktree.
+func linkGitCrypt(ctx context.Context, worktreePath string) error {
+	gitDirOut, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		return fmt.Errorf("resolve worktree git dir: %w", err)
+	}
+	commonOut, err := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return fmt.Errorf("resolve common git dir: %w", err)
+	}
+	gitDir := strings.TrimSpace(string(gitDirOut))
+	common := strings.TrimSpace(string(commonOut))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(worktreePath, common)
+	}
+	link := filepath.Join(gitDir, "git-crypt")
+	_ = os.Remove(link) // clear any stale link before re-creating
+	return os.Symlink(filepath.Join(common, "git-crypt"), link)
 }
 
 func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {
