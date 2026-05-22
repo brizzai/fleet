@@ -2,7 +2,7 @@
 
 ## What is fleet?
 
-A TUI for managing multiple Claude Code sessions in parallel. It started because running several AI coding agents simultaneously means you lose track of which ones need your attention. fleet solves that — and is evolving into something bigger.
+A TUI for managing multiple coding-agent sessions (Claude Code, Codex) in parallel. It started because running several AI coding agents simultaneously means you lose track of which ones need your attention. fleet solves that — and is evolving into something bigger.
 
 ## The Reverse IDE
 
@@ -21,7 +21,7 @@ fleet is the workspace for this new workflow.
 
 ## The Core Problem: Comprehension at Scale
 
-With 5-10 features in flight — each with an agent working on it — the hardest part isn't automation. Claude already commits, pushes, creates PRs, runs tests. That's solved.
+With 5-10 features in flight — each with an agent working on it — the hardest part isn't automation. The agents already commit, push, create PRs, run tests. That's solved.
 
 The unsolved problem is **comprehension**:
 
@@ -37,7 +37,7 @@ Raw data doesn't equal understanding. This is the gap fleet needs to close.
 
 - 1 session = 1 branch = 1 task/feature
 - Sometimes 2 sessions per feature for independent parallel parts (e.g., two unrelated pages to build)
-- Claude handles the git flow — commits, pushes, PRs via slash commands
+- The agent handles the git flow — commits, pushes, PRs via slash commands
 - The user orchestrates: assigns work, monitors progress, approves when needed, reviews results
 
 ## Killer Feature Directions
@@ -66,7 +66,7 @@ Agents spawn automatically. You wake up to work already in progress.
 
 Humans have limited working memory, just like AI has a context window. fleet should manage yours:
 
-- When you switch to a session: *"Last time you were here, you asked Claude to refactor the auth module. It finished 2 hours ago. 3 commits, PR #42 open, CI passing, 1 review comment."*
+- When you switch to a session: *"Last time you were here, you asked the agent to refactor the auth module. It finished 2 hours ago. 3 commits, PR #42 open, CI passing, 1 review comment."*
 - Surface what changed since you last looked
 - Minimize context-switching cost across features
 
@@ -105,7 +105,7 @@ Two possible directions (not mutually exclusive):
 
 ## Design Principles
 
-- **Don't automate what Claude already does.** Claude commits, creates PRs, runs tests. Don't duplicate that. Focus on what Claude *can't* do: see across sessions, prioritize attention, summarize work, react to external events.
+- **Don't automate what the agents already do.** They commit, create PRs, run tests. Don't duplicate that. Focus on what they *can't* do: see across sessions, prioritize attention, summarize work, react to external events.
 - **Comprehension over data.** Showing a git diff doesn't help. Showing "Added auth middleware, 5 files changed, tests passing" does.
 - **The user should feel 10x productive.** Not in control, not impressed by UI — *productive*. "I accomplish in 1 hour what used to take a full day."
-- **Stay Claude Code-native.** The deep hook integration is the moat. Don't dilute it chasing multi-model support.
+- **Go deep on hook-capable agents.** The deep hook integration — instant status, conversation resume, prompt-based naming — is the moat. fleet supports Claude Code and Codex because they expose real hooks; it stays native to *how they work* rather than diluting that depth with shallow keystroke-shimming across every CLI.
