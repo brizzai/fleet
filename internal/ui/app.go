@@ -569,8 +569,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		copyClaudeSettings := h.cfg.IsCopyClaudeSettingsEnabled() && !provider.IsCustom()
 		return h, tea.Batch(func() tea.Msg {
 			info, err := provider.Create(repoPath, name, branch, baseBranch)
-			if err == nil && info != nil && copyClaudeSettings {
-				copyClaudeSettingsFile(repoPath, info.Path)
+			if err == nil && info != nil {
+				if copyClaudeSettings {
+					copyClaudeSettingsFile(repoPath, info.Path)
+				}
+				workspace.CopyConfiguredFiles(repoPath, info.Path)
 			}
 			return workspaceCreateResultMsg{info: info, err: err, pendingID: pendingID, repoPath: repoPath}
 		}, spinnerTickCmd)
