@@ -137,14 +137,16 @@ func CheckoutBranch(repoPath, branch string) error {
 	return nil
 }
 
-// GetDefaultBranch returns the default branch name for the given repo.
-// Tries origin HEAD, then checks for "main" or "master" locally. Falls back to "main".
+// GetDefaultBranch returns the default base ref for the given repo, used to
+// pre-fill the worktree dialog. When an origin remote is configured, it returns
+// the remote-tracking ref (e.g. "origin/master") so new worktrees start from the
+// remote tip rather than the local branch. Falls back to local "main"/"master".
 func GetDefaultBranch(repoPath string) string {
 	// Try origin HEAD reference first.
 	cmd := exec.Command("git", "-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if output, err := cmd.Output(); err == nil {
 		ref := strings.TrimSpace(string(output))
-		return strings.TrimPrefix(ref, "refs/remotes/origin/")
+		return "origin/" + strings.TrimPrefix(ref, "refs/remotes/origin/")
 	} else {
 		debuglog.Logger.Debug("GetDefaultBranch symbolic-ref failed, trying fallback", "path", repoPath, "error", err)
 	}
