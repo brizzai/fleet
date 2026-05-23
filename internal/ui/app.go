@@ -51,7 +51,7 @@ type PendingDelete struct {
 	RepoPath      string
 	DestroyWS     bool
 	WorkspaceName string
-	UnpinRepo     bool // true if user chose D +Remove Repo
+	UnpinRepo     bool // unpin the repo from the sidebar on finalize (header delete)
 	DeletedAt     time.Time
 }
 
@@ -67,6 +67,11 @@ type (
 		workspaceName    string
 		unpinRepo        bool
 		repoPath         string
+	}
+	// repoDeleteMsg deletes every session in a repo/worktree group (header delete).
+	repoDeleteMsg struct {
+		repoPath         string
+		destroyWorkspace bool
 	}
 	pendingDeleteExpireMsg struct {
 		nonce string
@@ -368,6 +373,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		analytics.Track(analytics.EventSessionDeleted, nil)
 		return h.deferDelete(msg)
+
+	case repoDeleteMsg:
+		return h.deferDeleteRepo(msg)
 
 	case pendingDeleteExpireMsg:
 		return h.handlePendingDeleteExpire(msg)
@@ -1150,26 +1158,9 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		return h, h.forkSelected()
 	case "d":
-		// Handle d on empty pinned repo header: unpin directly.
+		// On a repo/worktree header, delete acts on the container (§ confirmDeleteHeader).
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
-			item := h.flatItems[h.cursor]
-			if h.countSessionsForRepo(item.RepoPath) == 0 && h.pinnedRepos[item.RepoPath] {
-				delete(h.pinnedRepos, item.RepoPath)
-				if err := h.storage.UnpinRepo(item.RepoPath); err != nil {
-					debuglog.Logger.Error("failed to unpin repo", "repo", item.RepoPath, "err", err)
-				}
-				h.actionLog.Add("unpin repo", filepath.Base(item.RepoPath), true)
-				h.rebuildFlatItems()
-				// Fix cursor if it's now out of bounds.
-				if h.cursor >= len(h.flatItems) {
-					h.cursor = len(h.flatItems) - 1
-				}
-				if h.cursor < 0 {
-					h.cursor = 0
-				}
-				return h, nil
-			}
-			return h, nil // non-empty repo header, ignore
+			return h, h.confirmDeleteHeader(h.flatItems[h.cursor])
 		}
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("delete session", s.Title, true)
@@ -1441,47 +1432,150 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 	}
 
 	id := s.ID
-	wsName := s.WorkspaceName
 	repoPath := session.GetRepoRoot(s.ProjectPath)
-	isLastInRepo := h.countSessionsForRepo(repoPath) == 1 && h.pinnedRepos[repoPath]
-	hasDestroyableWorkspace := false
-
-	if wsName != "" {
-		provider := workspace.ResolveProvider(repoPath)
-		hasDestroyableWorkspace = provider.CanDestroy()
-	}
 
 	details := []string{
 		"Press z to undo within 5s",
 	}
-	if isLastInRepo {
-		details = append(details, "Last session in this repo")
+	// Discoverability nudge: when this is the last session in a destroyable
+	// worktree, the worktree dir is kept — point the user at the header.
+	if s.WorkspaceName != "" && h.countSessionsForRepo(repoPath) == 1 &&
+		workspace.ResolveProvider(repoPath).CanDestroy() {
+		details = append(details, "Worktree kept — press d on its header to remove it")
 	}
 
-	onYes := func() tea.Msg {
+	h.confirmDialog.ShowDanger("Delete Session?", s.Title, details, func() tea.Msg {
 		return sessionDeleteMsg{id: id}
-	}
-	onRemoveRepo := func() tea.Msg {
-		return sessionDeleteMsg{id: id, unpinRepo: true, repoPath: repoPath}
+	})
+	return nil
+}
+
+// confirmDeleteHeader handles `d` pressed on a repo/worktree header. Scope is the
+// container: a worktree header removes the worktree dir + its sessions; a real-repo
+// header "forgets" the repo from fleet (deletes its sessions + unpins, folder kept).
+func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
+	repoPath := item.RepoPath
+	count := h.countSessionsForRepo(repoPath)
+	isWorktree := h.repoIsWorktree(repoPath)
+
+	// Empty plain repo: instant unpin, no dialog (unchanged behavior).
+	if count == 0 && !isWorktree {
+		return h.unpinRepoHeader(repoPath)
 	}
 
+	base := filepath.Base(repoPath)
+	var title string
+	var details []string
 	switch {
-	case hasDestroyableWorkspace && isLastInRepo:
-		onYesWS := func() tea.Msg {
-			return sessionDeleteMsg{id: id, destroyWorkspace: true, workspaceName: wsName}
+	case isWorktree && count > 0:
+		title = "Remove Worktree?"
+		details = []string{
+			fmt.Sprintf("Deletes %d session(s) + the worktree directory", count),
+			"Press z to undo within 5s",
 		}
-		h.confirmDialog.ShowDangerLastInRepoWithWorkspace("Delete Session?", s.Title, details, wsName, onYes, onYesWS, onRemoveRepo)
-	case hasDestroyableWorkspace:
-		onYesWS := func() tea.Msg {
-			return sessionDeleteMsg{id: id, destroyWorkspace: true, workspaceName: wsName}
+	case isWorktree: // empty worktree
+		title = "Remove Worktree?"
+		details = []string{"Removes the worktree directory"}
+	default: // real repo with sessions
+		title = "Remove repo from fleet?"
+		details = []string{
+			fmt.Sprintf("Deletes %d session(s) — folder untouched", count),
+			"Press z to undo within 5s",
 		}
-		h.confirmDialog.ShowDangerWithWorkspace("Delete Session?", s.Title, details, wsName, onYes, onYesWS)
-	case isLastInRepo:
-		h.confirmDialog.ShowDangerLastInRepo("Delete Session?", s.Title, details, onYes, onRemoveRepo)
-	default:
-		h.confirmDialog.ShowDanger("Delete Session?", s.Title, details, onYes)
+	}
+
+	h.actionLog.Add("delete "+map[bool]string{true: "worktree", false: "repo"}[isWorktree], base, true)
+	h.confirmDialog.ShowDanger(title, base, details, func() tea.Msg {
+		return repoDeleteMsg{repoPath: repoPath, destroyWorkspace: isWorktree}
+	})
+	return nil
+}
+
+// repoIsWorktree reports whether a repo group is a git worktree. Uses the cached
+// git info when available (populated by the worker for repos with sessions); for
+// an empty worktree header the worker never refreshes it, so fall back to a direct
+// git check — cheap, and only on the keypress that opens the delete dialog.
+func (h *Home) repoIsWorktree(repoPath string) bool {
+	// Snapshot under workerMu — the status worker writes gitInfoCache concurrently.
+	h.workerMu.Lock()
+	info := h.gitInfoCache[repoPath]
+	h.workerMu.Unlock()
+	if info != nil {
+		return info.IsWorktreeRepo
+	}
+	return git.IsWorktree(repoPath)
+}
+
+// unpinRepoHeader unpins a repo from the sidebar and fixes the cursor.
+func (h *Home) unpinRepoHeader(repoPath string) tea.Cmd {
+	if !h.pinnedRepos[repoPath] {
+		return nil
+	}
+	delete(h.pinnedRepos, repoPath)
+	if err := h.storage.UnpinRepo(repoPath); err != nil {
+		debuglog.Logger.Error("failed to unpin repo", "repo", repoPath, "err", err)
+	}
+	h.actionLog.Add("unpin repo", filepath.Base(repoPath), true)
+	h.rebuildFlatItems()
+	if h.cursor >= len(h.flatItems) {
+		h.cursor = len(h.flatItems) - 1
+	}
+	if h.cursor < 0 {
+		h.cursor = 0
 	}
 	return nil
+}
+
+// deferDeleteRepo deletes every session in a repo/worktree group, routing through
+// the per-session deferred-delete machinery so `z`-undo still works (LIFO). The last
+// session carries the container-level side effects (unpin, optional worktree destroy).
+// An empty worktree (no sessions) is removed directly in the background.
+func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
+	var sess []*session.Session
+	for _, s := range h.sessions {
+		if session.GetRepoRoot(s.ProjectPath) == msg.repoPath {
+			sess = append(sess, s)
+		}
+	}
+
+	var cmds []tea.Cmd
+	if len(sess) == 0 {
+		// Empty worktree: unpin + background `git worktree remove` (not undoable;
+		// the confirm dialog is the safety gate, nothing live to lose).
+		h.unpinRepoHeader(msg.repoPath)
+		if msg.destroyWorkspace {
+			repoPath := msg.repoPath
+			cmds = append(cmds, func() tea.Msg {
+				p := workspace.ResolveProvider(repoPath)
+				var err error
+				if p != nil && p.CanDestroy() {
+					err = p.Destroy(repoPath, filepath.Base(repoPath))
+				}
+				return deleteCleanupDoneMsg{workspaceErr: err}
+			})
+		}
+		return h, tea.Batch(cmds...)
+	}
+
+	for i, s := range sess {
+		dm := sessionDeleteMsg{id: s.ID}
+		if i == len(sess)-1 {
+			dm.unpinRepo = true
+			dm.repoPath = msg.repoPath
+			if msg.destroyWorkspace {
+				dm.destroyWorkspace = true
+				// Destroy matches the worktree by path, but finalizeDelete guards on a
+				// non-empty name; fall back to the dir basename when unset.
+				dm.workspaceName = s.WorkspaceName
+				if dm.workspaceName == "" {
+					dm.workspaceName = filepath.Base(msg.repoPath)
+				}
+			}
+		}
+		_, cmd := h.deferDelete(dm)
+		cmds = append(cmds, cmd)
+	}
+	return h, tea.Batch(cmds...)
 }
 
 func (h *Home) restartSelected() tea.Cmd {
