@@ -66,6 +66,17 @@ func TestCopyConfiguredFiles(t *testing.T) {
 		}
 	})
 
+	t.Run("copies filenames starting with two dots (e.g. ..env)", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeFile(t, src, "..env", "DOTDOT")
+		writeFile(t, src, ".fleet.json", `{"copy_files":{"paths":["..env"]}}`)
+
+		CopyConfiguredFiles(src, dst)
+
+		assertFile(t, filepath.Join(dst, "..env"), "DOTDOT")
+	})
+
 	t.Run("skips symlinks instead of following them", func(t *testing.T) {
 		src := t.TempDir()
 		dst := t.TempDir()

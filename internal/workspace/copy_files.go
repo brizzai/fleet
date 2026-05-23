@@ -45,7 +45,7 @@ func CopyConfiguredFiles(srcRepo, dstRepo string) {
 		}
 		for _, srcPath := range matches {
 			rel, err := filepath.Rel(srcRepoAbs, srcPath)
-			if err != nil || strings.HasPrefix(rel, "..") {
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				debuglog.Logger.Warn("copy_files: skipping match outside repo",
 					"src", srcRepo, "match", srcPath)
 				continue
