@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-05-23
+
+### Added
+
+- Per-repo `copy_files.paths` config in `.fleet.json` / `.fleet.local.json` copies declared gitignored files/dirs/globs from the source repo into each new worktree. Opt-in; additive merge across both files; applies to both git-worktree and shell providers.
+- Crash dumps for dying sessions: when a session transitions to `error`, fleet writes a forensic snapshot to `~/.config/fleet/crashes/<id>_<ts>.txt` containing the tmux exit status/signal (with human-readable annotation — e.g. `9 (SIGKILL — likely OOM/Jetsam or external kill)`), last 200 lines of pane content (raw ANSI), the SessionEnd hook reason from Claude Code, and the last 6 perfwatch heartbeats — enough to tell a kernel kill from a panic from a clean exit at a glance. Tmux now uses `remain-on-exit on` so dead panes can be inspected before fleet cleans them up. Perfwatch heartbeats also gained a `sys_free_mb` field (system-wide free memory) so the heartbeat trail records memory-pressure collapse leading up to a crash.
+- `FLEET_AUTO_UPDATE_DISABLED=1` env var to skip the auto-updater on a per-launch basis (handy when running a local dev build you don't want overwritten by the latest release)
+- "Mark All as Read" command in the command palette to acknowledge all finished sessions at once, transitioning them to idle.
+- Storm detector in perfwatch: dumps a snapshot when sustained Update() throughput exceeds 200/s, catching tea.Cmd loops that flood the loop without any single Update going slow (the stall watchdog can't see those)
+- Per-repo `pr_checks.ignore` config in `.fleet.json` / `.fleet.local.json` (path.Match globs) to drop noisy CI checks like gitstream's `minimum-review/default_reviewers` from the PR-badge rollup, so a single non-actionable failure no longer turns the whole badge red.
+
+### Changed
+
+- Delete is now scoped to whatever the cursor is on, so the confirm dialog is a single `y`/`n` (the old `Y +Workspace` / `D +Remove Repo` buttons are gone). `d` on a session deletes just that session; `d` on a worktree header deletes its sessions and runs `git worktree remove`; `d` on a repo header "forgets" the repo from fleet (deletes its sessions + unpins, the folder is left untouched); `d` on an empty repo header still unpins instantly. Header deletes route through the same 5s deferred-delete machinery, so `z` undo keeps working.
+- The "new worktree" dialog now pre-fills the base branch as `origin/<default>` (e.g. `origin/master`) instead of the local branch, so new worktrees start from the remote tip rather than a possibly-stale local ref. Falls back to local `main`/`master` for repos without an `origin` remote.
+
+### Fixed
+
+- Status flickering between `waiting` and `running` while navigating Claude's AskUserQuestion dialog
+- Restarting a dead session no longer briefly flashes back to `error` (with a misleading crash dump) before the new Claude process fires its first hook. Restart now clears the previous Claude's hook state — both in memory and the on-disk status file — so the worker doesn't trust an 8-minute-old `status=dead` during the relaunch window. The crash-dump quota also re-arms when a fresh hook reports the session is alive again, so a real death following a false-positive flash still produces a dump.
+- TUI freezing for ~500ms when the 5-second undo-delete window expired while scrolling — the tmux kill now runs off the Update loop
+
 ## [2.1.0] - 2026-05-07
 
 ### Added
@@ -116,7 +138,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/brizzai/fleet/releases/tag/v2.2.0
 [2.1.0]: https://github.com/brizzai/fleet/releases/tag/v2.1.0
 [2.0.0]: https://github.com/brizzai/fleet/releases/tag/v2.0.0
 [1.3.0]: https://github.com/brizzai/fleet/releases/tag/v1.3.0
