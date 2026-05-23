@@ -105,6 +105,7 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Worktree creation copies `.claude/settings.local.json` from source repo (configurable via `copy_claude_settings`, default true)
 - `.fleet.json` / `.fleet.local.json` in repo root (legacy `.bc.json` / `.bc.local.json` still read): `{"workspace": {"list": "cmd", "create": "cmd {{name}} {{branch}}", "destroy": "cmd {{name}}"}}`
 - `.fleet.json` / `.fleet.local.json` may also set `{"pr_checks": {"ignore": ["glob", ...]}}` to drop matching CI checks from the PR-badge rollup (path.Match globs; lists from both files merge additively; opt-in, empty by default)
+- `.fleet.json` / `.fleet.local.json` may also set `{"copy_files": {"paths": ["path", "dir", "glob/*", ...]}}` to copy gitignored files/dirs/globs from the source repo into each new worktree (filepath.Glob semantics, repo-relative only; lists from both files merge additively; opt-in, empty by default; applies to both git-worktree and shell providers; independent of `copy_claude_settings`)
 - Claude session resume: captures Claude session_id from hooks, uses `claude --resume <id>` on restart
 - Editor: config.editor > $EDITOR > "code" (VS Code)
 - Themes: tokyo-night (default), catppuccin-mocha, rose-pine, nord, gruvbox — configurable via settings (S key)
