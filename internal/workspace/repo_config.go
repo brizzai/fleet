@@ -11,8 +11,9 @@ import (
 
 // RepoWorkspaceConfig is the structure of .fleet.json files.
 type RepoWorkspaceConfig struct {
-	Workspace ShellConfig    `json:"workspace"`
-	PRChecks  PRChecksConfig `json:"pr_checks"`
+	Workspace ShellConfig     `json:"workspace"`
+	PRChecks  PRChecksConfig  `json:"pr_checks"`
+	CopyFiles CopyFilesConfig `json:"copy_files"`
 }
 
 // ShellConfig holds shell command configuration for workspace operations.
@@ -28,6 +29,13 @@ type PRChecksConfig struct {
 	// are dropped from the PR-badge rollup so a single noisy check (e.g. a
 	// gitstream "minimum reviewers" gate) doesn't turn the whole badge red.
 	Ignore []string `json:"ignore,omitempty"`
+}
+
+// CopyFilesConfig holds the list of repo-relative paths (files, dirs, or
+// filepath.Glob patterns) that should be copied from the source repo into a
+// freshly created worktree. Opt-in per repo; empty by default.
+type CopyFilesConfig struct {
+	Paths []string `json:"paths,omitempty"`
 }
 
 // loadMergedRepoConfig resolves .fleet.json / .fleet.local.json (with legacy
@@ -51,6 +59,7 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 	}
 
 	merged.PRChecks.Ignore = dedupeStrings(append(base.PRChecks.Ignore, local.PRChecks.Ignore...))
+	merged.CopyFiles.Paths = dedupeStrings(append(base.CopyFiles.Paths, local.CopyFiles.Paths...))
 	return merged
 }
 
@@ -75,6 +84,13 @@ func dedupeStrings(in []string) []string {
 // if no config sets it. Patterns are path.Match globs against check names.
 func IgnorePatterns(repoPath string) []string {
 	return loadMergedRepoConfig(repoPath).PRChecks.Ignore
+}
+
+// CopyFilesPatterns returns the merged copy_files.paths list for a repo, or
+// nil if no config sets it. Patterns are repo-relative filepath.Glob expressions
+// (or literal paths). Used by CopyConfiguredFiles when a worktree is created.
+func CopyFilesPatterns(repoPath string) []string {
+	return loadMergedRepoConfig(repoPath).CopyFiles.Paths
 }
 
 // ResolveProvider loads workspace config from repoPath. Preference is by file
