@@ -334,21 +334,22 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h.handleSessionCreate(msg)
 
 	case forkSessionMsg:
-		// Stage the parent's Claude transcript into the destination cwd's
-		// project dir so `claude --resume <id> --fork-session` finds it. Only
-		// needed when forking into a different cwd — same-cwd forks already
-		// have the transcript in place.
-		if msg.sourcePath != "" && msg.sourcePath != msg.path {
-			if err := session.CopyClaudeForkTranscript(msg.parentClaudeSessionID, msg.sourcePath, msg.path); err != nil {
-				return h, func() tea.Msg {
-					return sessionCreateResultMsg{err: fmt.Errorf("stage parent transcript: %w", err)}
-				}
-			}
-		}
 		s := session.NewSession(msg.title, msg.path)
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
+		parentSessionID := msg.parentClaudeSessionID
+		sourcePath := msg.sourcePath
+		destPath := msg.path
 		return h, func() tea.Msg {
+			// Stage the parent's Claude transcript into the destination cwd's
+			// project dir so `claude --resume <id> --fork-session` finds it.
+			// Only needed when forking into a different cwd — same-cwd forks
+			// already have the transcript in place.
+			if sourcePath != "" && sourcePath != destPath {
+				if err := session.CopyClaudeForkTranscript(parentSessionID, sourcePath, destPath); err != nil {
+					return sessionCreateResultMsg{err: fmt.Errorf("stage parent transcript: %w", err)}
+				}
+			}
 			if err := s.Start(); err != nil {
 				return sessionCreateResultMsg{err: err}
 			}
