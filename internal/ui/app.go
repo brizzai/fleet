@@ -143,6 +143,7 @@ type Home struct {
 	commandPalette        *CommandPaletteDialog
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
+	pendingForkCtx    *forkContext        // set while Shift+F worktree picker is open; consumed on pick/cancel
 	pendingDeletes    []PendingDelete     // undo stack for deferred deletions
 	// finalizingDeletes holds entries whose undo window has expired but whose
 	// background cleanup (tmux kill, hook removal, workspace destroy) is still
@@ -336,7 +337,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s := session.NewSession(msg.title, msg.path)
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
+		parentSessionID := msg.parentClaudeSessionID
+		sourcePath := msg.sourcePath
+		destPath := msg.path
 		return h, func() tea.Msg {
+			// Stage the parent's Claude transcript into the destination cwd's
+			// project dir so `claude --resume <id> --fork-session` finds it.
+			// Only needed when forking into a different cwd — same-cwd forks
+			// already have the transcript in place.
+			if sourcePath != "" && sourcePath != destPath {
+				if err := session.CopyClaudeForkTranscript(parentSessionID, sourcePath, destPath); err != nil {
+					return sessionCreateResultMsg{err: fmt.Errorf("stage parent transcript: %w", err)}
+				}
+			}
 			if err := s.Start(); err != nil {
 				return sessionCreateResultMsg{err: err}
 			}
@@ -495,6 +508,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case workspaceListMsg:
 		if msg.err != nil {
 			h.worktreeDialog.Hide()
+			h.clearPendingFork()
 			h.setError(fmt.Errorf("worktree list: %w", msg.err))
 			return h, nil
 		}
@@ -508,6 +522,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case workspaceSelectedMsg:
+		if ctx := h.pendingForkCtx; ctx != nil {
+			h.clearPendingFork()
+			return h, h.dispatchForkToWorktree(ctx, msg.info.Path, msg.info.Name)
+		}
 		return h.handleSessionCreate(sessionCreateMsg{
 			path:          msg.info.Path,
 			title:         msg.info.Name,
@@ -586,12 +604,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.err != nil {
 			h.setError(fmt.Errorf("workspace create failed: %w", msg.err))
+			h.clearPendingFork()
 			h.rebuildFlatItems()
 			// Clamp cursor if it was on the removed phantom.
 			if h.cursor >= len(h.flatItems) && len(h.flatItems) > 0 {
 				h.cursor = len(h.flatItems) - 1
 			}
 			return h, nil
+		}
+		if ctx := h.pendingForkCtx; ctx != nil {
+			h.clearPendingFork()
+			return h, h.dispatchForkToWorktree(ctx, msg.info.Path, msg.info.Name)
 		}
 		return h.handleSessionCreate(sessionCreateMsg{
 			path:          msg.info.Path,
@@ -956,11 +979,21 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if h.createWorkspaceDialog.IsVisible() {
 		dialog, cmd := h.createWorkspaceDialog.Update(msg)
 		h.createWorkspaceDialog = dialog
+		// User cancelled with ESC — drop fork ctx. Submit (Enter) also hides
+		// the dialog but emits a workspaceCreateMsg that consumes the ctx,
+		// so we must NOT clear on every Hide.
+		if isEscKey(msg) && !h.createWorkspaceDialog.IsVisible() && !h.worktreeDialog.IsVisible() {
+			h.clearPendingFork()
+		}
 		return h, cmd
 	}
 	if h.worktreeDialog.IsVisible() {
 		dialog, cmd := h.worktreeDialog.Update(msg)
 		h.worktreeDialog = dialog
+		// Same reasoning as createWorkspaceDialog above: only ESC clears.
+		if isEscKey(msg) && !h.worktreeDialog.IsVisible() && !h.createWorkspaceDialog.IsVisible() {
+			h.clearPendingFork()
+		}
 		return h, cmd
 	}
 	if h.branchDialog.IsVisible() {
@@ -1132,6 +1165,8 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 	case "f":
 		return h, h.forkSelected()
+	case "F":
+		return h, h.forkToWorktreeSelected()
 	case "d":
 		// On a repo/worktree header, delete acts on the container (§ confirmDeleteHeader).
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
@@ -1589,11 +1624,80 @@ func (h *Home) forkSelected() tea.Cmd {
 	return func() tea.Msg {
 		return forkSessionMsg{
 			parentClaudeSessionID: claudeSessionID,
+			sourcePath:            path,
 			path:                  path,
 			title:                 title,
 			workspaceName:         workspaceName,
 		}
 	}
+}
+
+// forkContext holds the parent-session fields captured when Shift+F opens the
+// worktree picker, so the deferred result handlers can build a forkSessionMsg
+// targeting the chosen destination.
+type forkContext struct {
+	parentClaudeSessionID string
+	parentProjectPath     string
+	parentTitle           string
+}
+
+// clearPendingFork resets fork-target picker state. Safe to call when nothing
+// is pending.
+func (h *Home) clearPendingFork() {
+	h.pendingForkCtx = nil
+}
+
+// isEscKey reports whether msg is a KeyMsg representing the ESC key.
+func isEscKey(msg tea.Msg) bool {
+	km, ok := msg.(tea.KeyMsg)
+	return ok && km.Type == tea.KeyEsc
+}
+
+// dispatchForkToWorktree builds the forkSessionMsg for a resolved destination
+// (existing or newly-created worktree). Title includes the destination
+// workspace name so the sidebar tells the user where the fork landed.
+func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceName string) tea.Cmd {
+	title := ctx.parentTitle + " (fork)"
+	if destWorkspaceName != "" {
+		title = ctx.parentTitle + " (" + destWorkspaceName + ")"
+	}
+	parentClaudeSessionID := ctx.parentClaudeSessionID
+	sourcePath := ctx.parentProjectPath
+	return func() tea.Msg {
+		return forkSessionMsg{
+			parentClaudeSessionID: parentClaudeSessionID,
+			sourcePath:            sourcePath,
+			path:                  destPath,
+			title:                 title,
+			workspaceName:         destWorkspaceName,
+		}
+	}
+}
+
+// forkToWorktreeSelected stashes parent context and opens the worktree picker
+// in fork-target mode.
+func (h *Home) forkToWorktreeSelected() tea.Cmd {
+	s := h.selectedSession()
+	if s == nil {
+		h.setError(fmt.Errorf("cannot fork to worktree: no session selected"))
+		return nil
+	}
+	if s.ClaudeSessionID == "" {
+		h.setError(fmt.Errorf("cannot fork to worktree: session has no Claude conversation ID yet"))
+		return nil
+	}
+	repoPath := session.GetRepoRoot(s.ProjectPath)
+	if repoPath == "" {
+		h.setError(fmt.Errorf("cannot fork to worktree: session is not inside a git repo"))
+		return nil
+	}
+	h.pendingForkCtx = &forkContext{
+		parentClaudeSessionID: s.ClaudeSessionID,
+		parentProjectPath:     s.ProjectPath,
+		parentTitle:           s.Title,
+	}
+	h.worktreeDialog.ShowLoading()
+	return tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 }
 
 func (h *Home) toggleRepoGroup() {
@@ -2958,6 +3062,7 @@ func (h *Home) buildPaletteCommands() []PaletteCommand {
 		{ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{ID: "fork", Name: "Fork Session", Shortcut: "f"},
+		{ID: "fork_worktree", Name: "Fork to Worktree", Shortcut: "F"},
 		{ID: "delete", Name: "Delete Session", Shortcut: "d"},
 		{ID: "restart", Name: "Restart Session", Shortcut: "r"},
 		{ID: "rename", Name: "Rename Session", Shortcut: "R"},
@@ -3014,6 +3119,8 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 	case "fork":
 		return h, h.forkSelected()
+	case "fork_worktree":
+		return h, h.forkToWorktreeSelected()
 	case "delete":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("delete session", s.Title, true)
