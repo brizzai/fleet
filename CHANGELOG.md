@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status flickering between `waiting` and `running` while navigating Claude's AskUserQuestion dialog
 - Restarting a dead session no longer briefly flashes back to `error` (with a misleading crash dump) before the new Claude process fires its first hook. Restart now clears the previous Claude's hook state — both in memory and the on-disk status file — so the worker doesn't trust an 8-minute-old `status=dead` during the relaunch window. The crash-dump quota also re-arms when a fresh hook reports the session is alive again, so a real death following a false-positive flash still produces a dump.
 - TUI freezing for ~500ms when the 5-second undo-delete window expired while scrolling — the tmux kill now runs off the Update loop
+- `debuglog.Init()` is now idempotent (guarded by `sync.Once`). The previous behavior re-created the global `slog.Logger` on every call, which raced with long-lived goroutines (e.g. the crash-dump writer) that hold a reference to it. Fixes a `go test -race` data race surfaced in CI.
 
 ## [2.1.0] - 2026-05-07
 
