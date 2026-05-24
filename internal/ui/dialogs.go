@@ -22,8 +22,13 @@ type sessionCreateMsg struct {
 }
 
 // forkSessionMsg is sent when the user forks an existing session.
+// sourcePath is the parent's ProjectPath; for in-place forks (today's `f`)
+// it equals path, and the JSONL copy is skipped. For fork-to-worktree
+// (Shift+F) it differs from path and the parent's JSONL is staged in the
+// destination's Claude project dir before the new session launches.
 type forkSessionMsg struct {
 	parentClaudeSessionID string
+	sourcePath            string
 	path                  string
 	title                 string
 	workspaceName         string

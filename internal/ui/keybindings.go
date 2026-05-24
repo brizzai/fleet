@@ -31,6 +31,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "n", BarKey: "n", BarDesc: "Repo", Desc: "New session (any repo)", Section: "session"},
 	{Key: "w", BarKey: "w", BarDesc: "Wktree", Desc: "New worktree session", Section: "session"},
 	{Key: "f", Desc: "Fork session", Section: "session"},
+	{Key: "F", Desc: "Fork to worktree", Section: "session"},
 	{Key: "d", BarKey: "d", BarDesc: "Del", Desc: "Delete session / repo / worktree", Section: "session"},
 	{Key: "z", Desc: "Undo delete", Section: "session"},
 	{Key: "r", BarKey: "r", BarDesc: "Restart", Desc: "Restart session", Section: "session"},
