@@ -11,9 +11,10 @@ const maxLogSize = 1 << 20  // 1 MB
 const keepBytes = 512 << 10 // keep last 512 KB after truncation
 
 var (
-	mu      sync.Mutex
-	logFile *os.File
-	Logger  *slog.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil)) // fallback
+	mu       sync.Mutex
+	initOnce sync.Once
+	logFile  *os.File
+	Logger   *slog.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil)) // fallback
 )
 
 // LogPath returns the debug log file path.
@@ -25,24 +26,29 @@ func LogPath() string {
 	return filepath.Join(home, ".config", "fleet", "debug.log")
 }
 
-// Init opens the debug log file and configures the global Logger.
+// Init opens the debug log file and configures the global Logger. Idempotent:
+// subsequent calls are no-ops. The sync.Once guard prevents a race where tests
+// (or any code) re-init Logger while a long-lived goroutine (e.g. crash-dump
+// writer) is still reading it — only the first call writes Logger.
 // On startup, if the log file exceeds maxLogSize, it is truncated to the last keepBytes.
 func Init() {
-	path := LogPath()
-	_ = os.MkdirAll(filepath.Dir(path), 0755)
-	truncateIfNeeded(path)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
-	}
-	mu.Lock()
-	logFile = f
-	level := slog.LevelInfo
-	if os.Getenv("FLEET_DEBUG") != "" {
-		level = slog.LevelDebug
-	}
-	Logger = slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
-	mu.Unlock()
+	initOnce.Do(func() {
+		path := LogPath()
+		_ = os.MkdirAll(filepath.Dir(path), 0755)
+		truncateIfNeeded(path)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		logFile = f
+		level := slog.LevelInfo
+		if os.Getenv("FLEET_DEBUG") != "" {
+			level = slog.LevelDebug
+		}
+		Logger = slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
+		mu.Unlock()
+	})
 }
 
 // Close closes the log file.
