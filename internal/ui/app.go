@@ -141,6 +141,7 @@ type Home struct {
 	createWorkspaceDialog *CreateWorkspaceDialog
 	branchDialog          *BranchCheckoutDialog
 	commandPalette        *CommandPaletteDialog
+	consentDialog         *ConsentDialog
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingForkCtx    *forkContext        // set while Shift+F worktree picker is open; consumed on pick/cancel
@@ -238,6 +239,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string) *Home
 		createWorkspaceDialog: NewCreateWorkspaceDialog(),
 		branchDialog:          NewBranchCheckoutDialog(),
 		commandPalette:        NewCommandPaletteDialog(),
+		consentDialog:         NewConsentDialog(),
 		bugReport:             NewBugReportDialog(),
 		previewCache:          make(map[string]string),
 		previewCacheTime:      make(map[string]time.Time),
@@ -293,6 +295,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.createWorkspaceDialog.SetSize(msg.Width, msg.Height)
 		h.branchDialog.SetSize(msg.Width, msg.Height)
 		h.commandPalette.SetSize(msg.Width, msg.Height)
+		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
 		return h, nil
@@ -457,6 +460,20 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case settingsClosedMsg:
 		// Re-read tick interval from config after settings change.
+		return h, nil
+
+	case consentResultMsg:
+		// Persist the answer so we don't ask again, then run startup
+		// analytics if (and only if) the user accepted.
+		enabled := msg.accepted
+		h.cfg.Telemetry = &enabled
+		h.cfg.AnalyticsConsentSeen = true
+		if err := h.cfg.Save(); err != nil {
+			debuglog.Logger.Error("config: save after consent", "err", err)
+		}
+		if enabled {
+			h.fireStartupAnalytics(len(session.GroupByRepo(h.sessions)))
+		}
 		return h, nil
 
 	case bugReportClosedMsg:
@@ -763,28 +780,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.workerStarted = true
 			go h.statusWorker()
 
-			// Initialize analytics (once, after first load). Init is idempotent
-			// so this is a no-op when runTUI already called it earlier.
-			analytics.Init(h.cfg.IsTelemetryEnabled(), h.version)
-			effectiveTheme := h.cfg.Theme
-			if effectiveTheme == "" {
-				effectiveTheme = "tokyo-night"
-			}
-			analytics.TrackAppStarted(
-				h.version,
-				len(h.sessions),
-				len(groups),
-				effectiveTheme,
-				h.cfg.GetEnterMode(),
-				h.cfg.IsAutoNameEnabled(),
-				h.cfg.IsCopyClaudeSettingsEnabled(),
-			)
-			// Snapshot the user's "shape" — how many repos, worktrees, sessions
-			// they're managing at launch. Useful for understanding scale.
-			analytics.EmitSnapshot(h.collectSnapshot())
-			// First-launch milestone — fires exactly once per install.
-			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
-				analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
+			// First-launch consent flow: if the user has never been asked,
+			// show the prompt now. analytics.Init / TrackAppStarted fire
+			// from the consentResultMsg handler instead of here.
+			if !h.cfg.AnalyticsConsentSeen {
+				h.consentDialog.Show()
+			} else {
+				h.fireStartupAnalytics(len(groups))
 			}
 		}
 
@@ -817,7 +819,11 @@ func (h *Home) View() string {
 }
 
 func (h *Home) renderBody() string {
-	// Modals take priority.
+	// Modals take priority. Consent goes first — it gates analytics init
+	// and must be the user's first interaction with the TUI.
+	if h.consentDialog.IsVisible() {
+		return h.consentDialog.View()
+	}
 	if h.helpOverlay.IsVisible() {
 		return h.helpOverlay.View()
 	}
@@ -991,6 +997,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if h.helpOverlay.IsVisible() {
 		overlay, cmd := h.helpOverlay.Update(msg)
 		h.helpOverlay = overlay
+		return h, cmd
+	}
+	if h.consentDialog.IsVisible() {
+		dialog, cmd := h.consentDialog.Update(msg)
+		h.consentDialog = dialog
 		return h, cmd
 	}
 	if h.bugReport.IsVisible() {

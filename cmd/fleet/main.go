@@ -96,9 +96,9 @@ func runTUI() {
 
 	cfg := config.Load()
 
-	// Init analytics early. Init is idempotent and the TUI also calls it;
-	// both paths converge on the same global client.
-	analytics.Init(cfg.IsTelemetryEnabled(), version)
+	// Analytics is initialized inside the TUI, after the first-launch
+	// consent prompt is answered. We still defer Shutdown unconditionally
+	// because Shutdown is a no-op when Init was never called.
 	defer analytics.Shutdown()
 
 	// Auto-update: check for newer version on launch.

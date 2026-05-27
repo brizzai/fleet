@@ -82,6 +82,17 @@ func TestSanitizePropertiesEmpty(t *testing.T) {
 	}
 }
 
+func TestReadGitIdentityNeverPanics(t *testing.T) {
+	t.Parallel()
+
+	// We can't assert specific values (depends on dev machine's git config),
+	// but the function MUST return without panicking and yield strings.
+	// On a CI runner without git configured, both should be "".
+	name, email := readGitIdentity()
+	_ = name
+	_ = email
+}
+
 func TestMergeValueAttachesValueAndStrips(t *testing.T) {
 	t.Parallel()
 

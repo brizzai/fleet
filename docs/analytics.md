@@ -1,6 +1,12 @@
 # Analytics
 
-fleet collects anonymous usage events via [Mixpanel](https://mixpanel.com) to understand how the tool is used, what new users do (and don't) succeed at, and to prioritize development.
+fleet collects usage events via [Mixpanel](https://mixpanel.com) to understand how the tool is used, what new users do (and don't) succeed at, and to prioritize development.
+
+## First-Launch Consent
+
+The first time you run fleet, you'll see a dialog asking whether you want to participate. It surfaces exactly what's collected (including your git `user.name` and `user.email`) and lets you accept or decline with a single keystroke. Your answer is persisted in `~/.config/fleet/config.json` and never asked again — change it any time in **Settings (S key)**.
+
+If you decline, no Mixpanel client is created and no network traffic happens. If you accept, analytics initialize and the events below start flowing.
 
 ## What We Collect
 
@@ -80,6 +86,9 @@ Set on the device's people profile so you can build cohorts and break events dow
 
 | Property | Example |
 |---|---|
+| `$name` | `Alice Smith` (from git `user.name`) |
+| `$email` | `alice@example.com` (from git `user.email`) |
+| `machine_hash` | SHA256 of hardware UUID (per-machine, anonymous) |
 | `app_version` | `v1.0.0` |
 | `os_version` | `15.3` |
 | `arch` | `arm64` |
@@ -100,12 +109,15 @@ Defense-in-depth: `sanitizeKey` (in `internal/analytics/analytics.go`) drops any
 
 ## Privacy
 
-### Anonymous Device ID
+### Identity
 
-Each installation generates a **one-way SHA256 hash** of the macOS hardware UUID. This hash:
-- Cannot be reversed to identify you or your machine
-- Is stable across app updates (cached at `~/.config/fleet/device_id`)
-- Is the only identifier sent to Mixpanel (as `distinct_id`)
+If git is configured globally on this machine, fleet uses your `git user.email` as the Mixpanel `distinct_id`. This means:
+- The same person shows up as a single user across multiple machines (cross-machine continuity in funnels).
+- Your git `user.name` is sent as the Mixpanel `$name` people property; your `user.email` as `$email`. This is what makes you identifiable to the fleet author when they look at the dashboard.
+
+If git isn't configured, fleet falls back to an **anonymous device ID** — a one-way SHA256 hash of the macOS hardware UUID, cached at `~/.config/fleet/device_id`. The same machine hash is also always sent as the `machine_hash` people property, so you can tell how many machines a given person uses.
+
+You only see this consent flow because you accepted on first launch. Decline at any time in Settings to disable everything.
 
 ## How to Opt Out
 

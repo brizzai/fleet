@@ -43,6 +43,33 @@ func (h *Home) collectSnapshot() analytics.SnapshotStats {
 	}
 }
 
+// fireStartupAnalytics initializes the analytics client and emits the
+// standard launch-time events (TrackAppStarted + boundary snapshot + first-
+// launch onboarding milestone). Split out from the main load handler
+// because it's now triggered both from "consent already given" and from
+// the consentResultMsg handler.
+func (h *Home) fireStartupAnalytics(repoCount int) {
+	analytics.Init(h.cfg.IsTelemetryEnabled(), h.version)
+
+	effectiveTheme := h.cfg.Theme
+	if effectiveTheme == "" {
+		effectiveTheme = "tokyo-night"
+	}
+	analytics.TrackAppStarted(
+		h.version,
+		len(h.sessions),
+		repoCount,
+		effectiveTheme,
+		h.cfg.GetEnterMode(),
+		h.cfg.IsAutoNameEnabled(),
+		h.cfg.IsCopyClaudeSettingsEnabled(),
+	)
+	analytics.EmitSnapshot(h.collectSnapshot())
+	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
+		analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
+	}
+}
+
 // anyAttached reports whether the user attached to at least one session this
 // install — used by the first_quit milestone to flag "ghost quitters" who
 // never engaged with a session.

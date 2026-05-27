@@ -78,11 +78,21 @@ func Init(telemetryEnabled bool, version string) {
 	}
 
 	deviceID := getOrCreateDeviceID()
+	gitName, gitEmail := readGitIdentity()
+
+	// Prefer git email as distinct_id so the same person shows up as one
+	// Mixpanel user across multiple machines. Fall back to the device hash
+	// for users who don't have git configured.
+	distinctID := deviceID
+	if gitEmail != "" {
+		distinctID = gitEmail
+	}
+
 	mp := mixpanel.NewApiClient(mixpanelToken)
 
 	c := &Client{
 		mp:       mp,
-		deviceID: deviceID,
+		deviceID: distinctID,
 		queue:    make(chan job, queueSize),
 	}
 	c.wg.Add(1)
@@ -92,17 +102,38 @@ func Init(telemetryEnabled bool, version string) {
 
 	// Set baseline people properties so Mixpanel sees this device/install
 	// even before the first explicit SetUserProperties call.
-	enqueuePeople(c, map[string]any{
-		"app_version": version,
-		"os_version":  osVersion(),
-		"arch":        runtime.GOARCH,
-	})
+	people := map[string]any{
+		"app_version":  version,
+		"os_version":   osVersion(),
+		"arch":         runtime.GOARCH,
+		"machine_hash": deviceID,
+	}
+	if gitName != "" {
+		people["$name"] = gitName
+	}
+	if gitEmail != "" {
+		people["$email"] = gitEmail
+	}
+	enqueuePeople(c, people)
 
-	preview := deviceID
+	preview := distinctID
 	if len(preview) >= 8 {
 		preview = preview[:8]
 	}
-	debuglog.Logger.Info("analytics initialized", "device_id", preview+"...")
+	debuglog.Logger.Info("analytics initialized", "distinct_id", preview+"...")
+}
+
+// readGitIdentity returns the user's globally-configured git name and email.
+// Either string may be empty if git isn't installed or the value isn't set.
+// Errors are intentionally swallowed — analytics never blocks startup.
+func readGitIdentity() (name, email string) {
+	if out, err := exec.Command("git", "config", "--global", "user.name").Output(); err == nil {
+		name = strings.TrimSpace(string(out))
+	}
+	if out, err := exec.Command("git", "config", "--global", "user.email").Output(); err == nil {
+		email = strings.TrimSpace(string(out))
+	}
+	return name, email
 }
 
 // worker drains the job queue and ships events to Mixpanel one at a time.
