@@ -6,8 +6,8 @@ import (
 )
 
 // collectSnapshot builds an analytics.SnapshotStats from the current TUI
-// state. Called at boundary events (app_started, app_quit, session create /
-// delete) to emit gauges of the user's "shape" — how many repos, worktrees,
+// state. Called at the two boundary events — app_started and app_quit —
+// to emit gauges of the user's "shape": how many repos, worktrees,
 // sessions, slot bindings they're juggling.
 func (h *Home) collectSnapshot() analytics.SnapshotStats {
 	groups := session.GroupByRepo(h.sessions)
@@ -47,9 +47,10 @@ func (h *Home) collectSnapshot() analytics.SnapshotStats {
 // standard launch-time events (TrackAppStarted + boundary snapshot + first-
 // launch onboarding milestone). Split out from the main load handler
 // because it's now triggered both from "consent already given" and from
-// the consentResultMsg handler.
+// the consentResultMsg handler. The pre-discovered Identity is passed in
+// so Init does no shell-outs on the UI thread.
 func (h *Home) fireStartupAnalytics(repoCount int) {
-	analytics.Init(h.cfg.IsTelemetryEnabled(), h.version)
+	analytics.Init(h.cfg.IsTelemetryEnabled(), h.version, h.identity)
 
 	effectiveTheme := h.cfg.Theme
 	if effectiveTheme == "" {

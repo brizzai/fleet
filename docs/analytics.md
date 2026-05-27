@@ -12,7 +12,9 @@ If you decline, no Mixpanel client is created and no network traffic happens. If
 
 ### Events
 
-All events are **Mixpanel events** with a `distinct_id` set to the anonymous device ID (see Privacy below). Direct actions and lifecycle events:
+All events are **Mixpanel events**. The `distinct_id` is your `git user.email` when git is configured globally (so the same person shows up as one Mixpanel user across machines); otherwise it falls back to a one-way SHA256 hash of the macOS hardware UUID. See the [Identity](#identity) section below for the full rule.
+
+Direct actions and lifecycle events:
 
 | Event | Properties | When |
 |---|---|---|
@@ -97,15 +99,24 @@ Set on the device's people profile so you can build cohorts and break events dow
 | `auto_name_sessions` | `true` |
 | `copy_claude_settings` | `true` |
 
+## What We Collect (Personal Data)
+
+Only when you accept the first-launch consent prompt:
+
+- `git user.name`  → Mixpanel people property `$name`
+- `git user.email` → Mixpanel people property `$email` and `distinct_id`
+
+That's the entire personal-data surface. If you decline (or never have git configured), neither is sent.
+
 ## What We Do NOT Collect
 
 - File paths or project names
 - Code content or prompts (only the count of prompts, not their contents)
-- Usernames, emails, or any PII
 - Git branch names or commit hashes
 - Session titles or repo names
+- Anything beyond the people-properties listed above
 
-Defense-in-depth: `sanitizeKey` (in `internal/analytics/analytics.go`) drops any property whose key matches a small PII blocklist (`path`, `repo`, `branch`, `title`, `hostname`, `prompt`, `message`, etc.) before the event reaches the Mixpanel SDK.
+Defense-in-depth: `sanitizeKey` (in `internal/analytics/analytics.go`) drops any event property whose key matches a small PII blocklist (`path`, `repo`, `branch`, `title`, `hostname`, `prompt`, `message`, etc.) before the event reaches the Mixpanel SDK.
 
 ## Privacy
 

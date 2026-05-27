@@ -189,6 +189,11 @@ type Home struct {
 	cfg     *config.Config
 	version string
 
+	// Pre-resolved per-install identity (device hash + git name/email +
+	// OS version). Discovered in main.go before the TUI starts so Init
+	// doesn't shell out on the Bubble Tea Update() thread.
+	identity analytics.Identity
+
 	// Bug report / diagnostics.
 	errorHistory *ErrorHistory
 	actionLog    *ActionLog
@@ -209,7 +214,7 @@ type Home struct {
 }
 
 // NewHome creates the main TUI model.
-func NewHome(storage *session.StateDB, cfg *config.Config, version string) *Home {
+func NewHome(storage *session.StateDB, cfg *config.Config, version string, identity analytics.Identity) *Home {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	fi := textinput.New()
@@ -247,6 +252,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string) *Home
 		filterInput:           fi,
 		cfg:                   cfg,
 		version:               version,
+		identity:              identity,
 		errorHistory:          NewErrorHistory(50),
 		actionLog:             NewActionLog(100),
 		statusTrigger:         make(chan struct{}, 1),
@@ -780,13 +786,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.workerStarted = true
 			go h.statusWorker()
 
-			// First-launch consent flow: if the user has never been asked,
-			// show the prompt now. analytics.Init / TrackAppStarted fire
-			// from the consentResultMsg handler instead of here.
-			if !h.cfg.AnalyticsConsentSeen {
-				h.consentDialog.Show()
-			} else {
+			// First-launch consent flow: prompt iff (a) the user hasn't
+			// been asked yet AND (b) they haven't already opted out via
+			// FLEET_TELEMETRY_DISABLED / DO_NOT_TRACK. When env opt-out is
+			// set there's nothing to ask about — analytics.Init would
+			// refuse to send anyway. We do NOT persist AnalyticsConsentSeen
+			// here so the prompt re-appears if the user later unsets the
+			// env var. fireStartupAnalytics is still safe to call: Init
+			// re-checks opt-out and creates a disabled client.
+			switch {
+			case h.cfg.AnalyticsConsentSeen:
 				h.fireStartupAnalytics(len(groups))
+			case analytics.IsOptedOutByEnv():
+				h.fireStartupAnalytics(len(groups))
+			default:
+				h.consentDialog.Show()
 			}
 		}
 

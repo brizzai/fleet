@@ -11,9 +11,9 @@ type SnapshotStats struct {
 	SlotBindingsTotal  int
 }
 
-// EmitSnapshot records the current TUI state as Sentry gauges + a
-// sessions_per_repo distribution. Safe to call repeatedly; no-op when
-// telemetry is disabled.
+// EmitSnapshot records the current TUI state as Mixpanel events via
+// analytics.Gauge and analytics.Distribution. Safe to call repeatedly;
+// no-op when telemetry is disabled.
 func EmitSnapshot(stats SnapshotStats) {
 	Gauge(MetricReposTotal, float64(stats.ReposTotal), nil)
 	Gauge(MetricWorktreeReposTotal, float64(stats.WorktreeReposTotal), nil)

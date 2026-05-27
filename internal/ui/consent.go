@@ -74,11 +74,11 @@ func (d *ConsentDialog) View() string {
 	b.WriteString("\n\n")
 
 	body := lipgloss.NewStyle().Foreground(ColorText)
-	b.WriteString(body.Render("fleet sends anonymous usage events so I can see"))
+	b.WriteString(body.Render("fleet sends usage events so I can see what"))
 	b.WriteString("\n")
-	b.WriteString(body.Render("what works and what doesn't. With your permission"))
+	b.WriteString(body.Render("works and what doesn't. With your permission"))
 	b.WriteString("\n")
-	b.WriteString(body.Render("it also includes:"))
+	b.WriteString(body.Render("each event is tagged with:"))
 	b.WriteString("\n\n")
 
 	bulletMark := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)

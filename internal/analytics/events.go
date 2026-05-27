@@ -3,7 +3,7 @@ package analytics
 // Event name constants.
 //
 // Naming convention: snake_case verb-or-noun phrases. New onboarding events
-// share an `onboarding_` prefix so they're easy to filter together in Sentry.
+// share an `onboarding_` prefix so they're easy to filter together in Mixpanel.
 const (
 	// Lifecycle.
 	EventAppStarted = "app_started"

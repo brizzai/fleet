@@ -124,7 +124,12 @@ func runTUI() {
 	}
 	defer storage.Close()
 
-	model := ui.NewHome(storage, cfg, version)
+	// Resolve per-install identity (device hash, git name/email, OS version)
+	// here so the Bubble Tea Update() loop never has to wait on git/ioreg/
+	// sw_vers. analytics.Init then becomes pure in-memory plumbing.
+	identity := analytics.DiscoverIdentity()
+
+	model := ui.NewHome(storage, cfg, version, identity)
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),

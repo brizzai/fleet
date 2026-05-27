@@ -44,12 +44,45 @@ var (
 )
 
 // Client wraps the Mixpanel ApiClient with a queued worker.
+//
+// deviceID and distinctID are kept separate on purpose: deviceID is always the
+// anonymous SHA256 of the hardware UUID (what DeviceID() exposes externally),
+// while distinctID is the value sent to Mixpanel as the per-event identifier
+// — usually the git user.email, with the device hash as a fallback. Logging
+// distinctID would leak email; logging deviceID is safe.
 type Client struct {
-	mp       *mixpanel.ApiClient
-	deviceID string
-	queue    chan job
-	wg       sync.WaitGroup
-	disabled bool
+	mp         *mixpanel.ApiClient
+	deviceID   string
+	distinctID string
+	queue      chan job
+	wg         sync.WaitGroup
+	disabled   bool
+}
+
+// Identity is the resolved per-install identity that callers pass into Init.
+// Discovered via DiscoverIdentity() outside the Bubble Tea Update() loop so
+// the consent-flow Init call is pure in-memory work.
+type Identity struct {
+	DeviceID  string // anonymous SHA256 of macOS hardware UUID
+	GitName   string // git config --global user.name (may be empty)
+	GitEmail  string // git config --global user.email (may be empty)
+	OSVersion string // sw_vers -productVersion (may be "unknown")
+}
+
+// DiscoverIdentity runs the shell-outs needed to populate an Identity:
+// ioreg (or hostname fallback) for the device ID, git config for name/email,
+// and sw_vers for the OS version. CLAUDE.md mandates that blocking I/O like
+// this never run inside the Bubble Tea Update() loop, so callers should
+// invoke this from main.go before the TUI starts. Safe to call concurrently;
+// no shared state.
+func DiscoverIdentity() Identity {
+	name, email := readGitIdentity()
+	return Identity{
+		DeviceID:  getOrCreateDeviceID(),
+		GitName:   name,
+		GitEmail:  email,
+		OSVersion: osVersion(),
+	}
 }
 
 // job represents one piece of work for the worker — either a Track event or a
@@ -59,11 +92,12 @@ type job struct {
 	people *mixpanel.PeopleProperties
 }
 
-// Init wires up the Mixpanel client and starts the worker goroutine. Safe to
-// call once; subsequent calls are no-ops. When telemetry is disabled the
-// client is created in a "disabled" state and all Track/Gauge/Distribution/
-// SetUserProperties calls become no-ops.
-func Init(telemetryEnabled bool, version string) {
+// Init wires up the Mixpanel client and starts the worker goroutine using a
+// pre-resolved Identity. Pass the result of DiscoverIdentity() (called before
+// the TUI starts) so no blocking I/O happens here. Safe to call once;
+// subsequent calls are no-ops. When telemetry is disabled the client is
+// created in a "disabled" state and all helper calls become no-ops.
+func Init(telemetryEnabled bool, version string, identity Identity) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 
@@ -77,23 +111,20 @@ func Init(telemetryEnabled bool, version string) {
 		return
 	}
 
-	deviceID := getOrCreateDeviceID()
-	gitName, gitEmail := readGitIdentity()
-
-	// Prefer git email as distinct_id so the same person shows up as one
-	// Mixpanel user across multiple machines. Fall back to the device hash
-	// for users who don't have git configured.
-	distinctID := deviceID
-	if gitEmail != "" {
-		distinctID = gitEmail
+	// Mixpanel distinct_id: prefer git email (one Mixpanel user across all
+	// of the person's machines), fall back to the anonymous device hash.
+	distinctID := identity.DeviceID
+	if identity.GitEmail != "" {
+		distinctID = identity.GitEmail
 	}
 
 	mp := mixpanel.NewApiClient(mixpanelToken)
 
 	c := &Client{
-		mp:       mp,
-		deviceID: distinctID,
-		queue:    make(chan job, queueSize),
+		mp:         mp,
+		deviceID:   identity.DeviceID,
+		distinctID: distinctID,
+		queue:      make(chan job, queueSize),
 	}
 	c.wg.Add(1)
 	go c.worker()
@@ -104,23 +135,21 @@ func Init(telemetryEnabled bool, version string) {
 	// even before the first explicit SetUserProperties call.
 	people := map[string]any{
 		"app_version":  version,
-		"os_version":   osVersion(),
+		"os_version":   identity.OSVersion,
 		"arch":         runtime.GOARCH,
-		"machine_hash": deviceID,
+		"machine_hash": identity.DeviceID,
 	}
-	if gitName != "" {
-		people["$name"] = gitName
+	if identity.GitName != "" {
+		people["$name"] = identity.GitName
 	}
-	if gitEmail != "" {
-		people["$email"] = gitEmail
+	if identity.GitEmail != "" {
+		people["$email"] = identity.GitEmail
 	}
 	enqueuePeople(c, people)
 
-	preview := distinctID
-	if len(preview) >= 8 {
-		preview = preview[:8]
-	}
-	debuglog.Logger.Info("analytics initialized", "distinct_id", preview+"...")
+	// Log only whether git identity was present, not the value or any prefix
+	// of it (which for a git email is plenty to identify a person).
+	debuglog.Logger.Info("analytics initialized", "git_identity_present", identity.GitEmail != "")
 }
 
 // readGitIdentity returns the user's globally-configured git name and email.
@@ -163,7 +192,7 @@ func Track(eventType string, properties map[string]interface{}) {
 	if c == nil || c.disabled {
 		return
 	}
-	event := c.mp.NewEvent(eventType, c.deviceID, sanitizeProperties(properties))
+	event := c.mp.NewEvent(eventType, c.distinctID, sanitizeProperties(properties))
 	enqueueEvent(c, event)
 }
 
@@ -176,7 +205,7 @@ func Gauge(name string, value float64, properties map[string]interface{}) {
 		return
 	}
 	props := mergeValue(properties, value)
-	event := c.mp.NewEvent(name, c.deviceID, props)
+	event := c.mp.NewEvent(name, c.distinctID, props)
 	enqueueEvent(c, event)
 }
 
@@ -189,7 +218,7 @@ func Distribution(name string, sample float64, properties map[string]interface{}
 		return
 	}
 	props := mergeValue(properties, sample)
-	event := c.mp.NewEvent(name, c.deviceID, props)
+	event := c.mp.NewEvent(name, c.distinctID, props)
 	enqueueEvent(c, event)
 }
 
@@ -249,7 +278,14 @@ func current() *Client {
 // queue is full, the event is dropped — fleet emits few enough events that
 // this should never happen in practice, but the non-blocking guarantee is
 // what keeps Track safe to call from the Bubble Tea Update() loop.
+//
+// The recover handles a narrow Shutdown race: between current() returning a
+// non-nil *Client and reaching the channel send below, Shutdown can close
+// c.queue from another goroutine (hook watcher, chrome client, etc.). A
+// closed channel makes `case c.queue <- …` selectable and panics. Analytics
+// is best-effort, so we'd rather drop the event than crash the TUI.
 func enqueueEvent(c *Client, event *mixpanel.Event) {
+	defer func() { _ = recover() }()
 	select {
 	case c.queue <- job{event: event}:
 	default:
@@ -258,7 +294,8 @@ func enqueueEvent(c *Client, event *mixpanel.Event) {
 }
 
 func enqueuePeople(c *Client, props map[string]any) {
-	people := mixpanel.NewPeopleProperties(c.deviceID, props)
+	defer func() { _ = recover() }()
+	people := mixpanel.NewPeopleProperties(c.distinctID, props)
 	select {
 	case c.queue <- job{people: people}:
 	default:
@@ -312,6 +349,14 @@ func sanitizeKey(k string) bool {
 		return false
 	}
 	return true
+}
+
+// IsOptedOutByEnv reports whether either env var (FLEET_TELEMETRY_DISABLED or
+// DO_NOT_TRACK) is set to a truthy value. Useful for callers that want to
+// skip a consent prompt when the user has already opted out at the shell
+// level — there's nothing to ask about.
+func IsOptedOutByEnv() bool {
+	return isOptedOut()
 }
 
 // isOptedOut checks env vars for telemetry opt-out.

@@ -125,7 +125,9 @@ func MarkOnboardingMilestone(milestone string) bool {
 }
 
 // SecondsSinceInstall returns the seconds elapsed since the install was first
-// seen. Returns 0 if the install_state.json file doesn't exist or is corrupt.
+// seen. Returns a near-zero value when the install_state.json file doesn't
+// exist or is corrupt — loadInstallState synthesizes InstalledAt = time.Now()
+// in those cases, so the duration is microseconds rather than exactly 0.
 func SecondsSinceInstall() float64 {
 	state, _ := loadInstallState()
 	return time.Since(state.InstalledAt).Seconds()
