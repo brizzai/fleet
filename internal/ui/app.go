@@ -370,6 +370,20 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setError(msg.err)
 			return h, nil
 		}
+		// Engagement signals: lifetime, prompt count, and orphaned-flag tell us
+		// whether the session was actually used before being thrown away.
+		if s, ok := h.sessionByID[msg.id]; ok {
+			lifetime := time.Since(s.CreatedAt).Seconds()
+			analytics.Distribution(analytics.MetricSessionLifetimeSeconds, lifetime, nil)
+			if s.PromptCount > 0 {
+				analytics.Distribution(analytics.MetricSessionPromptsPerSession, float64(s.PromptCount), nil)
+			}
+			if s.LastAccessedAt.IsZero() {
+				analytics.Track(analytics.EventSessionOrphaned, map[string]interface{}{
+					"lifetime_seconds": int(lifetime),
+				})
+			}
+		}
 		analytics.Track(analytics.EventSessionDeleted, nil)
 		return h.deferDelete(msg)
 
@@ -423,6 +437,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionRenameMsg:
 		if s, ok := h.sessionByID[msg.id]; ok {
+			// Manual rename on a previously auto-named session = signal that
+			// our auto-title heuristic produced a bad name.
+			if s.TitleGenerated && !s.ManuallyRenamed {
+				analytics.Track(analytics.EventManualRenameAfterAuto, nil)
+			}
 			s.Title = msg.newTitle
 			s.ManuallyRenamed = true
 			analytics.Track(analytics.EventSessionRenamed, nil)
@@ -744,8 +763,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.workerStarted = true
 			go h.statusWorker()
 
-			// Initialize analytics (once, after first load).
-			analytics.Init(h.cfg.IsTelemetryEnabled())
+			// Initialize analytics (once, after first load). Init is idempotent
+			// so this is a no-op when runTUI already called it earlier.
+			analytics.Init(h.cfg.IsTelemetryEnabled(), h.version)
 			effectiveTheme := h.cfg.Theme
 			if effectiveTheme == "" {
 				effectiveTheme = "tokyo-night"
@@ -759,6 +779,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.cfg.IsAutoNameEnabled(),
 				h.cfg.IsCopyClaudeSettingsEnabled(),
 			)
+			// Snapshot the user's "shape" — how many repos, worktrees, sessions
+			// they're managing at launch. Useful for understanding scale.
+			analytics.EmitSnapshot(h.collectSnapshot())
+			// First-launch milestone — fires exactly once per install.
+			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
+				analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
+			}
 		}
 
 		// Start listening for hook changes.
@@ -1113,6 +1140,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("attach session", s.Title, true)
 			analytics.Track(analytics.EventSessionAttached, nil)
+			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstAttach) {
+				analytics.Track(analytics.EventOnboardingFirstAttach, map[string]interface{}{
+					"seconds_since_install": int(analytics.SecondsSinceInstall()),
+				})
+			}
 		}
 		return h, h.attachSelected()
 	case "tab":
@@ -1304,9 +1336,41 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Finalize all pending deletes before quitting.
 		h.finalizeAllPendingDeletes()
+
+		uptime := time.Since(h.startTime).Seconds()
+		runningCount := 0
+		waitingCount := 0
+		for _, s := range h.sessions {
+			switch s.GetStatus() {
+			case session.StatusRunning:
+				runningCount++
+			case session.StatusWaiting:
+				waitingCount++
+			}
+		}
+
 		analytics.Track(analytics.EventAppQuit, map[string]interface{}{
-			"uptime_seconds": int(time.Since(h.startTime).Seconds()),
+			"uptime_seconds": int(uptime),
+			"session_count":  len(h.sessions),
 		})
+		analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
+		analytics.EmitSnapshot(h.collectSnapshot())
+
+		if runningCount > 0 || waitingCount > 0 {
+			analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
+				"running_count": runningCount,
+				"waiting_count": waitingCount,
+			})
+		}
+
+		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
+			analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
+				"uptime_seconds":         int(uptime),
+				"session_count":          len(h.sessions),
+				"attached_at_least_once": h.anyAttached(),
+			})
+		}
+
 		analytics.Shutdown()
 		return h, tea.Quit
 	}
@@ -1339,11 +1403,14 @@ func (h *Home) attachSelected() tea.Cmd {
 	}
 
 	h.isAttaching.Store(true)
+	attachStart := time.Now()
 
 	return tea.Exec(attachCmd{session: s.GetTmuxSession()}, func(err error) tea.Msg {
 		// CRITICAL: Clear isAttaching before returning the message.
 		// Prevents race where View() returns empty string after detach.
 		h.isAttaching.Store(false)
+		analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs,
+			time.Since(attachStart).Seconds(), nil)
 		return statusUpdateMsg{attachedSessionID: s.ID}
 	})
 }
@@ -1384,6 +1451,11 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 	}
 
 	analytics.Track(analytics.EventSessionCreated, nil)
+	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstSession) {
+		analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{
+			"seconds_since_install": int(analytics.SecondsSinceInstall()),
+		})
+	}
 
 	s := msg.session
 	h.workerMu.Lock()
@@ -3087,6 +3159,11 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("attach session", s.Title, true)
 			analytics.Track(analytics.EventSessionAttached, nil)
+			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstAttach) {
+				analytics.Track(analytics.EventOnboardingFirstAttach, map[string]interface{}{
+					"seconds_since_install": int(analytics.SecondsSinceInstall()),
+				})
+			}
 		}
 		return h, h.attachSelected()
 	case "focus":
