@@ -3165,6 +3165,8 @@ func (h *Home) buildPaletteCommands() []PaletteCommand {
 		{ID: "help", Name: "Help", Shortcut: "?"},
 		{ID: "reload_all", Name: "Reload All Sessions"},
 		{ID: "mark_all_read", Name: "Mark All as Read"},
+		{ID: "expand_all", Name: "Expand All Repos"},
+		{ID: "collapse_all", Name: "Collapse All Repos"},
 		{ID: "quit", Name: "Quit", Shortcut: "q"},
 	}
 }
@@ -3274,6 +3276,36 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "mark_all_read":
 		analytics.Track(analytics.EventMarkAllRead, nil)
 		h.markAllAsRead()
+		return h, nil
+	case "expand_all":
+		for repo := range session.GroupByRepo(h.sessions) {
+			h.repoExpanded[repo] = true
+		}
+		for repo := range h.pinnedRepos {
+			h.repoExpanded[repo] = true
+		}
+		h.rebuildFlatItems()
+		h.syncViewport()
+		return h, nil
+	case "collapse_all":
+		// Snapshot the repo under the cursor so we can land on its
+		// header after the rebuild hides everything else.
+		var snapRepo string
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+			snapRepo = h.flatItems[h.cursor].RepoPath
+		}
+		for repo := range h.repoExpanded {
+			h.repoExpanded[repo] = false
+		}
+		h.rebuildFlatItems()
+		h.cursor = 0
+		for i, item := range h.flatItems {
+			if item.IsRepoHeader && item.RepoPath == snapRepo {
+				h.cursor = i
+				break
+			}
+		}
+		h.syncViewport()
 		return h, nil
 	case "quit":
 		return h, tea.Quit
