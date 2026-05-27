@@ -233,6 +233,29 @@ func SetUserProperties(props map[string]interface{}) {
 	enqueuePeople(c, sanitizeProperties(props))
 }
 
+// SyncEnabled reconciles the live client with the user's current telemetry
+// preference — call this when the Settings dialog closes. Without it, the
+// Settings toggle would only take effect on the next launch: Track checks
+// c.disabled (set once at Init), not the live config. Env opt-out always
+// wins; this is a no-op when nothing changed. State changes tear the live
+// client down and re-init in the requested mode.
+func SyncEnabled(telemetryEnabled bool, version string, identity Identity) {
+	globalMu.Lock()
+	c := global
+	globalMu.Unlock()
+
+	wantDisabled := !telemetryEnabled || isOptedOut()
+	switch {
+	case c == nil && wantDisabled:
+		return
+	case c != nil && c.disabled == wantDisabled:
+		return
+	}
+
+	Shutdown()
+	Init(telemetryEnabled, version, identity)
+}
+
 // Shutdown closes the queue, drains in-flight events with a timeout, and
 // clears the global. Subsequent Track calls are no-ops.
 func Shutdown() {

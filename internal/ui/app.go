@@ -466,6 +466,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case settingsClosedMsg:
 		// Re-read tick interval from config after settings change.
+		// Also reconcile the live analytics client with the (possibly
+		// flipped) Telemetry toggle — otherwise the change only takes
+		// effect on next launch.
+		analytics.SyncEnabled(h.cfg.IsTelemetryEnabled(), h.version, h.identity)
 		return h, nil
 
 	case consentResultMsg:
@@ -478,7 +482,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			debuglog.Logger.Error("config: save after consent", "err", err)
 		}
 		if enabled {
-			h.fireStartupAnalytics(len(session.GroupByRepo(h.sessions)))
+			// Worker is already running by this point — guard the read.
+			h.workerMu.Lock()
+			repoCount := len(session.GroupByRepo(h.sessions))
+			h.workerMu.Unlock()
+			h.fireStartupAnalytics(repoCount)
 		}
 		return h, nil
 
@@ -1363,6 +1371,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.finalizeAllPendingDeletes()
 
 		uptime := time.Since(h.startTime).Seconds()
+
+		// h.cancel() above only signals the status worker — it can still be
+		// mid-cycle, holding workerMu and mutating h.sessions. Take the lock
+		// for the direct reads; collectSnapshot and anyAttached self-lock.
+		h.workerMu.Lock()
 		runningCount := 0
 		waitingCount := 0
 		for _, s := range h.sessions {
@@ -1373,10 +1386,12 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				waitingCount++
 			}
 		}
+		sessionCount := len(h.sessions)
+		h.workerMu.Unlock()
 
 		analytics.Track(analytics.EventAppQuit, map[string]interface{}{
 			"uptime_seconds": int(uptime),
-			"session_count":  len(h.sessions),
+			"session_count":  sessionCount,
 		})
 		analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
 		analytics.EmitSnapshot(h.collectSnapshot())
@@ -1391,7 +1406,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
 			analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
 				"uptime_seconds":         int(uptime),
-				"session_count":          len(h.sessions),
+				"session_count":          sessionCount,
 				"attached_at_least_once": h.anyAttached(),
 			})
 		}

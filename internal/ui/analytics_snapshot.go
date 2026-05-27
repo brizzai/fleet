@@ -9,7 +9,14 @@ import (
 // state. Called at the two boundary events — app_started and app_quit —
 // to emit gauges of the user's "shape": how many repos, worktrees,
 // sessions, slot bindings they're juggling.
+//
+// workerMu protects sessions/gitInfoCache from the status worker; we hold
+// it for the whole function because GroupByRepo and the iterations below
+// all touch h.sessions, and the snapshot fires while the worker is live.
 func (h *Home) collectSnapshot() analytics.SnapshotStats {
+	h.workerMu.Lock()
+	defer h.workerMu.Unlock()
+
 	groups := session.GroupByRepo(h.sessions)
 
 	worktreeCount := 0
@@ -56,9 +63,12 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 	if effectiveTheme == "" {
 		effectiveTheme = "tokyo-night"
 	}
+	h.workerMu.Lock()
+	sessionCount := len(h.sessions)
+	h.workerMu.Unlock()
 	analytics.TrackAppStarted(
 		h.version,
-		len(h.sessions),
+		sessionCount,
 		repoCount,
 		effectiveTheme,
 		h.cfg.GetEnterMode(),
@@ -75,6 +85,8 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 // install — used by the first_quit milestone to flag "ghost quitters" who
 // never engaged with a session.
 func (h *Home) anyAttached() bool {
+	h.workerMu.Lock()
+	defer h.workerMu.Unlock()
 	for _, s := range h.sessions {
 		if !s.LastAccessedAt.IsZero() {
 			return true
