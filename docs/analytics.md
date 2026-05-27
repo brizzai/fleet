@@ -1,16 +1,14 @@
 # Analytics
 
-fleet collects anonymous usage metrics and crash reports via [Sentry](https://sentry.io) to understand how the tool is used, catch regressions early, and prioritize development.
-
-The backend changed from Amplitude to Sentry — the opt-out controls are the same.
+fleet collects anonymous usage events via [Mixpanel](https://mixpanel.com) to understand how the tool is used, what new users do (and don't) succeed at, and to prioritize development.
 
 ## What We Collect
 
-### Counters (one per occurrence)
+### Events
 
-Lifecycle and direct actions:
+All events are **Mixpanel events** with a `distinct_id` set to the anonymous device ID (see Privacy below). Direct actions and lifecycle events:
 
-| Event | Attributes | When |
+| Event | Properties | When |
 |---|---|---|
 | `app_started` | `version`, `session_count`, `repo_count` | TUI launches |
 | `app_quit` | `uptime_seconds`, `session_count` | TUI exits |
@@ -33,65 +31,62 @@ Lifecycle and direct actions:
 | `reload_all` | — | "Reload all sessions" command |
 | `mark_all_read` | — | "Mark all read" command |
 | `error_occurred` | `category` | Any error shown |
-| `manual_rename_after_auto` | — | User renames a session we auto-named (signal that auto-title was wrong) |
+| `manual_rename_after_auto` | — | User renames a session we auto-named (auto-title was wrong) |
 | `quit_with_running_sessions` | `running_count`, `waiting_count` | App quit while sessions were active |
 | `claude_prompt_submitted` | — | UserPromptSubmit hook fired (engagement) |
 | `claude_response_received` | — | Stop hook fired (Claude finished a turn) |
-| `chrome_extension_connected` | — | Chrome native messaging host reachable (first success or after a failure) |
-| `chrome_extension_disconnected` | — | Chrome native messaging host failed after previously succeeding |
+| `chrome_extension_connected` | — | Chrome native messaging host reachable |
+| `chrome_extension_disconnected` | — | Chrome native messaging host failed after a previous success |
 
-Onboarding funnel (one-shot per install, persisted in `~/.config/fleet/install_state.json`):
+### Onboarding funnel (one-shot per install)
 
-| Event | Attributes | When |
+Persisted in `~/.config/fleet/install_state.json`. Each event fires exactly once per install:
+
+| Event | Properties |
+|---|---|
+| `onboarding_first_launch` | — |
+| `onboarding_first_session_created` | `seconds_since_install` |
+| `onboarding_first_attach` | `seconds_since_install` |
+| `onboarding_first_claude_response` | `seconds_since_install` |
+| `onboarding_first_quit` | `uptime_seconds`, `session_count`, `attached_at_least_once` |
+
+### Numeric metrics (events with a `value` property)
+
+Mixpanel doesn't have native gauges or distributions, so these are emitted as events with a numeric `value` property. Use Mixpanel's aggregations (sum / avg / percentile by event) to chart them.
+
+Gauges (snapshots at `app_started` + `app_quit`):
+
+| Event | `value` | Extra properties |
 |---|---|---|
-| `onboarding_first_launch` | — | First TUI launch on this install |
-| `onboarding_first_session_created` | `seconds_since_install` | First time a session is created |
-| `onboarding_first_attach` | `seconds_since_install` | First time the user attaches to a session |
-| `onboarding_first_claude_response` | `seconds_since_install` | First Stop hook seen — Claude actually answered |
-| `onboarding_first_quit` | `uptime_seconds`, `session_count`, `attached_at_least_once` | First app quit after install |
+| `repos_total` | count | — |
+| `worktree_repos_total` | count | — |
+| `sessions_total` | count | — |
+| `sessions_by_status` | count | `status` |
+| `slot_bindings_total` | count | — |
 
-### Gauges (point-in-time snapshots)
+Distributions (sampled at the relevant moment):
 
-Emitted at boundary events (`app_started`, `app_quit`):
-
-| Metric | Attributes | Meaning |
+| Event | `value` | When |
 |---|---|---|
-| `repos_total` | — | Number of pinned repos |
-| `worktree_repos_total` | — | Subset that are git worktrees |
-| `sessions_total` | — | Number of active sessions |
-| `sessions_by_status` | `status` | Sessions per status (running/waiting/finished/idle/error/starting) |
-| `slot_bindings_total` | — | RTS-style slot bindings set |
+| `session_lifetime_seconds` | seconds | Session deleted |
+| `session_prompts_per_session` | count | Session deleted |
+| `attached_session_uptime_seconds` | seconds | User detaches (only on successful attach) |
+| `app_uptime_seconds` | seconds | App quit |
+| `sessions_per_repo` | count | Snapshot — one event per repo |
 
-### Distributions (sampled values)
+### People profile (Mixpanel `/engage`)
 
-| Metric | Sampled at | Meaning |
-|---|---|---|
-| `session_lifetime_seconds` | Session deleted | Time from create → delete |
-| `session_prompts_per_session` | Session deleted | `PromptCount` at delete time |
-| `attached_session_uptime_seconds` | User detaches | Time spent attached |
-| `app_uptime_seconds` | App quit | Total time the TUI was open |
-| `sessions_per_repo` | Snapshot | One value per repo |
+Set on the device's people profile so you can build cohorts and break events down by these dimensions:
 
-### Default Attributes (applied to every metric)
-
-| Attribute | Example |
+| Property | Example |
 |---|---|
 | `app_version` | `v1.0.0` |
 | `os_version` | `15.3` |
 | `arch` | `arm64` |
-| `device_id` | `abc12345…` (SHA256, see below) |
 | `theme` | `tokyo-night` |
 | `enter_mode` | `attach` |
 | `auto_name_sessions` | `true` |
 | `copy_claude_settings` | `true` |
-
-### Errors and Panics
-
-The same Sentry SDK also captures:
-- **Panics** in the TUI run loop — wrapped with `sentry.CaptureException` then re-raised so the runtime still prints a stack trace.
-- **Flash errors** shown to the user via `ErrorHistory.Add()` — same buffer that backs the bug report dialog.
-
-Both are gated by the same telemetry toggle as the counters above.
 
 ## What We Do NOT Collect
 
@@ -100,9 +95,8 @@ Both are gated by the same telemetry toggle as the counters above.
 - Usernames, emails, or any PII
 - Git branch names or commit hashes
 - Session titles or repo names
-- IP addresses (Sentry anonymizes by default)
 
-There's also a defense-in-depth `sanitizeKey` filter in `internal/analytics/analytics.go` that drops any attribute whose key matches a small PII blocklist (`path`, `repo`, `branch`, `title`, `hostname`, `prompt`, `message`, etc.).
+Defense-in-depth: `sanitizeKey` (in `internal/analytics/analytics.go`) drops any property whose key matches a small PII blocklist (`path`, `repo`, `branch`, `title`, `hostname`, `prompt`, `message`, etc.) before the event reaches the Mixpanel SDK.
 
 ## Privacy
 
@@ -111,11 +105,11 @@ There's also a defense-in-depth `sanitizeKey` filter in `internal/analytics/anal
 Each installation generates a **one-way SHA256 hash** of the macOS hardware UUID. This hash:
 - Cannot be reversed to identify you or your machine
 - Is stable across app updates (cached at `~/.config/fleet/device_id`)
-- Is the only identifier sent to Sentry (attached as `user.id` and the `device_id` attribute)
+- Is the only identifier sent to Mixpanel (as `distinct_id`)
 
 ## How to Opt Out
 
-Any of these methods will completely disable analytics **and** crash/error reporting — there is a single toggle for both:
+Any of these methods will completely disable analytics:
 
 ### 1. Environment Variable
 
@@ -143,23 +137,23 @@ Edit `~/.config/fleet/config.json`:
 
 Press `S` in the TUI and toggle **Telemetry** to **off**.
 
-When telemetry is disabled, `sentry.Init` is never called and the global meter is a no-op — no network traffic of any kind.
+When telemetry is disabled, the Mixpanel client is never created and every call (`Track` / `Gauge` / `Distribution` / `SetUserProperties`) becomes a no-op — no network traffic.
 
 ## Architecture
 
 ```text
 internal/analytics/
-├── analytics.go        # sentry.Init, meter, Track, Gauge, Distribution, CaptureError
-├── events.go           # Event-name and metric-name constants
-├── onboarding.go       # ~/.config/fleet/install_state.json milestone dedupe
-└── snapshot.go         # EmitSnapshot — boundary gauges
+├── analytics.go     # Init, Track, Gauge, Distribution, SetUserProperties, Shutdown
+├── events.go        # Event-name constants
+├── onboarding.go    # ~/.config/fleet/install_state.json milestone dedupe
+└── snapshot.go      # EmitSnapshot — boundary gauges
 ```
 
-- **Global singleton** — `Init()` creates once, all helpers are safe to call from anywhere
-- **No-op when disabled** — every helper checks the disabled flag and returns immediately
-- **Thread-safe** — protected by mutex; the Sentry meter itself is goroutine-safe
-- **Flushed on quit** — `Shutdown()` calls `sentry.Flush(2s)` before the binary exits
+- **Buffered worker** — Mixpanel's SDK is synchronous HTTP. The TUI must never block in `Update()`, so events are pushed onto a 256-slot channel and a single worker goroutine ships them. Track/Gauge/Distribution return immediately.
+- **Queue full?** — Events are dropped silently (logged at debug level). In practice the queue is small enough that this only happens if the network is completely stuck for an extended time.
+- **Shutdown** — Closes the queue, waits up to 2s for the worker to drain, then returns. Surviving events are lost.
+- **Subprocesses** — `fleet hook-handler` and `fleet chrome-host` do **not** initialize analytics — they're transient (one invocation per Claude Code hook fire) and starting an HTTP worker per invocation isn't worth it.
 
-## DSN
+## Project Token
 
-Events are routed to a fleet-specific Sentry project. The DSN is compiled into the binary (`sentryDSN` in `analytics.go`) — there is no remote configuration. Subprocesses like `fleet hook-handler` do **not** initialize Sentry because they're transient (one invocation per Claude Code hook fire); panics there are logged to `~/.config/fleet/debug.log` only.
+Compiled into the binary (`mixpanelToken` constant in `analytics.go`). No remote configuration; updating the token requires a new release.

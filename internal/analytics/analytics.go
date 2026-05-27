@@ -1,10 +1,12 @@
-// Package analytics ships anonymous usage metrics to Sentry. The public surface
-// (Init, Track, SetUserProperties, Shutdown) is intentionally unchanged from
-// the previous Amplitude implementation so existing call sites keep working.
+// Package analytics ships anonymous usage events to Mixpanel. The public
+// surface (Init, Track, Gauge, Distribution, SetUserProperties, Shutdown) is
+// intentionally backend-agnostic so call sites in app.go / settings.go /
+// hooks / chrome don't need to change when the backend does.
 //
-// Backend: sentry.NewMeter records Count/Gauge/Distribution metrics. Errors and
-// panics also flow through this package via CaptureError so a single opt-out
-// switch covers both usage analytics and crash reports.
+// Backend: github.com/mixpanel/mixpanel-go's ApiClient. Mixpanel's Track is
+// a blocking HTTP call, which is unacceptable inside the Bubble Tea Update()
+// loop — so this package buffers events on a channel and ships them from a
+// single worker goroutine. Track/Gauge/Distribution return immediately.
 package analytics
 
 import (
@@ -20,27 +22,47 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
-	"github.com/getsentry/sentry-go"
-	"github.com/getsentry/sentry-go/attribute"
+	"github.com/mixpanel/mixpanel-go"
 )
 
-const sentryDSN = "https://ed169a419b5e672e4bb2b392155e26b4@o4510872302911488.ingest.us.sentry.io/4511460792598528"
+const (
+	mixpanelToken = "89fa427751dcb749b67d524d1dbc9f98"
+
+	// queueSize is how many events we buffer before dropping. The TUI emits
+	// at most a few events per second; this gives ~minutes of slack if
+	// Mixpanel is slow before we start losing events.
+	queueSize = 256
+
+	// shutdownTimeout caps how long Shutdown blocks waiting for the worker
+	// to drain the queue. 2s matches what the previous Sentry impl used.
+	shutdownTimeout = 2 * time.Second
+)
 
 var (
 	global   *Client
 	globalMu sync.Mutex
 )
 
-// Client holds the Sentry meter plus the anonymous device id.
+// Client wraps the Mixpanel ApiClient with a queued worker.
 type Client struct {
-	meter    sentry.Meter
+	mp       *mixpanel.ApiClient
 	deviceID string
+	queue    chan job
+	wg       sync.WaitGroup
 	disabled bool
 }
 
-// Init wires up Sentry and a global meter. Safe to call once; subsequent calls
-// are no-ops. When telemetry is disabled the client is created in a "disabled"
-// state and all Track/Gauge/Distribution/CaptureError calls become no-ops.
+// job represents one piece of work for the worker — either a Track event or a
+// PeopleSet update. Exactly one of `event` and `people` is non-nil.
+type job struct {
+	event  *mixpanel.Event
+	people *mixpanel.PeopleProperties
+}
+
+// Init wires up the Mixpanel client and starts the worker goroutine. Safe to
+// call once; subsequent calls are no-ops. When telemetry is disabled the
+// client is created in a "disabled" state and all Track/Gauge/Distribution/
+// SetUserProperties calls become no-ops.
 func Init(telemetryEnabled bool, version string) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
@@ -56,35 +78,25 @@ func Init(telemetryEnabled bool, version string) {
 	}
 
 	deviceID := getOrCreateDeviceID()
+	mp := mixpanel.NewApiClient(mixpanelToken)
 
-	if err := sentry.Init(sentry.ClientOptions{
-		Dsn:              sentryDSN,
-		Release:          "fleet@" + version,
-		Environment:      sentryEnvironment(version),
-		AttachStacktrace: true,
-		EnableTracing:    false,
-	}); err != nil {
-		debuglog.Logger.Error("sentry init failed", "err", err)
-		global = &Client{disabled: true}
-		return
-	}
-
-	sentry.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetUser(sentry.User{ID: deviceID})
-	})
-
-	meter := sentry.NewMeter(context.Background())
-	meter.SetAttributes(
-		attribute.String("app_version", version),
-		attribute.String("os_version", osVersion()),
-		attribute.String("arch", runtime.GOARCH),
-		attribute.String("device_id", deviceID),
-	)
-
-	global = &Client{
-		meter:    meter,
+	c := &Client{
+		mp:       mp,
 		deviceID: deviceID,
+		queue:    make(chan job, queueSize),
 	}
+	c.wg.Add(1)
+	go c.worker()
+
+	global = c
+
+	// Set baseline people properties so Mixpanel sees this device/install
+	// even before the first explicit SetUserProperties call.
+	enqueuePeople(c, map[string]any{
+		"app_version": version,
+		"os_version":  osVersion(),
+		"arch":        runtime.GOARCH,
+	})
 
 	preview := deviceID
 	if len(preview) >= 8 {
@@ -93,77 +105,76 @@ func Init(telemetryEnabled bool, version string) {
 	debuglog.Logger.Info("analytics initialized", "device_id", preview+"...")
 }
 
-// Track records a Count(name, 1) metric with optional attributes.
+// worker drains the job queue and ships events to Mixpanel one at a time.
+// Each call gets a 5s timeout so a hung Mixpanel endpoint can't permanently
+// stall the worker.
+func (c *Client) worker() {
+	defer c.wg.Done()
+	for j := range c.queue {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		switch {
+		case j.event != nil:
+			if err := c.mp.Track(ctx, []*mixpanel.Event{j.event}); err != nil {
+				debuglog.Logger.Debug("mixpanel track failed", "err", err)
+			}
+		case j.people != nil:
+			if err := c.mp.PeopleSet(ctx, []*mixpanel.PeopleProperties{j.people}); err != nil {
+				debuglog.Logger.Debug("mixpanel people_set failed", "err", err)
+			}
+		}
+		cancel()
+	}
+}
+
+// Track enqueues a Mixpanel event with the given properties.
 func Track(eventType string, properties map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled {
 		return
 	}
-	c.meter.Count(eventType, 1, sentry.WithAttributes(propertiesToAttributes(properties)...))
+	event := c.mp.NewEvent(eventType, c.deviceID, sanitizeProperties(properties))
+	enqueueEvent(c, event)
 }
 
-// Gauge records a point-in-time value (e.g., session count snapshot).
+// Gauge records a point-in-time value as an event with a numeric `value`
+// property. Mixpanel doesn't have native gauges; this convention lets you
+// chart averages or maxes by event name.
 func Gauge(name string, value float64, properties map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled {
 		return
 	}
-	c.meter.Gauge(name, value, sentry.WithAttributes(propertiesToAttributes(properties)...))
+	props := mergeValue(properties, value)
+	event := c.mp.NewEvent(name, c.deviceID, props)
+	enqueueEvent(c, event)
 }
 
-// Distribution records a sampled value (e.g., session lifetime in seconds).
+// Distribution records a sampled value as an event with a numeric `value`
+// property. Same Mixpanel-side semantics as Gauge — the distinction is for
+// the caller's intent only.
 func Distribution(name string, sample float64, properties map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled {
 		return
 	}
-	c.meter.Distribution(name, sample, sentry.WithAttributes(propertiesToAttributes(properties)...))
+	props := mergeValue(properties, sample)
+	event := c.mp.NewEvent(name, c.deviceID, props)
+	enqueueEvent(c, event)
 }
 
-// CapturePanic reports a recovered panic value to Sentry. Use this from a
-// deferred recover() so Sentry's panic API preserves the original panic
-// value type and Go's full stack trace from the runtime — wrapping the
-// panic in fmt.Errorf would flatten both.
-func CapturePanic(r any) {
-	c := current()
-	if c == nil || c.disabled || r == nil {
-		return
-	}
-	sentry.CurrentHub().Recover(r)
-}
-
-// CaptureError reports a Go error to Sentry with optional tags.
-func CaptureError(err error, properties map[string]interface{}) {
-	c := current()
-	if c == nil || c.disabled || err == nil {
-		return
-	}
-	if len(properties) == 0 {
-		sentry.CaptureException(err)
-		return
-	}
-	sentry.WithScope(func(scope *sentry.Scope) {
-		for k, v := range properties {
-			if !sanitizeKey(k) {
-				continue
-			}
-			scope.SetTag(k, fmt.Sprintf("%v", v))
-		}
-		sentry.CaptureException(err)
-	})
-}
-
-// SetUserProperties merges attributes into the meter's default attribute set.
-// Per Sentry docs these are included in all subsequent metrics.
+// SetUserProperties enqueues a Mixpanel /engage update on this device's
+// people profile. Mixpanel automatically retains the latest value per
+// property, so repeated calls during a session are fine.
 func SetUserProperties(props map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled {
 		return
 	}
-	c.meter.SetAttributes(propertiesToAttributes(props)...)
+	enqueuePeople(c, sanitizeProperties(props))
 }
 
-// Shutdown flushes pending Sentry traffic. Idempotent.
+// Shutdown closes the queue, drains in-flight events with a timeout, and
+// clears the global. Subsequent Track calls are no-ops.
 func Shutdown() {
 	globalMu.Lock()
 	c := global
@@ -174,7 +185,17 @@ func Shutdown() {
 		return
 	}
 
-	sentry.Flush(2 * time.Second)
+	close(c.queue)
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		debuglog.Logger.Info("analytics shutdown timed out, dropping queued events")
+	}
 	debuglog.Logger.Info("analytics shutdown")
 }
 
@@ -193,39 +214,56 @@ func current() *Client {
 	return global
 }
 
-// propertiesToAttributes converts a property map to typed Sentry attributes.
-// Drops keys that match the privacy blocklist via sanitizeKey.
-func propertiesToAttributes(props map[string]interface{}) []attribute.Builder {
-	if len(props) == 0 {
-		return nil
+// enqueueEvent pushes an event onto the worker queue without blocking. If the
+// queue is full, the event is dropped — fleet emits few enough events that
+// this should never happen in practice, but the non-blocking guarantee is
+// what keeps Track safe to call from the Bubble Tea Update() loop.
+func enqueueEvent(c *Client, event *mixpanel.Event) {
+	select {
+	case c.queue <- job{event: event}:
+	default:
+		debuglog.Logger.Debug("analytics queue full, dropping event", "event", event.Name)
 	}
-	attrs := make([]attribute.Builder, 0, len(props))
-	for k, v := range props {
+}
+
+func enqueuePeople(c *Client, props map[string]any) {
+	people := mixpanel.NewPeopleProperties(c.deviceID, props)
+	select {
+	case c.queue <- job{people: people}:
+	default:
+		debuglog.Logger.Debug("analytics queue full, dropping people_set")
+	}
+}
+
+// mergeValue returns a copy of `properties` with a "value" key added. We
+// don't mutate the caller's map.
+func mergeValue(properties map[string]interface{}, value float64) map[string]any {
+	out := make(map[string]any, len(properties)+1)
+	for k, v := range properties {
 		if !sanitizeKey(k) {
 			continue
 		}
-		switch val := v.(type) {
-		case nil:
-			continue
-		case string:
-			attrs = append(attrs, attribute.String(k, val))
-		case bool:
-			attrs = append(attrs, attribute.Bool(k, val))
-		case int:
-			attrs = append(attrs, attribute.Int(k, val))
-		case int32:
-			attrs = append(attrs, attribute.Int64(k, int64(val)))
-		case int64:
-			attrs = append(attrs, attribute.Int64(k, val))
-		case float32:
-			attrs = append(attrs, attribute.Float64(k, float64(val)))
-		case float64:
-			attrs = append(attrs, attribute.Float64(k, val))
-		default:
-			attrs = append(attrs, attribute.String(k, fmt.Sprintf("%v", val)))
-		}
+		out[k] = v
 	}
-	return attrs
+	out["value"] = value
+	return out
+}
+
+// sanitizeProperties returns a copy of `properties` with PII-blocked keys
+// dropped. Returns nil for nil/empty input so the Mixpanel SDK sees a clean
+// payload. We don't mutate the caller's map.
+func sanitizeProperties(properties map[string]interface{}) map[string]any {
+	if len(properties) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(properties))
+	for k, v := range properties {
+		if !sanitizeKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // sanitizeKey returns false for property keys that could carry PII. This is
@@ -243,14 +281,6 @@ func sanitizeKey(k string) bool {
 		return false
 	}
 	return true
-}
-
-// sentryEnvironment maps a build version to a Sentry environment tag.
-func sentryEnvironment(version string) string {
-	if version == "" || version == "dev" {
-		return "development"
-	}
-	return "production"
 }
 
 // isOptedOut checks env vars for telemetry opt-out.
@@ -330,7 +360,7 @@ func osVersion() string {
 }
 
 // TrackAppStarted records app launch with user properties merged into the
-// meter's default attributes, then emits an EventAppStarted counter.
+// people profile, then emits an EventAppStarted event.
 func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMode string, autoName, copyClaudeSettings bool) {
 	SetUserProperties(map[string]interface{}{
 		"theme":                theme,

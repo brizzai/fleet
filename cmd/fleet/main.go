@@ -96,23 +96,10 @@ func runTUI() {
 
 	cfg := config.Load()
 
-	// Init Sentry early so the panic-capture defer below can use it. Init is
-	// idempotent and the TUI also calls it; both paths converge on the same
-	// global client.
+	// Init analytics early. Init is idempotent and the TUI also calls it;
+	// both paths converge on the same global client.
 	analytics.Init(cfg.IsTelemetryEnabled(), version)
 	defer analytics.Shutdown()
-
-	// Panic capture. LIFO order: this defer fires first (captures panic),
-	// then analytics.Shutdown above flushes Sentry, then debuglog.Close runs.
-	// CapturePanic uses Sentry's panic-recovery API so the original panic
-	// value and runtime stack frames are preserved. The panic is re-raised
-	// so the runtime still prints a stack trace and exits non-zero.
-	defer func() {
-		if r := recover(); r != nil {
-			analytics.CapturePanic(r)
-			panic(r)
-		}
-	}()
 
 	// Auto-update: check for newer version on launch.
 	if cfg.IsAutoUpdateEnabled() && version != "dev" && update.ShouldCheck() {

@@ -38,73 +38,70 @@ func TestSanitizeDropsForbiddenKeys(t *testing.T) {
 	}
 }
 
-func TestPropertiesToAttributesTypeCoverage(t *testing.T) {
+func TestSanitizePropertiesDropsBlocklisted(t *testing.T) {
 	t.Parallel()
 
-	props := map[string]interface{}{
-		"s":   "hello",
-		"b":   true,
-		"i":   int(7),
-		"i32": int32(8),
-		"i64": int64(9),
-		"f32": float32(1.5),
-		"f64": float64(2.5),
-		"fb":  struct{ Name string }{Name: "x"}, // unknown → fallback string
-		"n":   nil,                              // skipped
-		// PII-blocked key — should be dropped entirely.
-		"repo": "secret-repo",
+	in := map[string]interface{}{
+		"session_count": 5,
+		"provider":      "git_worktree",
+		"path":          "/should/be/dropped",
+		"repo_name":     "secret-repo",
+		"branch":        "main",
+		"theme":         "tokyo-night",
 	}
+	out := sanitizeProperties(in)
 
-	attrs := propertiesToAttributes(props)
-
-	// nil and repo dropped = 8 entries.
-	if got, want := len(attrs), 8; got != want {
-		t.Errorf("propertiesToAttributes returned %d attrs, want %d", got, want)
+	want := map[string]any{
+		"session_count": 5,
+		"provider":      "git_worktree",
+		"theme":         "tokyo-night",
 	}
-
-	// Map key→true presence check — order isn't guaranteed.
-	seen := make(map[string]bool, len(attrs))
-	for _, a := range attrs {
-		seen[a.Key] = true
+	if got := len(out); got != len(want) {
+		t.Fatalf("sanitizeProperties returned %d keys, want %d (out=%v)", got, len(want), out)
 	}
-	for _, k := range []string{"s", "b", "i", "i32", "i64", "f32", "f64", "fb"} {
-		if !seen[k] {
-			t.Errorf("expected attribute key %q in output", k)
+	for k, v := range want {
+		if out[k] != v {
+			t.Errorf("sanitizeProperties[%q] = %v, want %v", k, out[k], v)
 		}
 	}
-	for _, k := range []string{"n", "repo"} {
-		if seen[k] {
-			t.Errorf("attribute key %q should have been dropped", k)
+	for _, k := range []string{"path", "repo_name", "branch"} {
+		if _, ok := out[k]; ok {
+			t.Errorf("expected key %q to be dropped, but it's present", k)
 		}
 	}
 }
 
-func TestPropertiesToAttributesEmpty(t *testing.T) {
+func TestSanitizePropertiesEmpty(t *testing.T) {
 	t.Parallel()
 
-	if got := propertiesToAttributes(nil); got != nil {
-		t.Errorf("propertiesToAttributes(nil) = %v, want nil", got)
+	if got := sanitizeProperties(nil); got != nil {
+		t.Errorf("sanitizeProperties(nil) = %v, want nil", got)
 	}
-	if got := propertiesToAttributes(map[string]interface{}{}); got != nil {
-		t.Errorf("propertiesToAttributes(empty) = %v, want nil", got)
+	if got := sanitizeProperties(map[string]interface{}{}); got != nil {
+		t.Errorf("sanitizeProperties(empty) = %v, want nil", got)
 	}
 }
 
-func TestSentryEnvironment(t *testing.T) {
+func TestMergeValueAttachesValueAndStrips(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
-		version string
-		want    string
-	}{
-		{"", "development"},
-		{"dev", "development"},
-		{"v1.0.0", "production"},
-		{"2.3.4", "production"},
+	in := map[string]interface{}{
+		"status": "running",
+		"path":   "/should/be/dropped",
 	}
-	for _, c := range cases {
-		if got := sentryEnvironment(c.version); got != c.want {
-			t.Errorf("sentryEnvironment(%q) = %q, want %q", c.version, got, c.want)
-		}
+	out := mergeValue(in, 42.5)
+
+	if out["value"] != 42.5 {
+		t.Errorf(`mergeValue did not attach "value": got %v`, out["value"])
+	}
+	if out["status"] != "running" {
+		t.Errorf(`mergeValue dropped a non-blocked key: got %v`, out["status"])
+	}
+	if _, ok := out["path"]; ok {
+		t.Errorf(`mergeValue kept a blocklisted key`)
+	}
+	// Caller's map must not be mutated.
+	if _, ok := in["value"]; ok {
+		t.Errorf("mergeValue mutated caller's map")
 	}
 }
