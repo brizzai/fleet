@@ -104,11 +104,12 @@ func runTUI() {
 
 	// Panic capture. LIFO order: this defer fires first (captures panic),
 	// then analytics.Shutdown above flushes Sentry, then debuglog.Close runs.
-	// The panic is re-raised so the runtime still prints a stack trace and
-	// exits with a non-zero code.
+	// CapturePanic uses Sentry's panic-recovery API so the original panic
+	// value and runtime stack frames are preserved. The panic is re-raised
+	// so the runtime still prints a stack trace and exits non-zero.
 	defer func() {
 		if r := recover(); r != nil {
-			analytics.CaptureError(fmt.Errorf("panic: %v", r), nil)
+			analytics.CapturePanic(r)
 			panic(r)
 		}
 	}()

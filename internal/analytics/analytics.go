@@ -120,6 +120,18 @@ func Distribution(name string, sample float64, properties map[string]interface{}
 	c.meter.Distribution(name, sample, sentry.WithAttributes(propertiesToAttributes(properties)...))
 }
 
+// CapturePanic reports a recovered panic value to Sentry. Use this from a
+// deferred recover() so Sentry's panic API preserves the original panic
+// value type and Go's full stack trace from the runtime — wrapping the
+// panic in fmt.Errorf would flatten both.
+func CapturePanic(r any) {
+	c := current()
+	if c == nil || c.disabled || r == nil {
+		return
+	}
+	sentry.CurrentHub().Recover(r)
+}
+
 // CaptureError reports a Go error to Sentry with optional tags.
 func CaptureError(err error, properties map[string]interface{}) {
 	c := current()

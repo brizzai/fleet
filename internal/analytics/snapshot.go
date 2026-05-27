@@ -1,8 +1,7 @@
 package analytics
 
 // SnapshotStats describes the structural state of the TUI at a moment in time.
-// Used to emit boundary gauges at app_started, app_quit, and after structural
-// change events (session create/delete, workspace create).
+// Used to emit boundary gauges at app_started and app_quit.
 type SnapshotStats struct {
 	ReposTotal         int
 	WorktreeReposTotal int

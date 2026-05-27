@@ -1409,8 +1409,14 @@ func (h *Home) attachSelected() tea.Cmd {
 		// CRITICAL: Clear isAttaching before returning the message.
 		// Prevents race where View() returns empty string after detach.
 		h.isAttaching.Store(false)
-		analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs,
-			time.Since(attachStart).Seconds(), nil)
+		// Only record uptime when the attach actually entered the session
+		// and exited via a normal detach (Ctrl+Q). A non-nil err here means
+		// the attach failed before / during entry (tmux gone, etc.) — the
+		// near-zero "uptime" would be noise in the distribution.
+		if err == nil {
+			analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs,
+				time.Since(attachStart).Seconds(), nil)
+		}
 		return statusUpdateMsg{attachedSessionID: s.ID}
 	})
 }

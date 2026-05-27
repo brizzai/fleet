@@ -1,11 +1,8 @@
 package ui
 
 import (
-	"errors"
 	"sync"
 	"time"
-
-	"github.com/brizzai/fleet/internal/analytics"
 )
 
 // ErrorEntry records a single error that was displayed to the user.
@@ -29,12 +26,14 @@ func NewErrorHistory(maxSize int) *ErrorHistory {
 	}
 }
 
-// Add records a new error and reports it to Sentry (no-op when telemetry is
-// disabled). Reporting is fire-and-forget; we don't block the UI on the
-// network call — analytics.CaptureError hands off to the Sentry SDK which
-// batches and sends in its own goroutine.
+// Add records a new error in the ring buffer. Sentry reporting happens
+// separately at the setError call site (which emits a category-tagged
+// EventErrorOccurred counter); we deliberately do NOT forward the raw
+// message here because fleet error strings frequently contain file paths,
+// repo names, and other user-specific text that shouldn't ship to Sentry.
 func (h *ErrorHistory) Add(msg string) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	entry := ErrorEntry{
 		Timestamp: time.Now(),
 		Message:   msg,
@@ -45,9 +44,6 @@ func (h *ErrorHistory) Add(msg string) {
 	} else {
 		h.entries = append(h.entries, entry)
 	}
-	h.mu.Unlock()
-
-	analytics.CaptureError(errors.New(msg), nil)
 }
 
 // Entries returns all entries, newest first.

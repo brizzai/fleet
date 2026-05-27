@@ -35,19 +35,27 @@ func installStatePath() string {
 	return filepath.Join(home, ".config", "fleet", "install_state.json")
 }
 
-// loadInstallState reads ~/.config/fleet/install_state.json. Returns a fresh
-// state with InstalledAt=now() if the file doesn't exist; the second return
-// value is true when this is a brand-new install (first launch).
+// loadInstallState reads ~/.config/fleet/install_state.json. The second return
+// value (freshInstall) is true ONLY when the file genuinely doesn't exist —
+// permission errors and other I/O failures return false so we don't keep
+// firing one-shot onboarding events forever on a system where state can be
+// read but not written (or vice versa).
 func loadInstallState() (*installState, bool) {
 	path := installStatePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return &installState{InstalledAt: time.Now()}, true
+		if os.IsNotExist(err) {
+			return &installState{InstalledAt: time.Now()}, true
+		}
+		// Permission / transient I/O: synthesize state in-memory but treat
+		// as a previously-seen install so milestones don't re-fire.
+		return &installState{InstalledAt: time.Now()}, false
 	}
 	var s installState
 	if err := json.Unmarshal(data, &s); err != nil {
-		// Corrupt — treat as fresh install so we don't silently miss the user.
-		return &installState{InstalledAt: time.Now()}, true
+		// Corrupt file — same conservative stance as I/O failure: don't
+		// re-fire onboarding events for someone who has the app installed.
+		return &installState{InstalledAt: time.Now()}, false
 	}
 	if s.InstalledAt.IsZero() {
 		s.InstalledAt = time.Now()
@@ -86,11 +94,14 @@ func MarkOnboardingMilestone(milestone string) bool {
 	case MilestoneFirstLaunch:
 		// Synthetic — fresh install IS the first launch. No timestamp field;
 		// the InstalledAt timestamp doubles as first-launch time.
-		if freshInstall {
-			_ = state.save()
-			return true
+		if !freshInstall {
+			return false
 		}
-		return false
+		if err := state.save(); err != nil {
+			// Couldn't persist — refuse to fire so the event isn't lost-and-resent.
+			return false
+		}
+		return true
 	case MilestoneFirstSession:
 		field = &state.FirstSessionAt
 	case MilestoneFirstAttach:
@@ -107,7 +118,9 @@ func MarkOnboardingMilestone(milestone string) bool {
 		return false
 	}
 	*field = time.Now()
-	_ = state.save()
+	if err := state.save(); err != nil {
+		return false
+	}
 	return true
 }
 
