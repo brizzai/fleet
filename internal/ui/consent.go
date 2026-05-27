@@ -69,8 +69,8 @@ func (d *ConsentDialog) answer(accepted bool) (*ConsentDialog, tea.Cmd) {
 func (d *ConsentDialog) View() string {
 	var b strings.Builder
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
-	b.WriteString(titleStyle.Render("Help improve fleet?"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorBrand)
+	b.WriteString(titleStyle.Render("✦ Help improve fleet?"))
 	b.WriteString("\n\n")
 
 	body := lipgloss.NewStyle().Foreground(ColorText)
@@ -81,42 +81,63 @@ func (d *ConsentDialog) View() string {
 	b.WriteString(body.Render("it also includes:"))
 	b.WriteString("\n\n")
 
+	bulletMark := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	bulletText := lipgloss.NewStyle().Foreground(ColorText)
 	bullets := []string{
 		"git user.name",
 		"git user.email",
 		"OS version, theme, session counts, error categories",
 	}
 	for _, item := range bullets {
-		b.WriteString(DimStyle.Render("  • " + item))
+		b.WriteString("  ")
+		b.WriteString(bulletMark.Render("›"))
+		b.WriteString(" ")
+		b.WriteString(bulletText.Render(item))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("Never sent: file paths, prompts, code, repo/branch names."))
+
+	checkStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
+	neverStyle := lipgloss.NewStyle().Foreground(ColorGreen)
+	b.WriteString(checkStyle.Render("✓ "))
+	b.WriteString(neverStyle.Render("Never sent: file paths, prompts, code, repo/branch names."))
 	b.WriteString("\n")
 	b.WriteString(DimStyle.Render("Change this any time in Settings (S key)."))
 	b.WriteString("\n\n")
 
-	// Buttons. Selected button gets the accent color background.
+	// Buttons. Selected Yes gets a green background (positive / inviting);
+	// selected No gets the neutral accent — declining is fine, not scary.
 	yesLabel := " Y  Yes, help out "
 	noLabel := " N  No thanks "
 
-	yesStyle := lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder).Padding(0, 1)
-	noStyle := lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder).Padding(0, 1)
-	selStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorBg).Background(ColorAccent).Padding(0, 1)
+	idleStyle := lipgloss.NewStyle().
+		Foreground(ColorTextDim).
+		Background(ColorSurface).
+		Padding(0, 1)
+	yesSelStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorBg).
+		Background(ColorGreen).
+		Padding(0, 1)
+	noSelStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorBg).
+		Background(ColorAccent).
+		Padding(0, 1)
 
 	if d.cursor == 0 {
-		b.WriteString(selStyle.Render(yesLabel))
+		b.WriteString(yesSelStyle.Render(yesLabel))
 		b.WriteString("  ")
-		b.WriteString(noStyle.Render(noLabel))
+		b.WriteString(idleStyle.Render(noLabel))
 	} else {
-		b.WriteString(yesStyle.Render(yesLabel))
+		b.WriteString(idleStyle.Render(yesLabel))
 		b.WriteString("  ")
-		b.WriteString(selStyle.Render(noLabel))
+		b.WriteString(noSelStyle.Render(noLabel))
 	}
 
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorAccent).
+		BorderForeground(ColorBrand).
 		Padding(1, 2)
 
 	box := boxStyle.Render(b.String())
