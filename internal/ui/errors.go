@@ -26,7 +26,11 @@ func NewErrorHistory(maxSize int) *ErrorHistory {
 	}
 }
 
-// Add records a new error.
+// Add records a new error in the ring buffer. We deliberately do NOT
+// forward the raw message to the analytics backend — fleet error strings
+// frequently contain file paths, repo names, and other user-specific text.
+// `setError` emits a category-tagged EventErrorOccurred counter for the
+// same frequency signal without that PII risk.
 func (h *ErrorHistory) Add(msg string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

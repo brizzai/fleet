@@ -3,13 +3,13 @@ module github.com/brizzai/fleet
 go 1.26.0
 
 require (
-	github.com/amplitude/analytics-go v1.3.1
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/mixpanel/mixpanel-go v1.2.1
 	github.com/rmhubbert/bubbletea-overlay v0.6.6
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.42.0

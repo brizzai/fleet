@@ -20,6 +20,10 @@ type Config struct {
 	CopyClaudeSettings *bool  `json:"copy_claude_settings,omitempty"`
 	EnterMode          string `json:"enter_mode,omitempty"` // "attach" or "split"
 	Telemetry          *bool  `json:"telemetry,omitempty"`
+	// AnalyticsConsentSeen is true once the user has been shown the
+	// first-launch consent prompt and answered it (either way). When false,
+	// the TUI shows the prompt before initializing analytics.
+	AnalyticsConsentSeen bool `json:"analytics_consent_seen,omitempty"`
 }
 
 // IsAutoNameEnabled returns whether auto-naming is enabled (default: true).

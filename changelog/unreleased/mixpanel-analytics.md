@@ -1,0 +1,4 @@
+---
+type: changed
+---
+Switched the analytics backend from Amplitude to Mixpanel and added a first-launch consent prompt: on the first run you'll see a dialog explaining exactly what fleet sends (including your git `user.name` and `user.email`, used as the Mixpanel `distinct_id` so the same person shows up across machines) and choose Yes or No with one keystroke. Choice persists in `~/.config/fleet/config.json` and can be changed any time in Settings (`S`). The standard opt-outs (`FLEET_TELEMETRY_DISABLED`, `DO_NOT_TRACK`, `telemetry: false`) still work and skip the prompt entirely. Significantly expanded the event set — onboarding funnel, shape gauges (repos, worktrees, sessions, slot bindings), engagement distributions, and frustration signals — to help spot when new users get stuck. Mixpanel HTTP calls run on a buffered worker goroutine so the TUI's Update() loop never blocks on the network.
