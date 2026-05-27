@@ -807,6 +807,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.fireStartupAnalytics(len(groups))
 			case analytics.IsOptedOutByEnv():
 				h.fireStartupAnalytics(len(groups))
+			case !h.cfg.IsTelemetryEnabled():
+				// User already opted out via config (e.g. from a pre-consent-dialog
+				// version). Don't re-prompt; treat as already answered.
+				h.fireStartupAnalytics(len(groups))
 			default:
 				h.consentDialog.Show()
 			}

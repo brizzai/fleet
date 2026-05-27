@@ -128,7 +128,7 @@ If git is configured globally on this machine, fleet uses your `git user.email` 
 
 If git isn't configured, fleet falls back to an **anonymous device ID** — a one-way SHA256 hash of the macOS hardware UUID, cached at `~/.config/fleet/device_id`. The same machine hash is also always sent as the `machine_hash` people property, so you can tell how many machines a given person uses.
 
-You only see this consent flow because you accepted on first launch. Decline at any time in Settings to disable everything.
+The consent prompt appears once on first launch (unless `FLEET_TELEMETRY_DISABLED` / `DO_NOT_TRACK` is set). Change your answer any time in Settings.
 
 ## How to Opt Out
 

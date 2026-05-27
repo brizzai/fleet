@@ -1,5 +1,7 @@
-// Package analytics ships anonymous usage events to Mixpanel. The public
-// surface (Init, Track, Gauge, Distribution, SetUserProperties, Shutdown) is
+// Package analytics ships usage events to Mixpanel. Identity may include the
+// user's git name/email when telemetry is enabled — see DiscoverIdentity and
+// internal/ui/consent.go for exactly what gets sent. The public surface
+// (Init, Track, Gauge, Distribution, SetUserProperties, Shutdown) is
 // intentionally backend-agnostic so call sites in app.go / settings.go /
 // hooks / chrome don't need to change when the backend does.
 //
