@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 const ASCII_WORDMARK = [
   "███████╗██╗     ███████╗███████╗████████╗",
   "██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝",
@@ -121,17 +123,17 @@ export function Hero() {
           animation: "fleet-rise 0.6s cubic-bezier(0.2,0.65,0.3,1) 0.45s both",
         }}
       >
-        <a
+        <Link
           href="/docs/getting-started/install"
           className="fleet-cta fleet-cta--primary"
         >
           <span>Install fleet</span>
           <span aria-hidden>↓</span>
-        </a>
-        <a href="/docs" className="fleet-cta">
+        </Link>
+        <Link href="/docs" className="fleet-cta">
           <span>Read the docs</span>
           <span aria-hidden>→</span>
-        </a>
+        </Link>
       </div>
 
       <div

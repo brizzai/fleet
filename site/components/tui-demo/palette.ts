@@ -19,6 +19,7 @@ export const PALETTE = {
   gray: "#565f89",
   orange: "#ff9e64",
   purple: "#bb9af7",
+  pink: "#f48fb1",
 } as const;
 
 import type { Status } from "./state";

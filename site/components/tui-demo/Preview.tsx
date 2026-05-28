@@ -186,7 +186,7 @@ function RepoExplanation({ repo, session }: { repo: Repo; session: Session }) {
           fontSize: "0.78rem",
         }}
       >
-        <span style={{ color: PALETTE.pink ?? "#f48fb1", display: "inline-flex", gap: "0.35ch" }}>
+        <span style={{ color: PALETTE.pink, display: "inline-flex", gap: "0.35ch" }}>
           <span aria-hidden></span>
           <span>{repo.branch}</span>
         </span>
@@ -431,7 +431,7 @@ function PromptInput({
     >
       <span
         style={{
-          color: isThinking && !inputFocused ? PALETTE.textDim : PALETTE.pink ?? "#f48fb1",
+          color: isThinking && !inputFocused ? PALETTE.textDim : PALETTE.pink,
           fontWeight: 700,
         }}
       >
