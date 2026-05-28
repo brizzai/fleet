@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-05-28
+
+### Added
+
+- Compatibility shim for users still on the legacy `brizz-code` binary. Released as `brizz-code_<version>_darwin_<arch>.tar.gz` so v1.x auto-updates land on a small wrapper that prints a deprecation warning (rate-limited to once/day), then either execs `fleet` if installed, falls back to auto-installing the latest fleet release next to itself (verifying via `checksums.txt`), or — if running from a Homebrew prefix — points the user at `brew install brizzai/tap/fleet`.
+
 ## [2.3.0] - 2026-05-27
 
 ### Added
@@ -149,7 +155,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/brizzai/fleet/releases/tag/v2.4.0
 [2.3.0]: https://github.com/brizzai/fleet/releases/tag/v2.3.0
 [2.2.0]: https://github.com/brizzai/fleet/releases/tag/v2.2.0
 [2.1.0]: https://github.com/brizzai/fleet/releases/tag/v2.1.0
