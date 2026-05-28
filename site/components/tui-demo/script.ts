@@ -25,10 +25,13 @@ function fresh(s: Session, now: number): boolean {
 }
 
 /**
- * Possible auto-play events with relative weights. Each recipe returns null
- * when no eligible session exists this tick — the dispatcher filters those
- * out so the chosen event always has a valid target. This is what keeps the
- * demo alive after every session has drifted into `waiting`.
+ * Possible auto-play events with relative weights. Only running sessions
+ * change status on their own — waiting/finished/idle sessions stay put
+ * until the user does something (matches real fleet behavior, where
+ * waiting agents need a human to approve before they keep going).
+ *
+ * Each recipe returns null when no eligible session exists this tick — the
+ * dispatcher filters those out so the chosen event always has a valid target.
  */
 const RECIPES: Array<{
   weight: number;
@@ -45,17 +48,6 @@ const RECIPES: Array<{
       return { kind: "set_waiting", sessionId: rng(c).id };
     },
   },
-  // waiting → running (auto-resolution, prevents the demo deadlocking)
-  {
-    weight: 18,
-    make: (sessions, now) => {
-      const c = sessions.filter(
-        (s) => s.status === "waiting" && fresh(s, now),
-      );
-      if (!c.length) return null;
-      return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
-    },
-  },
   // running → finished
   {
     weight: 16,
@@ -65,18 +57,6 @@ const RECIPES: Array<{
       );
       if (!c.length) return null;
       return { kind: "flip_status", sessionId: rng(c).id, to: "finished" };
-    },
-  },
-  // finished/idle → running
-  {
-    weight: 15,
-    make: (sessions, now) => {
-      const c = sessions.filter(
-        (s) =>
-          (s.status === "finished" || s.status === "idle") && fresh(s, now),
-      );
-      if (!c.length) return null;
-      return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
     },
   },
   // refresh activity text on a running session (no cooldown — visual only)
