@@ -42,15 +42,28 @@ const (
 )
 
 func main() {
-	printDeprecationWarning()
-
-	if path, err := exec.LookPath("fleet"); err == nil {
-		execFleet(path)
-	}
-
 	exePath, _ := os.Executable()
 	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
 		exePath = resolved
+	}
+
+	// Chrome launches native messaging hosts with `chrome-extension://...` as
+	// the sole argument and speaks a length-prefixed JSON protocol on stdio.
+	// v1.x `brizz-code` NMH manifests still point Chrome here until fleet runs
+	// interactively and rewrites the manifest, so suppress all human-facing
+	// output on this code path and just bridge to fleet (or exit non-zero so
+	// Chrome retries later).
+	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], "chrome-extension://") {
+		if path, err := exec.LookPath("fleet"); err == nil && !resolvesToSelf(path, exePath) {
+			execFleet(path)
+		}
+		os.Exit(1)
+	}
+
+	printDeprecationWarning()
+
+	if path, err := exec.LookPath("fleet"); err == nil && !resolvesToSelf(path, exePath) {
+		execFleet(path)
 	}
 
 	if isBrewPath(exePath) {
@@ -129,6 +142,24 @@ func recordWarning() {
 	_ = os.WriteFile(path, []byte(time.Now().Format(time.RFC3339)), 0600)
 }
 
+// resolvesToSelf reports whether `candidate` ultimately points at the same
+// file as `self`. Used to skip a `fleet` entry on PATH that is actually this
+// shim binary (or a symlink to it), which would cause an infinite re-exec.
+func resolvesToSelf(candidate, self string) bool {
+	if candidate == "" || self == "" {
+		return false
+	}
+	if candidate == self {
+		return true
+	}
+	cr, errC := filepath.EvalSymlinks(candidate)
+	sr, errS := filepath.EvalSymlinks(self)
+	if errC != nil || errS != nil {
+		return false
+	}
+	return cr == sr
+}
+
 func isBrewPath(p string) bool {
 	if p == "" {
 		return false
@@ -195,16 +226,24 @@ func installFleetNextTo(brizzExe string) (string, error) {
 		return "", fmt.Errorf("download %s: %w", archiveName, err)
 	}
 
-	if checksumsURL != "" {
-		if sums, err := httpGet(checksumsURL); err == nil {
-			if want := lookupChecksum(string(sums), archiveName); want != "" {
-				sum := sha256.Sum256(archiveData)
-				got := hex.EncodeToString(sum[:])
-				if got != want {
-					return "", fmt.Errorf("checksum mismatch for %s: want %s got %s", archiveName, want, got)
-				}
-			}
-		}
+	// Fail closed: every fleet release ships checksums.txt with an entry for
+	// every archive. Missing manifest, fetch failure, missing entry, and
+	// mismatched digest are all fatal — we're about to syscall.Exec this binary.
+	if checksumsURL == "" {
+		return "", fmt.Errorf("checksums.txt not found in release %s", rel.TagName)
+	}
+	sums, err := httpGet(checksumsURL)
+	if err != nil {
+		return "", fmt.Errorf("download checksums.txt: %w", err)
+	}
+	want := lookupChecksum(string(sums), archiveName)
+	if want == "" {
+		return "", fmt.Errorf("checksum for %s not found in checksums.txt", archiveName)
+	}
+	sum := sha256.Sum256(archiveData)
+	got := hex.EncodeToString(sum[:])
+	if got != want {
+		return "", fmt.Errorf("checksum mismatch for %s: want %s got %s", archiveName, want, got)
 	}
 
 	bin, err := extractFleetBinary(bytes.NewReader(archiveData))
