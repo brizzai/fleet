@@ -95,19 +95,20 @@ export function Features() {
             color: "var(--charm-text)",
           }}
         >
-          Go deep on Claude Code. Nothing else.
+          A new kind of IDE —{" "}
+          <span style={{ color: "var(--charm-pink)" }}>for when AI does the typing.</span>
         </h2>
         <p
           style={{
-            maxWidth: "60ch",
+            maxWidth: "62ch",
             margin: "0 auto",
             color: "var(--charm-text-dim)",
             lineHeight: 1.55,
           }}
         >
-          Every feature is designed around how Claude Code actually works — hooks,
-          conversation resume, session IDs, prompt structure. No generic
-          send-keystrokes-and-hope layer.
+          Cursor sits you in front of one file. fleet sits you in front of ten
+          agents. Real-time status, one-key approve, PR-aware, git-native —
+          everything you need to direct a team of AI coders without losing the plot.
         </p>
       </header>
 

@@ -1,20 +1,10 @@
-import type { DemoState, ScriptEvent } from "./state";
-
-const SESSION_NAME_POOL = [
-  "shadcn-port",
-  "rate-limit",
-  "graphql-types",
-  "viewport-bug",
-  "homepage-copy",
-  "redis-eviction",
-  "analytics-events",
-];
+import type { DemoState, ScriptEvent, Session } from "./state";
 
 const RUNNING_ACTIVITY_POOL = [
   "Read 6 files, planning approach…",
   "Editing components/Auth.tsx",
   "Bash command: pnpm test --filter web",
-  "Tool use: Grep \"useEffect cleanup\"",
+  'Tool use: Grep "useEffect cleanup"',
   "Resolving 2 unresolved review threads",
 ];
 
@@ -23,76 +13,94 @@ function rng<T>(pool: readonly T[]): T {
 }
 
 /**
- * Pick a single scripted event based on current state.
- * Called once per second by TuiDemo while the script is unpaused.
+ * Possible auto-play events with relative weights. Each recipe returns null
+ * when no eligible session exists this tick — the dispatcher filters those
+ * out so the chosen event always has a valid target. This is what keeps the
+ * demo alive after every session has drifted into `waiting`.
  */
-export function nextScriptEvent(state: DemoState): ScriptEvent | null {
-  const allSessions = state.repos.flatMap((r) =>
-    r.sessions.map((s) => ({ session: s, repo: r })),
-  );
-  if (allSessions.length === 0) return null;
-
-  const roll = Math.random();
-
-  // ~10% chance: a running session finishes
-  if (roll < 0.1) {
-    const candidates = allSessions.filter((x) => x.session.status === "running");
-    if (candidates.length) {
-      const target = rng(candidates);
-      return { kind: "flip_status", sessionId: target.session.id, to: "finished" };
-    }
-  }
-
-  // ~10% chance: a finished/idle session starts running again
-  if (roll < 0.2) {
-    const candidates = allSessions.filter(
-      (x) => x.session.status === "finished" || x.session.status === "idle",
-    );
-    if (candidates.length) {
-      const target = rng(candidates);
-      return { kind: "flip_status", sessionId: target.session.id, to: "running" };
-    }
-  }
-
-  // ~8% chance: a running session becomes waiting (permission prompt)
-  if (roll < 0.28) {
-    const candidates = allSessions.filter((x) => x.session.status === "running");
-    if (candidates.length) {
-      const target = rng(candidates);
-      return { kind: "set_waiting", sessionId: target.session.id };
-    }
-  }
-
-  // ~5% chance: spawn a new session in a non-empty repo
-  if (roll < 0.33) {
-    const nonEmpty = state.repos.filter((r) => r.sessions.length < 5);
-    if (nonEmpty.length) {
-      const repo = rng(nonEmpty);
-      return { kind: "spawn_session", repoId: repo.id, name: rng(SESSION_NAME_POOL) };
-    }
-  }
-
-  // ~30% chance: refresh a running session's activity text
-  if (roll < 0.63) {
-    const running = allSessions.filter((x) => x.session.status === "running");
-    if (running.length) {
-      const target = rng(running);
+const RECIPES: Array<{
+  weight: number;
+  make: (sessions: Session[]) => ScriptEvent | null;
+}> = [
+  // running → waiting (the headline behavior — most "fun")
+  {
+    weight: 32,
+    make: (sessions) => {
+      const c = sessions.filter((s) => s.status === "running");
+      if (!c.length) return null;
+      return { kind: "set_waiting", sessionId: rng(c).id };
+    },
+  },
+  // waiting → running (auto-resolution, prevents the demo deadlocking)
+  {
+    weight: 18,
+    make: (sessions) => {
+      const c = sessions.filter((s) => s.status === "waiting");
+      if (!c.length) return null;
+      return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
+    },
+  },
+  // running → finished
+  {
+    weight: 16,
+    make: (sessions) => {
+      const c = sessions.filter((s) => s.status === "running");
+      if (!c.length) return null;
+      return { kind: "flip_status", sessionId: rng(c).id, to: "finished" };
+    },
+  },
+  // finished/idle → running
+  {
+    weight: 15,
+    make: (sessions) => {
+      const c = sessions.filter(
+        (s) => s.status === "finished" || s.status === "idle",
+      );
+      if (!c.length) return null;
+      return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
+    },
+  },
+  // refresh activity text on a running session
+  {
+    weight: 17,
+    make: (sessions) => {
+      const c = sessions.filter((s) => s.status === "running");
+      if (!c.length) return null;
       return {
         kind: "set_activity",
-        sessionId: target.session.id,
+        sessionId: rng(c).id,
         text: rng(RUNNING_ACTIVITY_POOL),
       };
-    }
-  }
+    },
+  },
+];
 
-  // ~37% — no event this tick
-  return null;
+export function nextScriptEvent(state: DemoState): ScriptEvent | null {
+  const sessions = state.repos.flatMap((r) => r.sessions);
+  if (!sessions.length) return null;
+
+  // Materialize only viable events (recipe + concrete event with a real target).
+  const viable: Array<{ weight: number; event: ScriptEvent }> = [];
+  for (const recipe of RECIPES) {
+    const event = recipe.make(sessions);
+    if (event) viable.push({ weight: recipe.weight, event });
+  }
+  if (!viable.length) return null;
+
+  // Weighted pick among viable options.
+  const total = viable.reduce((sum, v) => sum + v.weight, 0);
+  let r = Math.random() * total;
+  for (const v of viable) {
+    r -= v.weight;
+    if (r <= 0) return v.event;
+  }
+  return viable[viable.length - 1]!.event;
 }
 
 /**
- * After a session enters `starting`, transition to `running` after 1.6s.
- * The TuiDemo container schedules these one-shots whenever a session
- * appears in `starting` state.
+ * After a session enters `starting`, transition it to `running` ~1.6s later.
+ * Scheduled as a one-shot timer by TuiDemo whenever a `starting` session
+ * appears.
  */
 export function startingToRunningEvent(sessionId: string): ScriptEvent {
   return { kind: "flip_status", sessionId, to: "running" };

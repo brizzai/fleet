@@ -48,6 +48,10 @@ export interface DemoState {
   attachedSessionId: string | null;
   /** Monotonic counter to flip Activity strings via setState. */
   tick: number;
+  /** When true, the Claude prompt input captures keystrokes; sidebar keybinds are off. */
+  inputFocused: boolean;
+  /** Text currently typed into the Claude prompt input. */
+  inputText: string;
 }
 
 export type Action =
@@ -63,6 +67,10 @@ export type Action =
   | { type: "filter_input"; value: string }
   | { type: "filter_end" }
   | { type: "set_focused"; value: boolean }
+  | { type: "focus_input" }
+  | { type: "blur_input" }
+  | { type: "input_change"; value: string }
+  | { type: "input_submit" }
   | { type: "tick"; now: number }
   | { type: "script_event"; event: ScriptEvent };
 
@@ -151,6 +159,8 @@ export const INITIAL_STATE: DemoState = {
   lastUserActionAt: 0,
   attachedSessionId: null,
   tick: 0,
+  inputFocused: false,
+  inputText: "",
 };
 
 const SESSION_NAME_POOL = [
@@ -373,6 +383,44 @@ export function reducer(state: DemoState, action: Action): DemoState {
       return withUserAction({ ...state, filterMode: false, filter: "" }, now);
     case "set_focused":
       return { ...state, focused: action.value };
+    case "focus_input":
+      return { ...state, inputFocused: true, lastUserActionAt: now };
+    case "blur_input":
+      return { ...state, inputFocused: false, inputText: "" };
+    case "input_change":
+      return { ...state, inputText: action.value, lastUserActionAt: now };
+    case "input_submit": {
+      const text = state.inputText.trim();
+      const repo = state.repos[state.cursor.repoIdx];
+      if (!repo || state.cursor.sessionIdx === null || !text) {
+        return { ...state, inputFocused: false, inputText: "" };
+      }
+      const repos = state.repos.map((r, ri) =>
+        ri !== state.cursor.repoIdx
+          ? r
+          : {
+              ...r,
+              sessions: r.sessions.map((s, si) =>
+                si !== state.cursor.sessionIdx
+                  ? s
+                  : {
+                      ...s,
+                      status: "running" as Status,
+                      pendingApprove: false,
+                      activity:
+                        text.length > 70 ? `${text.slice(0, 70)}…` : text,
+                    },
+              ),
+            },
+      );
+      return {
+        ...state,
+        repos,
+        inputFocused: false,
+        inputText: "",
+        lastUserActionAt: now,
+      };
+    }
     case "tick":
       return { ...state, tick: state.tick + 1 };
     case "script_event": {
@@ -451,5 +499,6 @@ export function reducer(state: DemoState, action: Action): DemoState {
 export const SCRIPT_PAUSE_MS = 5_000;
 
 export function isScriptPaused(state: DemoState, now: number): boolean {
+  if (state.inputFocused) return true;
   return now - state.lastUserActionAt < SCRIPT_PAUSE_MS;
 }

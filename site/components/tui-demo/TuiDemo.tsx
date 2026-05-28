@@ -22,7 +22,7 @@ import {
 import { nextScriptEvent, startingToRunningEvent } from "./script";
 
 const TICK_MS = 100;
-const SCRIPT_INTERVAL_MS = 1500;
+const SCRIPT_INTERVAL_MS = 1364;
 
 export function TuiDemo() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
@@ -88,6 +88,21 @@ export function TuiDemo() {
     containerRef.current?.focus();
   }, [autoOnly]);
 
+  const handleContainerClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (autoOnly) return;
+      containerRef.current?.focus();
+      const target = e.target as HTMLElement;
+      // If the click landed outside the Claude prompt input area, exit input mode.
+      if (!target.closest("[data-fleet-input]")) {
+        if (stateRef.current.inputFocused) {
+          dispatch({ type: "blur_input" });
+        }
+      }
+    },
+    [autoOnly],
+  );
+
   const handleBlur = useCallback(() => {
     dispatch({ type: "set_focused", value: false });
   }, []);
@@ -96,6 +111,31 @@ export function TuiDemo() {
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (autoOnly) return;
       const s = stateRef.current;
+
+      // Input mode: typing the Claude prompt. Enter sends, Esc exits.
+      if (s.inputFocused) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          dispatch({ type: "blur_input" });
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          dispatch({ type: "input_submit" });
+          return;
+        }
+        if (e.key === "Backspace") {
+          e.preventDefault();
+          dispatch({ type: "input_change", value: s.inputText.slice(0, -1) });
+          return;
+        }
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          dispatch({ type: "input_change", value: s.inputText + e.key });
+          return;
+        }
+        return;
+      }
 
       // Filter mode captures everything
       if (s.filterMode) {
@@ -257,7 +297,7 @@ export function TuiDemo() {
         role="application"
         aria-label="Interactive fleet TUI demo"
         tabIndex={0}
-        onClick={handleFocus}
+        onClick={handleContainerClick}
         onFocus={handleFocus}
         onBlur={handleBlur}
         onKeyDown={onKeyDown}
@@ -273,7 +313,7 @@ export function TuiDemo() {
         }}
       >
         <Sidebar state={state} spinnerFrame={spinnerFrame} />
-        <Preview state={state} spinnerFrame={spinnerFrame} />
+        <Preview state={state} spinnerFrame={spinnerFrame} dispatch={dispatch} />
       </div>
 
       <Footer focused={state.focused && !autoOnly} />

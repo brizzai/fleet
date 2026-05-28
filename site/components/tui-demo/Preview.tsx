@@ -1,12 +1,14 @@
 "use client";
 
+import type { Dispatch } from "react";
 import { PALETTE } from "./palette";
 import { SPINNER_FRAMES, STATUS_ICON } from "./glyphs";
-import type { DemoState, Session, Repo } from "./state";
+import type { Action, DemoState, Session, Repo } from "./state";
 
 interface Props {
   state: DemoState;
   spinnerFrame: number;
+  dispatch: Dispatch<Action>;
 }
 
 const CLAUDE_LOGO = [
@@ -18,7 +20,7 @@ const CLAUDE_LOGO = [
 const CLAUDE_VERSION = "v2.1.152";
 const CLAUDE_MODEL = "Opus 4.7 (1M context) with xhigh effort · Claude Max";
 
-export function Preview({ state, spinnerFrame }: Props) {
+export function Preview({ state, spinnerFrame, dispatch }: Props) {
   const repo = state.repos[state.cursor.repoIdx];
   const session =
     repo && state.cursor.sessionIdx !== null
@@ -29,7 +31,16 @@ export function Preview({ state, spinnerFrame }: Props) {
     return <EmptyPreview repo={repo} />;
   }
 
-  return <ClaudeCodePreview repo={repo} session={session} spinnerFrame={spinnerFrame} />;
+  return (
+    <ClaudeCodePreview
+      repo={repo}
+      session={session}
+      spinnerFrame={spinnerFrame}
+      inputFocused={state.inputFocused}
+      inputText={state.inputText}
+      dispatch={dispatch}
+    />
+  );
 }
 
 function EmptyPreview({ repo }: { repo?: Repo }) {
@@ -67,10 +78,16 @@ function ClaudeCodePreview({
   repo,
   session,
   spinnerFrame,
+  inputFocused,
+  inputText,
+  dispatch,
 }: {
   repo: Repo;
   session: Session;
   spinnerFrame: number;
+  inputFocused: boolean;
+  inputText: string;
+  dispatch: Dispatch<Action>;
 }) {
   return (
     <div
@@ -104,7 +121,12 @@ function ClaudeCodePreview({
 
       <Rule />
 
-      <PromptInput session={session} />
+      <PromptInput
+        session={session}
+        inputFocused={inputFocused}
+        inputText={inputText}
+        dispatch={dispatch}
+      />
 
       <Rule />
 
@@ -372,34 +394,67 @@ function ApprovePrompt({ session }: { session: Session }) {
   );
 }
 
-function PromptInput({ session }: { session: Session }) {
+function PromptInput({
+  session,
+  inputFocused,
+  inputText,
+  dispatch,
+}: {
+  session: Session;
+  inputFocused: boolean;
+  inputText: string;
+  dispatch: Dispatch<Action>;
+}) {
   const isThinking =
     session.status === "running" || session.status === "starting";
+
   return (
     <div
+      data-fleet-input="prompt"
+      role="textbox"
+      tabIndex={-1}
+      onClick={(e) => {
+        e.stopPropagation();
+        dispatch({ type: "focus_input" });
+      }}
       style={{
-        padding: "0.45rem 0.85rem",
+        padding: "0.5rem 0.85rem",
         display: "flex",
         alignItems: "center",
         gap: "0.5ch",
         color: PALETTE.text,
+        cursor: "text",
+        background: inputFocused ? `${PALETTE.accent}11` : "transparent",
+        borderLeft: `2px solid ${inputFocused ? PALETTE.accent : "transparent"}`,
+        transition: "background 0.15s ease, border-color 0.15s ease",
       }}
     >
-      <span style={{ color: isThinking ? PALETTE.textDim : PALETTE.text }}>❯</span>
-      <span style={{ color: PALETTE.textDim }}>
-        {isThinking ? "" : ""}
+      <span
+        style={{
+          color: isThinking && !inputFocused ? PALETTE.textDim : PALETTE.pink ?? "#f48fb1",
+          fontWeight: 700,
+        }}
+      >
+        ❯
       </span>
-      {!isThinking && (
-        <span
-          aria-hidden
-          style={{
-            display: "inline-block",
-            width: "0.55ch",
-            height: "1em",
-            background: PALETTE.text,
-            animation: "fleet-blink 1.05s steps(2,start) infinite",
-          }}
-        />
+      {inputFocused ? (
+        <>
+          <span style={{ color: PALETTE.text, whiteSpace: "pre" }}>{inputText}</span>
+          <span
+            aria-hidden
+            style={{
+              display: "inline-block",
+              width: "0.55ch",
+              height: "1em",
+              background: PALETTE.text,
+              animation: "fleet-blink 1.05s steps(2,start) infinite",
+            }}
+          />
+        </>
+      ) : (
+        <span style={{ color: PALETTE.textDim, fontStyle: "italic", fontSize: "0.92em" }}>
+          {isThinking ? "(Claude is working…)" : "click to type a prompt"}
+        </span>
       )}
     </div>
   );
