@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-05-28
+
+### Added
+
+- Documentation site at brizzai.github.io/fleet — landing page with an interactive in-page TUI demo (arrow keys, Enter to approve, `a` to spawn, Space to jump to attention) plus full docs ported from the README. Built on Next.js + Fumadocs and auto-deployed to GitHub Pages on every push to master.
+
+### Fixed
+
+- `brew install brizzai/tap/fleet` no longer trips macOS Gatekeeper on first launch — the cask now strips the `com.apple.quarantine` attribute via a postflight hook. Also fixed the legacy `brizz-code` shim's brew-path message to point at `brew uninstall brizz-code` + `brew install brizzai/tap/fleet` instead of the incorrect `rm -f` line.
+
 ## [2.4.0] - 2026-05-28
 
 ### Added
@@ -155,7 +165,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.4.1...HEAD
+[2.4.1]: https://github.com/brizzai/fleet/releases/tag/v2.4.1
 [2.4.0]: https://github.com/brizzai/fleet/releases/tag/v2.4.0
 [2.3.0]: https://github.com/brizzai/fleet/releases/tag/v2.3.0
 [2.2.0]: https://github.com/brizzai/fleet/releases/tag/v2.2.0
