@@ -1,0 +1,175 @@
+@import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
+
+@source "../node_modules/fumadocs-ui/dist/**/*.js";
+
+/* ─── Charm palette ────────────────────────────────────── */
+
+@layer base {
+  :root {
+    --charm-pink: #f48fb1;
+    --charm-pink-bright: #ff6ad5;
+    --charm-purple: #a06afe;
+    --charm-lime: #94ff8a;
+    --charm-bg: #0a0b10;
+    --charm-bg-soft: #10121a;
+    --charm-surface: #14161f;
+    --charm-surface-elev: #1a1d28;
+    --charm-border: #232634;
+    --charm-border-soft: #1c1f2b;
+    --charm-text: #e6e8ee;
+    --charm-text-dim: #8a8fa0;
+    --charm-text-faint: #565a6b;
+
+    /* Tokyo-night status colors (from internal/ui/palette.go) */
+    --tn-green: #9ece6a;
+    --tn-yellow: #e0af68;
+    --tn-blue: #7dcfff;
+    --tn-red: #f7768e;
+    --tn-gray: #565f89;
+    --tn-orange: #ff9e64;
+    --tn-purple: #bb9af7;
+  }
+
+  /* Force dark theme — site is terminal-themed */
+  html {
+    color-scheme: dark;
+    background: var(--charm-bg);
+  }
+
+  body {
+    background: var(--charm-bg);
+    color: var(--charm-text);
+    position: relative;
+  }
+
+  /* Fixed full-viewport background so the gradient is never clipped
+     by Fumadocs layout containers. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        ellipse 60vw 40vh at 50% -5%,
+        rgba(244, 143, 177, 0.12),
+        transparent 70%
+      ),
+      radial-gradient(
+        ellipse 50vw 35vh at 100% 25%,
+        rgba(160, 106, 254, 0.09),
+        transparent 70%
+      ),
+      radial-gradient(
+        ellipse 55vw 35vh at 0% 50%,
+        rgba(244, 143, 177, 0.06),
+        transparent 70%
+      ),
+      var(--charm-bg);
+  }
+}
+
+/* ─── Fumadocs theme overrides ─────────────────────────── */
+
+:root,
+.dark {
+  --color-fd-background: var(--charm-bg);
+  --color-fd-foreground: var(--charm-text);
+  --color-fd-muted: var(--charm-surface);
+  --color-fd-muted-foreground: var(--charm-text-dim);
+  --color-fd-popover: var(--charm-surface);
+  --color-fd-popover-foreground: var(--charm-text);
+  --color-fd-primary: var(--charm-pink);
+  --color-fd-primary-foreground: #1a0a14;
+  --color-fd-secondary: var(--charm-surface);
+  --color-fd-secondary-foreground: var(--charm-text);
+  --color-fd-accent: var(--charm-surface-elev);
+  --color-fd-accent-foreground: var(--charm-pink);
+  --color-fd-border: var(--charm-border);
+  --color-fd-card: var(--charm-surface);
+  --color-fd-card-foreground: var(--charm-text);
+  --color-fd-ring: var(--charm-pink);
+}
+
+/* ─── Fonts ────────────────────────────────────────────── */
+
+:root {
+  --font-mono:
+    "JetBrains Mono", "SF Mono", "Menlo", ui-monospace, monospace;
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  font-family: var(--font-sans);
+}
+
+.font-mono,
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+}
+
+/* Headings get mono treatment */
+.prose h1,
+.prose h2,
+.prose h3,
+h1.font-mono,
+h2.font-mono,
+h3.font-mono,
+#nd-docs-layout h1,
+#nd-docs-layout h2 {
+  font-family: var(--font-mono);
+  letter-spacing: -0.01em;
+}
+
+/* Phosphor glow on links */
+.fd-nav a,
+.fd-toc a {
+  transition: color 0.15s ease, text-shadow 0.15s ease;
+}
+
+.fd-nav a:hover {
+  color: var(--charm-pink);
+  text-shadow: 0 0 12px rgba(244, 143, 177, 0.4);
+}
+
+/* ─── Selection ────────────────────────────────────────── */
+
+::selection {
+  background: rgba(244, 143, 177, 0.3);
+  color: var(--charm-text);
+}
+
+/* ─── Scrollbar (subtle terminal vibe) ─────────────────── */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--charm-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--charm-border);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--charm-surface-elev);
+}
+
+/* ─── Reduced motion ───────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

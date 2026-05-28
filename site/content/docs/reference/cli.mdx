@@ -1,0 +1,65 @@
+---
+title: CLI
+description: fleet subcommands you can run from the shell.
+---
+
+Most of fleet lives in the TUI. These are the CLI entry points.
+
+## `fleet`
+
+Launch the TUI. No args.
+
+```bash
+fleet
+```
+
+## `fleet add <path>`
+
+Pin a repo without launching the TUI. Useful from scripts.
+
+```bash
+fleet add ~/code/my-repo
+```
+
+## `fleet list`
+
+Print all tracked sessions as JSON. Pipe to `jq` for filtering.
+
+```bash
+fleet list | jq '.[] | select(.status == "waiting") | .name'
+```
+
+## `fleet remove <session-id>`
+
+Tear down a session and remove it from state.
+
+```bash
+fleet remove a1b2c3d4-1716998400
+```
+
+## `fleet hooks`
+
+(Re-)install fleet hooks into `~/.claude/settings.json`. Normally run automatically on TUI startup.
+
+```bash
+fleet hooks
+```
+
+## `fleet hook-handler`
+
+Invoked by Claude Code hooks. Reads JSON from stdin, writes status files. **Don't invoke manually** — it's not a user-facing command.
+
+It reads `FLEET_INSTANCE_ID` from the env to know which session it belongs to.
+
+## `fleet chrome-host`
+
+The Chrome Native Messaging Host. Invoked by Chrome with a `chrome-extension://...` arg. **Don't invoke manually.**
+
+```bash
+# What Chrome runs (auto-detected via the URL arg pattern):
+fleet chrome-extension://haphpcoecelhofejcklinnlbfijgdnih/
+```
+
+## `fleet --version`
+
+Print version and exit.

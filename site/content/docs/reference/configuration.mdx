@@ -1,0 +1,61 @@
+---
+title: Configuration
+description: The fleet config file — what each key does.
+---
+
+Config lives at `~/.config/fleet/config.json`. fleet creates it on first launch and writes back from the settings dialog (**`S`**).
+
+## Schema
+
+```jsonc
+{
+  // How often background workers poll tmux/git. Default: 2.
+  "tick_interval_sec": 2,
+
+  // Default starting path for the workspace picker ('n' key). Empty = $HOME.
+  "default_project_path": "",
+
+  // Editor command for the 'e' key. Falls back to $EDITOR, then "code".
+  "editor": "code",
+
+  // Palette. One of: tokyo-night, catppuccin-mocha, rose-pine, nord, gruvbox.
+  "theme": "tokyo-night",
+
+  // Auto-title sessions from the first prompt. See: Auto-naming guide.
+  "auto_name_sessions": true,
+
+  // Copy .claude/settings.local.json from source repo to new worktrees.
+  "copy_claude_settings": true
+}
+```
+
+## File locations
+
+| Path | What's there |
+|---|---|
+| `~/.config/fleet/config.json` | This file |
+| `~/.config/fleet/state.db` | SQLite (WAL mode) — sessions, pinned repos, slot bindings, Claude session IDs |
+| `~/.config/fleet/hooks/<session_id>.json` | Hook status files written by `fleet hook-handler` |
+| `~/.config/fleet/debug.log` | slog output (TUI + hook handler) |
+| `~/.config/fleet/chrome.sock` | Unix socket for Chrome native messaging host |
+| `~/.config/fleet/snapshots/` | Cmd-Shift-D diagnostic snapshots (TUI only) |
+
+## Migrated from `brizz-code`?
+
+On first launch fleet runs a migration that:
+
+- Moves `~/.config/brizz-code/` → `~/.config/fleet/`
+- Renames live tmux sessions from `brizzcode_*` to `fleet_*`
+- Strips legacy hook entries from `~/.claude/settings.json` and re-installs under `fleet hook-handler`
+- Aliases legacy env vars: `BRIZZCODE_INSTANCE_ID` → `FLEET_INSTANCE_ID`, etc.
+
+A marker at `~/.config/fleet/.migrated-from-brizz-code` short-circuits subsequent launches.
+
+## Env vars
+
+| Var | What it does |
+|---|---|
+| `FLEET_INSTANCE_ID` | Set by fleet inside each spawned tmux session so `fleet hook-handler` knows which session it belongs to |
+| `FLEET_DEMO_PREFIX` | Used by demo scripts to namespace tmux sessions |
+| `FLEET_TELEMETRY_DISABLED` | (Reserved) |
+| `FLEET_DEBUG` | (Reserved) |

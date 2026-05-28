@@ -1,0 +1,51 @@
+---
+title: Chrome Extension
+description: Open and focus PRs in Chrome from fleet — without spawning a new tab every time.
+---
+
+The `p` key opens the current session's PR in Chrome and **reuses an existing tab** if one is already open. If Chrome isn't running or the extension isn't installed, it falls back to `open <url>`.
+
+## Architecture
+
+```
+fleet TUI  ──[unix socket]──▶  fleet chrome-host  ──[stdio native messaging]──▶  Chrome service worker
+```
+
+- **Unix socket**: `~/.config/fleet/chrome.sock` (mode `0600`, created by the native host)
+- **Native messaging host**: the `fleet chrome-host` subcommand (auto-detected when Chrome passes a `chrome-extension://...` arg)
+- **NMH manifest**: auto-installed to `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.brizzai.fleet.tabcontrol.json` on TUI startup
+- **Extension ID**: `haphpcoecelhofejcklinnlbfijgdnih` (stable via `key` in `manifest.json`)
+
+## Install the extension
+
+The extension lives in the [fleet repo](https://github.com/brizzai/fleet/tree/master/chrome-extension). Until it's on the Chrome Web Store:
+
+1. Open `chrome://extensions`
+2. Toggle **Developer mode** (top right)
+3. Click **Load unpacked**
+4. Pick `chrome-extension/` from your fleet checkout
+
+The NMH manifest is installed automatically the next time you launch fleet.
+
+## Commands the extension supports
+
+| Command | What it does |
+|---|---|
+| `open_or_focus` | Open a URL, or focus its tab if already open |
+| `close_tab` | Close a tab by URL |
+| `create_tab_group` | Group tabs by name |
+| `ping` | Health check |
+
+## Reconnect behavior
+
+The service worker reconnects to the native host on disconnect (2s delay). If you restart fleet, the extension picks it back up automatically.
+
+## Falling back
+
+If anything in the chain is missing, `p` falls back to:
+
+```bash
+open <pr-url>
+```
+
+…which still works — you just get a fresh tab every time.

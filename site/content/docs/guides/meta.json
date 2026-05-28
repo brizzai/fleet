@@ -1,0 +1,11 @@
+{
+  "title": "Guides",
+  "pages": [
+    "keybindings",
+    "workspaces",
+    "status-detection",
+    "auto-naming",
+    "themes",
+    "chrome-extension"
+  ]
+}

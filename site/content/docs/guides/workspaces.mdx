@@ -1,0 +1,55 @@
+---
+title: Workspaces & Worktrees
+description: How fleet creates isolated workspaces for parallel agents.
+---
+
+fleet has built-in git worktree support — no config needed. Press **`w`** and you get a new branch, a new working directory, and a new Claude Code session, all isolated.
+
+## Three ways to create a session
+
+| Key | What it does |
+|---|---|
+| `a` | New session in the repo your cursor is on (no dialog) |
+| `n` | Workspace picker — pick any path with directory autocomplete |
+| `w` | Worktree picker — pick base branch + new branch, spawns a worktree |
+
+## Worktree picker (`w`)
+
+The dialog shows:
+
+- **Base branch** — pre-filled with the repo's default (main/master, detected via `git.GetDefaultBranch`)
+- **New branch** — focused input
+- **Existing worktrees** — list, with delete affordance
+
+Submit and the dialog closes immediately. A **phantom "Creating…" entry** with an animated spinner appears in the sidebar so you can keep navigating while the worktree is being built. Multiple concurrent creations are supported.
+
+## What gets copied into a new worktree
+
+- `.claude/settings.local.json` (configurable — see [`copy_claude_settings`](/docs/reference/configuration))
+- Anything matched by `copy_files.paths` in `.fleet.json` (opt-in, gitignored files allowed — see [Per-repo config](/docs/reference/per-repo-config))
+
+## Workspace providers
+
+fleet resolves a provider per invocation:
+
+- **`GitWorktreeProvider`** (built-in) — default for all repos, zero config
+- **`ShellProvider`** — opt-in via `.fleet.json` in the repo root, runs custom shell commands for `list` / `create` / `destroy`
+
+```json
+{
+  "workspace": {
+    "list": "my-tool list",
+    "create": "my-tool create {{name}} {{branch}}",
+    "destroy": "my-tool destroy {{name}}"
+  }
+}
+```
+
+See [Per-repo config](/docs/reference/per-repo-config) for the full schema.
+
+## Pinned repos & sessions grouping
+
+- Repos are auto-pinned the first time you create a session inside them
+- Pinned repos persist in SQLite
+- Empty repos (all sessions deleted) show dimmed with `(empty)`
+- `d` on an empty repo header unpins it instantly

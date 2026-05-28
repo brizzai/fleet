@@ -1,0 +1,30 @@
+---
+title: Themes
+description: Switch between fleet's built-in palettes.
+---
+
+fleet ships with five hand-tuned palettes. Press **`S`** to open settings and pick one — preview is live.
+
+## Built-in themes
+
+- **tokyo-night** (default)
+- **catppuccin-mocha**
+- **rose-pine**
+- **nord**
+- **gruvbox**
+
+## How it persists
+
+Theme choice is saved to `~/.config/fleet/config.json` under `theme`. Restart-safe.
+
+```jsonc
+{
+  "theme": "tokyo-night"
+}
+```
+
+You can edit the file directly or use the dialog — the dialog auto-saves on close.
+
+## Custom themes
+
+Not supported yet. Open an issue if you want to land one — the palette structure is in `internal/ui/palette.go` and adding a new one is ~30 lines.

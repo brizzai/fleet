@@ -1,0 +1,43 @@
+---
+title: Auto-naming
+description: How fleet titles sessions from your first prompt.
+---
+
+Sessions are auto-titled from the first thing you type to Claude. No LLM call — a small Go heuristic that's predictable and free.
+
+## The pipeline
+
+1. `UserPromptSubmit` hook fires; the handler captures `input.message`
+2. Handler writes `user_prompt` to the session's status file
+3. `HookWatcher` reads it, populates `Session.FirstPrompt`
+4. Worker cycle calls `naming.GenerateTitle(prompt)`
+
+## The heuristic
+
+- Strip filler prefixes: `"please"`, `"can you"`, `"could you"`, `"i want to"`, etc.
+- Strip leading slash-commands (`/foo bar` → `bar`)
+- Truncate at the nearest word boundary, ~50 chars
+- Preserve original casing
+
+## Retitle at prompt 3
+
+When `PromptCount` reaches the `RetitlePromptThreshold` (3), `TitleGenerated` is reset and the worker regenerates the title from the latest prompt. The intent: the third prompt usually reflects the real session scope better than the first.
+
+## Manual rename wins
+
+Press **`R`** to rename. fleet sets `ManuallyRenamed` and never auto-renames that session again.
+
+## Config
+
+```jsonc
+// ~/.config/fleet/config.json
+{
+  "auto_name_sessions": true  // default
+}
+```
+
+Toggle in the settings dialog (**`S`**).
+
+## Why not an LLM?
+
+We tried SmolLM2 / Ollama / `llama-cli`. All too fragile for a tool that has to feel snappy. The current heuristic does the job for ~95% of prompts and falls back to the truncated prompt for the rest.
