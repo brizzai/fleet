@@ -59,7 +59,17 @@ export interface DemoState {
   inputFocused: boolean;
   /** Text currently typed into the Claude prompt input. */
   inputText: string;
+  /**
+   * Progressive coaching step for the banner under the demo.
+   *  - `intro` : user hasn't focused the demo yet
+   *  - `space` : focused; show "press SPACE to jump"
+   *  - `enter` : Space pressed; show "now press ENTER to approve"
+   *  - `done`  : approved; show celebratory message that fades out
+   */
+  coachStep: CoachStep;
 }
+
+export type CoachStep = "intro" | "space" | "enter" | "done";
 
 export type Action =
   | { type: "cursor_up" }
@@ -167,6 +177,7 @@ export const INITIAL_STATE: DemoState = {
   tick: 0,
   inputFocused: false,
   inputText: "",
+  coachStep: "intro",
 };
 
 const SESSION_NAME_POOL = [
@@ -250,6 +261,35 @@ function withUserAction(state: DemoState, now: number): DemoState {
   return { ...state, lastUserActionAt: now };
 }
 
+type CoachEvent =
+  | { kind: "focus"; focused: boolean }
+  | { kind: "jumped"; onApprovable: boolean }
+  | { kind: "approved" };
+
+/**
+ * Single source of truth for the coaching banner's intro→space→enter→done
+ * progression. Centralizing every transition here (instead of inline ternaries
+ * in each reducer case) keeps the banner from desyncing from what the cursor is
+ * actually on — e.g. advancing to "now press ENTER to approve" when Space
+ * landed on nothing approvable, which left the banner stuck telling the user to
+ * approve something that can't be approved.
+ */
+function advanceCoach(step: CoachStep, ev: CoachEvent): CoachStep {
+  if (step === "done") return step; // terminal — the loop's been taught
+  switch (ev.kind) {
+    case "focus":
+      // Gaining focus kicks off the walkthrough; losing it rewinds to the
+      // pre-focus prompt so the banner never contradicts the "click here" hint.
+      return ev.focused ? (step === "intro" ? "space" : step) : "intro";
+    case "jumped":
+      // Only graduate to the ENTER beat when Space actually landed on an
+      // approvable session — otherwise ENTER attaches instead of approving.
+      return step === "space" && ev.onApprovable ? "enter" : step;
+    case "approved":
+      return "done";
+  }
+}
+
 export function reducer(state: DemoState, action: Action): DemoState {
   const now = action.type === "tick" ? action.now : Date.now();
 
@@ -317,7 +357,9 @@ export function reducer(state: DemoState, action: Action): DemoState {
               ),
             },
       );
-      return withUserAction({ ...state, repos }, now);
+      // Approving is the payoff — graduate the banner to the wrap-up state.
+      const coachStep = advanceCoach(state.coachStep, { kind: "approved" });
+      return withUserAction({ ...state, repos, coachStep }, now);
     }
     case "add_session": {
       const repoIdx = state.cursor.repoIdx;
@@ -355,14 +397,18 @@ export function reducer(state: DemoState, action: Action): DemoState {
           if (item.kind !== "session") continue;
           const s = state.repos[item.repoIdx]!.sessions[item.sessionIdx]!;
           if (s.status === status) {
+            const coachStep = advanceCoach(state.coachStep, {
+              kind: "jumped",
+              onApprovable: !!s.pendingApprove,
+            });
             return withUserAction(
-              { ...state, cursor: cursorFromItem(item) },
+              { ...state, cursor: cursorFromItem(item), coachStep },
               now,
             );
           }
         }
       }
-      return state;
+      return state; // nothing to jump to — leave the coach where it is
     }
     case "delete": {
       const repoIdx = state.cursor.repoIdx;
@@ -389,8 +435,13 @@ export function reducer(state: DemoState, action: Action): DemoState {
       return withUserAction({ ...state, filter: action.value }, now);
     case "filter_end":
       return withUserAction({ ...state, filterMode: false, filter: "" }, now);
-    case "set_focused":
-      return { ...state, focused: action.value };
+    case "set_focused": {
+      const coachStep = advanceCoach(state.coachStep, {
+        kind: "focus",
+        focused: action.value,
+      });
+      return { ...state, focused: action.value, coachStep };
+    }
     case "focus_input":
       return { ...state, inputFocused: true, lastUserActionAt: now };
     case "blur_input":

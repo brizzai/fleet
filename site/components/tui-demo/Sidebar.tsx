@@ -3,7 +3,6 @@
 import { PALETTE } from "./palette";
 import { RepoHeader } from "./RepoHeader";
 import { SessionLine } from "./SessionLine";
-import { Hint } from "./Hint";
 import type { DemoState } from "./state";
 
 interface Props {
@@ -109,7 +108,6 @@ export function Sidebar({ state, spinnerFrame }: Props) {
         </div>
       )}
       </div>
-      <Hint />
     </div>
   );
 }
