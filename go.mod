@@ -11,6 +11,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/mixpanel/mixpanel-go v1.2.1
 	github.com/rmhubbert/bubbletea-overlay v0.6.6
+	github.com/sahilm/fuzzy v0.1.2
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.42.0
 	modernc.org/sqlite v1.48.0
