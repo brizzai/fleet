@@ -15,6 +15,13 @@ export interface Session {
   activity?: string;
   /** When true, a fake permission prompt is shown and Y will approve it. */
   pendingApprove?: boolean;
+  /**
+   * Wall-clock ms when this session last had a *status* transition.
+   * The auto-play script uses this to skip recently-flipped sessions, so the
+   * demo doesn't visually cluster (everything turning waiting at once after
+   * a wave of approvals, etc).
+   */
+  lastStatusChangeAt?: number;
 }
 
 export type PRState = "pending" | "approved" | "failing" | "merged";
@@ -94,7 +101,6 @@ export const INITIAL_STATE: DemoState = {
           id: "s1",
           name: "api-fix",
           status: "running",
-          slot: 1,
           activity: "Editing internal/api/routes.go",
         },
         {
@@ -306,6 +312,7 @@ export function reducer(state: DemoState, action: Action): DemoState {
                       status: "running" as Status,
                       pendingApprove: false,
                       activity: "Approved — resuming…",
+                      lastStatusChangeAt: now,
                     },
               ),
             },
@@ -323,6 +330,7 @@ export function reducer(state: DemoState, action: Action): DemoState {
         name,
         status: "starting",
         activity: "Spawning Claude session…",
+        lastStatusChangeAt: now,
       };
       const repos = state.repos.map((r, i) =>
         i === repoIdx ? { ...r, sessions: [...r.sessions, session], collapsed: false } : r,
@@ -409,6 +417,7 @@ export function reducer(state: DemoState, action: Action): DemoState {
                       pendingApprove: false,
                       activity:
                         text.length > 70 ? `${text.slice(0, 70)}…` : text,
+                      lastStatusChangeAt: now,
                     },
               ),
             },
@@ -440,6 +449,7 @@ export function reducer(state: DemoState, action: Action): DemoState {
                         : ev.to === "finished"
                           ? "Done. Awaiting next prompt."
                           : s.activity,
+                    lastStatusChangeAt: now,
                   }
                 : s,
             ),
@@ -456,6 +466,7 @@ export function reducer(state: DemoState, action: Action): DemoState {
                     status: "waiting" as Status,
                     pendingApprove: true,
                     activity: "Permission requested: Tool use Bash",
+                    lastStatusChangeAt: now,
                   }
                 : s,
             ),
