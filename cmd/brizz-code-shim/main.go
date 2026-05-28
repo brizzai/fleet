@@ -69,10 +69,8 @@ func main() {
 	if isBrewPath(exePath) {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Install fleet via Homebrew:")
+		fmt.Fprintln(os.Stderr, "  brew uninstall brizz-code")
 		fmt.Fprintln(os.Stderr, "  brew install brizzai/tap/fleet")
-		if exePath != "" {
-			fmt.Fprintf(os.Stderr, "  rm -f %q\n", exePath)
-		}
 		os.Exit(1)
 	}
 
