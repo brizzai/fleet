@@ -1,0 +1,23 @@
+---
+title: Requirements
+description: What fleet needs to run.
+---
+
+## Required
+
+- **macOS** — fleet is Mac-only by design. Linux support is not planned.
+- **[tmux](https://github.com/tmux/tmux)** — `brew install tmux`
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — `claude` on your `$PATH`
+
+## Optional
+
+- **[`gh`](https://cli.github.com/)** — required for PR badges (CI status, reviews, unresolved threads). PR info is hidden if `gh` isn't installed.
+- **Google Chrome** — required for the `p`-to-open-PR tab-reuse feature. Falls back to `open <url>` if Chrome or the extension isn't available.
+
+## Permissions
+
+- fleet writes to `~/.config/fleet/` (state DB, hook status files, debug log)
+- The Chrome extension installs a Native Messaging Host manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/`
+- Hooks are auto-installed into `~/.claude/settings.json` on first launch
+
+Nothing leaves your machine.

@@ -1,0 +1,46 @@
+---
+title: Quick Start
+description: Launch fleet and run your first parallel Claude Code sessions.
+---
+
+## Launch
+
+```bash
+fleet
+```
+
+The TUI opens with a sidebar grouped by git repo, a preview pane on the right, and a status footer.
+
+## Your first session
+
+From any repo directory, press **`a`** to spawn a new Claude Code session for the current repo. fleet will:
+
+1. Create a tmux session prefixed `fleet_`
+2. Boot `claude` inside it with hooks pre-installed
+3. Pin the repo in your sidebar
+
+You can also use **`n`** for a workspace picker (path autocomplete) or **`w`** to spin up a new worktree on a fresh branch.
+
+## Move between sessions
+
+- **`j` / `k`** — navigate up/down
+- **`Enter`** — full-screen attach
+- **`Ctrl+Q`** — detach back to fleet
+- **`Tab`** — split-mode preview (beta)
+- **`Space`** — jump to the next session that needs you (waiting → finished)
+
+## Approve without attaching
+
+When a session is **waiting** (◐), press **`Y`** to send `y` + Enter to the prompt. Works for both menu-style (`❯ 1. Yes`) and y/n style (`(Y/n)`) prompts.
+
+## Filter, rename, restart
+
+- **`/`** — fuzzy filter sessions by name
+- **`R`** — rename the current session (locks auto-naming)
+- **`r`** — restart a dead session (Claude resumes the same conversation)
+
+## What next?
+
+- [Keybindings reference](/docs/guides/keybindings)
+- [Workspaces & worktrees](/docs/guides/workspaces)
+- [How status detection works](/docs/guides/status-detection)

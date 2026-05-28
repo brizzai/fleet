@@ -1,0 +1,78 @@
+---
+title: Keybindings
+description: The full keybinding reference for the fleet TUI.
+---
+
+Press **`?`** in the TUI to see this list in-app.
+
+## Navigation
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate up/down |
+| `Enter` | Attach to session (full PTY) |
+| `Ctrl+Q` | Detach from session |
+| `Tab` | Focus/unfocus preview (split mode, beta) |
+| `Space` | Jump to next waiting/finished session |
+| `/` | Filter sessions |
+
+## Session lifecycle
+
+| Key | Action |
+|-----|--------|
+| `a` | New session in current repo |
+| `n` | New session (workspace picker with path autocomplete) |
+| `w` | New worktree session (base branch + new branch) |
+| `f` | Fork session (branch the Claude conversation) |
+| `r` | Restart session (`claude --resume`) |
+| `R` | Rename session (locks auto-naming) |
+| `d` | Delete (scope follows cursor — see below) |
+| `z` | Undo last delete (5s window) |
+
+## Prompt control
+
+| Key | Action |
+|-----|--------|
+| `Y` | Quick approve waiting prompt (sends `y` + Enter) |
+
+## Repo / branch
+
+| Key | Action |
+|-----|--------|
+| `b` | Switch git branch |
+| `e` | Open in editor |
+| `p` | Open PR in Chrome (tab reuse) |
+
+## Hotkey slots (RTS-style)
+
+| Key | Action |
+|-----|--------|
+| `Alt+0..9` | Bind cursor session to slot N; re-press to unbind |
+| `=` then digit | Same as `Alt+N` |
+| `==` then digit | Clear slot N |
+| `0..9` | Jump to slot N (double-tap < 400ms also attaches) |
+
+Bindings persist in SQLite (`slot_bindings`) and cascade on session delete. The sidebar marks bound sessions with `[N]`.
+
+## Meta
+
+| Key | Action |
+|-----|--------|
+| `:` or `Ctrl+P` | Command palette (fuzzy search all actions) |
+| `S` | Settings |
+| `!` | Bug report / diagnostics |
+| `?` | Help |
+| `q` | Quit |
+
+## Delete scope
+
+`d` does different things depending on what your cursor is on. There's a single y/n confirm dialog — no extra buttons.
+
+| Cursor target | What `d` does |
+|---|---|
+| A session | Deletes just that session |
+| A worktree header | Deletes its sessions + runs `git worktree remove` + unpins |
+| A real-repo header | "Forgets" the repo (sessions + unpin, folder untouched) |
+| Empty repo header | Unpins instantly (no dialog) |
+
+All deletions route through deferred-delete so **`z`** can undo within 5 seconds.

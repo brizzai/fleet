@@ -1,0 +1,102 @@
+---
+title: Per-repo .fleet.json
+description: Repo-local overrides for workspaces, PR checks, and file copying.
+---
+
+Drop a `.fleet.json` in any repo root to customize fleet's behavior for that repo. Pair it with a gitignored `.fleet.local.json` for personal overrides — the two are merged additively.
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+<Callout title="Legacy">
+  `.bc.json` / `.bc.local.json` are still read for backwards compatibility. New repos should use `.fleet.json`.
+</Callout>
+
+## Full schema
+
+```jsonc
+{
+  // Custom workspace provider. If present, fleet uses ShellProvider
+  // for this repo instead of the built-in git worktree provider.
+  "workspace": {
+    "list": "my-tool list",
+    "create": "my-tool create {{name}} {{branch}}",
+    "destroy": "my-tool destroy {{name}}"
+  },
+
+  // Glob patterns of CI checks to ignore in the PR badge rollup.
+  // Uses path.Match semantics. Lists from .fleet.json and .fleet.local.json merge.
+  "pr_checks": {
+    "ignore": [
+      "deploy-preview/*",
+      "codecov/*"
+    ]
+  },
+
+  // Files/dirs/globs to copy from the source repo into each new worktree.
+  // Repo-relative only. filepath.Glob semantics. Gitignored files allowed.
+  // Independent of copy_claude_settings.
+  "copy_files": {
+    "paths": [
+      ".env.local",
+      "config/local/",
+      "secrets/*.key"
+    ]
+  }
+}
+```
+
+## `workspace` — custom workspace provider
+
+When set, fleet uses `ShellProvider` for this repo instead of git worktrees.
+
+| Command | When it runs | Template vars |
+|---|---|---|
+| `list` | Sidebar refresh — should print existing workspaces, one per line | — |
+| `create` | `w` key | `{{name}}`, `{{branch}}` |
+| `destroy` | `d` on a worktree header | `{{name}}` |
+
+If `workspace` is absent, fleet uses `GitWorktreeProvider` (zero config).
+
+## `pr_checks.ignore` — drop noise from PR badge
+
+The PR badge rolls up all CI checks. Use this to hide ones that don't matter (deploy previews, code-coverage diffs, etc.).
+
+```json
+{
+  "pr_checks": {
+    "ignore": ["deploy-preview/*", "codecov/*"]
+  }
+}
+```
+
+Globs use Go's `path.Match`. Empty by default — opt-in.
+
+## `copy_files.paths` — seed new worktrees
+
+When you spawn a worktree (**`w`**), fleet copies these paths from the source repo into the new worktree directory. Useful for gitignored config that the agent needs:
+
+```json
+{
+  "copy_files": {
+    "paths": [
+      ".env.local",
+      "node_modules/.cache/",
+      "config/local.yaml"
+    ]
+  }
+}
+```
+
+- Repo-relative paths only (no `../`)
+- Applies to both `GitWorktreeProvider` and `ShellProvider`
+- Independent of `copy_claude_settings` (which is global config)
+- Empty by default — opt-in
+
+## Merging `.fleet.json` and `.fleet.local.json`
+
+Both files are read if present:
+
+- **Lists** (`pr_checks.ignore`, `copy_files.paths`) merge **additively** — duplicates deduped
+- **Objects** (`workspace`) — `.fleet.local.json` keys override `.fleet.json`
+
+This means `.fleet.json` can be committed (team defaults) and `.fleet.local.json` can be gitignored (personal additions).
