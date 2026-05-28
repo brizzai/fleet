@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-27
+
+### Added
+
+- Fork a Claude session into a different worktree — press `Shift+F` to open the worktree picker (pick an existing worktree or create a new one), and the forked conversation continues in the chosen destination instead of the parent's cwd. Available as "Fork to Worktree" in the command palette. Claude-only for this release.
+
+### Changed
+
+- Switched the analytics backend from Amplitude to Mixpanel and added a first-launch consent prompt: on the first run you'll see a dialog explaining exactly what fleet sends (including your git `user.name` and `user.email`, used as the Mixpanel `distinct_id` so the same person shows up across machines) and choose Yes or No with one keystroke. Choice persists in `~/.config/fleet/config.json` and can be changed any time in Settings (`S`). The standard opt-outs (`FLEET_TELEMETRY_DISABLED`, `DO_NOT_TRACK`, `telemetry: false`) still work and skip the prompt entirely. Significantly expanded the event set — onboarding funnel, shape gauges (repos, worktrees, sessions, slot bindings), engagement distributions, and frustration signals — to help spot when new users get stuck. Mixpanel HTTP calls run on a buffered worker goroutine so the TUI's Update() loop never blocks on the network.
+
 ## [2.2.0] - 2026-05-23
 
 ### Added
@@ -139,7 +149,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/brizzai/fleet/releases/tag/v2.3.0
 [2.2.0]: https://github.com/brizzai/fleet/releases/tag/v2.2.0
 [2.1.0]: https://github.com/brizzai/fleet/releases/tag/v2.1.0
 [2.0.0]: https://github.com/brizzai/fleet/releases/tag/v2.0.0
