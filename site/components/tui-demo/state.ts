@@ -261,6 +261,35 @@ function withUserAction(state: DemoState, now: number): DemoState {
   return { ...state, lastUserActionAt: now };
 }
 
+type CoachEvent =
+  | { kind: "focus"; focused: boolean }
+  | { kind: "jumped"; onApprovable: boolean }
+  | { kind: "approved" };
+
+/**
+ * Single source of truth for the coaching banner's intro→space→enter→done
+ * progression. Centralizing every transition here (instead of inline ternaries
+ * in each reducer case) keeps the banner from desyncing from what the cursor is
+ * actually on — e.g. advancing to "now press ENTER to approve" when Space
+ * landed on nothing approvable, which left the banner stuck telling the user to
+ * approve something that can't be approved.
+ */
+function advanceCoach(step: CoachStep, ev: CoachEvent): CoachStep {
+  if (step === "done") return step; // terminal — the loop's been taught
+  switch (ev.kind) {
+    case "focus":
+      // Gaining focus kicks off the walkthrough; losing it rewinds to the
+      // pre-focus prompt so the banner never contradicts the "click here" hint.
+      return ev.focused ? (step === "intro" ? "space" : step) : "intro";
+    case "jumped":
+      // Only graduate to the ENTER beat when Space actually landed on an
+      // approvable session — otherwise ENTER attaches instead of approving.
+      return step === "space" && ev.onApprovable ? "enter" : step;
+    case "approved":
+      return "done";
+  }
+}
+
 export function reducer(state: DemoState, action: Action): DemoState {
   const now = action.type === "tick" ? action.now : Date.now();
 
@@ -328,12 +357,8 @@ export function reducer(state: DemoState, action: Action): DemoState {
               ),
             },
       );
-      // Advance the coach: once the user has approved at least once they
-      // "get it" — graduate the banner to the wrap-up state.
-      const coachStep: CoachStep =
-        state.coachStep === "enter" || state.coachStep === "space"
-          ? "done"
-          : state.coachStep;
+      // Approving is the payoff — graduate the banner to the wrap-up state.
+      const coachStep = advanceCoach(state.coachStep, { kind: "approved" });
       return withUserAction({ ...state, repos, coachStep }, now);
     }
     case "add_session": {
@@ -366,14 +391,16 @@ export function reducer(state: DemoState, action: Action): DemoState {
       const items = flattenItems(state);
       const order: Status[] = ["waiting", "finished"];
       const cur = cursorIndex(state);
-      const coachStep: CoachStep =
-        state.coachStep === "space" ? "enter" : state.coachStep;
       for (const status of order) {
         for (let i = 1; i <= items.length; i++) {
           const item = items[(cur + i) % items.length]!;
           if (item.kind !== "session") continue;
           const s = state.repos[item.repoIdx]!.sessions[item.sessionIdx]!;
           if (s.status === status) {
+            const coachStep = advanceCoach(state.coachStep, {
+              kind: "jumped",
+              onApprovable: !!s.pendingApprove,
+            });
             return withUserAction(
               { ...state, cursor: cursorFromItem(item), coachStep },
               now,
@@ -381,7 +408,7 @@ export function reducer(state: DemoState, action: Action): DemoState {
           }
         }
       }
-      return { ...state, coachStep };
+      return state; // nothing to jump to — leave the coach where it is
     }
     case "delete": {
       const repoIdx = state.cursor.repoIdx;
@@ -409,8 +436,10 @@ export function reducer(state: DemoState, action: Action): DemoState {
     case "filter_end":
       return withUserAction({ ...state, filterMode: false, filter: "" }, now);
     case "set_focused": {
-      const coachStep: CoachStep =
-        action.value && state.coachStep === "intro" ? "space" : state.coachStep;
+      const coachStep = advanceCoach(state.coachStep, {
+        kind: "focus",
+        focused: action.value,
+      });
       return { ...state, focused: action.value, coachStep };
     }
     case "focus_input":

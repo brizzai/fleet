@@ -31,7 +31,7 @@ Pure-React recreation of the fleet sidebar+preview. Reads as one feature; touch 
 - **`palette.ts`** mirrors `internal/ui/palette.go` (tokyo-night). The `pink: "#f48fb1"` token was added late; don't sneak `?? "#f48fb1"` fallbacks back in.
 - **`state.ts`** is a `useReducer` machine. `dispatch` is threaded down to `Preview`/`PromptInput` for the typing flow; don't lift `useState` to children.
 - **`script.ts`** drives auto-play. Invariants:
-  - **Only `running` sessions transition on their own.** Waiting/finished/idle sit until the user acts — matches real fleet, and earns the `[SPACE] jump` hint at the bottom of the sidebar.
+  - **Only `running` sessions transition on their own.** Waiting/finished/idle sit until the user acts — matches real fleet, and is what the `SPACE → ENTER` coaching banner (`CoachBanner.tsx`, rendered under the demo) teaches.
   - **Per-session 5.5s cooldown** (`STATUS_COOLDOWN_MS`) on status changes prevents visual clustering after batches of approvals. `set_activity` (text-only) is exempt.
   - **`pendingApprove` MUST be cleared** whenever a session leaves `waiting`. The reducer's `flip_status` case does this; `SessionLine` also requires `status === "waiting"` to render the `(⏎)` hint as a safety net.
 - **`TuiDemo.tsx`** uses a jittered `setTimeout` chain (not `setInterval`) so events don't fire on a metronome.

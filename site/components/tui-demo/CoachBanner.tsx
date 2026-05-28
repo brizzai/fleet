@@ -12,33 +12,58 @@ import type { CoachStep } from "./state";
  * walk them through it in two beats, then fade away.
  */
 export function CoachBanner({ step }: { step: CoachStep }) {
-  const [hidden, setHidden] = useState(false);
+  // "shown" → "fading" (after holding `done` ~8s) → "gone" (unmounted, so the
+  // retired banner leaves no permanent empty gap under the demo).
+  const [phase, setPhase] = useState<"shown" | "fading" | "gone">("shown");
 
-  // After `done`, hold the celebratory message ~8s, then quietly retire.
   useEffect(() => {
     if (step !== "done") {
-      setHidden(false);
+      setPhase("shown");
       return;
     }
-    const id = setTimeout(() => setHidden(true), 8_000);
+    const id = setTimeout(() => setPhase("fading"), 8_000);
     return () => clearTimeout(id);
   }, [step]);
 
+  if (phase === "gone") return null;
+
+  const fading = phase === "fading";
   return (
     <div
       aria-live="polite"
+      onTransitionEnd={() => {
+        if (fading) setPhase("gone");
+      }}
       style={{
         margin: "1.5rem auto 0",
         maxWidth: 720,
         padding: "0 1rem",
         textAlign: "center",
-        opacity: hidden ? 0 : 1,
-        transform: hidden ? "translateY(-4px)" : "translateY(0)",
+        opacity: fading ? 0 : 1,
+        transform: fading ? "translateY(-4px)" : "translateY(0)",
         transition: "opacity 0.5s ease, transform 0.5s ease",
-        pointerEvents: hidden ? "none" : undefined,
+        pointerEvents: fading ? "none" : undefined,
       }}
     >
       <BannerPanel step={step} />
+      <style>{`
+        @keyframes fleet-coach-pulse {
+          0%, 100% {
+            box-shadow:
+              0 0 0 1px rgba(244,143,177,0.18),
+              0 0 32px -6px rgba(244,143,177,0.45);
+          }
+          50% {
+            box-shadow:
+              0 0 0 1px rgba(244,143,177,0.35),
+              0 0 44px -4px rgba(244,143,177,0.65);
+          }
+        }
+        @keyframes fleet-key-press {
+          0%, 88%, 100% { transform: translateY(0); }
+          94% { transform: translateY(2px); }
+        }
+      `}</style>
     </div>
   );
 }
@@ -160,24 +185,6 @@ function Panel({
       >
         {body}
       </div>
-      <style>{`
-        @keyframes fleet-coach-pulse {
-          0%, 100% {
-            box-shadow:
-              0 0 0 1px rgba(244,143,177,0.18),
-              0 0 32px -6px rgba(244,143,177,0.45);
-          }
-          50% {
-            box-shadow:
-              0 0 0 1px rgba(244,143,177,0.35),
-              0 0 44px -4px rgba(244,143,177,0.65);
-          }
-        }
-        @keyframes fleet-key-press {
-          0%, 88%, 100% { transform: translateY(0); }
-          94% { transform: translateY(2px); }
-        }
-      `}</style>
     </div>
   );
 }
