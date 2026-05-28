@@ -443,6 +443,11 @@ export function reducer(state: DemoState, action: Action): DemoState {
                 ? {
                     ...s,
                     status: ev.to,
+                    // Anything that isn't `waiting` shouldn't carry a pending
+                    // approval hint — clear it so the (⏎) badge doesn't leak
+                    // into running/finished/idle states.
+                    pendingApprove:
+                      ev.to === "waiting" ? s.pendingApprove : false,
                     activity:
                       ev.to === "running"
                         ? randomFromPool(ACTIVITY_POOL)

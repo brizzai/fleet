@@ -85,7 +85,7 @@ export function SessionLine({ session, isLast, selected, spinnerFrame }: Props) 
           [{session.slot}]
         </span>
       )}
-      {session.pendingApprove && !selected && (
+      {session.pendingApprove && session.status === "waiting" && !selected && (
         <span
           aria-hidden
           style={{
