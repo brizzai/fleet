@@ -17,9 +17,23 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: brizz-code-shim
+    main: ./cmd/brizz-code-shim
+    binary: brizz-code
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
 
 archives:
   - id: default
+    ids:
+      - fleet
     formats:
       - tar.gz
     name_template: >-
@@ -27,9 +41,21 @@ archives:
       {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
+  - id: brizz-code-shim
+    ids:
+      - brizz-code-shim
+    formats:
+      - tar.gz
+    name_template: >-
+      brizz-code_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
 
 homebrew_casks:
   - name: fleet
+    ids:
+      - default
     binaries:
       - fleet
     repository:
