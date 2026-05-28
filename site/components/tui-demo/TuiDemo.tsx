@@ -40,15 +40,28 @@ export function TuiDemo() {
     return () => clearInterval(id);
   }, []);
 
-  // Script ticker — auto-play idle behavior
+  // Script ticker — auto-play idle behavior. Uses jittered setTimeout chain
+  // (instead of setInterval) so events don't fire on a perfect metronome,
+  // which prevents the demo from looking like everything changes in lockstep.
   useEffect(() => {
-    const id = setInterval(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      if (cancelled) return;
       const now = Date.now();
-      if (isScriptPaused(stateRef.current, now)) return;
-      const ev = nextScriptEvent(stateRef.current);
-      if (ev) dispatch({ type: "script_event", event: ev });
-    }, SCRIPT_INTERVAL_MS);
-    return () => clearInterval(id);
+      if (!isScriptPaused(stateRef.current, now)) {
+        const ev = nextScriptEvent(stateRef.current);
+        if (ev) dispatch({ type: "script_event", event: ev });
+      }
+      // ±35% jitter around SCRIPT_INTERVAL_MS
+      const next = SCRIPT_INTERVAL_MS * (0.65 + Math.random() * 0.7);
+      timer = setTimeout(tick, next);
+    };
+    timer = setTimeout(tick, SCRIPT_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   // Promote any `starting` sessions to `running` after ~1.6s

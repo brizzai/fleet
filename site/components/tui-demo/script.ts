@@ -13,6 +13,18 @@ function rng<T>(pool: readonly T[]): T {
 }
 
 /**
+ * Sessions can't transition status again until this many ms after their last
+ * status change. Stops the demo from feeling like everything flips at once
+ * (e.g. after a wave of approvals, all the approved sessions would otherwise
+ * head straight back to waiting on consecutive ticks).
+ */
+const STATUS_COOLDOWN_MS = 5_500;
+
+function fresh(s: Session, now: number): boolean {
+  return now - (s.lastStatusChangeAt ?? 0) >= STATUS_COOLDOWN_MS;
+}
+
+/**
  * Possible auto-play events with relative weights. Each recipe returns null
  * when no eligible session exists this tick — the dispatcher filters those
  * out so the chosen event always has a valid target. This is what keeps the
@@ -20,13 +32,15 @@ function rng<T>(pool: readonly T[]): T {
  */
 const RECIPES: Array<{
   weight: number;
-  make: (sessions: Session[]) => ScriptEvent | null;
+  make: (sessions: Session[], now: number) => ScriptEvent | null;
 }> = [
   // running → waiting (the headline behavior — most "fun")
   {
     weight: 32,
-    make: (sessions) => {
-      const c = sessions.filter((s) => s.status === "running");
+    make: (sessions, now) => {
+      const c = sessions.filter(
+        (s) => s.status === "running" && fresh(s, now),
+      );
       if (!c.length) return null;
       return { kind: "set_waiting", sessionId: rng(c).id };
     },
@@ -34,8 +48,10 @@ const RECIPES: Array<{
   // waiting → running (auto-resolution, prevents the demo deadlocking)
   {
     weight: 18,
-    make: (sessions) => {
-      const c = sessions.filter((s) => s.status === "waiting");
+    make: (sessions, now) => {
+      const c = sessions.filter(
+        (s) => s.status === "waiting" && fresh(s, now),
+      );
       if (!c.length) return null;
       return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
     },
@@ -43,8 +59,10 @@ const RECIPES: Array<{
   // running → finished
   {
     weight: 16,
-    make: (sessions) => {
-      const c = sessions.filter((s) => s.status === "running");
+    make: (sessions, now) => {
+      const c = sessions.filter(
+        (s) => s.status === "running" && fresh(s, now),
+      );
       if (!c.length) return null;
       return { kind: "flip_status", sessionId: rng(c).id, to: "finished" };
     },
@@ -52,15 +70,16 @@ const RECIPES: Array<{
   // finished/idle → running
   {
     weight: 15,
-    make: (sessions) => {
+    make: (sessions, now) => {
       const c = sessions.filter(
-        (s) => s.status === "finished" || s.status === "idle",
+        (s) =>
+          (s.status === "finished" || s.status === "idle") && fresh(s, now),
       );
       if (!c.length) return null;
       return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
     },
   },
-  // refresh activity text on a running session
+  // refresh activity text on a running session (no cooldown — visual only)
   {
     weight: 17,
     make: (sessions) => {
@@ -78,11 +97,12 @@ const RECIPES: Array<{
 export function nextScriptEvent(state: DemoState): ScriptEvent | null {
   const sessions = state.repos.flatMap((r) => r.sessions);
   if (!sessions.length) return null;
+  const now = Date.now();
 
   // Materialize only viable events (recipe + concrete event with a real target).
   const viable: Array<{ weight: number; event: ScriptEvent }> = [];
   for (const recipe of RECIPES) {
-    const event = recipe.make(sessions);
+    const event = recipe.make(sessions, now);
     if (event) viable.push({ weight: recipe.weight, event });
   }
   if (!viable.length) return null;
