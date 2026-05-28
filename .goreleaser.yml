@@ -58,6 +58,13 @@ homebrew_casks:
       - default
     binaries:
       - fleet
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/fleet"]
+          end
     repository:
       owner: brizzai
       name: homebrew-tap
