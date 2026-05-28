@@ -59,7 +59,17 @@ export interface DemoState {
   inputFocused: boolean;
   /** Text currently typed into the Claude prompt input. */
   inputText: string;
+  /**
+   * Progressive coaching step for the banner under the demo.
+   *  - `intro` : user hasn't focused the demo yet
+   *  - `space` : focused; show "press SPACE to jump"
+   *  - `enter` : Space pressed; show "now press ENTER to approve"
+   *  - `done`  : approved; show celebratory message that fades out
+   */
+  coachStep: CoachStep;
 }
+
+export type CoachStep = "intro" | "space" | "enter" | "done";
 
 export type Action =
   | { type: "cursor_up" }
@@ -167,6 +177,7 @@ export const INITIAL_STATE: DemoState = {
   tick: 0,
   inputFocused: false,
   inputText: "",
+  coachStep: "intro",
 };
 
 const SESSION_NAME_POOL = [
@@ -317,7 +328,13 @@ export function reducer(state: DemoState, action: Action): DemoState {
               ),
             },
       );
-      return withUserAction({ ...state, repos }, now);
+      // Advance the coach: once the user has approved at least once they
+      // "get it" — graduate the banner to the wrap-up state.
+      const coachStep: CoachStep =
+        state.coachStep === "enter" || state.coachStep === "space"
+          ? "done"
+          : state.coachStep;
+      return withUserAction({ ...state, repos, coachStep }, now);
     }
     case "add_session": {
       const repoIdx = state.cursor.repoIdx;
@@ -349,6 +366,8 @@ export function reducer(state: DemoState, action: Action): DemoState {
       const items = flattenItems(state);
       const order: Status[] = ["waiting", "finished"];
       const cur = cursorIndex(state);
+      const coachStep: CoachStep =
+        state.coachStep === "space" ? "enter" : state.coachStep;
       for (const status of order) {
         for (let i = 1; i <= items.length; i++) {
           const item = items[(cur + i) % items.length]!;
@@ -356,13 +375,13 @@ export function reducer(state: DemoState, action: Action): DemoState {
           const s = state.repos[item.repoIdx]!.sessions[item.sessionIdx]!;
           if (s.status === status) {
             return withUserAction(
-              { ...state, cursor: cursorFromItem(item) },
+              { ...state, cursor: cursorFromItem(item), coachStep },
               now,
             );
           }
         }
       }
-      return state;
+      return { ...state, coachStep };
     }
     case "delete": {
       const repoIdx = state.cursor.repoIdx;
@@ -389,8 +408,11 @@ export function reducer(state: DemoState, action: Action): DemoState {
       return withUserAction({ ...state, filter: action.value }, now);
     case "filter_end":
       return withUserAction({ ...state, filterMode: false, filter: "" }, now);
-    case "set_focused":
-      return { ...state, focused: action.value };
+    case "set_focused": {
+      const coachStep: CoachStep =
+        action.value && state.coachStep === "intro" ? "space" : state.coachStep;
+      return { ...state, focused: action.value, coachStep };
+    }
     case "focus_input":
       return { ...state, inputFocused: true, lastUserActionAt: now };
     case "blur_input":

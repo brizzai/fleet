@@ -11,6 +11,7 @@ import {
 import { Sidebar } from "./Sidebar";
 import { Preview } from "./Preview";
 import { Footer } from "./Footer";
+import { CoachBanner } from "./CoachBanner";
 import { PALETTE } from "./palette";
 import { SPINNER_INTERVAL_MS } from "./glyphs";
 import {
@@ -215,7 +216,7 @@ export function TuiDemo() {
 
   const hint = useMemo(() => {
     if (autoOnly) return "auto-playing — drive on desktop!";
-    if (!state.focused) return "click here to drive!";
+    if (!state.focused) return "click here, then press SPACE";
     return null;
   }, [autoOnly, state.focused]);
 
@@ -331,6 +332,8 @@ export function TuiDemo() {
 
       <Footer focused={state.focused && !autoOnly} />
       </div>
+
+      {!autoOnly && <CoachBanner step={state.coachStep} />}
 
       <style>{`
         @keyframes fleet-blink {
