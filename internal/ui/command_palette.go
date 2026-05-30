@@ -343,24 +343,37 @@ func (d *CommandPaletteDialog) View() string {
 
 			badge := renderKindBadge(it.Kind)
 
+			// Haystack is `Name + " " + Detail` (for places) or just `Name` (commands).
+			// Map matched haystack indexes back to the Name and Detail substrings.
+			nameRuneLen := runeLen(it.Name)
+			detailStart := nameRuneLen + 1
+			nameIdx := filterShiftIndexes(it.matchedIndexes, 0, nameRuneLen, 0)
+			detailIdx := filterShiftIndexes(it.matchedIndexes, detailStart, detailStart+runeLen(it.Detail), detailStart)
+
 			rawName := truncRunes(it.Name, nameCol)
 			namePad := strings.Repeat(" ", nameCol-runeLen(rawName))
 			var name string
 			if selected {
 				name = SessionTitleSelStyle.Render(rawName + namePad)
 			} else {
-				name = highlightMatches(rawName, it.matchedIndexes) + namePad
+				name = highlightMatches(rawName, nameIdx) + namePad
 			}
 
 			right := it.Shortcut
+			highlightRight := false
 			if right == "" {
 				right = it.Detail
+				highlightRight = !selected && len(detailIdx) > 0
 			}
 			right = truncRunes(right, rightBudget)
 
 			b.WriteString(prefix + badge + " " + name + "  ")
 			if right != "" {
-				b.WriteString(DimStyle.Render(right))
+				if highlightRight {
+					b.WriteString(highlightMatchesDim(right, detailIdx))
+				} else {
+					b.WriteString(DimStyle.Render(right))
+				}
 			}
 			b.WriteString("\n")
 		}
@@ -472,15 +485,23 @@ func (d *CommandPaletteDialog) boxed(content string) string {
 	return DialogStyle.Width(d.dialogWidth()).Render(content)
 }
 
-// highlightMatches bolds the runes of s whose haystack indexes appear in
-// matchedIndexes (rune positions in the original Haystack). Indexes that fall
-// outside s — i.e. matched in the branch/detail portion — are ignored.
+// highlightMatches bolds the runes of s at positions listed in matchedIndexes.
+// Indexes outside the rune length of s are ignored (the caller is responsible
+// for translating haystack offsets into local-substring offsets).
 func highlightMatches(s string, matchedIndexes []int) string {
-	base := lipgloss.NewStyle().Foreground(ColorText)
+	return highlightWith(s, matchedIndexes, lipgloss.NewStyle().Foreground(ColorText), lipgloss.NewStyle().Foreground(ColorYellow).Bold(true))
+}
+
+// highlightMatchesDim is like highlightMatches but uses the dim base style
+// (for the right-side Detail column).
+func highlightMatchesDim(s string, matchedIndexes []int) string {
+	return highlightWith(s, matchedIndexes, DimStyle, lipgloss.NewStyle().Foreground(ColorYellow).Bold(true))
+}
+
+func highlightWith(s string, matchedIndexes []int, base, hl lipgloss.Style) string {
 	if len(matchedIndexes) == 0 {
 		return base.Render(s)
 	}
-	hl := lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	matched := make(map[int]bool, len(matchedIndexes))
 	for _, idx := range matchedIndexes {
 		matched[idx] = true
@@ -494,4 +515,20 @@ func highlightMatches(s string, matchedIndexes []int) string {
 		}
 	}
 	return b.String()
+}
+
+// filterShiftIndexes returns the subset of haystack rune indexes that fall in
+// the half-open range [lo, hi), shifted by -shift so they index into a
+// substring of the haystack.
+func filterShiftIndexes(indexes []int, lo, hi, shift int) []int {
+	if len(indexes) == 0 || hi <= lo {
+		return nil
+	}
+	out := make([]int, 0, len(indexes))
+	for _, idx := range indexes {
+		if idx >= lo && idx < hi {
+			out = append(out, idx-shift)
+		}
+	}
+	return out
 }

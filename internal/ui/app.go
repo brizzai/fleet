@@ -3219,27 +3219,44 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 	}
 	h.workerMu.Unlock()
 
-	seen := make(map[string]bool, len(h.flatItems))
-	places := make([]PaletteItem, 0, len(h.flatItems))
-	for _, item := range h.flatItems {
-		if !item.IsRepoHeader || item.RepoPath == "" || seen[item.RepoPath] {
+	// Build the place list from the unfiltered repo universe — the sidebar
+	// filter shouldn't strip repos from the palette (it's a global navigator).
+	repoSet := make(map[string]bool)
+	for repo := range session.GroupByRepo(h.sessions) {
+		repoSet[repo] = true
+	}
+	for repo := range h.pinnedRepos {
+		repoSet[repo] = true
+	}
+	for _, pw := range h.pendingWorkspaces {
+		if pw != nil && pw.RepoPath != "" {
+			repoSet[pw.RepoPath] = true
+		}
+	}
+	repos := make([]string, 0, len(repoSet))
+	for repo := range repoSet {
+		if repo == "" {
 			continue
 		}
-		seen[item.RepoPath] = true
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
 
+	places := make([]PaletteItem, 0, len(repos))
+	for _, repo := range repos {
 		kind := PaletteKindRepo
 		branch := ""
-		if info := gitSnap[item.RepoPath]; info != nil {
+		if info := gitSnap[repo]; info != nil {
 			if info.IsWorktreeRepo {
 				kind = PaletteKindWorktree
 			}
 			branch = info.Branch
 		}
 
-		name := filepath.Base(item.RepoPath)
+		name := filepath.Base(repo)
 		places = append(places, PaletteItem{
 			Kind:     kind,
-			ID:       item.RepoPath,
+			ID:       repo,
 			Name:     name,
 			Detail:   branch,
 			Haystack: name + " " + branch,
