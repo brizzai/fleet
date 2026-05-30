@@ -1,0 +1,20 @@
+---
+title: Welcome
+description: Documentation for fleet — the terminal cockpit for orchestrating Claude Code sessions in parallel.
+---
+
+fleet is a TUI for running multiple Claude Code agents at once, grouped by repo, with real-time status and PR awareness.
+
+## Quick links
+
+- [Install](/docs/getting-started/install) — Homebrew, shell script, or `go install`
+- [Quick Start](/docs/getting-started/quick-start) — launch your first parallel agents in 60 seconds
+- [Keybindings](/docs/guides/keybindings) — the full key reference
+- [Workspaces & worktrees](/docs/guides/workspaces) — how `w` spawns isolated workspaces
+- [Configuration](/docs/reference/configuration) — what lives in `~/.config/fleet/`
+
+## What fleet is
+
+fleet goes deep on Claude Code instead of supporting every agent CLI. It reads hooks for real-time status, captures the session ID for `claude --resume`, knows your PR has 2 unresolved review threads, and titles sessions from your first prompt.
+
+If Claude Code is your daily driver, this is the tightest integration on the market.

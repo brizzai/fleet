@@ -1,0 +1,50 @@
+---
+title: Status Detection
+description: How fleet knows what every session is doing.
+---
+
+fleet uses **Claude Code hooks** as its primary status source, with a structural pane-scrape fallback. The result: real-time status without polling.
+
+## The states
+
+| Icon | State | Meaning |
+|---|---|---|
+| ● | `running` | Claude is processing |
+| ◐ | `waiting` | A prompt needs your input |
+| ● | `finished` | Claude completed; awaiting next prompt |
+| ○ | `idle` | At the prompt, no activity |
+| ✕ | `error` | Session died |
+| ○ | `starting` | Spawning |
+
+## How hooks work
+
+On first launch, fleet writes entries into `~/.claude/settings.json` that point Claude Code's hooks at `fleet hook-handler`. Each hook writes a JSON status file to `~/.config/fleet/hooks/<session_id>.json`.
+
+The handler reads `FLEET_INSTANCE_ID` from the environment to know which session it belongs to.
+
+### Hooks fleet listens to
+
+- `UserPromptSubmit` — captures the prompt text (for [auto-naming](/docs/guides/auto-naming))
+- `Notification` / `Stop` / `SubagentStop` — drive `running` / `waiting` / `finished` transitions
+- `SessionStart` — captures Claude's `session_id` so we can `claude --resume` it on restart
+
+A background `HookWatcher` goroutine reads the status files and feeds the session model.
+
+## Pane fallback
+
+Hooks don't fire for **sub-agents** in agent-team mode, so fleet also does a structural pane capture:
+
+- **Menu prompts**: `❯ 1.` + `2.` + `Esc to cancel` on the visible pane
+- **Team box**: `│` + `Waiting for team lead` at line start (box-drawing characters)
+
+Pane detection uses structural checks (not text patterns) to avoid false positives from code or scrollback. Spinner characters on `"waiting for"` lines are skipped to dodge the animated team-box spinner.
+
+## Key invariants
+
+- **Hooks are authoritative.** `hook=running` is **never** overridden to `waiting` by the pane scraper.
+- **Stale waiting hook**: if the pane shows the idle prompt, fleet downgrades to `finished` (and preserves `idle` if you've already acknowledged it — prevents oscillation).
+- All blocking I/O (tmux, git, gh) runs in a background worker; the Bubble Tea `Update()` loop is never blocked.
+
+## Debugging
+
+Status detection logs to `~/.config/fleet/debug.log` (via `slog`). Press **`!`** in the TUI to open the bug-report dialog, which captures the last 100 lines.

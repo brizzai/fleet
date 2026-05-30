@@ -1,0 +1,37 @@
+---
+title: Install
+description: Install fleet via Homebrew, the install script, or go install.
+---
+
+## Homebrew (recommended)
+
+```bash
+brew install brizzai/tap/fleet
+```
+
+## Shell script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brizzai/fleet/master/install.sh | bash
+```
+
+Requires [`gh`](https://cli.github.com/).
+
+## Go install
+
+```bash
+go install github.com/brizzai/fleet/cmd/fleet@latest
+```
+
+Requires Go 1.26+.
+
+## Verify
+
+```bash
+fleet --version
+```
+
+## Next
+
+- [Quick Start](/docs/getting-started/quick-start)
+- [Requirements](/docs/getting-started/requirements)
