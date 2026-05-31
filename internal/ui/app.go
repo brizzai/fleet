@@ -1113,10 +1113,11 @@ func (h *Home) renderBody() string {
 		b.WriteString(" " + HelpKeyStyle.Render("/") + " " + DimStyle.Render(h.filterText) + "  " + DimStyle.Render("(/ to edit, esc to clear)"))
 		lineCount += 2
 	} else {
-		// Help bar (border + "\n " + shortcuts = 2 lines).
-		b.WriteString("\n")
+		// Help bar: 1 row of contextual hotkeys. The leading \n in
+		// renderHelpBar's output is the row break from the panel bottom;
+		// the row of keys itself is the only visible content.
 		b.WriteString(h.renderHelpBar())
-		lineCount += 2
+		lineCount++
 	}
 
 	// Track height mismatches (counter for bug report, log only on first occurrence).
