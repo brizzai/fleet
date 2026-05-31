@@ -7,23 +7,25 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Tokyo Night dark theme colors.
+// Initial colors match the default Fleet Pink palette. ApplyPalette reassigns
+// these when a theme is loaded, so a fresh fleet without a configured theme
+// still renders in the flagship pink.
 var (
-	ColorBg      = lipgloss.Color("#1a1b26")
-	ColorSurface = lipgloss.Color("#24283b")
-	ColorBorder  = lipgloss.Color("#414868")
-	ColorText    = lipgloss.Color("#c0caf5")
-	ColorTextDim = lipgloss.Color("#565f89")
-	ColorAccent  = lipgloss.Color("#7aa2f7")
-	ColorGreen   = lipgloss.Color("#9ece6a")
-	ColorYellow  = lipgloss.Color("#e0af68")
-	ColorBlue    = lipgloss.Color("#7dcfff")
-	ColorRed     = lipgloss.Color("#f7768e")
-	ColorGray    = lipgloss.Color("#565f89")
-	ColorWhite   = lipgloss.Color("#c0caf5")
-	ColorBrand   = lipgloss.Color("#F48FB1") // fleet pink — theme-independent
-	ColorOrange  = lipgloss.Color("#ff9e64")
-	ColorPurple  = lipgloss.Color("#bb9af7")
+	ColorBg      = lipgloss.Color("#16121f")
+	ColorSurface = lipgloss.Color("#231a2e")
+	ColorBorder  = lipgloss.Color("#3d2e4c")
+	ColorText    = lipgloss.Color("#f3e9f0")
+	ColorTextDim = lipgloss.Color("#7a6a80")
+	ColorAccent  = lipgloss.Color("#ff77c6")
+	ColorGreen   = lipgloss.Color("#88e090")
+	ColorYellow  = lipgloss.Color("#f3c98b")
+	ColorBlue    = lipgloss.Color("#7ab8f5")
+	ColorRed     = lipgloss.Color("#ff7088")
+	ColorGray    = lipgloss.Color("#7a6a80")
+	ColorWhite   = lipgloss.Color("#f3e9f0")
+	ColorBrand   = lipgloss.Color("#ff77c6") // fleet pink — theme-independent brand mark
+	ColorOrange  = lipgloss.Color("#ff9d6e")
+	ColorPurple  = lipgloss.Color("#c293f5")
 )
 
 // Pre-allocated styles.

@@ -61,7 +61,7 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 
 	effectiveTheme := h.cfg.Theme
 	if effectiveTheme == "" {
-		effectiveTheme = "tokyo-night"
+		effectiveTheme = DefaultPaletteName
 	}
 	h.workerMu.Lock()
 	sessionCount := len(h.sessions)

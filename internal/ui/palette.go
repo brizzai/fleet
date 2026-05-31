@@ -22,6 +22,23 @@ type Palette struct {
 
 // Built-in palette definitions.
 var (
+	PaletteFleetPink = Palette{
+		Name:    "fleet-pink",
+		Bg:      lipgloss.Color("#16121f"),
+		Surface: lipgloss.Color("#231a2e"),
+		Border:  lipgloss.Color("#3d2e4c"),
+		Text:    lipgloss.Color("#f3e9f0"),
+		TextDim: lipgloss.Color("#7a6a80"),
+		Accent:  lipgloss.Color("#ff77c6"),
+		Green:   lipgloss.Color("#88e090"),
+		Yellow:  lipgloss.Color("#f3c98b"),
+		Blue:    lipgloss.Color("#7ab8f5"),
+		Red:     lipgloss.Color("#ff7088"),
+		Gray:    lipgloss.Color("#7a6a80"),
+		Orange:  lipgloss.Color("#ff9d6e"),
+		Purple:  lipgloss.Color("#c293f5"),
+	}
+
 	PaletteTokyoNight = Palette{
 		Name:    "tokyo-night",
 		Bg:      lipgloss.Color("#1a1b26"),
@@ -108,8 +125,9 @@ var (
 	}
 )
 
-// BuiltinPalettes lists all available themes.
+// BuiltinPalettes lists all available themes. Fleet Pink is the flagship default.
 var BuiltinPalettes = []Palette{
+	PaletteFleetPink,
 	PaletteTokyoNight,
 	PaletteCatppuccin,
 	PaletteRosePine,
@@ -117,19 +135,25 @@ var BuiltinPalettes = []Palette{
 	PaletteGruvbox,
 }
 
-// PaletteByName returns the palette matching the given name, or Tokyo Night as default.
+// DefaultPaletteName is the theme used when no theme is configured or the
+// configured name doesn't match a built-in.
+const DefaultPaletteName = "fleet-pink"
+
+// PaletteByName returns the palette matching the given name, or the default as fallback.
 func PaletteByName(name string) Palette {
 	for _, p := range BuiltinPalettes {
 		if p.Name == name {
 			return p
 		}
 	}
-	return PaletteTokyoNight
+	return PaletteFleetPink
 }
 
 // PaletteDisplayName returns a human-readable display name for a palette.
 func PaletteDisplayName(name string) string {
 	switch name {
+	case "fleet-pink":
+		return "Fleet Pink"
 	case "tokyo-night":
 		return "Tokyo Night"
 	case "catppuccin-mocha":

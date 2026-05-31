@@ -246,10 +246,9 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	fi.CharLimit = 64
 	fi.Width = 20
 
-	// Apply theme from config if set.
-	if cfg.Theme != "" {
-		ApplyPalette(PaletteByName(cfg.Theme))
-	}
+	// Apply theme — PaletteByName falls back to the flagship default when
+	// cfg.Theme is empty or unknown.
+	ApplyPalette(PaletteByName(cfg.Theme))
 
 	return &Home{
 		storage:               storage,

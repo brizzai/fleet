@@ -82,7 +82,7 @@ func (d *SettingsDialog) cycleValue(dir int) {
 		}
 		current := d.cfg.Theme
 		if current == "" {
-			current = "tokyo-night"
+			current = DefaultPaletteName
 		}
 		idx := indexOf(names, current)
 		idx = (idx + dir + len(names)) % len(names)
@@ -151,7 +151,7 @@ func (d *SettingsDialog) View() string {
 
 	theme := d.cfg.Theme
 	if theme == "" {
-		theme = "tokyo-night"
+		theme = DefaultPaletteName
 	}
 
 	autoNameValue := "on"
