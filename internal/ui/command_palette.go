@@ -8,34 +8,77 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sahilm/fuzzy"
 )
 
-// commandPaletteMsg is sent when the user selects a command.
+// sortRecents orders the recents slice by the rank map (lower rank = more recent).
+func sortRecents(recents []scoredItem, rank map[string]int) {
+	sort.SliceStable(recents, func(i, j int) bool {
+		return rank[recents[i].ID] < rank[recents[j].ID]
+	})
+}
+
+// PaletteItemKind distinguishes commands from places (repos/worktrees) in the palette.
+type PaletteItemKind int
+
+const (
+	PaletteKindCommand PaletteItemKind = iota
+	PaletteKindRepo
+	PaletteKindWorktree
+)
+
+// commandPaletteMsg is sent when the user selects an item from the palette.
 type commandPaletteMsg struct {
-	commandID string
+	kind PaletteItemKind
+	id   string // command ID for commands, repo path for repos/worktrees
 }
 
-// PaletteCommand represents a single action in the command palette.
-type PaletteCommand struct {
-	ID       string // e.g. "restart", "reload_all"
-	Name     string // e.g. "Restart Session"
-	Shortcut string // e.g. "r" (empty for palette-only commands)
+// PaletteItem represents a single row in the palette — either a command or a place.
+type PaletteItem struct {
+	Kind     PaletteItemKind
+	ID       string // command ID, or repo path for places
+	Name     string // display name
+	Detail   string // dim right-side detail (branch for places, empty for commands)
+	Shortcut string // right-aligned keybinding hint (commands only)
+	Haystack string // string used for fuzzy matching
 }
 
-// CommandPaletteDialog shows a fuzzy-filterable list of available commands.
+// PaletteTab restricts which kinds of items show in the palette.
+type PaletteTab int
+
+const (
+	PaletteTabAll PaletteTab = iota
+	PaletteTabActions
+	PaletteTabPlaces
+)
+
+var paletteTabOrder = []struct {
+	Tab   PaletteTab
+	Label string
+}{
+	{PaletteTabAll, "all"},
+	{PaletteTabActions, "actions"},
+	{PaletteTabPlaces, "repos/worktrees"},
+}
+
+// CommandPaletteDialog shows a fuzzy-filterable list of palette items.
 type CommandPaletteDialog struct {
 	visible       bool
 	width, height int
-	commands      []PaletteCommand // full list
-	filtered      []scoredCommand  // after fuzzy filter
+	items         []PaletteItem // full list
+	recent        []string      // recent item IDs (most recent first)
+	filtered      []scoredItem  // after fuzzy filter + tab
 	cursor        int
 	scrollOff     int
+	activeTab     PaletteTab
 	filterInput   textinput.Model
 }
 
-type scoredCommand struct {
-	PaletteCommand
-	score int
+type scoredItem struct {
+	PaletteItem
+	score          int
+	matchedIndexes []int // rune positions in Haystack — used to highlight matched chars in Name
+	recent         bool  // true when this row is sitting in the "recent" section
 }
 
 const paletteMaxVisible = 14
@@ -43,7 +86,7 @@ const paletteMaxVisible = 14
 // NewCommandPaletteDialog creates a new command palette dialog.
 func NewCommandPaletteDialog() *CommandPaletteDialog {
 	fi := textinput.New()
-	fi.Placeholder = "type a command..."
+	fi.Placeholder = "search commands, repos, worktrees..."
 	fi.CharLimit = 64
 	fi.Width = 40
 
@@ -52,14 +95,46 @@ func NewCommandPaletteDialog() *CommandPaletteDialog {
 	}
 }
 
-// Show populates and opens the palette.
-func (d *CommandPaletteDialog) Show(commands []PaletteCommand) {
+// Show populates and opens the palette. recent is a list of recently picked
+// item IDs (most recent first); rows whose ID appears here float to the top
+// when no query is typed.
+func (d *CommandPaletteDialog) Show(items []PaletteItem, recent []string) {
 	d.visible = true
-	d.commands = commands
+	d.items = items
+	d.recent = recent
 	d.cursor = 0
 	d.scrollOff = 0
+	d.activeTab = PaletteTabAll
 	d.filterInput.SetValue("")
 	d.filterInput.Focus()
+	d.rebuildFiltered()
+}
+
+// itemMatchesTab reports whether an item is included by the active tab.
+func itemMatchesTab(it PaletteItem, tab PaletteTab) bool {
+	switch tab {
+	case PaletteTabActions:
+		return it.Kind == PaletteKindCommand
+	case PaletteTabPlaces:
+		return it.Kind == PaletteKindRepo || it.Kind == PaletteKindWorktree
+	default:
+		return true
+	}
+}
+
+// cycleTab advances to the next/previous tab and rebuilds the filtered list.
+func (d *CommandPaletteDialog) cycleTab(delta int) {
+	n := len(paletteTabOrder)
+	cur := 0
+	for i, t := range paletteTabOrder {
+		if t.Tab == d.activeTab {
+			cur = i
+			break
+		}
+	}
+	d.activeTab = paletteTabOrder[((cur+delta)%n+n)%n].Tab
+	d.cursor = 0
+	d.scrollOff = 0
 	d.rebuildFiltered()
 }
 
@@ -82,22 +157,47 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 	query := strings.TrimSpace(d.filterInput.Value())
 	d.filtered = nil
 
-	for _, cmd := range d.commands {
-		if query == "" {
-			d.filtered = append(d.filtered, scoredCommand{PaletteCommand: cmd, score: 0})
+	tabItems := make([]PaletteItem, 0, len(d.items))
+	haystacks := make([]string, 0, len(d.items))
+	for _, it := range d.items {
+		if !itemMatchesTab(it, d.activeTab) {
 			continue
 		}
-		matched, score := fuzzyMatch(query, cmd.Name)
-		if matched {
-			d.filtered = append(d.filtered, scoredCommand{PaletteCommand: cmd, score: score})
+		tabItems = append(tabItems, it)
+		hay := it.Haystack
+		if hay == "" {
+			hay = it.Name
 		}
+		haystacks = append(haystacks, hay)
 	}
 
-	// Sort by score descending when filtering.
-	if query != "" {
-		sort.SliceStable(d.filtered, func(i, j int) bool {
-			return d.filtered[i].score > d.filtered[j].score
-		})
+	if query == "" {
+		// Partition into recent (in recent-order) + the rest (in original order).
+		recentRank := make(map[string]int, len(d.recent))
+		for i, id := range d.recent {
+			recentRank[id] = i
+		}
+		recents := make([]scoredItem, 0, len(d.recent))
+		rest := make([]scoredItem, 0, len(tabItems))
+		for _, it := range tabItems {
+			if _, ok := recentRank[it.ID]; ok {
+				recents = append(recents, scoredItem{PaletteItem: it, recent: true})
+			} else {
+				rest = append(rest, scoredItem{PaletteItem: it})
+			}
+		}
+		sortRecents(recents, recentRank)
+		d.filtered = append(d.filtered, recents...)
+		d.filtered = append(d.filtered, rest...)
+	} else {
+		matches := fuzzy.Find(query, haystacks)
+		for _, m := range matches {
+			d.filtered = append(d.filtered, scoredItem{
+				PaletteItem:    tabItems[m.Index],
+				score:          m.Score,
+				matchedIndexes: m.MatchedIndexes,
+			})
+		}
 	}
 
 	// Clamp cursor.
@@ -131,16 +231,22 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.C
 	}
 
 	switch keyMsg.String() {
-	case "esc":
+	case "esc", "ctrl+k":
 		d.Hide()
 		return d, nil
-	case "up", "ctrl+k":
+	case "tab":
+		d.cycleTab(1)
+		return d, nil
+	case "shift+tab":
+		d.cycleTab(-1)
+		return d, nil
+	case "up":
 		if d.cursor > 0 {
 			d.cursor--
 			d.syncScroll()
 		}
 		return d, nil
-	case "down", "ctrl+j":
+	case "down":
 		if d.cursor < len(d.filtered)-1 {
 			d.cursor++
 			d.syncScroll()
@@ -153,7 +259,7 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.C
 		selected := d.filtered[d.cursor]
 		d.Hide()
 		return d, func() tea.Msg {
-			return commandPaletteMsg{commandID: selected.ID}
+			return commandPaletteMsg{kind: selected.Kind, id: selected.ID}
 		}
 	}
 
@@ -164,11 +270,16 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.C
 	return d, cmd
 }
 
-// View renders the command palette dialog.
+// View renders the command palette dialog as a styled box (no fullscreen canvas).
+// The caller composites this over the main view via overlay.Composite.
 func (d *CommandPaletteDialog) View() string {
 	var b strings.Builder
 
 	b.WriteString(TitleStyle.Render("Command Palette"))
+	b.WriteString("\n\n")
+
+	// Tab bar.
+	b.WriteString(d.renderTabs())
 	b.WriteString("\n\n")
 
 	// Search input.
@@ -176,7 +287,7 @@ func (d *CommandPaletteDialog) View() string {
 	b.WriteString("\n\n")
 
 	if len(d.filtered) == 0 {
-		b.WriteString(DimStyle.Render("  No matching commands"))
+		b.WriteString(DimStyle.Render("  No matches"))
 		b.WriteString("\n")
 	} else {
 		// Scroll indicators.
@@ -190,36 +301,78 @@ func (d *CommandPaletteDialog) View() string {
 			end = len(d.filtered)
 		}
 
-		// Calculate max name width for shortcut alignment.
-		maxName := 0
+		// Column layout: [prefix 2][badge 4][sep 1][name N][gap 2][right]
+		const reserved = 2 + paletteBadgeWidth + 1 + 2
+		const maxNameCap = 22
+
+		nameCol := 0
 		for i := d.scrollOff; i < end; i++ {
-			if len(d.filtered[i].Name) > maxName {
-				maxName = len(d.filtered[i].Name)
+			n := runeLen(d.filtered[i].Name)
+			if n > nameCol {
+				nameCol = n
 			}
 		}
+		if nameCol > maxNameCap {
+			nameCol = maxNameCap
+		}
 
+		rightBudget := d.innerContentWidth() - reserved - nameCol
+		if rightBudget < 0 {
+			rightBudget = 0
+		}
+
+		prevRecent := false
 		for i := d.scrollOff; i < end; i++ {
-			cmd := d.filtered[i]
+			it := d.filtered[i]
 			selected := i == d.cursor
+
+			// Section header: first recent row gets a "recent" label, and the
+			// first non-recent row that follows recents gets a blank-line break.
+			if it.recent && !prevRecent {
+				b.WriteString("  " + DimStyle.Render("recent"))
+				b.WriteString("\n")
+			} else if !it.recent && prevRecent {
+				b.WriteString("\n")
+			}
+			prevRecent = it.recent
 
 			prefix := "  "
 			if selected {
 				prefix = SessionSelectionPrefix.Render("▸ ")
 			}
 
-			name := cmd.Name
-			// Pad name for shortcut alignment.
-			padded := name + strings.Repeat(" ", maxName-len(name)+2)
+			badge := renderKindBadge(it.Kind)
 
+			// Haystack is `Name + " " + Detail` (for places) or just `Name` (commands).
+			// Map matched haystack indexes back to the Name and Detail substrings.
+			nameRuneLen := runeLen(it.Name)
+			detailStart := nameRuneLen + 1
+			nameIdx := filterShiftIndexes(it.matchedIndexes, 0, nameRuneLen, 0)
+			detailIdx := filterShiftIndexes(it.matchedIndexes, detailStart, detailStart+runeLen(it.Detail), detailStart)
+
+			rawName := truncRunes(it.Name, nameCol)
+			namePad := strings.Repeat(" ", nameCol-runeLen(rawName))
+			var name string
 			if selected {
-				b.WriteString(prefix + SessionTitleSelStyle.Render(name))
-				if cmd.Shortcut != "" {
-					b.WriteString(strings.Repeat(" ", maxName-len(name)+2) + DimStyle.Render(cmd.Shortcut))
-				}
+				name = SessionTitleSelStyle.Render(rawName + namePad)
 			} else {
-				b.WriteString(prefix + lipgloss.NewStyle().Foreground(ColorText).Render(padded))
-				if cmd.Shortcut != "" {
-					b.WriteString(DimStyle.Render(cmd.Shortcut))
+				name = highlightMatches(rawName, nameIdx) + namePad
+			}
+
+			right := it.Shortcut
+			highlightRight := false
+			if right == "" {
+				right = it.Detail
+				highlightRight = !selected && len(detailIdx) > 0
+			}
+			right = truncRunes(right, rightBudget)
+
+			b.WriteString(prefix + badge + " " + name + "  ")
+			if right != "" {
+				if highlightRight {
+					b.WriteString(highlightMatchesDim(right, detailIdx))
+				} else {
+					b.WriteString(DimStyle.Render(right))
 				}
 			}
 			b.WriteString("\n")
@@ -233,49 +386,149 @@ func (d *CommandPaletteDialog) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("↑↓ nav  enter: run  esc: close"))
+	b.WriteString(DimStyle.Render("↑↓ nav  tab: switch tab  enter: select  esc: close"))
 
-	return d.wrapDialog(b.String())
+	return d.boxed(b.String())
 }
 
-func (d *CommandPaletteDialog) wrapDialog(content string) string {
-	dialogWidth := d.width - 4
-	if dialogWidth > 64 {
-		dialogWidth = 64
-	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
-
-	box := DialogStyle.Width(dialogWidth).Render(content)
-	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, box)
-}
-
-// fuzzyMatch checks if all characters in query appear in target (in order)
-// and returns a relevance score.
-func fuzzyMatch(query, target string) (bool, int) {
-	q := strings.ToLower(query)
-	t := strings.ToLower(target)
-
-	qi := 0
-	score := 0
-	prevMatch := false
-
-	for ti := 0; ti < len(t) && qi < len(q); ti++ {
-		if t[ti] == q[qi] {
-			qi++
-			score++
-			if prevMatch {
-				score += 2 // consecutive match bonus
+// renderTabs renders the tab bar with the active tab highlighted.
+func (d *CommandPaletteDialog) renderTabs() string {
+	query := strings.TrimSpace(d.filterInput.Value())
+	counts := map[PaletteTab]int{}
+	for _, tab := range []PaletteTab{PaletteTabAll, PaletteTabActions, PaletteTabPlaces} {
+		haystacks := make([]string, 0, len(d.items))
+		for _, it := range d.items {
+			if !itemMatchesTab(it, tab) {
+				continue
 			}
-			if ti == 0 || t[ti-1] == ' ' {
-				score += 3 // word boundary bonus
+			if query == "" {
+				counts[tab]++
+				continue
 			}
-			prevMatch = true
-		} else {
-			prevMatch = false
+			hay := it.Haystack
+			if hay == "" {
+				hay = it.Name
+			}
+			haystacks = append(haystacks, hay)
+		}
+		if query != "" {
+			counts[tab] = len(fuzzy.Find(query, haystacks))
 		}
 	}
 
-	return qi == len(q), score
+	activeStyle := lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent).Bold(true).Padding(0, 1)
+	inactiveStyle := lipgloss.NewStyle().Foreground(ColorTextDim).Padding(0, 1)
+
+	parts := make([]string, 0, len(paletteTabOrder))
+	for _, t := range paletteTabOrder {
+		label := fmt.Sprintf("%s %d", t.Label, counts[t.Tab])
+		if t.Tab == d.activeTab {
+			parts = append(parts, activeStyle.Render(label))
+		} else {
+			parts = append(parts, inactiveStyle.Render(label))
+		}
+	}
+	return "  " + strings.Join(parts, " ")
+}
+
+const paletteBadgeWidth = 4
+
+// renderKindBadge returns a styled, fixed-width tag that identifies the row's kind.
+func renderKindBadge(k PaletteItemKind) string {
+	var label string
+	var color lipgloss.Color
+	switch k {
+	case PaletteKindRepo:
+		label, color = "repo", ColorPurple
+	case PaletteKindWorktree:
+		label, color = "wkt ", ColorGreen
+	default:
+		label, color = "cmd ", ColorTextDim
+	}
+	return lipgloss.NewStyle().Foreground(color).Render(label)
+}
+
+func truncRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(r[:maxRunes-1]) + "…"
+}
+
+func runeLen(s string) int { return len([]rune(s)) }
+
+func (d *CommandPaletteDialog) dialogWidth() int {
+	w := d.width - 4
+	if w > 64 {
+		w = 64
+	}
+	if w < 30 {
+		w = 30
+	}
+	return w
+}
+
+// innerContentWidth is the writable width inside the dialog box (minus DialogStyle padding).
+func (d *CommandPaletteDialog) innerContentWidth() int {
+	// DialogStyle has Padding(1, 2) — subtract horizontal padding (2 each side).
+	return d.dialogWidth() - 4
+}
+
+func (d *CommandPaletteDialog) boxed(content string) string {
+	return DialogStyle.Width(d.dialogWidth()).Render(content)
+}
+
+// highlightMatches bolds the runes of s at positions listed in matchedIndexes.
+// Indexes outside the rune length of s are ignored (the caller is responsible
+// for translating haystack offsets into local-substring offsets).
+func highlightMatches(s string, matchedIndexes []int) string {
+	return highlightWith(s, matchedIndexes, lipgloss.NewStyle().Foreground(ColorText), lipgloss.NewStyle().Foreground(ColorYellow).Bold(true))
+}
+
+// highlightMatchesDim is like highlightMatches but uses the dim base style
+// (for the right-side Detail column).
+func highlightMatchesDim(s string, matchedIndexes []int) string {
+	return highlightWith(s, matchedIndexes, DimStyle, lipgloss.NewStyle().Foreground(ColorYellow).Bold(true))
+}
+
+func highlightWith(s string, matchedIndexes []int, base, hl lipgloss.Style) string {
+	if len(matchedIndexes) == 0 {
+		return base.Render(s)
+	}
+	matched := make(map[int]bool, len(matchedIndexes))
+	for _, idx := range matchedIndexes {
+		matched[idx] = true
+	}
+	var b strings.Builder
+	for i, r := range []rune(s) {
+		if matched[i] {
+			b.WriteString(hl.Render(string(r)))
+		} else {
+			b.WriteString(base.Render(string(r)))
+		}
+	}
+	return b.String()
+}
+
+// filterShiftIndexes returns the subset of haystack rune indexes that fall in
+// the half-open range [lo, hi), shifted by -shift so they index into a
+// substring of the haystack.
+func filterShiftIndexes(indexes []int, lo, hi, shift int) []int {
+	if len(indexes) == 0 || hi <= lo {
+		return nil
+	}
+	out := make([]int, 0, len(indexes))
+	for _, idx := range indexes {
+		if idx >= lo && idx < hi {
+			out = append(out, idx-shift)
+		}
+	}
+	return out
 }

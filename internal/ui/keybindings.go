@@ -46,7 +46,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "= = then digit", Desc: "Unbind slot", Section: "session"},
 
 	// Global.
-	{Key: ": / Ctrl+P", BarKey: ":", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
+	{Key: "Ctrl+K", BarKey: "⌃K", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
 	{Key: "S", BarKey: "S", BarDesc: "Set", Desc: "Open settings", Section: "global"},
 	{Key: "!", BarKey: "!", BarDesc: "Bug", Desc: "Bug report / diagnostics", Section: "global"},
 	{Key: "?", BarKey: "?", BarDesc: "Help", Desc: "Toggle help", Section: "global"},

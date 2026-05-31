@@ -185,6 +185,9 @@ type Home struct {
 	// Floating toast overlay (bottom-right).
 	toasts *ToastStack
 
+	// Recently picked palette item IDs (most recent first). In-memory only.
+	recentPaletteIDs []string
+
 	// Config.
 	cfg     *config.Config
 	version string
@@ -418,8 +421,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 
 	case commandPaletteMsg:
-		h.actionLog.Add("command: "+msg.commandID, "", true)
-		return h.dispatchCommand(msg.commandID)
+		return h.dispatchPaletteSelection(msg)
 
 	case reloadAllResultMsg:
 		for _, s := range h.sessions {
@@ -835,6 +837,11 @@ func (h *Home) View() string {
 		return lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("   fleet")
 	}
 	base := h.renderBody()
+	// Command palette is a true overlay: render it on top of the main UI so
+	// the sidebar/preview stay visible behind the dialog box.
+	if h.commandPalette.IsVisible() {
+		base = overlay.Composite(h.commandPalette.View(), base, overlay.Center, overlay.Center, 0, 0)
+	}
 	toast := h.toasts.View(h.width)
 	if toast == "" {
 		return base
@@ -867,9 +874,6 @@ func (h *Home) renderBody() string {
 	}
 	if h.branchDialog.IsVisible() {
 		return h.branchDialog.View()
-	}
-	if h.commandPalette.IsVisible() {
-		return h.commandPalette.View()
 	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
@@ -1338,8 +1342,8 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, h.fetchPreviewForSelected()
 		}
 		return h, nil
-	case ":", "ctrl+p":
-		h.commandPalette.Show(h.buildPaletteCommands())
+	case "ctrl+k":
+		h.commandPalette.Show(h.buildPaletteItems(), h.recentPaletteIDs)
 		analytics.Track(analytics.EventCommandPalette, nil)
 		return h, nil
 	case "S":
@@ -3174,34 +3178,146 @@ func (h *Home) setInfo(msg string) {
 	h.toasts.Add(ToastInfo, msg)
 }
 
-// buildPaletteCommands returns all available commands for the command palette.
-func (h *Home) buildPaletteCommands() []PaletteCommand {
-	return []PaletteCommand{
-		{ID: "attach", Name: "Attach Session", Shortcut: "Enter"},
-		{ID: "focus", Name: "Focus Preview", Shortcut: "Tab"},
-		{ID: "jump_next", Name: "Jump to Next Waiting", Shortcut: "Space"},
-		{ID: "new_session", Name: "New Session", Shortcut: "a"},
-		{ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
-		{ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
-		{ID: "fork", Name: "Fork Session", Shortcut: "f"},
-		{ID: "fork_worktree", Name: "Fork to Worktree", Shortcut: "F"},
-		{ID: "delete", Name: "Delete Session", Shortcut: "d"},
-		{ID: "restart", Name: "Restart Session", Shortcut: "r"},
-		{ID: "rename", Name: "Rename Session", Shortcut: "R"},
-		{ID: "editor", Name: "Open in Editor", Shortcut: "e"},
-		{ID: "open_pr", Name: "Open PR", Shortcut: "p"},
-		{ID: "approve", Name: "Quick Approve", Shortcut: "Y"},
-		{ID: "branch", Name: "Switch Branch", Shortcut: "b"},
-		{ID: "filter", Name: "Filter Sessions", Shortcut: "/"},
-		{ID: "settings", Name: "Settings", Shortcut: "S"},
-		{ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
-		{ID: "help", Name: "Help", Shortcut: "?"},
-		{ID: "reload_all", Name: "Reload All Sessions"},
-		{ID: "mark_all_read", Name: "Mark All as Read"},
-		{ID: "expand_all", Name: "Expand All Repos"},
-		{ID: "collapse_all", Name: "Collapse All Repos"},
-		{ID: "quit", Name: "Quit", Shortcut: "q"},
+// buildPaletteItems returns all palette rows: built-in commands plus every
+// repo/worktree currently in the sidebar (matched by name, branch, or path).
+func (h *Home) buildPaletteItems() []PaletteItem {
+	commands := []PaletteItem{
+		{Kind: PaletteKindCommand, ID: "attach", Name: "Attach Session", Shortcut: "Enter"},
+		{Kind: PaletteKindCommand, ID: "focus", Name: "Focus Preview", Shortcut: "Tab"},
+		{Kind: PaletteKindCommand, ID: "jump_next", Name: "Jump to Next Waiting", Shortcut: "Space"},
+		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
+		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
+		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
+		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
+		{Kind: PaletteKindCommand, ID: "fork_worktree", Name: "Fork to Worktree", Shortcut: "F"},
+		{Kind: PaletteKindCommand, ID: "delete", Name: "Delete Session", Shortcut: "d"},
+		{Kind: PaletteKindCommand, ID: "restart", Name: "Restart Session", Shortcut: "r"},
+		{Kind: PaletteKindCommand, ID: "rename", Name: "Rename Session", Shortcut: "R"},
+		{Kind: PaletteKindCommand, ID: "editor", Name: "Open in Editor", Shortcut: "e"},
+		{Kind: PaletteKindCommand, ID: "open_pr", Name: "Open PR", Shortcut: "p"},
+		{Kind: PaletteKindCommand, ID: "approve", Name: "Quick Approve", Shortcut: "Y"},
+		{Kind: PaletteKindCommand, ID: "branch", Name: "Switch Branch", Shortcut: "b"},
+		{Kind: PaletteKindCommand, ID: "filter", Name: "Filter Sessions", Shortcut: "/"},
+		{Kind: PaletteKindCommand, ID: "settings", Name: "Settings", Shortcut: "S"},
+		{Kind: PaletteKindCommand, ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
+		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
+		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
+		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
+		{Kind: PaletteKindCommand, ID: "expand_all", Name: "Expand All Repos"},
+		{Kind: PaletteKindCommand, ID: "collapse_all", Name: "Collapse All Repos"},
+		{Kind: PaletteKindCommand, ID: "quit", Name: "Quit", Shortcut: "q"},
 	}
+	for i := range commands {
+		commands[i].Haystack = commands[i].Name
+	}
+
+	// Snapshot gitInfoCache so we can read it without holding workerMu during fuzzy match.
+	h.workerMu.Lock()
+	gitSnap := make(map[string]*git.RepoInfo, len(h.gitInfoCache))
+	for k, v := range h.gitInfoCache {
+		gitSnap[k] = v
+	}
+	h.workerMu.Unlock()
+
+	// Build the place list from the unfiltered repo universe — the sidebar
+	// filter shouldn't strip repos from the palette (it's a global navigator).
+	repoSet := make(map[string]bool)
+	for repo := range session.GroupByRepo(h.sessions) {
+		repoSet[repo] = true
+	}
+	for repo := range h.pinnedRepos {
+		repoSet[repo] = true
+	}
+	for _, pw := range h.pendingWorkspaces {
+		if pw != nil && pw.RepoPath != "" {
+			repoSet[pw.RepoPath] = true
+		}
+	}
+	repos := make([]string, 0, len(repoSet))
+	for repo := range repoSet {
+		if repo == "" {
+			continue
+		}
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+
+	places := make([]PaletteItem, 0, len(repos))
+	for _, repo := range repos {
+		kind := PaletteKindRepo
+		branch := ""
+		if info := gitSnap[repo]; info != nil {
+			if info.IsWorktreeRepo {
+				kind = PaletteKindWorktree
+			}
+			branch = info.Branch
+		}
+
+		name := filepath.Base(repo)
+		places = append(places, PaletteItem{
+			Kind:     kind,
+			ID:       repo,
+			Name:     name,
+			Detail:   branch,
+			Haystack: name + " " + branch,
+		})
+	}
+
+	return append(commands, places...)
+}
+
+// dispatchPaletteSelection routes a palette pick to either a command or a
+// place (repo/worktree).
+func (h *Home) dispatchPaletteSelection(msg commandPaletteMsg) (tea.Model, tea.Cmd) {
+	h.pushRecentPaletteID(msg.id)
+	switch msg.kind {
+	case PaletteKindRepo, PaletteKindWorktree:
+		h.actionLog.Add("palette jump", msg.id, true)
+		return h.jumpToRepoHeader(msg.id)
+	default:
+		h.actionLog.Add("command: "+msg.id, "", true)
+		return h.dispatchCommand(msg.id)
+	}
+}
+
+// pushRecentPaletteID prepends id to the recent list, dedupes, and trims to a cap.
+func (h *Home) pushRecentPaletteID(id string) {
+	const cap = 8
+	out := make([]string, 0, cap)
+	out = append(out, id)
+	for _, prev := range h.recentPaletteIDs {
+		if prev == id {
+			continue
+		}
+		out = append(out, prev)
+		if len(out) == cap {
+			break
+		}
+	}
+	h.recentPaletteIDs = out
+}
+
+// jumpToRepoHeader moves the cursor to the given repo header in the sidebar,
+// expanding the group if collapsed. Mirrors jumpToSlot's pattern.
+func (h *Home) jumpToRepoHeader(repoPath string) (tea.Model, tea.Cmd) {
+	if !h.repoExpanded[repoPath] {
+		h.repoExpanded[repoPath] = true
+		h.rebuildFlatItems()
+	}
+	idx := -1
+	for i, item := range h.flatItems {
+		if item.IsRepoHeader && item.RepoPath == repoPath {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		h.setInfo("Repo hidden by filter")
+		return h, nil
+	}
+	h.cursor = idx
+	h.syncViewport()
+	return h, h.fetchPreviewForSelected()
 }
 
 // dispatchCommand executes a command selected from the palette.

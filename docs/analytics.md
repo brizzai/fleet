@@ -35,7 +35,7 @@ Direct actions and lifecycle events:
 | `space_jump` | — | Space key pressed |
 | `settings_opened` | — | S key pressed |
 | `bug_report_opened` | — | ! key pressed |
-| `command_palette` | — | : / Ctrl+P pressed |
+| `command_palette` | — | Ctrl+K pressed |
 | `reload_all` | — | "Reload all sessions" command |
 | `mark_all_read` | — | "Mark all read" command |
 | `error_occurred` | `category` | Any error shown |
