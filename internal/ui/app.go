@@ -2896,8 +2896,14 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 			defer func() { <-sem }()
 			info := git.RefreshGitInfo(r)
 
+			// Carry PR + last-refresh stamp forward from the cache. CRITICAL:
+			// `LastPRRefresh` must be preserved even when `old.PR == nil`,
+			// because a recent "no PR for this branch" result is still a
+			// completed check that resets the 60s TTL. Otherwise repos with
+			// no open PR re-fetch on every 2s tick → blows the gh rate limit
+			// the moment we fan out across all repos in parallel.
 			h.workerMu.Lock()
-			if old, ok := h.gitInfoCache[r]; ok && old.PR != nil {
+			if old, ok := h.gitInfoCache[r]; ok {
 				info.PR = old.PR
 				info.LastPRRefresh = old.LastPRRefresh
 			}
