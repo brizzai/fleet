@@ -19,7 +19,7 @@ var (
 	ColorAccent  = lipgloss.Color("#c084d4")
 	ColorGreen   = lipgloss.Color("#88e090")
 	ColorYellow  = lipgloss.Color("#f3c98b")
-	ColorBlue    = lipgloss.Color("#7ab8f5")
+	ColorBlue    = lipgloss.Color("#85c4be")
 	ColorRed     = lipgloss.Color("#ff7088")
 	ColorGray    = lipgloss.Color("#7a6a80")
 	ColorWhite   = lipgloss.Color("#f3e9f0")
@@ -90,8 +90,9 @@ var (
 	// Panel title style (cyan/blue like agent-deck).
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 
-	// Header bar style.
-	HeaderBarStyle = lipgloss.NewStyle().Background(ColorSurface).Padding(0, 1)
+	// Header bar style — no background fill so the top bar reads as part of
+	// the canvas, not a separate ribbon.
+	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
 
 	// Help bar key style — accent-color text, bold. No background fill;
 	// reads as a Posting-style "colored key + plain description" pair.
@@ -167,7 +168,7 @@ func ApplyPalette(p Palette) {
 	ToolBadgeSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
 
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
-	HeaderBarStyle = lipgloss.NewStyle().Background(ColorSurface).Padding(0, 1)
+	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
 
 	HelpKeyStyle = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	HelpDescStyle = lipgloss.NewStyle().Foreground(ColorText)

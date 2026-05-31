@@ -3322,17 +3322,15 @@ func (h *Home) fetchPreviewForSelected() tea.Cmd {
 // --- Rendering helpers ---
 
 func (h *Home) renderHeader() string {
-	bg := ColorSurface
-	sp := lipgloss.NewStyle().Background(bg).Render
-	logo := lipgloss.NewStyle().Foreground(ColorBrand).Background(bg).Bold(true).Render("❯_")
-	title := logo + sp(" ") + TitleStyle.Background(bg).Render("fleet")
+	logo := lipgloss.NewStyle().Foreground(ColorBrand).Bold(true).Render("❯_")
+	title := logo + " " + TitleStyle.Render("fleet")
 
-	breadcrumb := h.cursorBreadcrumb(bg)
-	counts := h.statusCountsLine(bg)
+	breadcrumb := h.cursorBreadcrumb("")
+	counts := h.statusCountsLine("")
 
 	left := title
 	if breadcrumb != "" {
-		sep := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render("  ›  ")
+		sep := lipgloss.NewStyle().Foreground(ColorTextDim).Render("  ›  ")
 		left += sep + breadcrumb
 	}
 
@@ -3345,7 +3343,7 @@ func (h *Home) renderHeader() string {
 	if pad < 1 {
 		pad = 1
 	}
-	return HeaderBarStyle.Render(left + sp(strings.Repeat(" ", pad)) + counts)
+	return HeaderBarStyle.Render(left + strings.Repeat(" ", pad) + counts)
 }
 
 // cursorBarContext maps the cursor's flatItem to a BarContext so the footer

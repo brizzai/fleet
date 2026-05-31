@@ -32,7 +32,7 @@ var (
 		Accent:  lipgloss.Color("#c084d4"),
 		Green:   lipgloss.Color("#88e090"),
 		Yellow:  lipgloss.Color("#f3c98b"),
-		Blue:    lipgloss.Color("#7ab8f5"),
+		Blue:    lipgloss.Color("#85c4be"),
 		Red:     lipgloss.Color("#ff7088"),
 		Gray:    lipgloss.Color("#7a6a80"),
 		Orange:  lipgloss.Color("#ff9d6e"),
