@@ -106,7 +106,6 @@ var (
 
 	// Git info styles.
 	BranchStyle      = lipgloss.NewStyle().Foreground(ColorBlue)
-	BranchDirtyStyle = lipgloss.NewStyle().Foreground(ColorOrange)
 	DirtyStyle       = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	PROpenStyle    = lipgloss.NewStyle().Foreground(ColorGreen)
 	PRFailStyle    = lipgloss.NewStyle().Foreground(ColorRed)
@@ -180,7 +179,6 @@ func ApplyPalette(p Palette) {
 	HelpSepStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 
 	BranchStyle = lipgloss.NewStyle().Foreground(ColorBlue)
-	BranchDirtyStyle = lipgloss.NewStyle().Foreground(ColorOrange)
 	DirtyStyle = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	PROpenStyle = lipgloss.NewStyle().Foreground(ColorGreen)
 	PRFailStyle = lipgloss.NewStyle().Foreground(ColorRed)

@@ -422,6 +422,11 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 		worktreePrefix = "wt· "
 	}
 
+	dirty := ""
+	if repoInfo.IsDirty {
+		dirty = "*"
+	}
+
 	pr := ""
 	if repoInfo.PR != nil {
 		pr = " " + renderPRBadge(repoInfo.PR, selected)
@@ -439,20 +444,23 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 			wt = SessionStatusSelStyle.Render(worktreePrefix)
 		}
 		branchStyled := SessionTitleSelStyle.Render(" " + label + " ")
-		return fmt.Sprintf("   %s %s%s", icon, wt+branchStyled, "") + pr
+		dirtyStyled := ""
+		if dirty != "" {
+			dirtyStyled = SessionStatusSelStyle.Render(dirty)
+		}
+		return fmt.Sprintf("   %s %s%s", icon, wt+branchStyled, dirtyStyled) + pr
 	}
 	icon := DimStyle.Render(chevron)
 	wt := ""
 	if worktreePrefix != "" {
 		wt = DimStyle.Render(worktreePrefix)
 	}
-	// Dirty branches get an orange tint on the name itself; no trailing `*`.
-	branchStyle := BranchStyle
-	if repoInfo.IsDirty {
-		branchStyle = BranchDirtyStyle
+	branchStyled := BranchStyle.Render(label)
+	dirtyStyled := ""
+	if dirty != "" {
+		dirtyStyled = " " + DirtyStyle.Render(dirty)
 	}
-	branchStyled := branchStyle.Render(label)
-	return fmt.Sprintf("   %s %s%s", icon, wt, branchStyled) + pr
+	return fmt.Sprintf("   %s %s%s", icon, wt, branchStyled+dirtyStyled) + pr
 }
 
 // renderCheckoutHeaderNonGit renders a checkout row for a folder that isn't
