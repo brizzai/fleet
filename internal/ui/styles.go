@@ -16,7 +16,7 @@ var (
 	ColorBorder  = lipgloss.Color("#5e4d6e")
 	ColorText    = lipgloss.Color("#f3e9f0")
 	ColorTextDim = lipgloss.Color("#7a6a80")
-	ColorAccent  = lipgloss.Color("#e670b6")
+	ColorAccent  = lipgloss.Color("#c084d4")
 	ColorGreen   = lipgloss.Color("#88e090")
 	ColorYellow  = lipgloss.Color("#f3c98b")
 	ColorBlue    = lipgloss.Color("#7ab8f5")
