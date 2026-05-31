@@ -1022,14 +1022,13 @@ func (h *Home) renderBody() string {
 		b.WriteString("\n\n")
 
 		s, content := h.selectedPreview()
-		previewInner := RenderPreview(s, content, h.repoInfoFromSnap(gitInfoSnap), innerW, previewHeight-2, h.focusMode)
+		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
+		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
-		previewTitle := "Preview"
-		if h.focusMode {
-			previewTitle = "Preview · focus"
-		}
-		b.WriteString(RenderBorderedPanel(previewInner, previewTitle, h.width, previewHeight, h.focusMode))
+		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
+		previewFooter := BuildPreviewFooter(s, h.width-6)
+		b.WriteString(RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, h.width, previewHeight, h.focusMode))
 	default: // dual
 		gap := 1 // single-column gap between the two bordered panels
 		// Sidebar wants a ~target absolute width that's comfortable for long
@@ -1065,14 +1064,13 @@ func (h *Home) renderBody() string {
 		}
 
 		s, content := h.selectedPreview()
-		previewInner := RenderPreview(s, content, h.repoInfoFromSnap(gitInfoSnap), previewInnerW, innerH, h.focusMode)
+		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
+		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, innerH, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, innerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
-		previewTitle := "Preview"
-		if h.focusMode {
-			previewTitle = "Preview · focus"
-		}
-		rightPanel := RenderBorderedPanel(previewInner, previewTitle, previewWidth, contentHeight, h.focusMode)
+		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
+		previewFooter := BuildPreviewFooter(s, previewWidth-6)
+		rightPanel := RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, previewWidth, contentHeight, h.focusMode)
 
 		// Build the single-column gap as transparent spaces.
 		gapLines := make([]string, contentHeight)
