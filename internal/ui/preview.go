@@ -155,7 +155,7 @@ func renderGitInfoLine(info *git.RepoInfo) string {
 	var parts []string
 
 	// Branch.
-	parts = append(parts, BranchStyle.Render(branchIcon+" "+info.Branch))
+	parts = append(parts, BranchStyle.Render(info.Branch))
 
 	// Dirty indicator.
 	if info.IsDirty {

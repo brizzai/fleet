@@ -14,7 +14,6 @@ import (
 
 // Glyphs used across the clean tree.
 const (
-	branchIcon = ""   // checkout branch icon
 	guideGlyph = "│ " // left guide line down each checkout
 )
 
@@ -385,9 +384,9 @@ func renderEmptyState(width, height int) string {
 	return b.String()
 }
 
-// renderOriginHeader → "▾ originLabel  N  ─────────────────────"
-// The trailing dim rule fills the remaining width so the origin reads as a
-// section header, not just another row.
+// renderOriginHeader → "▾ originLabel  N"
+// The blank row inserted before each non-first origin (see BuildFlatItems)
+// carries the section break on its own; no trailing rule needed.
 func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 	chevron := "▸"
 	if item.Expanded {
@@ -399,25 +398,12 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 		icon := SessionSelectionPrefix.Render(chevron)
 		name := SessionTitleSelStyle.Render(" " + item.OriginLabel + " ")
 		count := SessionStatusSelStyle.Render(countStr)
-		return fmt.Sprintf("%s %s %s", icon, name, count) + originTrailingRule(width, lipgloss.Width(chevron)+1+lipgloss.Width(" "+item.OriginLabel+" ")+1+lipgloss.Width(countStr))
+		return fmt.Sprintf("%s %s %s", icon, name, count)
 	}
 	icon := DimStyle.Render(chevron)
 	name := RepoHeaderStyle.Render(item.OriginLabel)
 	count := DimStyle.Render(countStr)
-	visible := lipgloss.Width(chevron) + 1 + lipgloss.Width(item.OriginLabel) + 1 + lipgloss.Width(countStr)
-	return fmt.Sprintf("%s %s %s", icon, name, count) + originTrailingRule(width, visible)
-}
-
-// originTrailingRule renders a dim dashed rule from the end of the origin
-// header label to the right edge of the sidebar content area, with a small
-// gap so it doesn't visually touch the panel border.
-func originTrailingRule(width, consumed int) string {
-	const gap = 2 // 1 space before the rule + 1 trailing margin
-	remaining := width - consumed - gap
-	if remaining < 3 {
-		return ""
-	}
-	return " " + lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", remaining))
+	return fmt.Sprintf("%s %s %s", icon, name, count)
 }
 
 // renderCheckoutHeader → "   ⎇ branch * #PR"  for a git checkout,
@@ -437,7 +423,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	if len(branch) > 22 {
 		branch = branch[:19] + "…"
 	}
-	label := branchIcon + " " + branch
+	label := branch
 
 	dirty := ""
 	if repoInfo.IsDirty {
