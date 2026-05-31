@@ -92,6 +92,7 @@ type (
 		slotBindings map[int]string
 		ghAvailable  bool
 		warning      string
+		prCache      map[string]*session.PRCacheRow
 		err          error
 	}
 	openEditorMsg        struct{ err error }
@@ -166,8 +167,9 @@ type Home struct {
 	previewCacheTime map[string]time.Time
 	statusRRIndex    int // round-robin index for status updates
 
-	gitInfoCache map[string]*git.RepoInfo // repo root path -> git info
-	ghAvailable  bool                     // cached gh CLI availability
+	gitInfoCache  map[string]*git.RepoInfo // repo root path -> git info
+	repoLastHotAt map[string]time.Time     // repo root -> last time a session in it was Running (guarded by workerMu)
+	ghAvailable   bool                     // cached gh CLI availability
 
 	hookWatcher *hooks.HookWatcher
 
@@ -219,6 +221,10 @@ type Home struct {
 
 	startTime time.Time // app start time for uptime tracking
 
+	// Throttles the "gh rate-limited" WARN log so it doesn't fire every
+	// 2s tick. Reset to time.Time{} when a refresh comes back clean.
+	lastRateLimitWarn time.Time
+
 	// Boot splash. `booted` is false until the bootstrap fan-out resolves
 	// every visible repo's OriginKey (or the 4s deadline expires); while
 	// false, View() returns the splash and the steady-state worker has
@@ -268,6 +274,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		previewCache:          make(map[string]string),
 		previewCacheTime:      make(map[string]time.Time),
 		gitInfoCache:          make(map[string]*git.RepoInfo),
+		repoLastHotAt:         make(map[string]time.Time),
 		filterInput:           fi,
 		cfg:                   cfg,
 		version:               version,
@@ -809,6 +816,27 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.ghAvailable = msg.ghAvailable
+		// Hydrate gitInfoCache from the persisted PR cache before bootstrap
+		// fires. The branch-match guard in refreshAllGitAndPR will drop
+		// entries whose checkout has moved since the cache was written;
+		// we apply a 24h age cap here as a coarse outer bound — a PR that
+		// hasn't been touched for a day shouldn't outlast its row.
+		if msg.prCache != nil {
+			cutoff := 24 * time.Hour
+			now := time.Now()
+			for repo, row := range msg.prCache {
+				if now.Sub(row.LastPRRefresh) > cutoff {
+					continue
+				}
+				h.gitInfoCache[repo] = &git.RepoInfo{
+					Branch:          row.Branch,
+					OriginKey:       row.OriginKey,
+					PR:              row.PR,
+					LastPRRefresh:   row.LastPRRefresh,
+					PRRateLimitedAt: row.PRRateLimitedAt,
+				}
+			}
+		}
 		h.rebuildFlatItems()
 		if len(h.flatItems) > 0 && h.cursor == 0 {
 			h.cursor = FirstSelectableItem(h.flatItems)
@@ -2037,25 +2065,75 @@ func (h *Home) jumpToNextAttentionSession() {
 
 	// Priority: waiting > finished.
 	target := findNext(session.StatusWaiting)
+	targetKind := "waiting"
 	if target == nil {
 		target = findNext(session.StatusFinished)
+		targetKind = "finished"
 	}
+
+	// visIdx returns the index of a session ID in the visible flatItems, or -1.
+	visIdx := func(id string) int {
+		for i, item := range h.flatItems {
+			if !item.IsRepoHeader && item.Session != nil && item.Session.ID == id {
+				return i
+			}
+		}
+		return -1
+	}
+
 	if target == nil {
+		debuglog.Logger.Debug("spacejump: no waiting/finished target",
+			"cursor", h.cursor, "currentID", currentID, "allSessions", len(allSessions))
 		return // Silent no-op.
 	}
+
+	// DIAGNOSTIC: capture orderings + collapse/filter state before we touch
+	// anything. allSessions is repo-path-sorted; flatItems is origin-tree
+	// sorted — when these diverge, "next" in the jump list isn't "next" on
+	// screen, which is the suspected "only works going down" bug.
+	debuglog.Logger.Debug("spacejump: target found",
+		"kind", targetKind,
+		"targetID", target.s.ID,
+		"targetRepo", target.repo,
+		"targetOrigin", h.originOf(target.repo),
+		"cursor", h.cursor,
+		"currentID", currentID,
+		"currentIdx_allSessions", currentIdx,
+		"currentVisIdx", visIdx(currentID),
+		"targetVisIdx_beforeExpand", visIdx(target.s.ID),
+		"originCollapsed", !IsExpanded(h.repoExpanded, OriginExpandKey(h.originOf(target.repo))),
+		"checkoutCollapsed", !IsExpanded(h.repoExpanded, target.repo),
+		"filterText", h.filterText,
+	)
 
 	// Expand the repo group if collapsed.
 	h.repoExpanded[target.repo] = true
 	h.rebuildFlatItems()
 
 	// Set cursor to the target session.
-	for i, item := range h.flatItems {
-		if !item.IsRepoHeader && item.Session != nil && item.Session.ID == target.s.ID {
-			h.cursor = i
-			h.syncViewport()
-			return
+	if i := visIdx(target.s.ID); i >= 0 {
+		dir := "down"
+		if i < h.cursor {
+			dir = "up"
 		}
+		debuglog.Logger.Debug("spacejump: landed",
+			"targetID", target.s.ID, "oldCursor", h.cursor, "newCursor", i, "direction", dir)
+		h.cursor = i
+		h.syncViewport()
+		return
 	}
+
+	// Target found by findNext but absent from flatItems after expanding only
+	// the checkout key — it's hidden under a collapsed ORIGIN header (we never
+	// expand the "origin:" key here) or filtered out. Cursor does NOT move:
+	// this is the silent "nothing happens" the user reported.
+	debuglog.Logger.Warn("spacejump: target HIDDEN, cursor NOT moved",
+		"targetID", target.s.ID,
+		"targetRepo", target.repo,
+		"targetOrigin", h.originOf(target.repo),
+		"originCollapsed", !IsExpanded(h.repoExpanded, OriginExpandKey(h.originOf(target.repo))),
+		"filterText", h.filterText,
+	)
 }
 
 func (h *Home) renameSelected() tea.Cmd {
@@ -2862,9 +2940,42 @@ drainPriority:
 	// 5. Git+PR refresh: fan out across all session repos in parallel,
 	// bounded to 4 concurrent goroutines so the subprocess load stays
 	// flat. Branch/dirty lands within the 2s tick; PR refresh respects
-	// its own 60s TTL inside the per-repo goroutine.
+	// the per-repo TTL gate (60s hot / 2 min cold) inside the goroutine.
+	//
+	// First: stamp `repoLastHotAt` so the TTL classifier (next call) can
+	// see who's active right now. A repo is "hot" if any of its sessions
+	// is currently Running — checked every cycle, cheap.
+	now := time.Now()
+	h.workerMu.Lock()
+	for _, s := range sessions {
+		if s.GetStatus() == session.StatusRunning {
+			h.repoLastHotAt[session.GetRepoRoot(s.ProjectPath)] = now
+		}
+	}
+	h.workerMu.Unlock()
+
 	repos := h.uniqueRepoPathsFromSessions(sessions)
 	h.refreshAllGitAndPR(repos, 4, 0)
+}
+
+// PR-refresh TTL constants. Hot repos refresh fast so an actively-used
+// branch's badge stays responsive; cold repos refresh slowly so a 24-repo
+// fleet doesn't burn through the gh rate limit.
+const (
+	prTTLHot         = 60 * time.Second
+	prTTLCold        = 2 * time.Minute
+	prHotnessWindow  = 15 * time.Minute
+	prRateLimitedFor = 5 * time.Minute
+)
+
+// repoTTLFor returns the per-repo PR refresh TTL. A repo is hot if any of
+// its sessions was Running within `prHotnessWindow`; cold otherwise.
+// Caller must hold workerMu.
+func (h *Home) repoTTLFor(repo string, now time.Time) time.Duration {
+	if t, ok := h.repoLastHotAt[repo]; ok && now.Sub(t) < prHotnessWindow {
+		return prTTLHot
+	}
+	return prTTLCold
 }
 
 // refreshAllGitAndPR runs the per-repo git+PR refresh across `repos` with
@@ -2886,6 +2997,22 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 	if maxParallel < 1 {
 		maxParallel = 1
 	}
+	cycleStart := time.Now()
+	var prFetches atomic.Int32
+	var rateLimitedHits atomic.Int32
+
+	// Precompute per-repo TTL under the lock so the per-repo goroutines
+	// don't need to grab workerMu just for classification. Bootstrap and
+	// any cycle where `repoLastHotAt` is empty produce all-cold TTLs;
+	// that's fine — the bootstrap honors carried-forward LastPRRefresh
+	// values from the persisted cache the same way.
+	h.workerMu.Lock()
+	repoTTL := make(map[string]time.Duration, len(repos))
+	for _, r := range repos {
+		repoTTL[r] = h.repoTTLFor(r, cycleStart)
+	}
+	h.workerMu.Unlock()
+
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
 	for _, repo := range repos {
@@ -2896,42 +3023,113 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 			defer func() { <-sem }()
 			info := git.RefreshGitInfo(r)
 
-			// Carry PR + last-refresh stamp forward from the cache. CRITICAL:
+			// Carry PR + last-refresh stamp forward from the cache, but
+			// ONLY if the cached row's branch matches what RefreshGitInfo
+			// just observed. A branch switch (interactive or external)
+			// invalidates the cached PR for that checkout — better to
+			// re-fetch than show a badge for the wrong branch.
+			//
 			// `LastPRRefresh` must be preserved even when `old.PR == nil`,
 			// because a recent "no PR for this branch" result is still a
-			// completed check that resets the 60s TTL. Otherwise repos with
-			// no open PR re-fetch on every 2s tick → blows the gh rate limit
-			// the moment we fan out across all repos in parallel.
+			// completed check that resets the TTL. Otherwise repos with
+			// no open PR re-fetch on every 2s tick → blows the gh rate
+			// limit the moment we fan out across all repos in parallel.
 			h.workerMu.Lock()
-			if old, ok := h.gitInfoCache[r]; ok {
+			if old, ok := h.gitInfoCache[r]; ok && old.Branch == info.Branch {
 				info.PR = old.PR
 				info.LastPRRefresh = old.LastPRRefresh
+				info.PRRateLimitedAt = old.PRRateLimitedAt
 			}
 			h.workerMu.Unlock()
 
-			if h.ghAvailable && (info.LastPRRefresh.IsZero() || time.Since(info.LastPRRefresh) > 60*time.Second) {
+			ttl := repoTTL[r]
+			if ttl == 0 {
+				ttl = prTTLHot
+			}
+			if h.ghAvailable && shouldRefreshPR(info, ttl) {
+				prFetches.Add(1)
 				git.RefreshPRInfo(info, r, workspace.IgnorePatterns(r))
+				if !info.PRRateLimitedAt.IsZero() && time.Since(info.PRRateLimitedAt) < time.Second {
+					rateLimitedHits.Add(1)
+				}
 			}
 
 			h.workerMu.Lock()
 			h.gitInfoCache[r] = info
 			h.workerMu.Unlock()
+
+			// Persist to SQLite so the next launch can carry this forward
+			// instead of re-firing gh. Storage method logs errors itself;
+			// a failed write doesn't affect the in-memory cache.
+			_ = h.storage.SavePRCacheRow(&session.PRCacheRow{
+				RepoPath:        r,
+				Branch:          info.Branch,
+				OriginKey:       info.OriginKey,
+				PR:              info.PR,
+				LastPRRefresh:   info.LastPRRefresh,
+				PRRateLimitedAt: info.PRRateLimitedAt,
+			})
 		}(repo)
 	}
 
 	if deadline <= 0 {
 		wg.Wait()
+	} else {
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(deadline):
+		}
+	}
+
+	// One-line cycle summary at DEBUG. Off by default — set FLEET_DEBUG=1
+	// to surface it. Helps diagnose "PR badges missing" without grepping
+	// per-repo lines.
+	rl := rateLimitedHits.Load()
+	debuglog.Logger.Debug("git+PR refresh cycle",
+		"repos", len(repos),
+		"pr_fetches", prFetches.Load(),
+		"rate_limited", rl,
+		"duration_ms", time.Since(cycleStart).Milliseconds(),
+	)
+	if rl > 0 {
+		h.maybeWarnRateLimited()
+	}
+}
+
+// shouldRefreshPR decides whether the worker should call gh for this repo
+// this cycle. Returns false when we're in the rate-limit back-off window —
+// otherwise compares LastPRRefresh against the supplied `ttl` (which the
+// caller picks based on per-repo hotness).
+func shouldRefreshPR(info *git.RepoInfo, ttl time.Duration) bool {
+	if !info.PRRateLimitedAt.IsZero() && time.Since(info.PRRateLimitedAt) < prRateLimitedFor {
+		return false
+	}
+	if info.LastPRRefresh.IsZero() {
+		return true
+	}
+	return time.Since(info.LastPRRefresh) > ttl
+}
+
+// maybeWarnRateLimited emits a single WARN line per cooldown window when
+// any repo in the last cycle was rate-limited by gh. Without the throttle
+// every 2s tick would re-warn until the hourly reset.
+func (h *Home) maybeWarnRateLimited() {
+	const cooldown = 5 * time.Minute
+	h.workerMu.Lock()
+	last := h.lastRateLimitWarn
+	now := time.Now()
+	if !last.IsZero() && now.Sub(last) < cooldown {
+		h.workerMu.Unlock()
 		return
 	}
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(deadline):
-	}
+	h.lastRateLimitWarn = now
+	h.workerMu.Unlock()
+	debuglog.Logger.Warn("gh rate-limited — PR badges paused; resets hourly. Run: gh api rate_limit --jq .resources.graphql")
 }
 
 // uniqueRepoPathsFromSessions returns distinct repo root paths from the given sessions.
@@ -3368,7 +3566,21 @@ func (h *Home) loadSessions() tea.Msg {
 		warning = "claude CLI not found — install Claude Code to create sessions"
 	}
 
-	return loadSessionsMsg{sessions: sessions, slotBindings: slotBindings, ghAvailable: ghAvailable, warning: warning}
+	// Load persisted PR cache. A failure here is non-fatal — the bootstrap
+	// will just re-fetch from gh as usual.
+	prCache, err := h.storage.LoadPRCache()
+	if err != nil {
+		debuglog.Logger.Error("failed to load PR cache", "err", err)
+		prCache = nil
+	}
+
+	return loadSessionsMsg{
+		sessions:     sessions,
+		slotBindings: slotBindings,
+		ghAvailable:  ghAvailable,
+		warning:      warning,
+		prCache:      prCache,
+	}
 }
 
 func (h *Home) setError(err error) {

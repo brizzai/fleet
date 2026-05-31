@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -9,13 +10,14 @@ import (
 
 // RepoInfo holds cached git and PR metadata for a repository.
 type RepoInfo struct {
-	Branch         string
-	IsDirty        bool
-	IsWorktreeRepo bool
-	OriginKey      string // stable origin identity (see GetOriginKey)
-	PR             *github.PR
-	LastGitRefresh time.Time
-	LastPRRefresh  time.Time
+	Branch          string
+	IsDirty         bool
+	IsWorktreeRepo  bool
+	OriginKey       string // stable origin identity (see GetOriginKey)
+	PR              *github.PR
+	LastGitRefresh  time.Time
+	LastPRRefresh   time.Time
+	PRRateLimitedAt time.Time // last time gh reported a rate-limit error; non-zero = back off
 }
 
 // RefreshGitInfo fetches branch, dirty status, and worktree info for a repo.
@@ -35,11 +37,21 @@ func RefreshGitInfo(repoPath string) *RepoInfo {
 // ignorePatterns is the per-repo CI-check ignore list (path.Match globs);
 // caller is responsible for loading it (typically via workspace.IgnorePatterns)
 // to keep this package free of a workspace-package dependency.
+//
+// On a rate-limit error, marks PRRateLimitedAt and leaves PR / LastPRRefresh
+// untouched — the cached PR (possibly nil) stays visible until the back-off
+// expires and the caller retries.
 func RefreshPRInfo(info *RepoInfo, repoPath string, ignorePatterns []string) {
 	pr, err := github.GetPRForBranch(repoPath, info.Branch, ignorePatterns)
+	if errors.Is(err, github.ErrRateLimited) {
+		info.PRRateLimitedAt = time.Now()
+		debuglog.Logger.Warn("PR fetch rate-limited; backing off", "path", repoPath, "branch", info.Branch)
+		return
+	}
 	if err != nil {
 		debuglog.Logger.Debug("RefreshPRInfo failed", "path", repoPath, "branch", info.Branch, "error", err)
 	}
 	info.PR = pr
 	info.LastPRRefresh = time.Now()
+	info.PRRateLimitedAt = time.Time{} // clear back-off on any successful round-trip
 }
