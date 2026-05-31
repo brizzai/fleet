@@ -15,17 +15,17 @@ var (
 	ColorSurface = lipgloss.Color("#231a2e")
 	ColorBorder  = lipgloss.Color("#5e4d6e")
 	ColorText    = lipgloss.Color("#f3e9f0")
-	ColorTextDim = lipgloss.Color("#7a6a80")
+	ColorTextDim = lipgloss.Color("#807888")
 	ColorAccent  = lipgloss.Color("#dc88c0")
 	ColorGreen   = lipgloss.Color("#8ad698")
 	ColorYellow  = lipgloss.Color("#e8c590")
 	ColorBlue    = lipgloss.Color("#9aa8e0")
-	ColorRed     = lipgloss.Color("#e88090")
-	ColorGray    = lipgloss.Color("#7a6a80")
+	ColorRed     = lipgloss.Color("#e07685")
+	ColorGray    = lipgloss.Color("#807888")
 	ColorWhite   = lipgloss.Color("#f3e9f0")
 	ColorBrand   = lipgloss.Color("#dc88c0") // fleet pink — theme-independent brand mark
 	ColorOrange  = lipgloss.Color("#e8a880")
-	ColorPurple  = lipgloss.Color("#b89cdb")
+	ColorPurple  = lipgloss.Color("#a08dd6")
 )
 
 // Pre-allocated styles.
@@ -34,13 +34,9 @@ var (
 			Bold(true).
 			Foreground(ColorAccent)
 
-	// Origin headers are bold mid-text (not accent pink) so the brand pink
-	// only appears in two places — the )_ fleet wordmark + the selection
-	// pill. Reading top-to-bottom: pink = "you are here", bold white =
-	// "section heading", everything else dims into scaffolding.
 	RepoHeaderStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorText)
+			Foreground(ColorAccent)
 
 	SessionItemStyle = lipgloss.NewStyle().
 				Foreground(ColorText)
@@ -145,7 +141,7 @@ func ApplyPalette(p Palette) {
 
 	// 2. Rebuild all styles (lipgloss copies colors by value at construction).
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
-	RepoHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText)
+	RepoHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
 	SessionItemStyle = lipgloss.NewStyle().Foreground(ColorText)
 	SessionSelectedStyle = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	PreviewHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText)

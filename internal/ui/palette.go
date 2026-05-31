@@ -28,7 +28,7 @@ var (
 		Surface: lipgloss.Color("#231a2e"),
 		Border:  lipgloss.Color("#5e4d6e"),
 		Text:    lipgloss.Color("#f3e9f0"),
-		TextDim: lipgloss.Color("#7a6a80"),
+		TextDim: lipgloss.Color("#807888"),
 		// Accent is the only fully-saturated color — it carries the brand.
 		// Every other slot sits in the same ~70% luminance pastel band so
 		// status semantics read clearly without out-shouting the accent.
@@ -40,10 +40,10 @@ var (
 		Blue:   lipgloss.Color("#9aa8e0"),
 		Green:  lipgloss.Color("#8ad698"),
 		Yellow: lipgloss.Color("#e8c590"),
-		Red:    lipgloss.Color("#e88090"),
+		Red:    lipgloss.Color("#e07685"),
 		Orange: lipgloss.Color("#e8a880"),
-		Purple: lipgloss.Color("#b89cdb"),
-		Gray:   lipgloss.Color("#7a6a80"),
+		Purple: lipgloss.Color("#a08dd6"),
+		Gray:   lipgloss.Color("#807888"),
 	}
 
 	PaletteTokyoNight = Palette{
