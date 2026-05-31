@@ -112,6 +112,14 @@ var (
 
 	// Slot badge style (RTS-style quick-access hotkey).
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
+
+	// Dim variant of the slot badge — used in the clean-tree sidebar where
+	// the bright orange would fight the calm row layout.
+	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+
+	// Single-glyph "│" guide line drawn down the left edge of each
+	// checkout's sessions in the clean-tree sidebar.
+	BorderGuideStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 )
 
 // ApplyPalette reassigns all color vars and rebuilds all style vars from the given palette.
@@ -176,6 +184,8 @@ func ApplyPalette(p Palette) {
 	PRMergedStyle = lipgloss.NewStyle().Foreground(ColorPurple)
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
+	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+	BorderGuideStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 }
 
 // RenderPanelTitle renders a panel title with a divider underline.

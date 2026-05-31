@@ -1293,6 +1293,23 @@ func GroupByRepo(sessions []*Session) map[string][]*Session {
 	return groups
 }
 
+// GroupByOrigin groups sessions by origin → checkout (repo root) → sessions.
+// originOf maps a repo root to a stable origin key (typically a github
+// org/repo identity); use [github.com/brizzai/fleet/internal/git.GetOriginKey]
+// or a cached lookup. Worktrees of the same repo land under one origin.
+func GroupByOrigin(sessions []*Session, originOf func(repoRoot string) string) map[string]map[string][]*Session {
+	groups := make(map[string]map[string][]*Session)
+	for _, s := range sessions {
+		root := GetRepoRoot(s.ProjectPath)
+		origin := originOf(root)
+		if groups[origin] == nil {
+			groups[origin] = make(map[string][]*Session)
+		}
+		groups[origin][root] = append(groups[origin][root], s)
+	}
+	return groups
+}
+
 func generateID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)

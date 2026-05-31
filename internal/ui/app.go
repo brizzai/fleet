@@ -106,6 +106,13 @@ type (
 		skipped   int
 		errors    []string
 	}
+	// bootstrapDoneMsg fires when the initial parallel git/origin probe
+	// finishes (or hits its deadline). It dismisses the boot splash and
+	// hands control to the steady-state status worker.
+	bootstrapDoneMsg struct{}
+	// splashFrameMsg advances the boot-splash spinner. Self-rescheduled
+	// while !booted; not emitted after bootstrapDoneMsg.
+	splashFrameMsg time.Time
 )
 
 func spinnerTickCmd() tea.Msg {
@@ -153,13 +160,13 @@ type Home struct {
 	finalizingDeletes []PendingDelete
 	pinnedRepos       map[string]bool // pinned repo paths (persist in SQLite)
 
-	repoExpanded     map[string]bool // repo path -> expanded state
+	repoExpanded     map[string]bool // checkout-path / "origin:<key>" -> expanded state (default expanded when missing)
+	idleFolded       map[string]bool // checkout path -> idle sessions folded ("z" key)
 	previewCache     map[string]string
 	previewCacheTime map[string]time.Time
 	statusRRIndex    int // round-robin index for status updates
 
 	gitInfoCache map[string]*git.RepoInfo // repo root path -> git info
-	gitRRIndex   int                      // round-robin index for git refresh
 	ghAvailable  bool                     // cached gh CLI availability
 
 	hookWatcher *hooks.HookWatcher
@@ -212,6 +219,14 @@ type Home struct {
 
 	startTime time.Time // app start time for uptime tracking
 
+	// Boot splash. `booted` is false until the bootstrap fan-out resolves
+	// every visible repo's OriginKey (or the 4s deadline expires); while
+	// false, View() returns the splash and the steady-state worker has
+	// not started.
+	booted         bool
+	splashFrame    int
+	bootstrapRepos int // total repos the bootstrap is waiting on (for progress UI)
+
 	// Rendering diagnostics (accumulated counters for bug reports).
 	renderStats RenderStats
 }
@@ -234,6 +249,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		storage:               storage,
 		sessionByID:           make(map[string]*session.Session),
 		repoExpanded:          make(map[string]bool),
+		idleFolded:            make(map[string]bool),
 		slotBindings:          make(map[int]string),
 		lastSlotTapSlot:       -1,
 		toasts:                NewToastStack(),
@@ -735,6 +751,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case bootstrapDoneMsg:
+		h.booted = true
+		h.workerMu.Lock()
+		h.rebuildFlatItems()
+		h.workerMu.Unlock()
+		go h.statusWorker()
+		return h, nil
+
+	case splashFrameMsg:
+		if h.booted {
+			return h, nil
+		}
+		h.splashFrame++
+		return h, h.splashTick()
+
 	case loadSessionsMsg:
 		if msg.err != nil {
 			h.setError(msg.err)
@@ -791,19 +822,30 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Start background status worker (once).
+		// Kick off the bootstrap fan-out: resolve every visible repo's
+		// origin/branch/dirty info in parallel before the steady-state
+		// worker starts. While this runs, View() shows the boot splash.
+		// First-launch consent flow: prompt iff (a) the user hasn't
+		// been asked yet AND (b) they haven't already opted out via
+		// FLEET_TELEMETRY_DISABLED / DO_NOT_TRACK. When env opt-out is
+		// set there's nothing to ask about — analytics.Init would
+		// refuse to send anyway. We do NOT persist AnalyticsConsentSeen
+		// here so the prompt re-appears if the user later unsets the
+		// env var. fireStartupAnalytics is still safe to call: Init
+		// re-checks opt-out and creates a disabled client.
+		var startupCmd tea.Cmd
 		if !h.workerStarted {
 			h.workerStarted = true
-			go h.statusWorker()
+			repos := h.bootstrapRepoSet()
+			h.bootstrapRepos = len(repos)
+			if len(repos) == 0 {
+				// Empty fleet: no probes to wait on. Skip the splash entirely.
+				h.booted = true
+				go h.statusWorker()
+			} else {
+				startupCmd = tea.Batch(h.bootstrapGitInfo(repos), h.splashTick())
+			}
 
-			// First-launch consent flow: prompt iff (a) the user hasn't
-			// been asked yet AND (b) they haven't already opted out via
-			// FLEET_TELEMETRY_DISABLED / DO_NOT_TRACK. When env opt-out is
-			// set there's nothing to ask about — analytics.Init would
-			// refuse to send anyway. We do NOT persist AnalyticsConsentSeen
-			// here so the prompt re-appears if the user later unsets the
-			// env var. fireStartupAnalytics is still safe to call: Init
-			// re-checks opt-out and creates a disabled client.
 			switch {
 			case h.cfg.AnalyticsConsentSeen:
 				h.fireStartupAnalytics(len(groups))
@@ -820,9 +862,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Start listening for hook changes.
 		if h.hookWatcher != nil {
+			if startupCmd != nil {
+				return h, tea.Batch(startupCmd, h.listenForHookChanges)
+			}
 			return h, h.listenForHookChanges
 		}
-		return h, nil
+		return h, startupCmd
 	}
 
 	return h, nil
@@ -835,6 +880,9 @@ func (h *Home) View() string {
 	}
 	if h.width == 0 {
 		return lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("   fleet")
+	}
+	if !h.booted {
+		return RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame)
 	}
 	base := h.renderBody()
 	// Command palette is a true overlay: render it on top of the main UI so
@@ -1249,8 +1297,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			h.actionLog.Add("delete session", s.Title, true)
 		}
 		return h, h.confirmDeleteSelected()
-	case "z":
+	case "u":
 		return h.undoDelete()
+	case "z":
+		h.toggleIdleFold()
+		return h, nil
 	case "r":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("restart session", s.Title, true)
@@ -1826,16 +1877,66 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	return tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 }
 
-func (h *Home) toggleRepoGroup() {
-	if h.cursor < 0 || h.cursor >= len(h.flatItems) || !h.flatItems[h.cursor].IsRepoHeader {
+// toggleIdleFold flips the idle-fold state for the checkout at cursor. Acts on
+// the checkout under the cursor — whether the cursor sits on the checkout
+// header itself, on a session inside it, or on the "+ N idle" placeholder.
+func (h *Home) toggleIdleFold() {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
 		return
 	}
-	repo := h.flatItems[h.cursor].RepoPath
-	h.repoExpanded[repo] = !h.repoExpanded[repo]
+	item := h.flatItems[h.cursor]
+	repo := ""
+	switch {
+	case item.IsCheckoutHeader || item.IsIdleFold:
+		repo = item.RepoPath
+	case item.Session != nil:
+		repo = session.GetRepoRoot(item.Session.ProjectPath)
+	case item.Pending != nil:
+		repo = item.Pending.RepoPath
+	default:
+		return
+	}
+	if repo == "" {
+		return
+	}
+	h.idleFolded[repo] = !h.idleFolded[repo]
 	h.rebuildFlatItems()
-	// Keep cursor on the same repo header.
-	for i, item := range h.flatItems {
-		if item.IsRepoHeader && item.RepoPath == repo {
+	h.syncViewport()
+}
+
+// expandKeyFor returns the repoExpanded key for the header at cursor — the
+// origin key (prefixed) for origin headers, the repo path for checkouts.
+// Empty when the cursor isn't on a header.
+func (h *Home) expandKeyFor(item SidebarItem) string {
+	switch {
+	case item.IsOriginHeader:
+		return OriginExpandKey(item.OriginKey)
+	case item.IsCheckoutHeader:
+		return item.RepoPath
+	case item.Session != nil:
+		return session.GetRepoRoot(item.Session.ProjectPath)
+	}
+	return ""
+}
+
+func (h *Home) toggleRepoGroup() {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return
+	}
+	item := h.flatItems[h.cursor]
+	if !item.IsOriginHeader && !item.IsCheckoutHeader {
+		return
+	}
+	key := h.expandKeyFor(item)
+	if key == "" {
+		return
+	}
+	h.repoExpanded[key] = !IsExpanded(h.repoExpanded, key)
+	h.rebuildFlatItems()
+	// Keep cursor on the same header.
+	for i, it := range h.flatItems {
+		if (it.IsOriginHeader && it.OriginKey == item.OriginKey && item.IsOriginHeader) ||
+			(it.IsCheckoutHeader && it.RepoPath == item.RepoPath && item.IsCheckoutHeader) {
 			h.cursor = i
 			break
 		}
@@ -1847,19 +1948,11 @@ func (h *Home) expandRepoAtCursor() {
 	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
 		return
 	}
-	item := h.flatItems[h.cursor]
-	var repo string
-	if item.IsRepoHeader {
-		repo = item.RepoPath
-	} else if item.Session != nil {
-		repo = session.GetRepoRoot(item.Session.ProjectPath)
-	} else {
+	key := h.expandKeyFor(h.flatItems[h.cursor])
+	if key == "" || IsExpanded(h.repoExpanded, key) {
 		return
 	}
-	if h.repoExpanded[repo] {
-		return // Already expanded.
-	}
-	h.repoExpanded[repo] = true
+	h.repoExpanded[key] = true
 	h.rebuildFlatItems()
 	h.syncViewport()
 }
@@ -1869,22 +1962,19 @@ func (h *Home) collapseRepoAtCursor() {
 		return
 	}
 	item := h.flatItems[h.cursor]
-	var repo string
-	if item.IsRepoHeader {
-		repo = item.RepoPath
-	} else if item.Session != nil {
-		repo = session.GetRepoRoot(item.Session.ProjectPath)
-	} else {
+	key := h.expandKeyFor(item)
+	if key == "" || !IsExpanded(h.repoExpanded, key) {
 		return
 	}
-	if !h.repoExpanded[repo] {
-		return // Already collapsed.
-	}
-	h.repoExpanded[repo] = false
+	h.repoExpanded[key] = false
 	h.rebuildFlatItems()
-	// Move cursor to the repo header.
+	// Move cursor to the matching header row.
 	for i, fi := range h.flatItems {
-		if fi.IsRepoHeader && fi.RepoPath == repo {
+		if item.IsOriginHeader && fi.IsOriginHeader && fi.OriginKey == item.OriginKey {
+			h.cursor = i
+			break
+		}
+		if !item.IsOriginHeader && fi.IsCheckoutHeader && fi.RepoPath == h.expandKeyFor(item) {
 			h.cursor = i
 			break
 		}
@@ -2495,6 +2585,69 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	return h, h.tick()
 }
 
+// bootstrapRepoSet returns the union of repo roots derived from sessions and
+// the user's pinned-repo set — i.e. every repo the sidebar will display on
+// the first non-splash frame. Output order is non-deterministic; the
+// bootstrap fan-out treats it as a set.
+func (h *Home) bootstrapRepoSet() []string {
+	seen := make(map[string]bool)
+	var repos []string
+	for _, s := range h.sessions {
+		root := session.GetRepoRoot(s.ProjectPath)
+		if !seen[root] {
+			seen[root] = true
+			repos = append(repos, root)
+		}
+	}
+	for repo := range h.pinnedRepos {
+		if !seen[repo] {
+			seen[repo] = true
+			repos = append(repos, repo)
+		}
+	}
+	return repos
+}
+
+// bootstrapGitInfo fans out git+PR refresh across `repos` with high
+// parallelism (8 workers — these calls are network-bound) and a 6-second
+// wall-clock deadline. Goroutines that finish after the deadline still
+// write their result to the cache; the next refresh tick will pick them
+// up. Returns bootstrapDoneMsg as soon as every goroutine finishes OR
+// the deadline elapses.
+func (h *Home) bootstrapGitInfo(repos []string) tea.Cmd {
+	return func() tea.Msg {
+		const maxParallel = 8
+		const deadline = 6 * time.Second
+
+		h.refreshAllGitAndPR(repos, maxParallel, deadline)
+		return bootstrapDoneMsg{}
+	}
+}
+
+// bootProgress reports how much of the bootstrap has resolved, in [0,1].
+// Caller holds workerMu? No — we acquire it briefly to read gitInfoCache.
+// 0 when there are no repos to wait on (the empty-fleet path already flips
+// booted directly without ever rendering the splash).
+func (h *Home) bootProgress() float64 {
+	if h.bootstrapRepos <= 0 {
+		return 1
+	}
+	h.workerMu.Lock()
+	resolved := len(h.gitInfoCache)
+	h.workerMu.Unlock()
+	if resolved > h.bootstrapRepos {
+		resolved = h.bootstrapRepos
+	}
+	return float64(resolved) / float64(h.bootstrapRepos)
+}
+
+// splashTick schedules the next splash-spinner advance (~80ms cadence).
+func (h *Home) splashTick() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+		return splashFrameMsg(t)
+	})
+}
+
 // statusWorker runs in its own goroutine, performing all blocking I/O
 // (tmux, git, gh) outside the Bubble Tea Update() loop.
 func (h *Home) statusWorker() {
@@ -2706,31 +2859,72 @@ drainPriority:
 	}
 	h.statusRRIndex = (h.statusRRIndex + count) % len(sessions)
 
-	// 5. Git info refresh: 1 repo per cycle (round-robin).
+	// 5. Git+PR refresh: fan out across all session repos in parallel,
+	// bounded to 4 concurrent goroutines so the subprocess load stays
+	// flat. Branch/dirty lands within the 2s tick; PR refresh respects
+	// its own 60s TTL inside the per-repo goroutine.
 	repos := h.uniqueRepoPathsFromSessions(sessions)
-	if len(repos) > 0 {
-		idx := h.gitRRIndex % len(repos)
-		repo := repos[idx]
+	h.refreshAllGitAndPR(repos, 4, 0)
+}
 
-		info := git.RefreshGitInfo(repo)
+// refreshAllGitAndPR runs the per-repo git+PR refresh across `repos` with
+// bounded parallelism, optionally capped by a wall-clock deadline.
+//
+// Mirrors the lock-and-merge pattern from the original round-robin step 5b:
+// each goroutine reads any cached PR forward, writes the merged result back
+// atomically under workerMu.
+//
+//   - maxParallel <= 0 collapses to 1 (no fan-out).
+//   - deadline <= 0 waits for every goroutine to finish.
+//   - deadline > 0 returns early when it elapses; in-flight goroutines keep
+//     running and their results land in the cache when they finish — the
+//     next refresh tick picks them up via rebuildFlatItems.
+func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time.Duration) {
+	if len(repos) == 0 {
+		return
+	}
+	if maxParallel < 1 {
+		maxParallel = 1
+	}
+	sem := make(chan struct{}, maxParallel)
+	var wg sync.WaitGroup
+	for _, repo := range repos {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(r string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			info := git.RefreshGitInfo(r)
 
-		// Preserve PR data unless TTL expired.
-		h.workerMu.Lock()
-		if old, ok := h.gitInfoCache[repo]; ok && old.PR != nil {
-			info.PR = old.PR
-			info.LastPRRefresh = old.LastPRRefresh
-		}
-		h.workerMu.Unlock()
+			h.workerMu.Lock()
+			if old, ok := h.gitInfoCache[r]; ok && old.PR != nil {
+				info.PR = old.PR
+				info.LastPRRefresh = old.LastPRRefresh
+			}
+			h.workerMu.Unlock()
 
-		if h.ghAvailable && (info.LastPRRefresh.IsZero() || time.Since(info.LastPRRefresh) > 60*time.Second) {
-			git.RefreshPRInfo(info, repo, workspace.IgnorePatterns(repo))
-		}
+			if h.ghAvailable && (info.LastPRRefresh.IsZero() || time.Since(info.LastPRRefresh) > 60*time.Second) {
+				git.RefreshPRInfo(info, r, workspace.IgnorePatterns(r))
+			}
 
-		h.workerMu.Lock()
-		h.gitInfoCache[repo] = info
-		h.workerMu.Unlock()
+			h.workerMu.Lock()
+			h.gitInfoCache[r] = info
+			h.workerMu.Unlock()
+		}(repo)
+	}
 
-		h.gitRRIndex++
+	if deadline <= 0 {
+		wg.Wait()
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(deadline):
 	}
 }
 
@@ -2825,7 +3019,7 @@ func (h *Home) renderHeader() string {
 	}
 
 	bg := ColorSurface
-	logo := lipgloss.NewStyle().Foreground(ColorBrand).Background(bg).Bold(true).Render(">_")
+	logo := lipgloss.NewStyle().Foreground(ColorBrand).Background(bg).Bold(true).Render("❯_")
 	title := logo + lipgloss.NewStyle().Background(bg).Render(" ") + TitleStyle.Background(bg).Render("fleet")
 
 	// Build status indicators — only show non-zero.
@@ -3025,8 +3219,19 @@ func (h *Home) repoInfoFromSnap(snap map[string]*git.RepoInfo) *git.RepoInfo {
 // --- Internal helpers ---
 
 func (h *Home) rebuildFlatItems() {
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos)
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.originOf, h.idleFolded)
 	h.sidebarDirty = true
+}
+
+// originOf maps a repo root to its stable origin key, falling back to
+// "local:<basename>" for repos whose RepoInfo hasn't been refreshed yet.
+// Reads the snapshot directly from the worker-managed cache; callers that
+// hold workerMu can pass it as a function value safely.
+func (h *Home) originOf(repoRoot string) string {
+	if info := h.gitInfoCache[repoRoot]; info != nil && info.OriginKey != "" {
+		return info.OriginKey
+	}
+	return "local:" + filepath.Base(repoRoot)
 }
 
 func (h *Home) removePendingWorkspace(id string) {

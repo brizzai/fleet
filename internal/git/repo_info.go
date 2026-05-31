@@ -12,6 +12,7 @@ type RepoInfo struct {
 	Branch         string
 	IsDirty        bool
 	IsWorktreeRepo bool
+	OriginKey      string // stable origin identity (see GetOriginKey)
 	PR             *github.PR
 	LastGitRefresh time.Time
 	LastPRRefresh  time.Time
@@ -24,6 +25,7 @@ func RefreshGitInfo(repoPath string) *RepoInfo {
 		Branch:         GetBranchName(repoPath),
 		IsDirty:        HasUncommittedChanges(repoPath),
 		IsWorktreeRepo: IsWorktree(repoPath),
+		OriginKey:      GetOriginKey(repoPath),
 		LastGitRefresh: time.Now(),
 	}
 }
