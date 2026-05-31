@@ -29,14 +29,21 @@ var (
 		Border:  lipgloss.Color("#5e4d6e"),
 		Text:    lipgloss.Color("#f3e9f0"),
 		TextDim: lipgloss.Color("#7a6a80"),
-		Accent:  lipgloss.Color("#c084d4"),
-		Green:   lipgloss.Color("#88e090"),
-		Yellow:  lipgloss.Color("#f3c98b"),
-		Blue:    lipgloss.Color("#85c4be"),
-		Red:     lipgloss.Color("#ff7088"),
-		Gray:    lipgloss.Color("#7a6a80"),
-		Orange:  lipgloss.Color("#ff9d6e"),
-		Purple:  lipgloss.Color("#c293f5"),
+		// Accent is the only fully-saturated color — it carries the brand.
+		// Every other slot sits in the same ~70% luminance pastel band so
+		// status semantics read clearly without out-shouting the accent.
+		Accent: lipgloss.Color("#dc88c0"),
+		// Periwinkle: cool but shares a purple gene with the accent, so it
+		// harmonizes via analogous-color theory instead of clashing the way
+		// a true sky-blue or teal would. Used for branch names and finished
+		// status — secondary information that should feel calm.
+		Blue:   lipgloss.Color("#9aa8e0"),
+		Green:  lipgloss.Color("#8ad698"),
+		Yellow: lipgloss.Color("#e8c590"),
+		Red:    lipgloss.Color("#e88090"),
+		Orange: lipgloss.Color("#e8a880"),
+		Purple: lipgloss.Color("#b89cdb"),
+		Gray:   lipgloss.Color("#7a6a80"),
 	}
 
 	PaletteTokyoNight = Palette{

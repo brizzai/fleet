@@ -16,16 +16,16 @@ var (
 	ColorBorder  = lipgloss.Color("#5e4d6e")
 	ColorText    = lipgloss.Color("#f3e9f0")
 	ColorTextDim = lipgloss.Color("#7a6a80")
-	ColorAccent  = lipgloss.Color("#c084d4")
-	ColorGreen   = lipgloss.Color("#88e090")
-	ColorYellow  = lipgloss.Color("#f3c98b")
-	ColorBlue    = lipgloss.Color("#85c4be")
-	ColorRed     = lipgloss.Color("#ff7088")
+	ColorAccent  = lipgloss.Color("#dc88c0")
+	ColorGreen   = lipgloss.Color("#8ad698")
+	ColorYellow  = lipgloss.Color("#e8c590")
+	ColorBlue    = lipgloss.Color("#9aa8e0")
+	ColorRed     = lipgloss.Color("#e88090")
 	ColorGray    = lipgloss.Color("#7a6a80")
 	ColorWhite   = lipgloss.Color("#f3e9f0")
-	ColorBrand   = lipgloss.Color("#e670b6") // fleet pink — theme-independent brand mark
-	ColorOrange  = lipgloss.Color("#ff9d6e")
-	ColorPurple  = lipgloss.Color("#c293f5")
+	ColorBrand   = lipgloss.Color("#dc88c0") // fleet pink — theme-independent brand mark
+	ColorOrange  = lipgloss.Color("#e8a880")
+	ColorPurple  = lipgloss.Color("#b89cdb")
 )
 
 // Pre-allocated styles.
