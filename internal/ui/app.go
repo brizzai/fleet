@@ -3348,6 +3348,25 @@ func (h *Home) renderHeader() string {
 	return HeaderBarStyle.Render(left + sp(strings.Repeat(" ", pad)) + counts)
 }
 
+// cursorBarContext maps the cursor's flatItem to a BarContext so the footer
+// can show only the relevant subset of keys.
+func (h *Home) cursorBarContext() BarContext {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return BarContextEmpty
+	}
+	item := h.flatItems[h.cursor]
+	switch {
+	case item.IsOriginHeader:
+		return BarContextOrigin
+	case item.IsCheckoutHeader:
+		return BarContextCheckout
+	case item.Session != nil:
+		return BarContextSession
+	default:
+		return BarContextEmpty
+	}
+}
+
 // cursorBreadcrumb returns "origin › checkout › session-title" for the row
 // currently under the cursor. Empty string if there's no useful path (boot,
 // empty fleet). Honours bg so it inlays into the header surface cleanly.
@@ -3433,7 +3452,7 @@ func (h *Home) renderHelpBar() string {
 	// Border line.
 	border := lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", h.width))
 
-	contextKeys, globalKeys := HelpBarBindings()
+	contextKeys, globalKeys := HelpBarBindingsFor(h.cursorBarContext())
 
 	var parts []string
 	for _, kd := range contextKeys {
