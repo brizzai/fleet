@@ -64,8 +64,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
 github.com/rivo/uniseg v0.4.7/go.mod h1:FN3SvrM+Zdj16jyLfmOkMNblXMcoc8DfTHruCPUcx88=
-github.com/rmhubbert/bubbletea-overlay v0.6.6 h1:hDs8EuQdQRb+ti1zRsRSm4YUCnwD8fQcGCrGbqrwjQA=
-github.com/rmhubbert/bubbletea-overlay v0.6.6/go.mod h1:EI4cLG6YAA7GIHTKOpf9yYijDEZuI6Iuw/IIIWLaYoo=
+github.com/rmhubbert/bubbletea-overlay v0.6.7 h1:czTGRD7ZOVHLeOipnef3Lw7UQw0Ms66Z6aAjJIoZFOo=
+github.com/rmhubbert/bubbletea-overlay v0.6.7/go.mod h1:tR94NxVER/vn6BWMaHcwDMjUghsCvJb2uC3iDkYslww=
 github.com/sahilm/fuzzy v0.1.2 h1:kdSkz23lx1meNjEl+SLJULeSbjTI4Dn14K/YxdGrIww=
 github.com/sahilm/fuzzy v0.1.2/go.mod h1:au6//VbVSqu6DFrkL2CfjlJ5iURpNCPeE+1GwY3XsT8=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
