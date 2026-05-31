@@ -53,7 +53,7 @@ func (d *SettingsDialog) Update(msg tea.Msg) (*SettingsDialog, tea.Cmd) {
 		return d, nil
 	}
 
-	numRows := 8 // theme, editor, tick, auto-name, auto-update, copy-claude, enter-mode, telemetry
+	numRows := 9 // theme, status-style, editor, tick, auto-name, auto-update, copy-claude, enter-mode, telemetry
 	switch keyMsg.String() {
 	case "j", "down":
 		d.cursor = (d.cursor + 1) % numRows
@@ -90,7 +90,15 @@ func (d *SettingsDialog) cycleValue(dir int) {
 		ApplyPalette(PaletteByName(d.cfg.Theme))
 		analytics.Track(analytics.EventThemeChanged, map[string]interface{}{"theme": d.cfg.Theme})
 
-	case 1: // Editor
+	case 1: // Status style (icon / bar)
+		if d.cfg.GetStatusIndicator() == "icon" {
+			d.cfg.StatusIndicator = "bar"
+		} else {
+			d.cfg.StatusIndicator = "icon"
+		}
+		StatusIndicatorMode = d.cfg.GetStatusIndicator()
+
+	case 2: // Editor
 		current := d.cfg.GetEditor()
 		idx := indexOf(editorPresets, current)
 		if idx < 0 {
@@ -99,7 +107,7 @@ func (d *SettingsDialog) cycleValue(dir int) {
 		idx = (idx + dir + len(editorPresets)) % len(editorPresets)
 		d.cfg.Editor = editorPresets[idx]
 
-	case 2: // Tick interval
+	case 3: // Tick interval
 		current := d.cfg.TickIntervalSec
 		if current <= 0 {
 			current = 2
@@ -111,29 +119,29 @@ func (d *SettingsDialog) cycleValue(dir int) {
 		idx = (idx + dir + len(tickPresets)) % len(tickPresets)
 		d.cfg.TickIntervalSec = tickPresets[idx]
 
-	case 3: // Auto-name
+	case 4: // Auto-name
 		enabled := d.cfg.IsAutoNameEnabled()
 		enabled = !enabled
 		d.cfg.AutoNameSessions = &enabled
 
-	case 4: // Auto-update
+	case 5: // Auto-update
 		enabled := d.cfg.IsAutoUpdateEnabled()
 		enabled = !enabled
 		d.cfg.AutoUpdate = &enabled
 
-	case 5: // Copy Claude settings
+	case 6: // Copy Claude settings
 		enabled := d.cfg.IsCopyClaudeSettingsEnabled()
 		enabled = !enabled
 		d.cfg.CopyClaudeSettings = &enabled
 
-	case 6: // Enter mode
+	case 7: // Enter mode
 		if d.cfg.GetEnterMode() == "attach" {
 			d.cfg.EnterMode = "split"
 		} else {
 			d.cfg.EnterMode = "attach"
 		}
 
-	case 7: // Telemetry
+	case 8: // Telemetry
 		enabled := d.cfg.IsTelemetryEnabled()
 		enabled = !enabled
 		d.cfg.Telemetry = &enabled
@@ -176,6 +184,7 @@ func (d *SettingsDialog) View() string {
 
 	rows := []row{
 		{"Theme", PaletteDisplayName(theme)},
+		{"Status style", d.cfg.GetStatusIndicator()},
 		{"Editor", d.cfg.GetEditor()},
 		{"Tick (sec)", fmt.Sprintf("%d", d.cfg.TickIntervalSec)},
 		{"Auto-name", autoNameValue},

@@ -249,6 +249,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// Apply theme — PaletteByName falls back to the flagship default when
 	// cfg.Theme is empty or unknown.
 	ApplyPalette(PaletteByName(cfg.Theme))
+	StatusIndicatorMode = cfg.GetStatusIndicator()
 
 	return &Home{
 		storage:               storage,

@@ -105,8 +105,9 @@ var (
 	HelpSepStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 
 	// Git info styles.
-	BranchStyle    = lipgloss.NewStyle().Foreground(ColorBlue)
-	DirtyStyle     = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
+	BranchStyle      = lipgloss.NewStyle().Foreground(ColorBlue)
+	BranchDirtyStyle = lipgloss.NewStyle().Foreground(ColorOrange)
+	DirtyStyle       = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	PROpenStyle    = lipgloss.NewStyle().Foreground(ColorGreen)
 	PRFailStyle    = lipgloss.NewStyle().Foreground(ColorRed)
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
@@ -179,6 +180,7 @@ func ApplyPalette(p Palette) {
 	HelpSepStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 
 	BranchStyle = lipgloss.NewStyle().Foreground(ColorBlue)
+	BranchDirtyStyle = lipgloss.NewStyle().Foreground(ColorOrange)
 	DirtyStyle = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	PROpenStyle = lipgloss.NewStyle().Foreground(ColorGreen)
 	PRFailStyle = lipgloss.NewStyle().Foreground(ColorRed)
@@ -313,43 +315,43 @@ func RenderFocusedPanelTitle(title string, width int) string {
 	return titleLine + "\n" + underline
 }
 
-// StatusSymbol returns a styled status indicator.
+// StatusIndicatorMode controls how StatusSymbol renders session state in the
+// sidebar. "icon" (default) uses semantic circles (●◐✕); "bar" uses a single
+// colored vertical bar in the leftmost column, VS Code gutter style. Idle is
+// always blank in either mode — only non-idle states get a glyph.
+var StatusIndicatorMode = "icon"
+
+const StatusBarChar = "┃"
+
+// StatusSymbol returns a styled status indicator. Idle and Starting return a
+// single space so column alignment is preserved without a visible glyph.
 func StatusSymbol(status session.Status) string {
-	switch status {
-	case session.StatusRunning:
-		return StatusRunningStyle.Render("●")
-	case session.StatusWaiting:
-		return StatusWaitingStyle.Render("◐")
-	case session.StatusFinished:
-		return StatusFinishedStyle.Render("●")
-	case session.StatusIdle:
-		return StatusIdleStyle.Render("○")
-	case session.StatusError:
-		return StatusErrorStyle.Render("✕")
-	case session.StatusStarting:
-		return StatusStartingStyle.Render("○")
-	default:
-		return StatusIdleStyle.Render("○")
+	raw := StatusSymbolRaw(status)
+	if raw == " " {
+		return " "
 	}
+	return StatusStyle(status).Render(raw)
 }
 
-// StatusSymbolRaw returns the raw icon character for a status (no styling).
+// StatusSymbolRaw returns the raw character for a status, respecting the
+// configured indicator mode. Idle/Starting always returns " " (blank).
 func StatusSymbolRaw(status session.Status) string {
 	switch status {
-	case session.StatusRunning:
+	case session.StatusIdle, session.StatusStarting:
+		return " "
+	}
+	if StatusIndicatorMode == "bar" {
+		return StatusBarChar
+	}
+	switch status {
+	case session.StatusRunning, session.StatusFinished:
 		return "●"
 	case session.StatusWaiting:
 		return "◐"
-	case session.StatusFinished:
-		return "●"
-	case session.StatusIdle:
-		return "○"
 	case session.StatusError:
 		return "✕"
-	case session.StatusStarting:
-		return "○"
 	default:
-		return "○"
+		return " "
 	}
 }
 

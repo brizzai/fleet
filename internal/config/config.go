@@ -18,7 +18,8 @@ type Config struct {
 	AutoNameSessions   *bool  `json:"auto_name_sessions,omitempty"`
 	AutoUpdate         *bool  `json:"auto_update,omitempty"`
 	CopyClaudeSettings *bool  `json:"copy_claude_settings,omitempty"`
-	EnterMode          string `json:"enter_mode,omitempty"` // "attach" or "split"
+	EnterMode          string `json:"enter_mode,omitempty"`        // "attach" or "split"
+	StatusIndicator    string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
 	Telemetry          *bool  `json:"telemetry,omitempty"`
 	// AnalyticsConsentSeen is true once the user has been shown the
 	// first-launch consent prompt and answered it (either way). When false,
@@ -124,6 +125,15 @@ func (c *Config) GetEnterMode() string {
 		return "split"
 	}
 	return "attach"
+}
+
+// GetStatusIndicator returns the configured sidebar status style — "icon"
+// (default, semantic circles) or "bar" (single colored vertical bar).
+func (c *Config) GetStatusIndicator() string {
+	if c.StatusIndicator == "bar" {
+		return "bar"
+	}
+	return "icon"
 }
 
 // IsTelemetryEnabled returns whether telemetry is enabled (default: true).

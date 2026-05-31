@@ -414,9 +414,12 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	}
 	label := branchIcon + " " + branch
 
-	dirty := ""
-	if repoInfo.IsDirty {
-		dirty = "*"
+	// Worktree prefix: `wt· ` (dim) marks rows that are git worktrees rather
+	// than the main clone. Operationally meaningful — `d` does different
+	// things on worktree vs main-repo headers — so it gets a visible flag.
+	worktreePrefix := ""
+	if repoInfo.IsWorktreeRepo {
+		worktreePrefix = "wt· "
 	}
 
 	pr := ""
@@ -431,20 +434,25 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
-		branchStyled := SessionTitleSelStyle.Render(" " + label + " ")
-		dirtyStyled := ""
-		if dirty != "" {
-			dirtyStyled = SessionStatusSelStyle.Render(dirty)
+		wt := ""
+		if worktreePrefix != "" {
+			wt = SessionStatusSelStyle.Render(worktreePrefix)
 		}
-		return fmt.Sprintf("   %s %s%s", icon, branchStyled, dirtyStyled) + pr
+		branchStyled := SessionTitleSelStyle.Render(" " + label + " ")
+		return fmt.Sprintf("   %s %s%s", icon, wt+branchStyled, "") + pr
 	}
 	icon := DimStyle.Render(chevron)
-	branchStyled := BranchStyle.Render(label)
-	dirtyStyled := ""
-	if dirty != "" {
-		dirtyStyled = " " + DirtyStyle.Render(dirty)
+	wt := ""
+	if worktreePrefix != "" {
+		wt = DimStyle.Render(worktreePrefix)
 	}
-	return fmt.Sprintf("   %s %s%s", icon, branchStyled, dirtyStyled) + pr
+	// Dirty branches get an orange tint on the name itself; no trailing `*`.
+	branchStyle := BranchStyle
+	if repoInfo.IsDirty {
+		branchStyle = BranchDirtyStyle
+	}
+	branchStyled := branchStyle.Render(label)
+	return fmt.Sprintf("   %s %s%s", icon, wt, branchStyled) + pr
 }
 
 // renderCheckoutHeaderNonGit renders a checkout row for a folder that isn't
@@ -485,11 +493,13 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 		title = title[:maxTitleLen-1] + "…"
 	}
 
+	// Selection: the inverted-background title carries the "you are here"
+	// signal on its own — no leading ▶ arrow (it collided with the chevron
+	// glyph used for collapsed headers).
 	selPrefix := " "
 	var styledSymbol, styledTitle, styledSlot string
 
 	if selected {
-		selPrefix = SessionSelectionPrefix.Render("▶")
 		styledSymbol = SessionStatusSelStyle.Render(symbolRaw)
 		styledTitle = SessionTitleSelStyle.Render(" " + title + " ")
 		if slotRaw != "" {
@@ -513,7 +523,6 @@ func renderIdleFold(item SidebarItem, width int, selected bool) string {
 	selPrefix := " "
 	var styled string
 	if selected {
-		selPrefix = SessionSelectionPrefix.Render("▶")
 		styled = SessionTitleSelStyle.Render(" " + label + " ")
 	} else {
 		styled = DimStyle.Render(label)
@@ -538,7 +547,6 @@ func renderPendingItem(pw *PendingWorkspace, width int, selected bool) string {
 	selPrefix := " "
 	var styledSpinner, styledTitle string
 	if selected {
-		selPrefix = SessionSelectionPrefix.Render("▶")
 		styledSpinner = SessionStatusSelStyle.Render(spinner)
 		styledTitle = SessionTitleSelStyle.Render(" " + title + " ")
 	} else {
