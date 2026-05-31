@@ -37,7 +37,7 @@ const (
 	previewCacheTTL        = 500 * time.Millisecond
 	layoutBreakpointSingle = 50
 	layoutBreakpointDual   = 80
-	helpBarHeight          = 2 // border line + shortcuts
+	helpBarHeight          = 1 // single row of contextual hotkeys, no top rule
 	statusRoundRobin       = 5 // sessions per tick
 	undoDeleteTimeout      = 5 * time.Second
 )
@@ -3384,7 +3384,14 @@ func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
 
 	var parts []string
 	if item.OriginKey != "" {
-		parts = append(parts, segStyle.Render(labelForOrigin(item.OriginKey)))
+		// Show the full origin (e.g. "brizzai/fleet") so the breadcrumb
+		// names both the owner AND the repo, not just the repo. Local
+		// repos use the bare folder basename after stripping "local:".
+		origin := item.OriginKey
+		if rest, ok := strings.CutPrefix(origin, "local:"); ok {
+			origin = rest
+		}
+		parts = append(parts, segStyle.Render(origin))
 	}
 
 	if item.RepoPath != "" && !item.IsOriginHeader {
@@ -3449,9 +3456,6 @@ func (h *Home) statusCountsLine(bg lipgloss.Color) string {
 }
 
 func (h *Home) renderHelpBar() string {
-	// Border line.
-	border := lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", h.width))
-
 	contextKeys, globalKeys := HelpBarBindingsFor(h.cursorBarContext())
 
 	var parts []string
@@ -3467,7 +3471,7 @@ func (h *Home) renderHelpBar() string {
 	}
 	right := strings.Join(gparts, "  ")
 
-	return border + "\n " + left + sep + right
+	return " " + left + sep + right
 }
 
 func (h *Home) layoutMode() string {
