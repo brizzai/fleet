@@ -29,7 +29,7 @@ var (
 		Border:  lipgloss.Color("#5e4d6e"),
 		Text:    lipgloss.Color("#f3e9f0"),
 		TextDim: lipgloss.Color("#7a6a80"),
-		Accent:  lipgloss.Color("#ff77c6"),
+		Accent:  lipgloss.Color("#e670b6"),
 		Green:   lipgloss.Color("#88e090"),
 		Yellow:  lipgloss.Color("#f3c98b"),
 		Blue:    lipgloss.Color("#7ab8f5"),

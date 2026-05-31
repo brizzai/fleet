@@ -2747,9 +2747,15 @@ func (h *Home) bootstrapGitInfo(repos []string) tea.Cmd {
 // as they finish — NOT len(gitInfoCache), which can be non-zero from the
 // SQLite PR-cache hydration in loadSessionsMsg (the bar would otherwise
 // start at 100% on a warm-cache launch).
+//
+// Returns 0 before bootstrapRepos has been initialized — there's a one-frame
+// window between the first paint and loadSessionsMsg arriving where the
+// splash renders without yet knowing the repo count. The empty-fleet path
+// flips `booted=true` in the same Update tick, so the splash never appears
+// for users with no repos either way.
 func (h *Home) bootProgress() float64 {
 	if h.bootstrapRepos <= 0 {
-		return 1
+		return 0
 	}
 	resolved := int(h.bootstrapResolved.Load())
 	if resolved > h.bootstrapRepos {
