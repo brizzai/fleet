@@ -34,9 +34,13 @@ var (
 			Bold(true).
 			Foreground(ColorAccent)
 
+	// Origin headers are bold mid-text (not accent pink) so the brand pink
+	// only appears in two places — the )_ fleet wordmark + the selection
+	// pill. Reading top-to-bottom: pink = "you are here", bold white =
+	// "section heading", everything else dims into scaffolding.
 	RepoHeaderStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorAccent)
+			Foreground(ColorText)
 
 	SessionItemStyle = lipgloss.NewStyle().
 				Foreground(ColorText)
@@ -141,7 +145,7 @@ func ApplyPalette(p Palette) {
 
 	// 2. Rebuild all styles (lipgloss copies colors by value at construction).
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
-	RepoHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	RepoHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText)
 	SessionItemStyle = lipgloss.NewStyle().Foreground(ColorText)
 	SessionSelectedStyle = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	PreviewHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText)
