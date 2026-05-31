@@ -188,22 +188,32 @@ func ApplyPalette(p Palette) {
 // RenderBorderedPanel wraps content in a rounded border with a title inset
 // into the top border. Output is exactly width × height.
 //
-//	╭─ Sessions ────────╮
-//	│ ...content...     │
-//	╰──── 2 RUN · 1 WAIT ╯  (bottomRight optional)
+//	╭─ Sessions ──────── 2 RUN · 51 idle ─╮
+//	│ ...content...                       │
+//	╰─────────────────────────────────────╯
 //
 // When accent is true, the border is drawn in the accent color (used for the
 // focused panel in dual mode); otherwise it uses the muted border color.
-// Pass bottomRight via RenderBorderedPanelFooter for the variant with a
-// status pill embedded in the bottom border.
+// Use RenderBorderedPanelTopRight to embed a right-aligned status pill into
+// the top border, or RenderBorderedPanelFooter for the bottom-border variant.
 func RenderBorderedPanel(content, title string, width, height int, accent bool) string {
-	return RenderBorderedPanelFooter(content, title, "", width, height, accent)
+	return renderBorderedPanel(content, title, "", "", width, height, accent)
+}
+
+// RenderBorderedPanelTopRight is like RenderBorderedPanel but also embeds a
+// right-aligned status pill into the TOP border (after the title).
+func RenderBorderedPanelTopRight(content, title, titleRight string, width, height int, accent bool) string {
+	return renderBorderedPanel(content, title, titleRight, "", width, height, accent)
 }
 
 // RenderBorderedPanelFooter is like RenderBorderedPanel but also embeds a
 // right-aligned status pill into the bottom border. Empty footer renders an
 // unbroken bottom border.
 func RenderBorderedPanelFooter(content, title, footerRight string, width, height int, accent bool) string {
+	return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
+}
+
+func renderBorderedPanel(content, title, titleRight, footerRight string, width, height int, accent bool) string {
 	if width < 6 || height < 3 {
 		return content
 	}
@@ -215,9 +225,22 @@ func RenderBorderedPanelFooter(content, title, footerRight string, width, height
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
 	titleStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 
-	// Top border with title inset: ╭─ title ─...─╮
+	// Top border: ╭─ title ─...─ titleRight ─╮ (titleRight optional)
 	titleText := titleStyle.Render(title)
 	titleWidth := lipgloss.Width(titleText)
+	if titleRight != "" {
+		rightStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+		rightText := rightStyle.Render(titleRight)
+		rightW := lipgloss.Width(rightText)
+		// Layout: ╭ ─ ' ' title ' ' ─*K ' ' titleRight ' ' ─ ╮
+		dashes := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space after dash*/ - titleWidth - 1 /*space before fill*/ - rightW - 1 /*space before trailing dash*/ - 1 /*trailing dash*/
+		if dashes < 1 {
+			// Top is too tight; drop the trailing right text rather than wrap.
+			return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
+		}
+		top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", dashes)+" ") + rightText + borderStyle.Render(" ─╮")
+		return finishBorderedPanel(top, content, footerRight, width, height, borderStyle)
+	}
 	// Layout: ╭ ─ ' ' title ' ' ─*K ╮ — leading dash count is 1, K fills the rest.
 	fillRight := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space*/ - titleWidth - 1 /*space*/
 	if fillRight < 1 {
@@ -228,6 +251,10 @@ func RenderBorderedPanelFooter(content, title, footerRight string, width, height
 		fillRight = max(width-5-titleWidth, 1)
 	}
 	top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", fillRight)+"╮")
+	return finishBorderedPanel(top, content, footerRight, width, height, borderStyle)
+}
+
+func finishBorderedPanel(top, content, footerRight string, width, height int, borderStyle lipgloss.Style) string {
 
 	// Bottom border, optionally with a right-aligned status pill inset.
 	var bottom string

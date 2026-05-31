@@ -994,9 +994,10 @@ func (h *Home) renderBody() string {
 		contentHeight = 1
 	}
 
-	// Status counts now live in the top header (statusCountsLine) — the
-	// Sessions panel bottom border stays unadorned.
-	statusFooter := ""
+	// Status counts ride the Sessions panel's top-right border (inset into
+	// the title border, after the "Sessions" label). The top app bar no
+	// longer renders them.
+	statusTitle := h.statusCountsLine("")
 
 	switch h.layoutMode() {
 	case "single":
@@ -1006,7 +1007,7 @@ func (h *Home) renderBody() string {
 		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH)
 		sidebar = ensureExactHeight(sidebar, innerH)
 		sidebar = ensureExactWidth(sidebar, innerW)
-		b.WriteString(RenderBorderedPanelFooter(sidebar, "Sessions", statusFooter, h.width, contentHeight, h.focusMode))
+		b.WriteString(RenderBorderedPanelTopRight(sidebar, "Sessions", statusTitle, h.width, contentHeight, h.focusMode))
 	case "stacked":
 		sidebarHeight := (contentHeight * 55) / 100
 		if sidebarHeight < 3 {
@@ -1018,7 +1019,7 @@ func (h *Home) renderBody() string {
 		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2)
 		sidebarInner = ensureExactHeight(sidebarInner, sidebarHeight-2)
 		sidebarInner = ensureExactWidth(sidebarInner, innerW)
-		b.WriteString(RenderBorderedPanelFooter(sidebarInner, "Sessions", statusFooter, h.width, sidebarHeight, h.focusMode))
+		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, "Sessions", statusTitle, h.width, sidebarHeight, h.focusMode))
 		b.WriteString("\n\n")
 
 		s, content := h.selectedPreview()
@@ -1058,7 +1059,7 @@ func (h *Home) renderBody() string {
 			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH)
 			inner = ensureExactHeight(inner, innerH)
 			inner = ensureExactWidth(inner, sidebarInnerW)
-			leftPanel = RenderBorderedPanelFooter(inner, "Sessions", statusFooter, sidebarWidth, contentHeight, h.focusMode)
+			leftPanel = RenderBorderedPanelTopRight(inner, "Sessions", statusTitle, sidebarWidth, contentHeight, h.focusMode)
 			h.cachedSidebar = leftPanel
 			h.sidebarDirty = false
 		}
@@ -3326,7 +3327,6 @@ func (h *Home) renderHeader() string {
 	title := logo + " " + TitleStyle.Render("fleet")
 
 	breadcrumb := h.cursorBreadcrumb("")
-	counts := h.statusCountsLine("")
 
 	left := title
 	if breadcrumb != "" {
@@ -3334,16 +3334,8 @@ func (h *Home) renderHeader() string {
 		left += sep + breadcrumb
 	}
 
-	if h.width <= 0 {
-		return HeaderBarStyle.Render(left)
-	}
-	leftW := lipgloss.Width(left)
-	rightW := lipgloss.Width(counts)
-	pad := h.width - leftW - rightW
-	if pad < 1 {
-		pad = 1
-	}
-	return HeaderBarStyle.Render(left + strings.Repeat(" ", pad) + counts)
+	// Status counts moved to the Sessions panel's top-right border.
+	return HeaderBarStyle.Render(left)
 }
 
 // cursorBarContext maps the cursor's flatItem to a BarContext so the footer
