@@ -2725,6 +2725,61 @@ func (h *Home) bootstrapRepoSet() []string {
 	return repos
 }
 
+// allExpandKeys returns every origin + checkout key the sidebar could render
+// right now, derived from sessions + pinned repos + pending workspaces (the
+// same sources BuildFlatItems consumes). Used by Expand All / Collapse All
+// so they can force-write every entry to a known value — IsExpanded defaults
+// missing keys to true, which means iterating only the existing map entries
+// would leave un-toggled groups in the wrong state.
+func (h *Home) allExpandKeys() []string {
+	checkoutSeen := make(map[string]bool)
+	originSeen := make(map[string]bool)
+	var keys []string
+
+	addCheckout := func(repo string) {
+		if repo == "" || checkoutSeen[repo] {
+			return
+		}
+		checkoutSeen[repo] = true
+		keys = append(keys, repo)
+	}
+	addOrigin := func(origin string) {
+		if origin == "" || originSeen[origin] {
+			return
+		}
+		originSeen[origin] = true
+		keys = append(keys, OriginExpandKey(origin))
+	}
+
+	originFor := func(repo string) string {
+		h.workerMu.Lock()
+		info := h.gitInfoCache[repo]
+		h.workerMu.Unlock()
+		if info != nil && info.OriginKey != "" {
+			return info.OriginKey
+		}
+		return "local:" + filepath.Base(repo)
+	}
+
+	for _, s := range h.sessions {
+		repo := session.GetRepoRoot(s.ProjectPath)
+		addCheckout(repo)
+		addOrigin(originFor(repo))
+	}
+	for repo := range h.pinnedRepos {
+		addCheckout(repo)
+		addOrigin(originFor(repo))
+	}
+	for _, pw := range h.pendingWorkspaces {
+		if pw == nil {
+			continue
+		}
+		addCheckout(pw.RepoPath)
+		addOrigin(originFor(pw.RepoPath))
+	}
+	return keys
+}
+
 // bootstrapGitInfo fans out git+PR refresh across `repos` with high
 // parallelism (8 workers — these calls are network-bound) and a 6-second
 // wall-clock deadline. Goroutines that finish after the deadline still
@@ -3905,11 +3960,8 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.markAllAsRead()
 		return h, nil
 	case "expand_all":
-		for repo := range session.GroupByRepo(h.sessions) {
-			h.repoExpanded[repo] = true
-		}
-		for repo := range h.pinnedRepos {
-			h.repoExpanded[repo] = true
+		for _, key := range h.allExpandKeys() {
+			h.repoExpanded[key] = true
 		}
 		h.rebuildFlatItems()
 		h.syncViewport()
@@ -3921,8 +3973,11 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
 			snapRepo = h.flatItems[h.cursor].RepoPath
 		}
-		for repo := range h.repoExpanded {
-			h.repoExpanded[repo] = false
+		// Force-write every origin + checkout key to false. We can't
+		// rely on iterating h.repoExpanded — IsExpanded defaults missing
+		// keys to true, so untouched groups would stay open.
+		for _, key := range h.allExpandKeys() {
+			h.repoExpanded[key] = false
 		}
 		h.rebuildFlatItems()
 		h.cursor = 0
