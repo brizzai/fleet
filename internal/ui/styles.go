@@ -93,12 +93,11 @@ var (
 	// Header bar style.
 	HeaderBarStyle = lipgloss.NewStyle().Background(ColorSurface).Padding(0, 1)
 
-	// Help bar key pill style (inverted accent).
+	// Help bar key style — accent-color text, bold. No background fill;
+	// reads as a Posting-style "colored key + plain description" pair.
 	HelpKeyStyle = lipgloss.NewStyle().
-			Background(ColorAccent).
-			Foreground(ColorBg).
-			Bold(true).
-			Padding(0, 1)
+			Foreground(ColorAccent).
+			Bold(true)
 
 	HelpDescStyle = lipgloss.NewStyle().Foreground(ColorText)
 
@@ -170,7 +169,7 @@ func ApplyPalette(p Palette) {
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 	HeaderBarStyle = lipgloss.NewStyle().Background(ColorSurface).Padding(0, 1)
 
-	HelpKeyStyle = lipgloss.NewStyle().Background(ColorAccent).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	HelpKeyStyle = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	HelpDescStyle = lipgloss.NewStyle().Foreground(ColorText)
 	HelpSepStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 

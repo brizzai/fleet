@@ -985,10 +985,10 @@ func (h *Home) renderBody() string {
 	// Header.
 	header := h.renderHeader()
 	b.WriteString(header)
-	b.WriteString("\n")
 
-	// Content area.
-	contentHeight := h.height - 2 - helpBarHeight // header + help bar
+	// Content area. Header is 1 row (no trailing blank), help bar is
+	// helpBarHeight rows, leaving the rest for the panels.
+	contentHeight := h.height - 1 - helpBarHeight
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -3570,7 +3570,7 @@ func (h *Home) rebuildSessionMap() {
 // Stacked mode gives the sidebar ~55% of the content area; single/dual give
 // it the full content area. Mirrors the arithmetic in View() (app.go:794+).
 func (h *Home) sidebarListHeight() int {
-	contentHeight := h.height - 2 - helpBarHeight
+	contentHeight := h.height - 1 - helpBarHeight
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
