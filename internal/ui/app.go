@@ -993,7 +993,9 @@ func (h *Home) renderBody() string {
 		contentHeight = 1
 	}
 
-	statusFooter := h.sidebarStatusFooter()
+	// Status counts now live in the top header (statusCountsLine) — the
+	// Sessions panel bottom border stays unadorned.
+	statusFooter := ""
 
 	switch h.layoutMode() {
 	case "single":
@@ -3321,52 +3323,109 @@ func (h *Home) fetchPreviewForSelected() tea.Cmd {
 
 func (h *Home) renderHeader() string {
 	bg := ColorSurface
-	logo := lipgloss.NewStyle().Foreground(ColorBrand).Background(bg).Bold(true).Render("❯_")
-	title := logo + lipgloss.NewStyle().Background(bg).Render(" ") + TitleStyle.Background(bg).Render("fleet")
-
 	sp := lipgloss.NewStyle().Background(bg).Render
-	content := title
+	logo := lipgloss.NewStyle().Foreground(ColorBrand).Background(bg).Bold(true).Render("❯_")
+	title := logo + sp(" ") + TitleStyle.Background(bg).Render("fleet")
 
-	// Status counts now ride the bottom border of the Sessions panel —
-	// see sidebarStatusFooter — so the header is just the brand mark.
-	if h.width > 0 {
-		contentWidth := lipgloss.Width(content)
-		if contentWidth < h.width {
-			content += sp(strings.Repeat(" ", h.width-contentWidth))
-		}
+	breadcrumb := h.cursorBreadcrumb(bg)
+	counts := h.statusCountsLine(bg)
+
+	left := title
+	if breadcrumb != "" {
+		sep := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render("  ›  ")
+		left += sep + breadcrumb
 	}
-	return HeaderBarStyle.Render(content)
+
+	if h.width <= 0 {
+		return HeaderBarStyle.Render(left)
+	}
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(counts)
+	pad := h.width - leftW - rightW
+	if pad < 1 {
+		pad = 1
+	}
+	return HeaderBarStyle.Render(left + sp(strings.Repeat(" ", pad)) + counts)
 }
 
-// sidebarStatusFooter builds the right-aligned pill text that rides the
-// Sessions panel's bottom border. Shows only non-zero counts in a compact
-// "N RUN · N WAIT · N idle" form (errors and finished get their own tokens
-// when present).
-func (h *Home) sidebarStatusFooter() string {
+// cursorBreadcrumb returns "origin › checkout › session-title" for the row
+// currently under the cursor. Empty string if there's no useful path (boot,
+// empty fleet). Honours bg so it inlays into the header surface cleanly.
+func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return ""
+	}
+	item := h.flatItems[h.cursor]
+	if item.IsSpacer {
+		return ""
+	}
+	segStyle := lipgloss.NewStyle().Foreground(ColorText).Background(bg)
+	dimSeg := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg)
+	sep := dimSeg.Render(" › ")
+
+	var parts []string
+	if item.OriginKey != "" {
+		parts = append(parts, segStyle.Render(labelForOrigin(item.OriginKey)))
+	}
+
+	if item.RepoPath != "" && !item.IsOriginHeader {
+		branch := ""
+		h.workerMu.Lock()
+		if info := h.gitInfoCache[item.RepoPath]; info != nil {
+			branch = info.Branch
+		}
+		h.workerMu.Unlock()
+		if branch == "" {
+			branch = filepath.Base(item.RepoPath)
+		}
+		if idx := strings.LastIndex(branch, "/"); idx != -1 {
+			branch = branch[idx+1:]
+		}
+		parts = append(parts, segStyle.Render(branch))
+	}
+
+	if item.Session != nil {
+		title := item.Session.Title
+		if len(title) > 40 {
+			title = title[:39] + "…"
+		}
+		parts = append(parts, segStyle.Bold(true).Render(title))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, sep)
+}
+
+// statusCountsLine renders the global session-status pill ("N RUN · N WAIT ·
+// N idle") for the right side of the header bar. Same content as the old
+// sidebarStatusFooter; now lives in the top dashboard instead.
+func (h *Home) statusCountsLine(bg lipgloss.Color) string {
 	counts := make(map[session.Status]int)
 	for _, s := range h.sessions {
 		counts[s.GetStatus()]++
 	}
 	var parts []string
 	if n := counts[session.StatusRunning] + counts[session.StatusStarting]; n > 0 {
-		parts = append(parts, StatusRunningStyle.Render(fmt.Sprintf("%d RUN", n)))
+		parts = append(parts, StatusRunningStyle.Background(bg).Render(fmt.Sprintf("%d RUN", n)))
 	}
 	if n := counts[session.StatusWaiting]; n > 0 {
-		parts = append(parts, StatusWaitingStyle.Render(fmt.Sprintf("%d WAIT", n)))
+		parts = append(parts, StatusWaitingStyle.Background(bg).Render(fmt.Sprintf("%d WAIT", n)))
 	}
 	if n := counts[session.StatusError]; n > 0 {
-		parts = append(parts, StatusErrorStyle.Render(fmt.Sprintf("%d ERR", n)))
+		parts = append(parts, StatusErrorStyle.Background(bg).Render(fmt.Sprintf("%d ERR", n)))
 	}
 	if n := counts[session.StatusFinished]; n > 0 {
-		parts = append(parts, StatusFinishedStyle.Render(fmt.Sprintf("%d FIN", n)))
+		parts = append(parts, StatusFinishedStyle.Background(bg).Render(fmt.Sprintf("%d FIN", n)))
 	}
 	if n := counts[session.StatusIdle]; n > 0 {
-		parts = append(parts, DimStyle.Render(fmt.Sprintf("%d idle", n)))
+		parts = append(parts, lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(fmt.Sprintf("%d idle", n)))
 	}
 	if len(parts) == 0 {
 		return ""
 	}
-	sep := DimStyle.Render(" · ")
+	sep := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(" · ")
 	return strings.Join(parts, sep)
 }
 
