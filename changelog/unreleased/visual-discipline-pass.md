@@ -6,7 +6,9 @@ Sidebar and Preview now live in their own rounded-border cards with corner-inset
 
 New `fleet-pink` flagship theme (Bubblegum `#ff77c6`) is the default for first-run users. Tokyo Night, Catppuccin Mocha, Rosé Pine, Nord and Gruvbox remain available via the `S` settings dialog.
 
-Sidebar cleanup: selected sessions drop the leading `▶` (it collided with the `▸` chevron used on collapsed headers — the inverted-background title was already carrying the selection signal). Worktree checkouts now show a dim `wt·` prefix so you can tell the main clone apart from its worktrees at a glance. Dirty branches lose their `*` glyph and instead tint the branch name orange. Idle and Starting sessions render no glyph — only RUN/WAIT/ERR/FIN get an indicator, so the screen no longer scans as "rows of empty circles."
+Sidebar cleanup: selected sessions drop the leading `▶` (it collided with the `▸` chevron used on collapsed headers — the inverted-background title was already carrying the selection signal). Worktree branch names render in italic so you can tell the main clone apart from its worktrees at a glance without an extra prefix column. Idle and Starting sessions render no glyph — only RUN/WAIT/ERR/FIN get an indicator, so the screen no longer scans as "rows of empty circles." Selection background is one contiguous span across each row (PR badge and dirty marker sit inside the highlighted pill instead of bleeding out as separate boxes).
+
+Sidebar width is now responsive: targets 65 absolute columns capped at 45% of terminal width. On a Mac 14" (~150 cols) that's ~43% so long titles fit; on a wide monitor it shrinks to ~26% so the preview keeps its share. Scroll indicators replaced the `⋮` glyph (which rendered as `:` in some fonts) with `… N more above/below`.
 
 New `Status style` setting (`icon` default, or `bar` for a VS-Code gutter-style `┃`) lets you pick how non-idle state is shown. Toggle live in the settings dialog.
 
