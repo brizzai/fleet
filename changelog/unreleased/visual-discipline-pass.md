@@ -10,6 +10,8 @@ Sidebar cleanup: selected sessions drop the leading `▶` (it collided with the 
 
 Sidebar width is now responsive: targets 65 absolute columns capped at 45% of terminal width. On a Mac 14" (~150 cols) that's ~43% so long titles fit; on a wide monitor it shrinks to ~26% so the preview keeps its share. Scroll indicators replaced the `⋮` glyph (which rendered as `:` in some fonts) with `… N more above/below`.
 
+Visual rhythm pass: one blank row between origin groups, each origin header grows a dim trailing rule (`▾ brizzai 16 ─────────────`), and the indent tightened across the tree so long titles get more horizontal room. Idle sessions now render a dim `·` in icon mode so the eye has a leftmost anchor on every row — the all-blank screen is gone. On boot, the cursor lands on the first session instead of the first origin, so your first keystroke does something useful.
+
 New `Status style` setting (`icon` default, or `bar` for a VS-Code gutter-style `┃`) lets you pick how non-idle state is shown. Toggle live in the settings dialog.
 
 Running/waiting/idle counts moved out of the top header and into a right-aligned pill embedded in the Sessions panel's bottom border (`╰── 2 RUN · 1 WAIT · 51 idle ─╯`). The header is just the `❯_ fleet` wordmark now.
