@@ -233,7 +233,8 @@ func renderBorderedPanel(content, title, titleRight, footerRight string, width, 
 		rightText := rightStyle.Render(titleRight)
 		rightW := lipgloss.Width(rightText)
 		// Layout: ╭ ─ ' ' title ' ' ─*K ' ' titleRight ' ' ─ ╮
-		dashes := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space after dash*/ - titleWidth - 1 /*space before fill*/ - rightW - 1 /*space before trailing dash*/ - 1 /*trailing dash*/
+		// 8 fixed chars: 2 corners + 2 dashes + 4 spaces.
+		dashes := width - 8 - titleWidth - rightW
 		if dashes < 1 {
 			// Top is too tight; drop the trailing right text rather than wrap.
 			return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
