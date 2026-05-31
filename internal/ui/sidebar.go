@@ -281,10 +281,9 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 
 	var b strings.Builder
 
-	b.WriteString(RenderPanelTitle(" SESSIONS", width))
-	b.WriteString("\n")
-
-	visibleHeight := height - 2
+	// Panel title + border are now drawn by RenderBorderedPanel in the caller.
+	// `height` here is the inner content height — no title/underline rows to deduct.
+	visibleHeight := height
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
@@ -347,8 +346,6 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 
 func renderEmptyState(width, height int) string {
 	var b strings.Builder
-	b.WriteString(RenderPanelTitle(" SESSIONS", width))
-	b.WriteString("\n")
 
 	if height < 8 {
 		b.WriteString(DimStyle.Render("  No sessions — 'a' to create"))

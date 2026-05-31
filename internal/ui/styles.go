@@ -190,6 +190,109 @@ func ApplyPalette(p Palette) {
 	BorderGuideStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 }
 
+// RenderBorderedPanel wraps content in a rounded border with a title inset
+// into the top border at column 2. Output is exactly width × height.
+//
+//	╭─ Sessions ────────╮
+//	│ ...content...     │
+//	╰───────────────────╯
+//
+// When accent is true, the border is drawn in the accent color (used for the
+// focused panel in dual mode); otherwise it uses the muted border color.
+func RenderBorderedPanel(content, title string, width, height int, accent bool) string {
+	if width < 6 || height < 3 {
+		return content
+	}
+
+	borderColor := ColorBorder
+	if accent {
+		borderColor = ColorAccent
+	}
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	titleStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+
+	// Top border with title inset: ╭─ title ─...─╮
+	titleText := titleStyle.Render(title)
+	titleWidth := lipgloss.Width(titleText)
+	// Layout: ╭ ─ ' ' title ' ' ─*K ╮ — leading dash count is 1, K fills the rest.
+	fillRight := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space*/ - titleWidth - 1 /*space*/
+	if fillRight < 1 {
+		// Title too wide; truncate it so the border still closes.
+		maxTitle := max(width-6, 1)
+		titleText = titleStyle.Render(ansiTruncate(title, maxTitle))
+		titleWidth = lipgloss.Width(titleText)
+		fillRight = max(width-5-titleWidth, 1)
+	}
+	top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", fillRight)+"╮")
+
+	bottom := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+
+	innerWidth := width - 2
+	innerHeight := height - 2
+	contentLines := strings.Split(content, "\n")
+
+	side := borderStyle.Render("│")
+	middle := make([]string, innerHeight)
+	for i := range innerHeight {
+		line := ""
+		if i < len(contentLines) {
+			line = contentLines[i]
+		}
+		lineW := lipgloss.Width(line)
+		if lineW > innerWidth {
+			line = ansiTruncate(line, innerWidth)
+		} else if lineW < innerWidth {
+			line += strings.Repeat(" ", innerWidth-lineW)
+		}
+		middle[i] = side + line + side
+	}
+
+	return top + "\n" + strings.Join(middle, "\n") + "\n" + bottom
+}
+
+// dimBackdrop dims rendered content by wrapping each line in the SGR Faint
+// escape (CSI 2 m) so an overlay can sit above it with visible elevation.
+// Inner ANSI sequences keep their hues; the faint layer only reduces overall
+// intensity — most terminals render this as a subtle wash that's perfect as
+// a modal backdrop without the cost of a full re-render.
+func dimBackdrop(s string) string {
+	const (
+		faint = "\x1b[2m"
+		reset = "\x1b[22m"
+	)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = faint + line + reset
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ansiTruncate is a thin wrapper around lipgloss/ANSI-aware truncation that
+// works on strings with embedded escape sequences (status colors, accents).
+func ansiTruncate(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	// lipgloss exposes a helper via the underlying rendering — we re-use
+	// a simple width-aware loop here to avoid a new dependency.
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	// Fallback: drop runes from the end until we're within budget. Loses
+	// trailing styling but is correct for visible width.
+	var b strings.Builder
+	cur := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if cur+rw > w {
+			break
+		}
+		b.WriteRune(r)
+		cur += rw
+	}
+	return b.String()
+}
+
 // RenderPanelTitle renders a panel title with a divider underline.
 func RenderPanelTitle(title string, width int) string {
 	titleLine := PanelTitleStyle.Render(title)

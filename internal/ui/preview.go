@@ -11,20 +11,14 @@ import (
 )
 
 // RenderPreview renders the preview pane for the selected session.
+// Panel title + border are now drawn by RenderBorderedPanel in the caller, so
+// `width` and `height` here describe the inner content area only.
 func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, width, height int, focused bool) string {
 	if s == nil {
-		return RenderPanelTitle(" PREVIEW", width) + "\n" + DimStyle.Render("  No session selected")
+		return DimStyle.Render("  No session selected")
 	}
 
 	var b strings.Builder
-
-	// Panel title.
-	if focused {
-		b.WriteString(RenderFocusedPanelTitle(" PREVIEW [FOCUSED]", width))
-	} else {
-		b.WriteString(RenderPanelTitle(" PREVIEW", width))
-	}
-	b.WriteString("\n")
 
 	// Header: title + status.
 	header := fmt.Sprintf("  %s %s  %s",
@@ -44,7 +38,7 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 	b.WriteString("\n")
 
 	// Git info line.
-	usedLines := 5 // panel title + underline + header + path + separator
+	usedLines := 3 // header + path + first content row
 	if gitLine := renderGitInfoLine(repoInfo); gitLine != "" {
 		b.WriteString("  " + gitLine)
 		b.WriteString("\n")

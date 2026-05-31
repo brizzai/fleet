@@ -913,8 +913,10 @@ func (h *Home) View() string {
 	}
 	base := h.renderBody()
 	// Command palette is a true overlay: render it on top of the main UI so
-	// the sidebar/preview stay visible behind the dialog box.
+	// the sidebar/preview stay visible behind the dialog box. The base is
+	// dimmed first so the palette visually lifts above the content.
 	if h.commandPalette.IsVisible() {
+		base = dimBackdrop(base)
 		base = overlay.Composite(h.commandPalette.View(), base, overlay.Center, overlay.Center, 0, 0)
 	}
 	toast := h.toasts.View(h.width)
@@ -984,61 +986,79 @@ func (h *Home) renderBody() string {
 
 	switch h.layoutMode() {
 	case "single":
-		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, h.width, contentHeight)
-		b.WriteString(sidebar)
+		// Inner content area = total - 2 for the border on each side.
+		innerW := h.width - 2
+		innerH := contentHeight - 2
+		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH)
+		sidebar = ensureExactHeight(sidebar, innerH)
+		sidebar = ensureExactWidth(sidebar, innerW)
+		b.WriteString(RenderBorderedPanel(sidebar, "Sessions", h.width, contentHeight, h.focusMode))
 	case "stacked":
 		sidebarHeight := (contentHeight * 55) / 100
 		if sidebarHeight < 3 {
 			sidebarHeight = 3
 		}
-		previewHeight := contentHeight - sidebarHeight - 1 // 1 for separator
-		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, h.width, sidebarHeight)
-		b.WriteString(sidebar)
-		b.WriteString("\n")
-		b.WriteString(DimStyle.Render(strings.Repeat("─", h.width)))
-		b.WriteString("\n")
+		previewHeight := contentHeight - sidebarHeight - 1 // 1 for gap row
+		innerW := h.width - 2
+
+		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2)
+		sidebarInner = ensureExactHeight(sidebarInner, sidebarHeight-2)
+		sidebarInner = ensureExactWidth(sidebarInner, innerW)
+		b.WriteString(RenderBorderedPanel(sidebarInner, "Sessions", h.width, sidebarHeight, h.focusMode))
+		b.WriteString("\n\n")
+
 		s, content := h.selectedPreview()
-		preview := RenderPreview(s, content, h.repoInfoFromSnap(gitInfoSnap), h.width, previewHeight, h.focusMode)
-		b.WriteString(preview)
-	default: // dual
-		sidebarWidth := h.width * 35 / 100
-		if sidebarWidth < 20 {
-			sidebarWidth = 20
+		previewInner := RenderPreview(s, content, h.repoInfoFromSnap(gitInfoSnap), innerW, previewHeight-2, h.focusMode)
+		previewInner = ensureExactHeight(previewInner, previewHeight-2)
+		previewInner = ensureExactWidth(previewInner, innerW)
+		previewTitle := "Preview"
+		if h.focusMode {
+			previewTitle = "Preview · focus"
 		}
-		previewWidth := h.width - sidebarWidth - 3 // 3 for separator " │ "
+		b.WriteString(RenderBorderedPanel(previewInner, previewTitle, h.width, previewHeight, h.focusMode))
+	default: // dual
+		gap := 1 // single-column gap between the two bordered panels
+		sidebarWidth := h.width * 35 / 100
+		if sidebarWidth < 22 {
+			sidebarWidth = 22
+		}
+		previewWidth := h.width - sidebarWidth - gap
+
+		sidebarInnerW := sidebarWidth - 2
+		previewInnerW := previewWidth - 2
+		innerH := contentHeight - 2
 
 		// In focus mode, reuse cached sidebar to avoid expensive rebuild on every keystroke.
 		var leftPanel string
 		if h.focusMode && !h.sidebarDirty && h.cachedSidebar != "" {
 			leftPanel = h.cachedSidebar
 		} else {
-			leftPanel = RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarWidth, contentHeight)
-			leftPanel = ensureExactHeight(leftPanel, contentHeight)
-			leftPanel = ensureExactWidth(leftPanel, sidebarWidth)
+			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH)
+			inner = ensureExactHeight(inner, innerH)
+			inner = ensureExactWidth(inner, sidebarInnerW)
+			leftPanel = RenderBorderedPanel(inner, "Sessions", sidebarWidth, contentHeight, h.focusMode)
 			h.cachedSidebar = leftPanel
 			h.sidebarDirty = false
 		}
 
 		s, content := h.selectedPreview()
-		rightPanel := RenderPreview(s, content, h.repoInfoFromSnap(gitInfoSnap), previewWidth, contentHeight, h.focusMode)
-
-		// Build separator as explicit lines.
-		sepColor := ColorBorder
+		previewInner := RenderPreview(s, content, h.repoInfoFromSnap(gitInfoSnap), previewInnerW, innerH, h.focusMode)
+		previewInner = ensureExactHeight(previewInner, innerH)
+		previewInner = ensureExactWidth(previewInner, previewInnerW)
+		previewTitle := "Preview"
 		if h.focusMode {
-			sepColor = ColorAccent
+			previewTitle = "Preview · focus"
 		}
-		sepStyle := lipgloss.NewStyle().Foreground(sepColor)
-		sepLines := make([]string, contentHeight)
-		for i := range sepLines {
-			sepLines[i] = sepStyle.Render(" │ ")
+		rightPanel := RenderBorderedPanel(previewInner, previewTitle, previewWidth, contentHeight, h.focusMode)
+
+		// Build the single-column gap as transparent spaces.
+		gapLines := make([]string, contentHeight)
+		for i := range gapLines {
+			gapLines[i] = " "
 		}
-		separator := strings.Join(sepLines, "\n")
+		gapCol := strings.Join(gapLines, "\n")
 
-		// Ensure exact dimensions before joining (prevents ANSI misalignment).
-		rightPanel = ensureExactHeight(rightPanel, contentHeight)
-		rightPanel = ensureExactWidth(rightPanel, previewWidth)
-
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, separator, rightPanel))
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, gapCol, rightPanel))
 	}
 
 	// Pad to fill content area.
