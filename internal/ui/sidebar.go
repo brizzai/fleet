@@ -29,6 +29,7 @@ type SidebarItem struct {
 	IsOriginHeader   bool
 	IsCheckoutHeader bool
 	IsIdleFold       bool
+	IsSpacer         bool // visual gap row between origin groups; not selectable
 
 	OriginKey   string // origin grouping key (github org/repo or local:basename)
 	OriginLabel string // human-readable origin label
@@ -178,6 +179,13 @@ func BuildFlatItems(
 			continue
 		}
 
+		// Visual breathing space between origin groups — one blank row
+		// before every origin except the first. Marked IsSpacer so cursor
+		// nav skips it and it renders as a blank line.
+		if len(items) > 0 {
+			items = append(items, SidebarItem{IsSpacer: true})
+		}
+
 		originExpanded := IsExpanded(expanded, OriginExpandKey(origin))
 		items = append(items, SidebarItem{
 			IsRepoHeader:   true,
@@ -313,6 +321,8 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 	for i := viewOffset; i < visibleEnd; i++ {
 		item := items[i]
 		switch {
+		case item.IsSpacer:
+			// Blank line between origin groups.
 		case item.IsOriginHeader:
 			b.WriteString(renderOriginHeader(item, width, i == cursor))
 		case item.IsCheckoutHeader:
@@ -375,7 +385,9 @@ func renderEmptyState(width, height int) string {
 	return b.String()
 }
 
-// renderOriginHeader → " ▾ originLabel                          N"
+// renderOriginHeader → "▾ originLabel  N  ─────────────────────"
+// The trailing dim rule fills the remaining width so the origin reads as a
+// section header, not just another row.
 func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 	chevron := "▸"
 	if item.Expanded {
@@ -387,12 +399,25 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 		icon := SessionSelectionPrefix.Render(chevron)
 		name := SessionTitleSelStyle.Render(" " + item.OriginLabel + " ")
 		count := SessionStatusSelStyle.Render(countStr)
-		return fmt.Sprintf(" %s %s %s", icon, name, count)
+		return fmt.Sprintf("%s %s %s", icon, name, count) + originTrailingRule(width, lipgloss.Width(chevron)+1+lipgloss.Width(" "+item.OriginLabel+" ")+1+lipgloss.Width(countStr))
 	}
 	icon := DimStyle.Render(chevron)
 	name := RepoHeaderStyle.Render(item.OriginLabel)
 	count := DimStyle.Render(countStr)
-	return fmt.Sprintf(" %s %s %s", icon, name, count)
+	visible := lipgloss.Width(chevron) + 1 + lipgloss.Width(item.OriginLabel) + 1 + lipgloss.Width(countStr)
+	return fmt.Sprintf("%s %s %s", icon, name, count) + originTrailingRule(width, visible)
+}
+
+// originTrailingRule renders a dim dashed rule from the end of the origin
+// header label to the right edge of the sidebar content area, with a small
+// gap so it doesn't visually touch the panel border.
+func originTrailingRule(width, consumed int) string {
+	const gap = 2 // 1 space before the rule + 1 trailing margin
+	remaining := width - consumed - gap
+	if remaining < 3 {
+		return ""
+	}
+	return " " + lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", remaining))
 }
 
 // renderCheckoutHeader → "   ⎇ branch * #PR"  for a git checkout,
@@ -446,7 +471,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 			inner += " " + prText
 		}
 		inner += " "
-		return fmt.Sprintf("   %s %s", icon, SessionTitleSelStyle.Italic(repoInfo.IsWorktreeRepo).Render(inner))
+		return fmt.Sprintf("  %s %s", icon, SessionTitleSelStyle.Italic(repoInfo.IsWorktreeRepo).Render(inner))
 	}
 	icon := DimStyle.Render(chevron)
 	branchStyled := branchFG.Render(label)
@@ -454,7 +479,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	if dirty != "" {
 		dirtyStyled = DirtyStyle.Render(dirty)
 	}
-	return fmt.Sprintf("   %s %s%s%s", icon, branchStyled, dirtyStyled, prBadge)
+	return fmt.Sprintf("  %s %s%s%s", icon, branchStyled, dirtyStyled, prBadge)
 }
 
 // renderCheckoutHeaderNonGit renders a checkout row for a folder that isn't
@@ -468,11 +493,11 @@ func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
 		nameStyled := SessionTitleSelStyle.Render(" " + name + " ")
-		return fmt.Sprintf("   %s %s", icon, nameStyled)
+		return fmt.Sprintf("  %s %s", icon, nameStyled)
 	}
 	icon := DimStyle.Render(chevron)
 	nameStyled := DimStyle.Render(name)
-	return fmt.Sprintf("   %s %s", icon, nameStyled)
+	return fmt.Sprintf("  %s %s", icon, nameStyled)
 }
 
 // renderSessionItem → "  │ <status> title [slot]"  (under a checkout)
@@ -502,7 +527,7 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	if selected {
 		guide := BorderGuideStyle.Render(guideGlyph)
 		row := " " + symbolRaw + " " + title + slotRaw + " "
-		return fmt.Sprintf("  %s%s", guide, SessionTitleSelStyle.Render(row))
+		return fmt.Sprintf(" %s%s", guide, SessionTitleSelStyle.Render(row))
 	}
 
 	styledSymbol := StatusSymbol(status)
@@ -512,17 +537,17 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
 	}
 	guide := BorderGuideStyle.Render(guideGlyph)
-	return fmt.Sprintf("  %s %s %s%s", guide, styledSymbol, styledTitle, styledSlot)
+	return fmt.Sprintf(" %s %s %s%s", guide, styledSymbol, styledTitle, styledSlot)
 }
 
-// renderIdleFold → "  │   + N idle"  (under a checkout, in dim)
+// renderIdleFold → " │   + N idle"  (under a checkout, in dim)
 func renderIdleFold(item SidebarItem, width int, selected bool) string {
 	label := fmt.Sprintf("+ %d idle", item.IdleCount)
 	guide := BorderGuideStyle.Render(guideGlyph)
 	if selected {
-		return fmt.Sprintf("  %s%s", guide, SessionTitleSelStyle.Render("   "+label+" "))
+		return fmt.Sprintf(" %s%s", guide, SessionTitleSelStyle.Render("   "+label+" "))
 	}
-	return fmt.Sprintf("  %s   %s", guide, DimStyle.Render(label))
+	return fmt.Sprintf(" %s   %s", guide, DimStyle.Render(label))
 }
 
 // renderPendingItem renders a "Creating…" phantom under its checkout.
@@ -541,11 +566,11 @@ func renderPendingItem(pw *PendingWorkspace, width int, selected bool) string {
 	guide := BorderGuideStyle.Render(guideGlyph)
 	if selected {
 		row := " " + spinner + " " + title + " "
-		return fmt.Sprintf("  %s%s", guide, SessionTitleSelStyle.Render(row))
+		return fmt.Sprintf(" %s%s", guide, SessionTitleSelStyle.Render(row))
 	}
 	styledSpinner := lipgloss.NewStyle().Foreground(ColorAccent).Render(spinner)
 	styledTitle := DimStyle.Render(title)
-	return fmt.Sprintf("  %s %s %s", guide, styledSpinner, styledTitle)
+	return fmt.Sprintf(" %s %s %s", guide, styledSpinner, styledTitle)
 }
 
 // prBadgeText returns the raw badge text ("#N" or "#N ✕↩") without styling;
@@ -609,14 +634,38 @@ func renderPRBadge(pr *github.PR, selected bool) string {
 	return prBadgeStyle(pr).Render(text)
 }
 
-// NextSelectableItem advances the cursor; every row is selectable.
+// NextSelectableItem advances the cursor; every row except spacers is
+// selectable. Steps repeatedly past spacers in `direction` so j/k feel
+// instant across origin-gap rows.
 func NextSelectableItem(items []SidebarItem, current, direction int) int {
 	next := current + direction
-	if next >= 0 && next < len(items) {
-		return next
+	for next >= 0 && next < len(items) {
+		if !items[next].IsSpacer {
+			return next
+		}
+		next += direction
 	}
 	return current
 }
 
-// FirstSelectableItem returns the first row index.
-func FirstSelectableItem(items []SidebarItem) int { return 0 }
+// FirstSelectableItem returns the first non-spacer row index, or 0 if none.
+func FirstSelectableItem(items []SidebarItem) int {
+	for i, it := range items {
+		if !it.IsSpacer {
+			return i
+		}
+	}
+	return 0
+}
+
+// FirstSessionItem returns the index of the first row whose Session is non-nil,
+// or -1 if no real session exists in the list. Used to land the cursor on
+// something actionable instead of an origin header on first paint.
+func FirstSessionItem(items []SidebarItem) int {
+	for i, it := range items {
+		if !it.IsRepoHeader && !it.IsSpacer && it.Session != nil {
+			return i
+		}
+	}
+	return -1
+}

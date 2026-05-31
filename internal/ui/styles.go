@@ -348,8 +348,7 @@ var StatusIndicatorMode = "icon"
 
 const StatusBarChar = "┃"
 
-// StatusSymbol returns a styled status indicator. Idle and Starting return a
-// single space so column alignment is preserved without a visible glyph.
+// StatusSymbol returns a styled status indicator.
 func StatusSymbol(status session.Status) string {
 	raw := StatusSymbolRaw(status)
 	if raw == " " {
@@ -359,14 +358,17 @@ func StatusSymbol(status session.Status) string {
 }
 
 // StatusSymbolRaw returns the raw character for a status, respecting the
-// configured indicator mode. Idle/Starting always returns " " (blank).
+// configured indicator mode. Icon mode renders a dim `·` for idle so every
+// row has a leftmost anchor for the eye; bar mode keeps idle blank because
+// the gutter is the signal there.
 func StatusSymbolRaw(status session.Status) string {
-	switch status {
-	case session.StatusIdle, session.StatusStarting:
-		return " "
-	}
 	if StatusIndicatorMode == "bar" {
-		return StatusBarChar
+		switch status {
+		case session.StatusIdle, session.StatusStarting:
+			return " "
+		default:
+			return StatusBarChar
+		}
 	}
 	switch status {
 	case session.StatusRunning, session.StatusFinished:
@@ -375,6 +377,8 @@ func StatusSymbolRaw(status session.Status) string {
 		return "◐"
 	case session.StatusError:
 		return "✕"
+	case session.StatusIdle, session.StatusStarting:
+		return "·"
 	default:
 		return " "
 	}

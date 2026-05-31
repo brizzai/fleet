@@ -763,6 +763,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.booted = true
 		h.workerMu.Lock()
 		h.rebuildFlatItems()
+		// Land the cursor on the first actionable row (a session) instead
+		// of the first origin header — first keystroke does something
+		// useful immediately.
+		if idx := FirstSessionItem(h.flatItems); idx >= 0 {
+			h.cursor = idx
+			h.syncViewport()
+		}
 		h.workerMu.Unlock()
 		go h.statusWorker()
 		return h, nil
