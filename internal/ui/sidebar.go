@@ -12,10 +12,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Glyphs used across the clean tree.
-const (
-	guideGlyph = "│ " // left guide line down each checkout
-)
 
 // SidebarItem represents a flattened row for cursor navigation.
 //
@@ -511,9 +507,8 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	// glyph used for collapsed headers). Bg fill spans symbol + title + slot
 	// in one continuous render so the row reads as a single pill.
 	if selected {
-		guide := BorderGuideStyle.Render(guideGlyph)
 		row := " " + symbolRaw + " " + title + slotRaw + " "
-		return fmt.Sprintf(" %s%s", guide, SessionTitleSelStyle.Render(row))
+		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render(row))
 	}
 
 	styledSymbol := StatusSymbol(status)
@@ -522,18 +517,16 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	if slotRaw != "" {
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
 	}
-	guide := BorderGuideStyle.Render(guideGlyph)
-	return fmt.Sprintf(" %s %s %s%s", guide, styledSymbol, styledTitle, styledSlot)
+	return fmt.Sprintf("    %s %s%s", styledSymbol, styledTitle, styledSlot)
 }
 
-// renderIdleFold → " │   + N idle"  (under a checkout, in dim)
+// renderIdleFold → "      + N idle"  (under a checkout, in dim)
 func renderIdleFold(item SidebarItem, width int, selected bool) string {
 	label := fmt.Sprintf("+ %d idle", item.IdleCount)
-	guide := BorderGuideStyle.Render(guideGlyph)
 	if selected {
-		return fmt.Sprintf(" %s%s", guide, SessionTitleSelStyle.Render("   "+label+" "))
+		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render("   "+label+" "))
 	}
-	return fmt.Sprintf(" %s   %s", guide, DimStyle.Render(label))
+	return fmt.Sprintf("      %s", DimStyle.Render(label))
 }
 
 // renderPendingItem renders a "Creating…" phantom under its checkout.
@@ -549,14 +542,13 @@ func renderPendingItem(pw *PendingWorkspace, width int, selected bool) string {
 		title = title[:maxTitleLen-1] + "…"
 	}
 
-	guide := BorderGuideStyle.Render(guideGlyph)
 	if selected {
 		row := " " + spinner + " " + title + " "
-		return fmt.Sprintf(" %s%s", guide, SessionTitleSelStyle.Render(row))
+		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render(row))
 	}
 	styledSpinner := lipgloss.NewStyle().Foreground(ColorAccent).Render(spinner)
 	styledTitle := DimStyle.Render(title)
-	return fmt.Sprintf(" %s %s %s", guide, styledSpinner, styledTitle)
+	return fmt.Sprintf("    %s %s", styledSpinner, styledTitle)
 }
 
 // prBadgeText returns the raw badge text ("#N" or "#N ✕↩") without styling;

@@ -118,10 +118,6 @@ var (
 	// Dim variant of the slot badge — used in the clean-tree sidebar where
 	// the bright orange would fight the calm row layout.
 	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
-
-	// Single-glyph "│" guide line drawn down the left edge of each
-	// checkout's sessions in the clean-tree sidebar.
-	BorderGuideStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 )
 
 // ApplyPalette reassigns all color vars and rebuilds all style vars from the given palette.
@@ -187,7 +183,6 @@ func ApplyPalette(p Palette) {
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
 	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
-	BorderGuideStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 }
 
 // RenderBorderedPanel wraps content in a rounded border with a title inset
