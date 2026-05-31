@@ -985,9 +985,10 @@ func (h *Home) renderBody() string {
 	// Header.
 	header := h.renderHeader()
 	b.WriteString(header)
+	b.WriteString("\n") // line break that starts panel row 0 — NOT a blank padding row
 
-	// Content area. Header is 1 row (no trailing blank), help bar is
-	// helpBarHeight rows, leaving the rest for the panels.
+	// Content area. Header is 1 row, help bar is helpBarHeight rows, leaving
+	// the rest for the panels.
 	contentHeight := h.height - 1 - helpBarHeight
 	if contentHeight < 1 {
 		contentHeight = 1
@@ -3471,7 +3472,10 @@ func (h *Home) renderHelpBar() string {
 	}
 	right := strings.Join(gparts, "  ")
 
-	return " " + left + sep + right
+	// Leading \n: end the panel's last row and place the hotkey row on the
+	// next line. Without it the keys would be appended to the bottom border
+	// of the Sessions panel.
+	return "\n " + left + sep + right
 }
 
 func (h *Home) layoutMode() string {

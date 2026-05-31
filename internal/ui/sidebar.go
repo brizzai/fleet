@@ -230,9 +230,10 @@ func BuildFlatItems(
 			for _, s := range rendered {
 				childIdx++
 				items = append(items, SidebarItem{
-					RepoPath: blk.repo,
-					Session:  s,
-					IsLast:   childIdx == totalChildren,
+					OriginKey: origin,
+					RepoPath:  blk.repo,
+					Session:   s,
+					IsLast:    childIdx == totalChildren,
 				})
 			}
 			if idleN > 0 {
@@ -249,9 +250,10 @@ func BuildFlatItems(
 			for _, pw := range blk.pending {
 				childIdx++
 				items = append(items, SidebarItem{
-					RepoPath: blk.repo,
-					Pending:  pw,
-					IsLast:   childIdx == totalChildren,
+					OriginKey: origin,
+					RepoPath:  blk.repo,
+					Pending:   pw,
+					IsLast:    childIdx == totalChildren,
 				})
 			}
 		}
