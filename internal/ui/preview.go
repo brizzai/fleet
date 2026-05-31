@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/git"
+	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -90,9 +91,13 @@ func BuildPreviewTitle(s *session.Session, repoInfo *git.RepoInfo, focused bool,
 	statusSeg := StatusStyle(s.GetStatus()).Render(string(s.GetStatus()))
 
 	prSeg := ""
-	if repoInfo != nil && repoInfo.PR != nil {
-		if txt := prBadgeText(repoInfo.PR); txt != "" {
-			prSeg = prBadgeStyle(repoInfo.PR).Render(txt)
+	var pr *github.PR
+	if repoInfo != nil {
+		pr = repoInfo.PR
+	}
+	if pr != nil {
+		if txt := previewPRSummary(pr); txt != "" {
+			prSeg = prBadgeStyle(pr).Render(txt)
 		}
 	}
 
@@ -128,6 +133,50 @@ func BuildPreviewTitle(s *session.Session, repoInfo *git.RepoInfo, focused bool,
 		parts = append(parts, focusSeg)
 	}
 	return strings.Join(parts, sep)
+}
+
+// previewPRSummary returns a verbose human-readable PR summary like
+// "PR #2874 (CI failing, 3 unresolved, conflicts)". Glyph-only badges work
+// in the sidebar because there's a learning curve users opt into; in the
+// preview title we spell the problems out so newcomers can read state
+// without a legend.
+func previewPRSummary(pr *github.PR) string {
+	if pr == nil || pr.State == "CLOSED" {
+		return ""
+	}
+	base := fmt.Sprintf("PR #%d", pr.Number)
+
+	if pr.State == "MERGED" {
+		return base + " (merged)"
+	}
+
+	var details []string
+	if pr.CIStatus == "FAILURE" {
+		details = append(details, "CI failing")
+	}
+	if pr.HasConflicts {
+		details = append(details, "conflicts")
+	}
+	if pr.ReviewDecision == "CHANGES_REQUESTED" {
+		details = append(details, "changes requested")
+	}
+	if pr.UnresolvedThreads > 0 {
+		details = append(details, fmt.Sprintf("%d unresolved", pr.UnresolvedThreads))
+	}
+	if pr.CIStatus == "PENDING" && len(details) == 0 {
+		details = append(details, "CI pending")
+	}
+	if pr.ReviewDecision == "REVIEW_REQUIRED" && len(details) == 0 {
+		details = append(details, "review pending")
+	}
+	if pr.CIStatus == "SUCCESS" && pr.ReviewDecision == "APPROVED" && len(details) == 0 {
+		return base + " (ready)"
+	}
+
+	if len(details) == 0 {
+		return base
+	}
+	return base + " (" + strings.Join(details, ", ") + ")"
 }
 
 // BuildPreviewFooter renders the rich bottom-border footer for the preview
