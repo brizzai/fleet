@@ -130,7 +130,7 @@ func TestRefreshAllGitAndPR_AllReposPopulated(t *testing.T) {
 		filepath.Join(tmpDir, "r3"),
 	}
 
-	home.refreshAllGitAndPR(repos, 4, 0)
+	home.refreshAllGitAndPR(repos, 4, 0, nil)
 
 	home.workerMu.Lock()
 	defer home.workerMu.Unlock()

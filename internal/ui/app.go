@@ -229,9 +229,10 @@ type Home struct {
 	// every visible repo's OriginKey (or the 4s deadline expires); while
 	// false, View() returns the splash and the steady-state worker has
 	// not started.
-	booted         bool
-	splashFrame    int
-	bootstrapRepos int // total repos the bootstrap is waiting on (for progress UI)
+	booted             bool
+	splashFrame        int
+	bootstrapRepos     int          // total repos the bootstrap is waiting on (for progress UI)
+	bootstrapResolved  atomic.Int32 // goroutines that have finished within the current bootstrap fan-out
 
 	// Rendering diagnostics (accumulated counters for bug reports).
 	renderStats RenderStats
@@ -2719,22 +2720,22 @@ func (h *Home) bootstrapGitInfo(repos []string) tea.Cmd {
 		const maxParallel = 8
 		const deadline = 6 * time.Second
 
-		h.refreshAllGitAndPR(repos, maxParallel, deadline)
+		h.bootstrapResolved.Store(0)
+		h.refreshAllGitAndPR(repos, maxParallel, deadline, &h.bootstrapResolved)
 		return bootstrapDoneMsg{}
 	}
 }
 
 // bootProgress reports how much of the bootstrap has resolved, in [0,1].
-// Caller holds workerMu? No — we acquire it briefly to read gitInfoCache.
-// 0 when there are no repos to wait on (the empty-fleet path already flips
-// booted directly without ever rendering the splash).
+// Reads an atomic counter that bootstrapGitInfo's per-repo goroutines bump
+// as they finish — NOT len(gitInfoCache), which can be non-zero from the
+// SQLite PR-cache hydration in loadSessionsMsg (the bar would otherwise
+// start at 100% on a warm-cache launch).
 func (h *Home) bootProgress() float64 {
 	if h.bootstrapRepos <= 0 {
 		return 1
 	}
-	h.workerMu.Lock()
-	resolved := len(h.gitInfoCache)
-	h.workerMu.Unlock()
+	resolved := int(h.bootstrapResolved.Load())
 	if resolved > h.bootstrapRepos {
 		resolved = h.bootstrapRepos
 	}
@@ -2977,7 +2978,7 @@ drainPriority:
 	h.workerMu.Unlock()
 
 	repos := h.uniqueRepoPathsFromSessions(sessions)
-	h.refreshAllGitAndPR(repos, 4, 0)
+	h.refreshAllGitAndPR(repos, 4, 0, nil)
 }
 
 // PR-refresh TTL constants. Hot repos refresh fast so an actively-used
@@ -3012,7 +3013,7 @@ func (h *Home) repoTTLFor(repo string, now time.Time) time.Duration {
 //   - deadline > 0 returns early when it elapses; in-flight goroutines keep
 //     running and their results land in the cache when they finish — the
 //     next refresh tick picks them up via rebuildFlatItems.
-func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time.Duration) {
+func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time.Duration, progress *atomic.Int32) {
 	if len(repos) == 0 {
 		return
 	}
@@ -3043,6 +3044,9 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 		go func(r string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if progress != nil {
+				defer progress.Add(1)
+			}
 			info := git.RefreshGitInfo(r)
 
 			// Carry PR + last-refresh stamp forward from the cache, but
