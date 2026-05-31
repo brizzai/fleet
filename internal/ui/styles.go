@@ -193,15 +193,24 @@ func ApplyPalette(p Palette) {
 }
 
 // RenderBorderedPanel wraps content in a rounded border with a title inset
-// into the top border at column 2. Output is exactly width × height.
+// into the top border. Output is exactly width × height.
 //
 //	╭─ Sessions ────────╮
 //	│ ...content...     │
-//	╰───────────────────╯
+//	╰──── 2 RUN · 1 WAIT ╯  (bottomRight optional)
 //
 // When accent is true, the border is drawn in the accent color (used for the
 // focused panel in dual mode); otherwise it uses the muted border color.
+// Pass bottomRight via RenderBorderedPanelFooter for the variant with a
+// status pill embedded in the bottom border.
 func RenderBorderedPanel(content, title string, width, height int, accent bool) string {
+	return RenderBorderedPanelFooter(content, title, "", width, height, accent)
+}
+
+// RenderBorderedPanelFooter is like RenderBorderedPanel but also embeds a
+// right-aligned status pill into the bottom border. Empty footer renders an
+// unbroken bottom border.
+func RenderBorderedPanelFooter(content, title, footerRight string, width, height int, accent bool) string {
 	if width < 6 || height < 3 {
 		return content
 	}
@@ -227,7 +236,25 @@ func RenderBorderedPanel(content, title string, width, height int, accent bool) 
 	}
 	top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", fillRight)+"╮")
 
-	bottom := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+	// Bottom border, optionally with a right-aligned status pill inset.
+	var bottom string
+	if footerRight != "" {
+		footerStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+		footerText := footerStyle.Render(footerRight)
+		footerW := lipgloss.Width(footerText)
+		// Layout: ╰─*K ' ' footer ' '─╯ — trailing dash count is 1.
+		fillLeft := width - 2 /*corners*/ - 1 /*space*/ - footerW - 1 /*space*/ - 1 /*trailing dash*/
+		if fillLeft < 1 {
+			// Footer too wide; truncate.
+			maxFooter := max(width-6, 1)
+			footerText = footerStyle.Render(ansiTruncate(footerRight, maxFooter))
+			footerW = lipgloss.Width(footerText)
+			fillLeft = max(width-5-footerW, 1)
+		}
+		bottom = borderStyle.Render("╰"+strings.Repeat("─", fillLeft)+" ") + footerText + borderStyle.Render(" ─╯")
+	} else {
+		bottom = borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+	}
 
 	innerWidth := width - 2
 	innerHeight := height - 2

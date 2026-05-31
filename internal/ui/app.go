@@ -985,6 +985,8 @@ func (h *Home) renderBody() string {
 		contentHeight = 1
 	}
 
+	statusFooter := h.sidebarStatusFooter()
+
 	switch h.layoutMode() {
 	case "single":
 		// Inner content area = total - 2 for the border on each side.
@@ -993,7 +995,7 @@ func (h *Home) renderBody() string {
 		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH)
 		sidebar = ensureExactHeight(sidebar, innerH)
 		sidebar = ensureExactWidth(sidebar, innerW)
-		b.WriteString(RenderBorderedPanel(sidebar, "Sessions", h.width, contentHeight, h.focusMode))
+		b.WriteString(RenderBorderedPanelFooter(sidebar, "Sessions", statusFooter, h.width, contentHeight, h.focusMode))
 	case "stacked":
 		sidebarHeight := (contentHeight * 55) / 100
 		if sidebarHeight < 3 {
@@ -1005,7 +1007,7 @@ func (h *Home) renderBody() string {
 		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2)
 		sidebarInner = ensureExactHeight(sidebarInner, sidebarHeight-2)
 		sidebarInner = ensureExactWidth(sidebarInner, innerW)
-		b.WriteString(RenderBorderedPanel(sidebarInner, "Sessions", h.width, sidebarHeight, h.focusMode))
+		b.WriteString(RenderBorderedPanelFooter(sidebarInner, "Sessions", statusFooter, h.width, sidebarHeight, h.focusMode))
 		b.WriteString("\n\n")
 
 		s, content := h.selectedPreview()
@@ -1037,7 +1039,7 @@ func (h *Home) renderBody() string {
 			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH)
 			inner = ensureExactHeight(inner, innerH)
 			inner = ensureExactWidth(inner, sidebarInnerW)
-			leftPanel = RenderBorderedPanel(inner, "Sessions", sidebarWidth, contentHeight, h.focusMode)
+			leftPanel = RenderBorderedPanelFooter(inner, "Sessions", statusFooter, sidebarWidth, contentHeight, h.focusMode)
 			h.cachedSidebar = leftPanel
 			h.sidebarDirty = false
 		}
@@ -3237,40 +3239,15 @@ func (h *Home) fetchPreviewForSelected() tea.Cmd {
 // --- Rendering helpers ---
 
 func (h *Home) renderHeader() string {
-	statusCounts := make(map[session.Status]int)
-	for _, s := range h.sessions {
-		statusCounts[s.GetStatus()]++
-	}
-
 	bg := ColorSurface
 	logo := lipgloss.NewStyle().Foreground(ColorBrand).Background(bg).Bold(true).Render("❯_")
 	title := logo + lipgloss.NewStyle().Background(bg).Render(" ") + TitleStyle.Background(bg).Render("fleet")
 
-	// Build status indicators — only show non-zero.
-	var indicators []string
-	if n := statusCounts[session.StatusRunning] + statusCounts[session.StatusStarting]; n > 0 {
-		indicators = append(indicators, StatusRunningStyle.Background(bg).Render(fmt.Sprintf("● %d running", n)))
-	}
-	if n := statusCounts[session.StatusWaiting]; n > 0 {
-		indicators = append(indicators, StatusWaitingStyle.Background(bg).Render(fmt.Sprintf("◐ %d waiting", n)))
-	}
-	if n := statusCounts[session.StatusFinished]; n > 0 {
-		indicators = append(indicators, StatusFinishedStyle.Background(bg).Render(fmt.Sprintf("● %d finished", n)))
-	}
-	if n := statusCounts[session.StatusIdle]; n > 0 {
-		indicators = append(indicators, StatusIdleStyle.Background(bg).Render(fmt.Sprintf("○ %d idle", n)))
-	}
-	if n := statusCounts[session.StatusError]; n > 0 {
-		indicators = append(indicators, StatusErrorStyle.Background(bg).Render(fmt.Sprintf("✕ %d error", n)))
-	}
-
-	sep := lipgloss.NewStyle().Foreground(ColorBorder).Background(bg).Render(" • ")
-	stats := strings.Join(indicators, sep)
-
 	sp := lipgloss.NewStyle().Background(bg).Render
-	content := title + sp("  ") + stats
+	content := title
 
-	// Manually pad to full width with background-styled spaces to avoid ANSI reset issues.
+	// Status counts now ride the bottom border of the Sessions panel —
+	// see sidebarStatusFooter — so the header is just the brand mark.
 	if h.width > 0 {
 		contentWidth := lipgloss.Width(content)
 		if contentWidth < h.width {
@@ -3278,6 +3255,38 @@ func (h *Home) renderHeader() string {
 		}
 	}
 	return HeaderBarStyle.Render(content)
+}
+
+// sidebarStatusFooter builds the right-aligned pill text that rides the
+// Sessions panel's bottom border. Shows only non-zero counts in a compact
+// "N RUN · N WAIT · N idle" form (errors and finished get their own tokens
+// when present).
+func (h *Home) sidebarStatusFooter() string {
+	counts := make(map[session.Status]int)
+	for _, s := range h.sessions {
+		counts[s.GetStatus()]++
+	}
+	var parts []string
+	if n := counts[session.StatusRunning] + counts[session.StatusStarting]; n > 0 {
+		parts = append(parts, StatusRunningStyle.Render(fmt.Sprintf("%d RUN", n)))
+	}
+	if n := counts[session.StatusWaiting]; n > 0 {
+		parts = append(parts, StatusWaitingStyle.Render(fmt.Sprintf("%d WAIT", n)))
+	}
+	if n := counts[session.StatusError]; n > 0 {
+		parts = append(parts, StatusErrorStyle.Render(fmt.Sprintf("%d ERR", n)))
+	}
+	if n := counts[session.StatusFinished]; n > 0 {
+		parts = append(parts, StatusFinishedStyle.Render(fmt.Sprintf("%d FIN", n)))
+	}
+	if n := counts[session.StatusIdle]; n > 0 {
+		parts = append(parts, DimStyle.Render(fmt.Sprintf("%d idle", n)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	sep := DimStyle.Render(" · ")
+	return strings.Join(parts, sep)
 }
 
 func (h *Home) renderHelpBar() string {
