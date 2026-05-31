@@ -1022,7 +1022,16 @@ func (h *Home) renderBody() string {
 		b.WriteString(RenderBorderedPanel(previewInner, previewTitle, h.width, previewHeight, h.focusMode))
 	default: // dual
 		gap := 1 // single-column gap between the two bordered panels
-		sidebarWidth := h.width * 35 / 100
+		// Sidebar wants a ~target absolute width that's comfortable for long
+		// branch names and session titles — so on a Mac 14" (~150 cols) it's
+		// ~40%, on a wide monitor (~250 cols) it shrinks to ~25% so the
+		// preview keeps its share. Cap at 45% of total so it never dominates
+		// a small terminal; floor at 22 cols so the headers don't collapse.
+		const sidebarTargetCols = 65
+		sidebarWidth := sidebarTargetCols
+		if cap := h.width * 45 / 100; sidebarWidth > cap {
+			sidebarWidth = cap
+		}
 		if sidebarWidth < 22 {
 			sidebarWidth = 22
 		}

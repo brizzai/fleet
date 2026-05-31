@@ -306,7 +306,7 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 	}
 
 	if showAbove {
-		b.WriteString(DimStyle.Render(fmt.Sprintf("  ⋮ +%d above", viewOffset)))
+		b.WriteString(DimStyle.Render(fmt.Sprintf("  … %d more above", viewOffset)))
 		b.WriteString("\n")
 	}
 
@@ -338,7 +338,7 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 	if showBelow {
 		below := len(items) - visibleEnd
 		b.WriteString("\n")
-		b.WriteString(DimStyle.Render(fmt.Sprintf("  ⋮ +%d below", below)))
+		b.WriteString(DimStyle.Render(fmt.Sprintf("  … %d more below", below)))
 	}
 
 	return b.String()
@@ -414,22 +414,9 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	}
 	label := branchIcon + " " + branch
 
-	// Worktree prefix: `wt· ` (dim) marks rows that are git worktrees rather
-	// than the main clone. Operationally meaningful — `d` does different
-	// things on worktree vs main-repo headers — so it gets a visible flag.
-	worktreePrefix := ""
-	if repoInfo.IsWorktreeRepo {
-		worktreePrefix = "wt· "
-	}
-
 	dirty := ""
 	if repoInfo.IsDirty {
-		dirty = "*"
-	}
-
-	pr := ""
-	if repoInfo.PR != nil {
-		pr = " " + renderPRBadge(repoInfo.PR, selected)
+		dirty = " *"
 	}
 
 	chevron := "▸"
@@ -437,30 +424,37 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 		chevron = "▾"
 	}
 
+	// Worktree distinction: italicize the branch label instead of a `wt·`
+	// prefix. Zero extra width; eye picks out worktrees from main clones at
+	// the same indent without a noisy left column of repeated chips.
+	branchFG := BranchStyle
+	if repoInfo.IsWorktreeRepo {
+		branchFG = branchFG.Italic(true)
+	}
+
+	prBadge := ""
+	if repoInfo.PR != nil {
+		prBadge = " " + renderPRBadge(repoInfo.PR, selected)
+	}
+
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
-		wt := ""
-		if worktreePrefix != "" {
-			wt = SessionStatusSelStyle.Render(worktreePrefix)
+		// Selection bg is one contiguous span over title + dirty + PR badge,
+		// so the highlighted row reads as a single pill instead of two boxes.
+		inner := " " + label + dirty
+		if prText := prBadgeText(repoInfo.PR); prText != "" {
+			inner += " " + prText
 		}
-		branchStyled := SessionTitleSelStyle.Render(" " + label + " ")
-		dirtyStyled := ""
-		if dirty != "" {
-			dirtyStyled = SessionStatusSelStyle.Render(dirty)
-		}
-		return fmt.Sprintf("   %s %s%s", icon, wt+branchStyled, dirtyStyled) + pr
+		inner += " "
+		return fmt.Sprintf("   %s %s", icon, SessionTitleSelStyle.Italic(repoInfo.IsWorktreeRepo).Render(inner))
 	}
 	icon := DimStyle.Render(chevron)
-	wt := ""
-	if worktreePrefix != "" {
-		wt = DimStyle.Render(worktreePrefix)
-	}
-	branchStyled := BranchStyle.Render(label)
+	branchStyled := branchFG.Render(label)
 	dirtyStyled := ""
 	if dirty != "" {
-		dirtyStyled = " " + DirtyStyle.Render(dirty)
+		dirtyStyled = DirtyStyle.Render(dirty)
 	}
-	return fmt.Sprintf("   %s %s%s", icon, wt, branchStyled+dirtyStyled) + pr
+	return fmt.Sprintf("   %s %s%s%s", icon, branchStyled, dirtyStyled, prBadge)
 }
 
 // renderCheckoutHeaderNonGit renders a checkout row for a folder that isn't
@@ -503,40 +497,32 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 
 	// Selection: the inverted-background title carries the "you are here"
 	// signal on its own — no leading ▶ arrow (it collided with the chevron
-	// glyph used for collapsed headers).
-	selPrefix := " "
-	var styledSymbol, styledTitle, styledSlot string
-
+	// glyph used for collapsed headers). Bg fill spans symbol + title + slot
+	// in one continuous render so the row reads as a single pill.
 	if selected {
-		styledSymbol = SessionStatusSelStyle.Render(symbolRaw)
-		styledTitle = SessionTitleSelStyle.Render(" " + title + " ")
-		if slotRaw != "" {
-			styledSlot = SessionStatusSelStyle.Render(slotRaw)
-		}
-	} else {
-		styledSymbol = StatusSymbol(status)
-		styledTitle = TitleStyleForStatus(status).Render(title)
-		if slotRaw != "" {
-			styledSlot = SlotBadgeDimStyle.Render(slotRaw)
-		}
+		guide := BorderGuideStyle.Render(guideGlyph)
+		row := " " + symbolRaw + " " + title + slotRaw + " "
+		return fmt.Sprintf("  %s%s", guide, SessionTitleSelStyle.Render(row))
 	}
 
+	styledSymbol := StatusSymbol(status)
+	styledTitle := TitleStyleForStatus(status).Render(title)
+	styledSlot := ""
+	if slotRaw != "" {
+		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
+	}
 	guide := BorderGuideStyle.Render(guideGlyph)
-	return fmt.Sprintf("  %s%s%s %s%s", guide, selPrefix, styledSymbol, styledTitle, styledSlot)
+	return fmt.Sprintf("  %s %s %s%s", guide, styledSymbol, styledTitle, styledSlot)
 }
 
 // renderIdleFold → "  │   + N idle"  (under a checkout, in dim)
 func renderIdleFold(item SidebarItem, width int, selected bool) string {
 	label := fmt.Sprintf("+ %d idle", item.IdleCount)
-	selPrefix := " "
-	var styled string
-	if selected {
-		styled = SessionTitleSelStyle.Render(" " + label + " ")
-	} else {
-		styled = DimStyle.Render(label)
-	}
 	guide := BorderGuideStyle.Render(guideGlyph)
-	return fmt.Sprintf("  %s%s  %s", guide, selPrefix, styled)
+	if selected {
+		return fmt.Sprintf("  %s%s", guide, SessionTitleSelStyle.Render("   "+label+" "))
+	}
+	return fmt.Sprintf("  %s   %s", guide, DimStyle.Render(label))
 }
 
 // renderPendingItem renders a "Creating…" phantom under its checkout.
@@ -552,68 +538,75 @@ func renderPendingItem(pw *PendingWorkspace, width int, selected bool) string {
 		title = title[:maxTitleLen-1] + "…"
 	}
 
-	selPrefix := " "
-	var styledSpinner, styledTitle string
-	if selected {
-		styledSpinner = SessionStatusSelStyle.Render(spinner)
-		styledTitle = SessionTitleSelStyle.Render(" " + title + " ")
-	} else {
-		styledSpinner = lipgloss.NewStyle().Foreground(ColorAccent).Render(spinner)
-		styledTitle = DimStyle.Render(title)
-	}
 	guide := BorderGuideStyle.Render(guideGlyph)
-	return fmt.Sprintf("  %s%s%s %s", guide, selPrefix, styledSpinner, styledTitle)
+	if selected {
+		row := " " + spinner + " " + title + " "
+		return fmt.Sprintf("  %s%s", guide, SessionTitleSelStyle.Render(row))
+	}
+	styledSpinner := lipgloss.NewStyle().Foreground(ColorAccent).Render(spinner)
+	styledTitle := DimStyle.Render(title)
+	return fmt.Sprintf("  %s %s %s", guide, styledSpinner, styledTitle)
 }
 
-func renderPRBadge(pr *github.PR, selected bool) string {
+// prBadgeText returns the raw badge text ("#N" or "#N ✕↩") without styling;
+// callers wrap it in the selection bg or per-state PR color.
+func prBadgeText(pr *github.PR) string {
 	if pr == nil || pr.State == "CLOSED" {
 		return ""
 	}
-
 	badge := fmt.Sprintf("#%d", pr.Number)
-
 	if pr.State == "MERGED" {
-		result := badge + " ⇡"
-		if selected {
-			return SessionStatusSelStyle.Render(result)
-		}
-		return PRMergedStyle.Render(result)
+		return badge + " ⇡"
 	}
-
-	ciFail := pr.CIStatus == "FAILURE"
-	changesReq := pr.ReviewDecision == "CHANGES_REQUESTED"
-	approved := pr.ReviewDecision == "APPROVED"
-	ciPass := pr.CIStatus == "SUCCESS"
-	hasThreads := pr.UnresolvedThreads > 0
-	hasConflicts := pr.HasConflicts
-
 	var icons string
-	style := PRPendingStyle
-
-	if ciFail || changesReq || hasThreads || hasConflicts {
-		style = PRFailStyle
-		if ciFail {
-			icons += "✕"
-		}
-		if hasConflicts {
-			icons += "⚠"
-		}
-		if changesReq || hasThreads {
-			icons += "↩"
-		}
-	} else if approved && ciPass {
-		style = PROpenStyle
+	if pr.CIStatus == "FAILURE" {
+		icons += "✕"
+	}
+	if pr.HasConflicts {
+		icons += "⚠"
+	}
+	if pr.ReviewDecision == "CHANGES_REQUESTED" || pr.UnresolvedThreads > 0 {
+		icons += "↩"
+	}
+	if icons == "" && pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" {
 		icons = "✓"
 	}
+	if icons == "" {
+		return badge
+	}
+	return badge + " " + icons
+}
 
-	result := badge
-	if icons != "" {
-		result += " " + icons
+// prBadgeStyle picks the foreground color carrying the PR's state semantic.
+func prBadgeStyle(pr *github.PR) lipgloss.Style {
+	if pr == nil {
+		return PRPendingStyle
+	}
+	if pr.State == "MERGED" {
+		return PRMergedStyle
+	}
+	ciFail := pr.CIStatus == "FAILURE"
+	changesReq := pr.ReviewDecision == "CHANGES_REQUESTED"
+	hasThreads := pr.UnresolvedThreads > 0
+	hasConflicts := pr.HasConflicts
+	if ciFail || changesReq || hasThreads || hasConflicts {
+		return PRFailStyle
+	}
+	if pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" {
+		return PROpenStyle
+	}
+	return PRPendingStyle
+}
+
+func renderPRBadge(pr *github.PR, selected bool) string {
+	text := prBadgeText(pr)
+	if text == "" {
+		return ""
 	}
 	if selected {
-		return SessionStatusSelStyle.Render(result)
+		return SessionStatusSelStyle.Render(text)
 	}
-	return style.Render(result)
+	return prBadgeStyle(pr).Render(text)
 }
 
 // NextSelectableItem advances the cursor; every row is selectable.

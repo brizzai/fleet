@@ -26,7 +26,7 @@ var (
 		Name:    "fleet-pink",
 		Bg:      lipgloss.Color("#16121f"),
 		Surface: lipgloss.Color("#231a2e"),
-		Border:  lipgloss.Color("#3d2e4c"),
+		Border:  lipgloss.Color("#5e4d6e"),
 		Text:    lipgloss.Color("#f3e9f0"),
 		TextDim: lipgloss.Color("#7a6a80"),
 		Accent:  lipgloss.Color("#ff77c6"),

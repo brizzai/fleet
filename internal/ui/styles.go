@@ -13,7 +13,7 @@ import (
 var (
 	ColorBg      = lipgloss.Color("#16121f")
 	ColorSurface = lipgloss.Color("#231a2e")
-	ColorBorder  = lipgloss.Color("#3d2e4c")
+	ColorBorder  = lipgloss.Color("#5e4d6e")
 	ColorText    = lipgloss.Color("#f3e9f0")
 	ColorTextDim = lipgloss.Color("#7a6a80")
 	ColorAccent  = lipgloss.Color("#ff77c6")
