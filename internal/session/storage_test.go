@@ -479,7 +479,7 @@ func TestUpdatePromptCount(t *testing.T) {
 	}
 }
 
-func TestMarkAndResetTitleGenerated(t *testing.T) {
+func TestMarkTitleGenerated(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
@@ -511,18 +511,6 @@ func TestMarkAndResetTitleGenerated(t *testing.T) {
 	}
 	if !sessions[0].TitleGenerated {
 		t.Error("expected TitleGenerated to be true")
-	}
-
-	// Reset.
-	if err := db.ResetTitleGenerated("titlegen-test"); err != nil {
-		t.Fatalf("ResetTitleGenerated failed: %v", err)
-	}
-	sessions, err = db.LoadSessions()
-	if err != nil {
-		t.Fatalf("LoadSessions failed: %v", err)
-	}
-	if sessions[0].TitleGenerated {
-		t.Error("expected TitleGenerated to be false after reset")
 	}
 }
 

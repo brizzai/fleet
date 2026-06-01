@@ -42,6 +42,15 @@ const (
 	focusFilterFooterRows  = 2 // border + content line — focus mode / filter active
 	statusRoundRobin       = 5 // sessions per tick
 	undoDeleteTimeout      = 5 * time.Second
+
+	// claudeNameRecheckInterval is the steady-state cadence for re-reading a
+	// session's title from its (growing) JSONL transcript.
+	claudeNameRecheckInterval = 30 * time.Second
+	// claudeNameFreshPollWindow is how long after creation a still-untitled
+	// session is polled every cycle so it adopts its ai-title promptly. Past
+	// this window the transcript is large enough that scanning it every tick is
+	// wasteful, so we fall back to claudeNameRecheckInterval.
+	claudeNameFreshPollWindow = 2 * time.Minute
 )
 
 // PendingDelete holds state for a deferred session deletion (undo window).
@@ -3098,10 +3107,17 @@ func (h *Home) statusWorkerCycle() {
 				continue
 			}
 
-			// Re-read Claude's title from the JSONL. Until we have one, check
-			// every cycle so a fresh session adopts its ai-title promptly;
-			// after that, re-check ~every 30s to follow custom-title/ai-title drift.
-			if s.ClaudeSessionID != "" && (s.ClaudeSessionName == "" || time.Since(s.ClaudeNameLastChecked) > 30*time.Second) {
+			// Re-read Claude's title from the JSONL. A freshly-created session
+			// with no title yet is polled every cycle so it adopts its ai-title
+			// promptly; otherwise (already titled, or old enough that its
+			// transcript is large) we re-check ~every 30s to follow
+			// custom-title/ai-title drift without re-scanning a growing file
+			// each tick.
+			recheck := claudeNameRecheckInterval
+			if s.ClaudeSessionName == "" && time.Since(s.CreatedAt) < claudeNameFreshPollWindow {
+				recheck = 0
+			}
+			if s.ClaudeSessionID != "" && time.Since(s.ClaudeNameLastChecked) >= recheck {
 				s.ClaudeNameLastChecked = time.Now()
 				name := session.ReadClaudeSessionName(s.ClaudeSessionID, s.ProjectPath)
 				if name != "" && name != s.ClaudeSessionName {
