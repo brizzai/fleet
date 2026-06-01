@@ -95,6 +95,44 @@ func TestRecentReposSkipsNonGitAndMissing(t *testing.T) {
 	}
 }
 
+// TestRecentReposDedupKeepsNewest: when two project dirs resolve to the same
+// cwd, the kept record must be the most-recently-used transcript — not whichever
+// project dir sorted first alphabetically.
+func TestRecentReposDedupKeepsNewest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "code", "proj")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	write := func(projDir, sessionID string, mod time.Time) {
+		dir := filepath.Join(home, ".claude", "projects", projDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f := filepath.Join(dir, sessionID+".jsonl")
+		line := `{"type":"user","cwd":"` + repo + `","gitBranch":"main","message":{"role":"user","content":"hi there"}}` + "\n"
+		if err := os.WriteFile(f, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(f, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// proj-a sorts first alphabetically but is OLDER; proj-b is the NEWER one.
+	write("proj-a", "aaaaaaaa-older", time.Now().Add(-10*time.Hour))
+	write("proj-b", "bbbbbbbb-newer", time.Now().Add(-1*time.Hour))
+
+	got := RecentRepos(10)
+	if len(got) != 1 {
+		t.Fatalf("want 1 deduped repo, got %d: %+v", len(got), got)
+	}
+	if got[0].ClaudeSessionID != "bbbbbbbb-newer" {
+		t.Errorf("dedup kept the older transcript: got session %q, want the newer one", got[0].ClaudeSessionID)
+	}
+}
+
 func TestRecentReposEmptyHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if got := RecentRepos(10); got != nil {

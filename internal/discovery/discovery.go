@@ -50,21 +50,33 @@ func RecentRepos(limit int) []Recent {
 		return nil
 	}
 
-	seen := make(map[string]bool)
 	var out []Recent
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		rec, ok := readProject(filepath.Join(home, ".claude", "projects", e.Name()))
-		if !ok || seen[rec.Path] {
+		if !ok {
 			continue
 		}
-		seen[rec.Path] = true
 		out = append(out, rec)
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].LastUsed.After(out[j].LastUsed) })
+	// Dedup AFTER the recency sort so the kept record per resolved cwd is the
+	// most-recently-used one — two project dirs can map to the same path (e.g.
+	// a /var ↔ /private/var symlink), and the resume target must be the latest
+	// transcript, not whichever dir sorted first alphabetically.
+	seen := make(map[string]bool, len(out))
+	deduped := out[:0]
+	for _, rec := range out {
+		if seen[rec.Path] {
+			continue
+		}
+		seen[rec.Path] = true
+		deduped = append(deduped, rec)
+	}
+	out = deduped
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
