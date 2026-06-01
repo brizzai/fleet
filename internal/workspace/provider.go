@@ -109,12 +109,18 @@ func (g *GitWorktreeProvider) Create(repoPath, name, branch, baseBranch string) 
 		if err := runAdd("--no-checkout"); err != nil {
 			return nil, err
 		}
+		// The worktree dir (and, for a fresh -b, its branch) now exist. If the
+		// git-crypt setup or checkout fails below, remove the worktree so the same
+		// name can be retried; the branch is intentionally left intact (a retry
+		// reuses it via the no-`-b` path).
 		if err := linkGitCrypt(ctx, path); err != nil {
 			debuglog.Logger.Error("git-crypt worktree link failed", "name", name, "path", path, "err", err)
+			removeWorktree(repoPath, path)
 			return nil, fmt.Errorf("git-crypt worktree setup: %w", err)
 		}
 		if out, err := exec.CommandContext(ctx, "git", "-C", path, "checkout").CombinedOutput(); err != nil {
 			debuglog.Logger.Error("git-crypt worktree checkout failed", "name", name, "path", path, "err", strings.TrimSpace(string(out)))
+			removeWorktree(repoPath, path)
 			return nil, fmt.Errorf("git worktree checkout: %s", strings.TrimSpace(string(out)))
 		}
 	} else if err := runAdd(); err != nil {
@@ -140,8 +146,21 @@ func usesGitCrypt(ctx context.Context, repoPath string) bool {
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(repoPath, common)
 	}
-	info, err := os.Stat(filepath.Join(common, "git-crypt", "keys"))
-	return err == nil && info.IsDir()
+	// git-crypt stores keys as files under <gitdir>/git-crypt/keys/. `git-crypt
+	// lock` removes those files but can leave an empty keys/ dir behind, so we
+	// require at least one key file present — not merely that the dir exists — to
+	// avoid treating a locked (keyless) repo as unlocked, which would link an
+	// empty key dir and then fail checkout.
+	entries, err := os.ReadDir(filepath.Join(common, "git-crypt", "keys"))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // linkGitCrypt symlinks the shared git-crypt key dir into a worktree's private
@@ -164,6 +183,18 @@ func linkGitCrypt(ctx context.Context, worktreePath string) error {
 	link := filepath.Join(gitDir, "git-crypt")
 	_ = os.Remove(link) // clear any stale link before re-creating
 	return os.Symlink(filepath.Join(common, "git-crypt"), link)
+}
+
+// removeWorktree best-effort removes a partially-created worktree (e.g. after a
+// failed git-crypt setup) so its path/name can be reused on retry. It uses a
+// fresh context so cleanup still runs even when the caller's context already
+// timed out, and leaves the branch intact (a retry reuses it).
+func removeWorktree(repoPath, worktreePath string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "remove", "--force", worktreePath).CombinedOutput(); err != nil {
+		debuglog.Logger.Warn("git-crypt cleanup: worktree remove failed", "path", worktreePath, "err", strings.TrimSpace(string(out)))
+	}
 }
 
 func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {

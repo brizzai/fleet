@@ -23,20 +23,51 @@ type nmhManifest struct {
 	AllowedOrigins []string `json:"allowed_origins"`
 }
 
-// NMHManifestPath returns the path where the NMH manifest should be installed.
-// Chrome's NativeMessagingHosts dir differs per OS.
-func NMHManifestPath() string {
+// nmhManifestDirs returns the NativeMessagingHosts directories for Chrome-family
+// browsers on this OS. Stable Google Chrome is always included so the manifest is
+// ready before Chrome's first launch; the other variants (Chromium and the
+// beta/unstable channels) are included only when that browser's config dir
+// already exists, so we don't create stray dirs for browsers that aren't there.
+func nmhManifestDirs() []string {
 	home, _ := os.UserHomeDir()
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts", nmhName+".json")
+
+	type candidate struct {
+		base string // browser config dir; "" means always install
+		nmh  string // NativeMessagingHosts dir
 	}
-	// Linux Chrome.
-	return filepath.Join(home, ".config", "google-chrome", "NativeMessagingHosts", nmhName+".json")
+	var cands []candidate
+	if runtime.GOOS == "darwin" {
+		appSup := filepath.Join(home, "Library", "Application Support")
+		cands = []candidate{
+			{nmh: filepath.Join(appSup, "Google", "Chrome", "NativeMessagingHosts")},
+			{base: filepath.Join(appSup, "Chromium"), nmh: filepath.Join(appSup, "Chromium", "NativeMessagingHosts")},
+		}
+	} else {
+		cfg := filepath.Join(home, ".config")
+		cands = []candidate{
+			{nmh: filepath.Join(cfg, "google-chrome", "NativeMessagingHosts")},
+			{base: filepath.Join(cfg, "chromium"), nmh: filepath.Join(cfg, "chromium", "NativeMessagingHosts")},
+			{base: filepath.Join(cfg, "google-chrome-beta"), nmh: filepath.Join(cfg, "google-chrome-beta", "NativeMessagingHosts")},
+			{base: filepath.Join(cfg, "google-chrome-unstable"), nmh: filepath.Join(cfg, "google-chrome-unstable", "NativeMessagingHosts")},
+		}
+	}
+
+	dirs := make([]string, 0, len(cands))
+	for _, c := range cands {
+		if c.base != "" {
+			if info, err := os.Stat(c.base); err != nil || !info.IsDir() {
+				continue
+			}
+		}
+		dirs = append(dirs, c.nmh)
+	}
+	return dirs
 }
 
-// InstallNativeMessagingHost writes the NMH manifest JSON so Chrome can find the host.
-// Uses os.Executable() + EvalSymlinks for a stable binary path (same pattern as hooks.GetHookCommand).
-// Returns true if the manifest was written or updated.
+// InstallNativeMessagingHost writes the NMH manifest JSON into every applicable
+// Chrome-family NativeMessagingHosts dir so Chrome/Chromium can find the host.
+// Uses os.Executable() + EvalSymlinks for a stable binary path (same pattern as
+// hooks.GetHookCommand). Returns true if any manifest was written or updated.
 func InstallNativeMessagingHost() bool {
 	log := debuglog.Logger
 
@@ -53,26 +84,6 @@ func InstallNativeMessagingHost() bool {
 	// The native host command is the binary itself with "chrome-host" subcommand.
 	hostPath := resolved
 
-	manifestPath := NMHManifestPath()
-
-	// Remove legacy NMH manifest if present so Chrome doesn't keep two competing entries.
-	legacyPath := filepath.Join(filepath.Dir(manifestPath), legacyNMHName+".json")
-	if _, err := os.Stat(legacyPath); err == nil {
-		if err := os.Remove(legacyPath); err != nil {
-			log.Warn("chrome: cannot remove legacy NMH manifest", "path", legacyPath, "err", err)
-		} else {
-			log.Info("chrome: removed legacy NMH manifest", "path", legacyPath)
-		}
-	}
-
-	// Check if manifest already exists with the correct path.
-	if existing, err := os.ReadFile(manifestPath); err == nil {
-		var m nmhManifest
-		if json.Unmarshal(existing, &m) == nil && m.Path == hostPath {
-			return false // Already up to date.
-		}
-	}
-
 	manifest := nmhManifest{
 		Name:        nmhName,
 		Description: "fleet Chrome tab control",
@@ -83,24 +94,45 @@ func InstallNativeMessagingHost() bool {
 			"chrome-extension://haphpcoecelhofejcklinnlbfijgdnih/",
 		},
 	}
-
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		log.Warn("chrome: cannot marshal NMH manifest", "err", err)
 		return false
 	}
 
-	// Ensure directory exists.
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0755); err != nil {
-		log.Warn("chrome: cannot create NMH dir", "err", err)
-		return false
-	}
+	changed := false
+	for _, dir := range nmhManifestDirs() {
+		manifestPath := filepath.Join(dir, nmhName+".json")
 
-	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
-		log.Warn("chrome: cannot write NMH manifest", "err", err, "path", manifestPath)
-		return false
-	}
+		// Remove legacy NMH manifest if present so Chrome doesn't keep two competing entries.
+		legacyPath := filepath.Join(dir, legacyNMHName+".json")
+		if _, err := os.Stat(legacyPath); err == nil {
+			if err := os.Remove(legacyPath); err != nil {
+				log.Warn("chrome: cannot remove legacy NMH manifest", "path", legacyPath, "err", err)
+			} else {
+				log.Info("chrome: removed legacy NMH manifest", "path", legacyPath)
+			}
+		}
 
-	log.Info("chrome: installed NMH manifest", "path", manifestPath)
-	return true
+		// Skip if the manifest already exists with the correct path.
+		if existing, err := os.ReadFile(manifestPath); err == nil {
+			var m nmhManifest
+			if json.Unmarshal(existing, &m) == nil && m.Path == hostPath {
+				continue
+			}
+		}
+
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Warn("chrome: cannot create NMH dir", "err", err, "dir", dir)
+			continue
+		}
+		if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+			log.Warn("chrome: cannot write NMH manifest", "err", err, "path", manifestPath)
+			continue
+		}
+
+		log.Info("chrome: installed NMH manifest", "path", manifestPath)
+		changed = true
+	}
+	return changed
 }
