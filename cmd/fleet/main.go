@@ -135,6 +135,9 @@ func runTUI() {
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
+	// Wire the program back into the model so worker goroutines can push
+	// state updates to the Update loop via h.send. Must happen before Run.
+	model.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

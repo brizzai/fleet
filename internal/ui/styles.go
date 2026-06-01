@@ -5,25 +5,28 @@ import (
 
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// Tokyo Night dark theme colors.
+// Initial colors match the default Fleet Pink palette. ApplyPalette reassigns
+// these when a theme is loaded, so a fresh fleet without a configured theme
+// still renders in the flagship pink.
 var (
-	ColorBg      = lipgloss.Color("#1a1b26")
-	ColorSurface = lipgloss.Color("#24283b")
-	ColorBorder  = lipgloss.Color("#414868")
-	ColorText    = lipgloss.Color("#c0caf5")
-	ColorTextDim = lipgloss.Color("#565f89")
-	ColorAccent  = lipgloss.Color("#7aa2f7")
-	ColorGreen   = lipgloss.Color("#9ece6a")
-	ColorYellow  = lipgloss.Color("#e0af68")
-	ColorBlue    = lipgloss.Color("#7dcfff")
-	ColorRed     = lipgloss.Color("#f7768e")
-	ColorGray    = lipgloss.Color("#565f89")
-	ColorWhite   = lipgloss.Color("#c0caf5")
-	ColorBrand   = lipgloss.Color("#F48FB1") // fleet pink — theme-independent
-	ColorOrange  = lipgloss.Color("#ff9e64")
-	ColorPurple  = lipgloss.Color("#bb9af7")
+	ColorBg      = lipgloss.Color("#16121f")
+	ColorSurface = lipgloss.Color("#231a2e")
+	ColorBorder  = lipgloss.Color("#5e4d6e")
+	ColorText    = lipgloss.Color("#f3e9f0")
+	ColorTextDim = lipgloss.Color("#807888")
+	ColorAccent  = lipgloss.Color("#dc88c0")
+	ColorGreen   = lipgloss.Color("#8ad698")
+	ColorYellow  = lipgloss.Color("#e8c590")
+	ColorBlue    = lipgloss.Color("#9aa8e0")
+	ColorRed     = lipgloss.Color("#e07685")
+	ColorGray    = lipgloss.Color("#807888")
+	ColorWhite   = lipgloss.Color("#f3e9f0")
+	ColorBrand   = lipgloss.Color("#dc88c0") // fleet pink — theme-independent brand mark
+	ColorOrange  = lipgloss.Color("#e8a880")
+	ColorPurple  = lipgloss.Color("#a08dd6")
 )
 
 // Pre-allocated styles.
@@ -88,15 +91,15 @@ var (
 	// Panel title style (cyan/blue like agent-deck).
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 
-	// Header bar style.
-	HeaderBarStyle = lipgloss.NewStyle().Background(ColorSurface).Padding(0, 1)
+	// Header bar style — no background fill so the top bar reads as part of
+	// the canvas, not a separate ribbon.
+	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
 
-	// Help bar key pill style (inverted accent).
+	// Help bar key style — accent-color text, bold. No background fill;
+	// reads as a Posting-style "colored key + plain description" pair.
 	HelpKeyStyle = lipgloss.NewStyle().
-			Background(ColorAccent).
-			Foreground(ColorBg).
-			Bold(true).
-			Padding(0, 1)
+			Foreground(ColorAccent).
+			Bold(true)
 
 	HelpDescStyle = lipgloss.NewStyle().Foreground(ColorText)
 
@@ -112,6 +115,10 @@ var (
 
 	// Slot badge style (RTS-style quick-access hotkey).
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
+
+	// Dim variant of the slot badge — used in the clean-tree sidebar where
+	// the bright orange would fight the calm row layout.
+	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
 )
 
 // ApplyPalette reassigns all color vars and rebuilds all style vars from the given palette.
@@ -162,9 +169,9 @@ func ApplyPalette(p Palette) {
 	ToolBadgeSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
 
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
-	HeaderBarStyle = lipgloss.NewStyle().Background(ColorSurface).Padding(0, 1)
+	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
 
-	HelpKeyStyle = lipgloss.NewStyle().Background(ColorAccent).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	HelpKeyStyle = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	HelpDescStyle = lipgloss.NewStyle().Foreground(ColorText)
 	HelpSepStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 
@@ -176,6 +183,152 @@ func ApplyPalette(p Palette) {
 	PRMergedStyle = lipgloss.NewStyle().Foreground(ColorPurple)
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
+	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+}
+
+// RenderBorderedPanel wraps content in a rounded border with a title inset
+// into the top border. Output is exactly width × height.
+//
+//	╭─ Sessions ──────── 2 RUN · 51 idle ─╮
+//	│ ...content...                       │
+//	╰─────────────────────────────────────╯
+//
+// When accent is true, the border is drawn in the accent color (used for the
+// focused panel in dual mode); otherwise it uses the muted border color.
+// Use RenderBorderedPanelTopRight to embed a right-aligned status pill into
+// the top border, or RenderBorderedPanelFooter for the bottom-border variant.
+func RenderBorderedPanel(content, title string, width, height int, accent bool) string {
+	return renderBorderedPanel(content, title, "", "", width, height, accent)
+}
+
+// RenderBorderedPanelTopRight is like RenderBorderedPanel but also embeds a
+// right-aligned status pill into the TOP border (after the title).
+func RenderBorderedPanelTopRight(content, title, titleRight string, width, height int, accent bool) string {
+	return renderBorderedPanel(content, title, titleRight, "", width, height, accent)
+}
+
+// RenderBorderedPanelFooter is like RenderBorderedPanel but also embeds a
+// right-aligned status pill into the bottom border. Empty footer renders an
+// unbroken bottom border.
+func RenderBorderedPanelFooter(content, title, footerRight string, width, height int, accent bool) string {
+	return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
+}
+
+func renderBorderedPanel(content, title, titleRight, footerRight string, width, height int, accent bool) string {
+	if width < 6 || height < 3 {
+		return content
+	}
+
+	borderColor := ColorBorder
+	if accent {
+		borderColor = ColorAccent
+	}
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	titleStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+
+	// Top border: ╭─ title ─...─ titleRight ─╮ (titleRight optional).
+	// Pre-styled inputs (callers like BuildPreviewTitle / statusCountsLine that
+	// already render per-segment colors) are passed through verbatim; only
+	// plain strings get the default title/right wrap.
+	titleText := styleIfPlain(title, titleStyle)
+	titleWidth := lipgloss.Width(titleText)
+	if titleRight != "" {
+		rightText := styleIfPlain(titleRight, lipgloss.NewStyle().Foreground(ColorTextDim))
+		rightW := lipgloss.Width(rightText)
+		// Layout: ╭ ─ ' ' title ' ' ─*K ' ' titleRight ' ' ─ ╮
+		// 8 fixed chars: 2 corners + 2 dashes + 4 spaces.
+		dashes := width - 8 - titleWidth - rightW
+		if dashes < 1 {
+			// Top is too tight; drop the trailing right text rather than wrap.
+			return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
+		}
+		top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", dashes)+" ") + rightText + borderStyle.Render(" ─╮")
+		return finishBorderedPanel(top, content, footerRight, width, height, borderStyle)
+	}
+	// Layout: ╭ ─ ' ' title ' ' ─*K ╮ — leading dash count is 1, K fills the rest.
+	fillRight := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space*/ - titleWidth - 1 /*space*/
+	if fillRight < 1 {
+		// Title too wide; truncate it so the border still closes. ansi.Truncate
+		// is escape-sequence aware, so pre-styled titles stay intact.
+		maxTitle := max(width-6, 1)
+		titleText = styleIfPlain(ansi.Truncate(title, maxTitle, ""), titleStyle)
+		titleWidth = lipgloss.Width(titleText)
+		fillRight = max(width-5-titleWidth, 1)
+	}
+	top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", fillRight)+"╮")
+	return finishBorderedPanel(top, content, footerRight, width, height, borderStyle)
+}
+
+// styleIfPlain renders s with style only when s is plain text. If s already
+// contains an ANSI escape, return it untouched so per-segment colors set by
+// the caller (e.g. BuildPreviewTitle's status pill) survive the outer wrap.
+func styleIfPlain(s string, style lipgloss.Style) string {
+	if strings.Contains(s, "\x1b") {
+		return s
+	}
+	return style.Render(s)
+}
+
+func finishBorderedPanel(top, content, footerRight string, width, height int, borderStyle lipgloss.Style) string {
+
+	// Bottom border, optionally with a right-aligned status pill inset.
+	var bottom string
+	if footerRight != "" {
+		footerStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+		footerText := styleIfPlain(footerRight, footerStyle)
+		footerW := lipgloss.Width(footerText)
+		// Layout: ╰─*K ' ' footer ' '─╯ — trailing dash count is 1.
+		fillLeft := width - 2 /*corners*/ - 1 /*space*/ - footerW - 1 /*space*/ - 1 /*trailing dash*/
+		if fillLeft < 1 {
+			// Footer too wide; truncate (ANSI-aware via ansi.Truncate).
+			maxFooter := max(width-6, 1)
+			footerText = styleIfPlain(ansi.Truncate(footerRight, maxFooter, ""), footerStyle)
+			footerW = lipgloss.Width(footerText)
+			fillLeft = max(width-5-footerW, 1)
+		}
+		bottom = borderStyle.Render("╰"+strings.Repeat("─", fillLeft)+" ") + footerText + borderStyle.Render(" ─╯")
+	} else {
+		bottom = borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+	}
+
+	innerWidth := width - 2
+	innerHeight := height - 2
+	contentLines := strings.Split(content, "\n")
+
+	side := borderStyle.Render("│")
+	middle := make([]string, innerHeight)
+	for i := range innerHeight {
+		line := ""
+		if i < len(contentLines) {
+			line = contentLines[i]
+		}
+		lineW := lipgloss.Width(line)
+		if lineW > innerWidth {
+			line = ansi.Truncate(line, innerWidth, "")
+		} else if lineW < innerWidth {
+			line += strings.Repeat(" ", innerWidth-lineW)
+		}
+		middle[i] = side + line + side
+	}
+
+	return top + "\n" + strings.Join(middle, "\n") + "\n" + bottom
+}
+
+// dimBackdrop dims rendered content by wrapping each line in the SGR Faint
+// escape (CSI 2 m) so an overlay can sit above it with visible elevation.
+// Inner ANSI sequences keep their hues; the faint layer only reduces overall
+// intensity — most terminals render this as a subtle wash that's perfect as
+// a modal backdrop without the cost of a full re-render.
+func dimBackdrop(s string) string {
+	const (
+		faint = "\x1b[2m"
+		reset = "\x1b[22m"
+	)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = faint + line + reset
+	}
+	return strings.Join(lines, "\n")
 }
 
 // RenderPanelTitle renders a panel title with a divider underline.
@@ -198,43 +351,48 @@ func RenderFocusedPanelTitle(title string, width int) string {
 	return titleLine + "\n" + underline
 }
 
+// StatusIndicatorMode controls how StatusSymbol renders session state in the
+// sidebar. "icon" (default) uses semantic circles (●◐✕) and anchors idle/
+// starting rows with a dim `·` so every row has a leftmost mark. "bar" uses
+// a single colored vertical bar in the leftmost column (VS Code gutter style)
+// and keeps idle/starting blank — the gutter bar carries the signal there.
+var StatusIndicatorMode = "icon"
+
+const StatusBarChar = "┃"
+
 // StatusSymbol returns a styled status indicator.
 func StatusSymbol(status session.Status) string {
-	switch status {
-	case session.StatusRunning:
-		return StatusRunningStyle.Render("●")
-	case session.StatusWaiting:
-		return StatusWaitingStyle.Render("◐")
-	case session.StatusFinished:
-		return StatusFinishedStyle.Render("●")
-	case session.StatusIdle:
-		return StatusIdleStyle.Render("○")
-	case session.StatusError:
-		return StatusErrorStyle.Render("✕")
-	case session.StatusStarting:
-		return StatusStartingStyle.Render("○")
-	default:
-		return StatusIdleStyle.Render("○")
+	raw := StatusSymbolRaw(status)
+	if raw == " " {
+		return " "
 	}
+	return StatusStyle(status).Render(raw)
 }
 
-// StatusSymbolRaw returns the raw icon character for a status (no styling).
+// StatusSymbolRaw returns the raw character for a status, respecting the
+// configured indicator mode. Icon mode renders a dim `·` for idle so every
+// row has a leftmost anchor for the eye; bar mode keeps idle blank because
+// the gutter is the signal there.
 func StatusSymbolRaw(status session.Status) string {
+	if StatusIndicatorMode == "bar" {
+		switch status {
+		case session.StatusIdle, session.StatusStarting:
+			return " "
+		default:
+			return StatusBarChar
+		}
+	}
 	switch status {
-	case session.StatusRunning:
+	case session.StatusRunning, session.StatusFinished:
 		return "●"
 	case session.StatusWaiting:
 		return "◐"
-	case session.StatusFinished:
-		return "●"
-	case session.StatusIdle:
-		return "○"
 	case session.StatusError:
 		return "✕"
-	case session.StatusStarting:
-		return "○"
+	case session.StatusIdle, session.StatusStarting:
+		return "·"
 	default:
-		return "○"
+		return " "
 	}
 }
 
