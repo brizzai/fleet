@@ -22,33 +22,12 @@ type Palette struct {
 
 // Built-in palette definitions.
 var (
+	// Fleet Pink — vivid candy pink (#ff77c6) accent with sky-blue support.
+	// Accent carries the brand; sky blue is the secondary cool tone (branch
+	// names, finished status). The supporting status palette sits a notch
+	// quieter so semantic colors stay readable without out-shouting the accent.
 	PaletteFleetPink = Palette{
 		Name:    "fleet-pink",
-		Bg:      lipgloss.Color("#16121f"),
-		Surface: lipgloss.Color("#231a2e"),
-		Border:  lipgloss.Color("#5e4d6e"),
-		Text:    lipgloss.Color("#f3e9f0"),
-		TextDim: lipgloss.Color("#807888"),
-		// Accent is the only fully-saturated color — it carries the brand.
-		// Every other slot sits in the same ~70% luminance pastel band so
-		// status semantics read clearly without out-shouting the accent.
-		Accent: lipgloss.Color("#dc88c0"),
-		// Periwinkle: cool but shares a purple gene with the accent, so it
-		// harmonizes via analogous-color theory instead of clashing the way
-		// a true sky-blue or teal would. Used for branch names and finished
-		// status — secondary information that should feel calm.
-		Blue:   lipgloss.Color("#9aa8e0"),
-		Green:  lipgloss.Color("#8ad698"),
-		Yellow: lipgloss.Color("#e8c590"),
-		Red:    lipgloss.Color("#e07685"),
-		Orange: lipgloss.Color("#e8a880"),
-		Purple: lipgloss.Color("#a08dd6"),
-		Gray:   lipgloss.Color("#807888"),
-	}
-
-	// fleet-pink-bubblegum — vivid candy pink (#ff77c6), sky-blue support.
-	PaletteFleetPinkBubblegum = Palette{
-		Name:    "fleet-pink-bubblegum",
 		Bg:      lipgloss.Color("#17121f"),
 		Surface: lipgloss.Color("#241a2e"),
 		Border:  lipgloss.Color("#6a4d78"),
@@ -153,7 +132,6 @@ var (
 // BuiltinPalettes lists all available themes. Fleet Pink is the flagship default.
 var BuiltinPalettes = []Palette{
 	PaletteFleetPink,
-	PaletteFleetPinkBubblegum,
 	PaletteTokyoNight,
 	PaletteCatppuccin,
 	PaletteRosePine,
@@ -180,8 +158,6 @@ func PaletteDisplayName(name string) string {
 	switch name {
 	case "fleet-pink":
 		return "Fleet Pink"
-	case "fleet-pink-bubblegum":
-		return "Fleet Pink · Bubblegum"
 	case "tokyo-night":
 		return "Tokyo Night"
 	case "catppuccin-mocha":
