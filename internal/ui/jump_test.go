@@ -16,48 +16,48 @@ func visibleHasSession(h *Home, id string) bool {
 	return false
 }
 
-// TestJumpExpandsCollapsedOrigin: a waiting session hidden under a collapsed
-// origin group must be revealed (origin expanded) and selected when the user
-// presses Space (jump to next attention session).
-func TestJumpExpandsCollapsedOrigin(t *testing.T) {
-	idle := session.NewSession("main work", "/tmp/jt-main")
-	idle.SetStatus(session.StatusIdle)
-	waiting := session.NewSession("needs you", "/tmp/jt-wt")
-	waiting.SetStatus(session.StatusWaiting)
+// TestJumpSkipsCollapsedOrigin: Space-jump must NOT dive into a collapsed
+// origin. With a waiting session visible in one origin and another waiting
+// session hidden under a collapsed origin, jump lands on the visible one and
+// leaves the collapsed origin folded.
+func TestJumpSkipsCollapsedOrigin(t *testing.T) {
+	aMain := session.NewSession("alpha-main", "/tmp/js-a-main")
+	aMain.SetStatus(session.StatusIdle)
+	aWait := session.NewSession("alpha-wait", "/tmp/js-a-wt")
+	aWait.SetStatus(session.StatusWaiting)
+	bWait := session.NewSession("beta-wait", "/tmp/js-b")
+	bWait.SetStatus(session.StatusWaiting)
 
 	h := &Home{
-		sessions:     []*session.Session{idle, waiting},
+		sessions:     []*session.Session{aMain, aWait, bWait},
 		repoExpanded: map[string]bool{},
 		idleFolded:   map[string]bool{},
 		pinnedRepos:  map[string]bool{},
 	}
 	gi := map[string]*git.RepoInfo{
-		"/tmp/jt-main": {OriginKey: "github.com/acme/repo"},
-		"/tmp/jt-wt":   {OriginKey: "github.com/acme/repo", IsWorktreeRepo: true},
+		"/tmp/js-a-main": {OriginKey: "github.com/acme/alpha"},
+		"/tmp/js-a-wt":   {OriginKey: "github.com/acme/alpha", IsWorktreeRepo: true},
+		"/tmp/js-b":      {OriginKey: "github.com/acme/beta"},
 	}
 	h.gitInfoCache.Store(&gi)
 
-	// Collapse the shared origin group and rebuild — the waiting row is hidden.
-	originKey := OriginExpandKey("github.com/acme/repo")
-	h.repoExpanded[originKey] = false
+	// Collapse the beta origin — its waiting session is now hidden.
+	betaKey := OriginExpandKey("github.com/acme/beta")
+	h.repoExpanded[betaKey] = false
 	h.rebuildFlatItems()
-	if visibleHasSession(h, waiting.ID) {
-		t.Fatal("precondition failed: waiting session should be hidden under collapsed origin")
+	if visibleHasSession(h, bWait.ID) {
+		t.Fatal("precondition failed: beta waiting session should be hidden under collapsed origin")
 	}
 
-	// Land the cursor on the (collapsed) origin header, then jump.
 	h.cursor = 0
 	h.jumpToNextAttentionSession()
 
-	if !IsExpanded(h.repoExpanded, originKey) {
-		t.Error("jump did not expand the collapsed origin")
-	}
-	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
-		t.Fatalf("cursor out of range after jump: %d (items=%d)", h.cursor, len(h.flatItems))
-	}
 	landed := h.flatItems[h.cursor].Session
-	if landed == nil || landed.ID != waiting.ID {
-		t.Errorf("jump did not land on the waiting session inside the collapsed origin")
+	if landed == nil || landed.ID != aWait.ID {
+		t.Errorf("jump should land on the visible waiting session (alpha), got %v", landed)
+	}
+	if IsExpanded(h.repoExpanded, betaKey) {
+		t.Error("jump must NOT expand the collapsed beta origin")
 	}
 }
 

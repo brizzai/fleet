@@ -2327,129 +2327,47 @@ func (h *Home) collapseRepoAtCursor() {
 	h.syncViewport()
 }
 
-// jumpToNextAttentionSession cycles through sessions needing attention:
-// waiting first, then finished. Wraps around, auto-expands collapsed groups.
+// jumpToNextAttentionSession moves the cursor to the next session needing
+// attention — waiting first, then finished — cycling in on-screen order and
+// wrapping. It only considers rows that are CURRENTLY VISIBLE in the sidebar:
+// sessions inside a collapsed origin/checkout, idle-folded, or filtered out
+// are skipped, so folding a group mutes it from the jump cycle (and never
+// auto-expands it). Silent no-op when nothing visible needs attention.
 func (h *Home) jumpToNextAttentionSession() {
-	// Build ordered list of ALL sessions (same order as sidebar).
-	groups := session.GroupByRepo(h.sessions)
-	repos := make([]string, 0, len(groups))
-	for repo := range groups {
-		repos = append(repos, repo)
-	}
-	sort.Strings(repos)
-
-	type candidate struct {
-		s    *session.Session
-		repo string
-	}
-	var allSessions []candidate
-	for _, repo := range repos {
-		for _, s := range groups[repo] {
-			allSessions = append(allSessions, candidate{s: s, repo: repo})
-		}
-	}
-	if len(allSessions) == 0 {
+	n := len(h.flatItems)
+	if n == 0 {
 		return
 	}
-
-	// Find the current session's position in allSessions.
-	var currentID string
-	if h.cursor >= 0 && h.cursor < len(h.flatItems) && !h.flatItems[h.cursor].IsRepoHeader {
-		if s := h.flatItems[h.cursor].Session; s != nil {
-			currentID = s.ID
-		}
-	}
-	currentIdx := -1
-	for i, c := range allSessions {
-		if c.s.ID == currentID {
-			currentIdx = i
-			break
-		}
+	start := h.cursor
+	if start < 0 || start >= n {
+		start = 0
 	}
 
-	// findNext scans forward (wrapping) for a session with the given status.
-	findNext := func(status session.Status) *candidate {
-		n := len(allSessions)
-		start := currentIdx + 1
-		for i := 0; i < n; i++ {
-			c := &allSessions[(start+i)%n]
-			if c.s.GetStatus() == status {
-				return c
-			}
-		}
-		return nil
-	}
-
-	// Priority: waiting > finished.
-	target := findNext(session.StatusWaiting)
-	targetKind := "waiting"
-	if target == nil {
-		target = findNext(session.StatusFinished)
-		targetKind = "finished"
-	}
-
-	// visIdx returns the index of a session ID in the visible flatItems, or -1.
-	visIdx := func(id string) int {
-		for i, item := range h.flatItems {
-			if !item.IsRepoHeader && item.Session != nil && item.Session.ID == id {
+	// findNext scans forward from the cursor (wrapping) for a visible session
+	// row of the given status.
+	findNext := func(status session.Status) int {
+		for off := 1; off <= n; off++ {
+			i := (start + off) % n
+			it := h.flatItems[i]
+			if !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status {
 				return i
 			}
 		}
 		return -1
 	}
 
-	if target == nil {
-		debuglog.Logger.Debug("spacejump: no waiting/finished target",
-			"cursor", h.cursor, "currentID", currentID, "allSessions", len(allSessions))
+	target := findNext(session.StatusWaiting)
+	if target < 0 {
+		target = findNext(session.StatusFinished)
+	}
+	if target < 0 {
+		debuglog.Logger.Debug("spacejump: no visible waiting/finished target", "cursor", h.cursor)
 		return // Silent no-op.
 	}
 
-	// DIAGNOSTIC: capture orderings + collapse/filter state before we touch
-	// anything. allSessions is repo-path-sorted; flatItems is origin-tree
-	// sorted — when these diverge, "next" in the jump list isn't "next" on
-	// screen, which is the suspected "only works going down" bug.
-	debuglog.Logger.Debug("spacejump: target found",
-		"kind", targetKind,
-		"targetID", target.s.ID,
-		"targetRepo", target.repo,
-		"targetOrigin", h.originOf(target.repo),
-		"cursor", h.cursor,
-		"currentID", currentID,
-		"currentIdx_allSessions", currentIdx,
-		"currentVisIdx", visIdx(currentID),
-		"targetVisIdx_beforeExpand", visIdx(target.s.ID),
-		"originCollapsed", !IsExpanded(h.repoExpanded, OriginExpandKey(h.originOf(target.repo))),
-		"checkoutCollapsed", !IsExpanded(h.repoExpanded, target.repo),
-		"filterText", h.filterText,
-	)
-
-	// Expand both header levels (origin group + checkout) so the target is visible.
-	h.revealCheckout(target.repo)
-	h.rebuildFlatItems()
-
-	// Set cursor to the target session.
-	if i := visIdx(target.s.ID); i >= 0 {
-		dir := "down"
-		if i < h.cursor {
-			dir = "up"
-		}
-		debuglog.Logger.Debug("spacejump: landed",
-			"targetID", target.s.ID, "oldCursor", h.cursor, "newCursor", i, "direction", dir)
-		h.cursor = i
-		h.syncViewport()
-		return
-	}
-
-	// Target found by findNext but still absent from flatItems even after
-	// expanding both the origin and checkout keys — it's filtered out by the
-	// active filter. Cursor does NOT move.
-	debuglog.Logger.Warn("spacejump: target HIDDEN, cursor NOT moved",
-		"targetID", target.s.ID,
-		"targetRepo", target.repo,
-		"targetOrigin", h.originOf(target.repo),
-		"originCollapsed", !IsExpanded(h.repoExpanded, OriginExpandKey(h.originOf(target.repo))),
-		"filterText", h.filterText,
-	)
+	debuglog.Logger.Debug("spacejump: landed", "oldCursor", h.cursor, "newCursor", target)
+	h.cursor = target
+	h.syncViewport()
 }
 
 func (h *Home) renameSelected() tea.Cmd {
