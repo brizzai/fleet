@@ -195,44 +195,44 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 		o.DisplayName = s.DisplayName
 	}
 
-	// Top border header (rendered on the pane-border-status top line):
-	// session identity left, path right. Tmux draws the horizontal rule
-	// itself — our format fills in the labels.
+	// Top border header carries ALL the useful info: session identity, origin,
+	// PR status, branch (left to right by importance) and path right-aligned.
+	// The bottom strip is reserved for the detach hint only.
 	topLeftParts := []string{}
 	if o.DisplayName != "" {
 		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, o.DisplayName))
 	}
+	if o.Origin != "" {
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, o.Origin))
+	}
 	if o.Branch != "" {
 		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, o.Branch))
+	}
+	if o.PRSummary != "" {
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, o.PRSummary))
 	}
 	paneFmt := " " + strings.Join(topLeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
 	if o.Path != "" {
 		paneFmt += fmt.Sprintf("#[align=right,fg=%s]%s ", o.Dim, o.Path)
 	}
 
-	// Bottom status line: origin + PR left, detach hint right.
-	bottomLeftParts := []string{}
-	if o.Origin != "" {
-		bottomLeftParts = append(bottomLeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, o.Origin))
-	}
-	if o.PRSummary != "" {
-		bottomLeftParts = append(bottomLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, o.PRSummary))
-	}
-	bottomLeft := " "
-	if len(bottomLeftParts) > 0 {
-		bottomLeft = " " + strings.Join(bottomLeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
-	}
-	bottomRight := fmt.Sprintf("#[fg=%s,noBold]%s ", o.Dim, o.DetachHint)
+	// Bottom: just the detach hint, centred, painted in accent colours so
+	// the strip pops out as a brand-matched footer instead of fading into
+	// the pane background.
+	bottomCenter := fmt.Sprintf("#[bg=%s,fg=%s,bold] %s #[default]",
+		o.AccentColor, o.StripBg, o.DetachHint)
 
 	cmd := exec.Command("tmux",
 		"set-option", "-t", s.Name, "status", "on", ";",
 		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.StripBg, o.StripFg), ";",
-		"set-option", "-t", s.Name, "status-left", bottomLeft, ";",
-		"set-option", "-t", s.Name, "status-left-length", "200", ";",
-		"set-option", "-t", s.Name, "status-right", bottomRight, ";",
-		"set-option", "-t", s.Name, "status-right-length", "40", ";",
-		// Top horizontal rule + content (the only "border" tmux can draw on
-		// a single-pane session).
+		"set-option", "-t", s.Name, "status-justify", "centre", ";",
+		"set-option", "-t", s.Name, "status-left", "", ";",
+		"set-option", "-t", s.Name, "status-left-length", "0", ";",
+		"set-option", "-t", s.Name, "status-right", "", ";",
+		"set-option", "-t", s.Name, "status-right-length", "0", ";",
+		"set-option", "-t", s.Name, "window-status-current-format", bottomCenter, ";",
+		"set-option", "-t", s.Name, "window-status-format", bottomCenter, ";",
+		// Top horizontal rule with all the orientation info.
 		"set-option", "-t", s.Name, "pane-border-status", "top", ";",
 		"set-option", "-t", s.Name, "pane-border-format", paneFmt, ";",
 		"set-option", "-t", s.Name, "pane-border-style", fmt.Sprintf("fg=%s", o.BorderColor), ";",
