@@ -3111,47 +3111,47 @@ func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
 	}
 }
 
-// buildTmuxStatusBarOpts converts the live theme + session state into the
-// tmux-agnostic struct ApplyStatusBar consumes.
+// buildTmuxStatusBarOpts converts the live theme + repo state into the
+// tmux-agnostic struct ApplyStatusBar consumes. The chrome inside the pane
+// surfaces only info you can't see from inside the tool — origin, branch,
+// PR status, path — so you stay oriented without detaching.
 func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tmux.StatusBarOpts {
 	branch := ""
+	origin := ""
+	prSummary := ""
+	prColor := string(ColorTextDim)
 	if info != nil {
 		branch = info.Branch
-	}
-	stateLabel := ""
-	var stateBg string
-	switch s.GetStatus() {
-	case session.StatusRunning:
-		stateLabel = "RUNNING"
-		stateBg = string(ColorGreen)
-	case session.StatusWaiting:
-		stateLabel = "WAITING"
-		stateBg = string(ColorYellow)
-	case session.StatusError:
-		stateLabel = "ERROR"
-		stateBg = string(ColorRed)
-	case session.StatusFinished:
-		stateLabel = "DONE"
-		stateBg = string(ColorBlue)
-	case session.StatusStarting:
-		stateLabel = "STARTING"
-		stateBg = string(ColorAccent)
-	default:
-		// Idle: leave the state pill empty so the strip stays calm.
-		stateBg = string(ColorAccent)
+		origin = strings.TrimPrefix(info.OriginKey, "local:")
+		if info.PR != nil {
+			if txt := previewPRSummary(info.PR); txt != "" {
+				prSummary = txt
+				switch {
+				case info.PR.State == "MERGED":
+					prColor = string(ColorPurple)
+				case info.PR.CIStatus == "FAILURE" || info.PR.ReviewDecision == "CHANGES_REQUESTED" || info.PR.UnresolvedThreads > 0 || info.PR.HasConflicts:
+					prColor = string(ColorRed)
+				case info.PR.ReviewDecision == "APPROVED" && info.PR.CIStatus == "SUCCESS":
+					prColor = string(ColorGreen)
+				default:
+					prColor = string(ColorYellow)
+				}
+			}
+		}
 	}
 	return tmux.StatusBarOpts{
-		Bg:          string(ColorSurface),
-		Fg:          string(ColorText),
+		StripBg:     string(ColorBorder),
+		StripFg:     string(ColorText),
 		Dim:         string(ColorTextDim),
 		BorderColor: string(ColorBorder),
-		StateBg:     stateBg,
-		StateFg:     string(ColorBg),
-		DetachHint:  "ctrl+q detach",
-		StateLabel:  stateLabel,
+		AccentColor: string(ColorAccent),
+		Origin:      origin,
+		PRSummary:   prSummary,
+		PRColor:     prColor,
 		DisplayName: s.Title,
-		Folder:      filepath.Base(s.ProjectPath),
 		Branch:      branch,
+		Path:        shortenPath(s.ProjectPath),
+		DetachHint:  "ctrl+q detach",
 	}
 }
 
