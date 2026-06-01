@@ -113,8 +113,10 @@ func (s *Session) Start(command string, env ...string) error {
 		}
 	}
 
-	// Configure status bar.
-	s.ConfigureStatusBar()
+	// Lay down a baseline status bar with default colours so the pane has
+	// readable chrome from the first frame. The UI worker re-applies with
+	// the active fleet theme + live state on the next tick.
+	s.ApplyStatusBar(StatusBarOpts{})
 
 	// Immediately register in cache.
 	sessionCacheMu.Lock()
@@ -127,19 +129,93 @@ func (s *Session) Start(command string, env ...string) error {
 	return nil
 }
 
-// ConfigureStatusBar sets up the tmux status bar with detach hint and session info.
-func (s *Session) ConfigureStatusBar() {
-	folderName := filepath.Base(s.WorkDir)
-	rightStatus := fmt.Sprintf("#[fg=#565f89]ctrl+q detach#[default] │ 📁 %s | %s ", s.DisplayName, folderName)
+// StatusBarOpts holds the theme + content inputs for ApplyStatusBar. All
+// colors are tmux-format hex strings (#RRGGBB); leaving any color blank
+// falls back to a sane default.
+type StatusBarOpts struct {
+	// Theme.
+	Bg          string // status bar background
+	Fg          string // status bar foreground
+	Dim         string // secondary text (detach hint, separators)
+	BorderColor string // tmux pane-border-style
+	StateBg     string // background for the left state-pill (matches fleet status color)
+	StateFg     string // foreground for the left state-pill (contrasts with StateBg)
+
+	// Content.
+	DetachHint  string // e.g. "ctrl+q detach"
+	StateLabel  string // optional left pill, e.g. "WAITING". Empty → no pill.
+	DisplayName string
+	Folder      string
+	Branch      string // optional; shown in the pane-border header when set
+}
+
+// ApplyStatusBar repaints the tmux session chrome — bottom status bar, pane
+// border style, and pane-border header — using the supplied opts. Idempotent
+// and cheap (a single batched set-option call) so callers can re-apply on
+// every status change without worry. Replaces the old ConfigureStatusBar
+// helper which hardcoded Tokyo Night colours and skipped the border header.
+func (s *Session) ApplyStatusBar(o StatusBarOpts) {
+	if o.Bg == "" {
+		o.Bg = "#1a1b26"
+	}
+	if o.Fg == "" {
+		o.Fg = "#a9b1d6"
+	}
+	if o.Dim == "" {
+		o.Dim = "#565f89"
+	}
+	if o.BorderColor == "" {
+		o.BorderColor = o.Dim
+	}
+	if o.DetachHint == "" {
+		o.DetachHint = "ctrl+q detach"
+	}
+	if o.DisplayName == "" {
+		o.DisplayName = s.DisplayName
+	}
+	if o.Folder == "" {
+		o.Folder = filepath.Base(s.WorkDir)
+	}
+
+	// Bottom status bar.
+	statusLeft := " "
+	if o.StateLabel != "" && o.StateBg != "" {
+		stateFg := o.StateFg
+		if stateFg == "" {
+			stateFg = o.Bg
+		}
+		statusLeft = fmt.Sprintf(" #[bg=%s,fg=%s,bold] %s #[bg=%s,fg=%s] ", o.StateBg, stateFg, o.StateLabel, o.Bg, o.Fg)
+	}
+	rightStatus := fmt.Sprintf("#[fg=%s]%s#[default,bg=%s,fg=%s] │ 📁 %s · %s ",
+		o.Dim, o.DetachHint, o.Bg, o.Fg, o.DisplayName, o.Folder)
+
+	// Pane-border header (shown above each pane). When tmux has a single
+	// pane the line still renders, giving us an always-visible identity
+	// strip inside the attached session.
+	paneFmt := fmt.Sprintf(" #[fg=%s]📁 %s", o.Dim, o.DisplayName)
+	if o.Branch != "" {
+		paneFmt += fmt.Sprintf(" #[fg=%s]·#[fg=%s] %s", o.Dim, o.Fg, o.Branch)
+	}
+	paneFmt += " "
+	activeBorder := o.StateBg
+	if activeBorder == "" {
+		activeBorder = o.BorderColor
+	}
+
 	cmd := exec.Command("tmux",
 		"set-option", "-t", s.Name, "status", "on", ";",
-		"set-option", "-t", s.Name, "status-style", "bg=#1a1b26,fg=#a9b1d6", ";",
-		"set-option", "-t", s.Name, "status-left", " ", ";",
+		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.Bg, o.Fg), ";",
+		"set-option", "-t", s.Name, "status-left", statusLeft, ";",
+		"set-option", "-t", s.Name, "status-left-length", "30", ";",
 		"set-option", "-t", s.Name, "status-right", rightStatus, ";",
-		"set-option", "-t", s.Name, "status-right-length", "80",
+		"set-option", "-t", s.Name, "status-right-length", "80", ";",
+		"set-option", "-t", s.Name, "pane-border-status", "top", ";",
+		"set-option", "-t", s.Name, "pane-border-format", paneFmt, ";",
+		"set-option", "-t", s.Name, "pane-border-style", fmt.Sprintf("fg=%s", o.BorderColor), ";",
+		"set-option", "-t", s.Name, "pane-active-border-style", fmt.Sprintf("fg=%s", activeBorder),
 	)
 	if err := cmd.Run(); err != nil {
-		debuglog.Logger.Error("tmux configure status bar failed", "session", s.Name, "err", err)
+		debuglog.Logger.Error("tmux apply status bar failed", "session", s.Name, "err", err)
 	}
 }
 

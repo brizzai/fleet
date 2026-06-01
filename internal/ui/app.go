@@ -167,6 +167,12 @@ type Home struct {
 	previewCacheTime map[string]time.Time
 	statusRRIndex    int // round-robin index for status updates
 
+	// lastTmuxStatusBar tracks the most recent (status, theme) tuple applied
+	// to each session's tmux status bar so the worker can skip no-op
+	// re-applies. Map is only read/written from the worker goroutine — no
+	// lock needed.
+	lastTmuxStatusBar map[string]string // sessionID -> "status|theme"
+
 	gitInfoCache  map[string]*git.RepoInfo // repo root path -> git info
 	repoLastHotAt map[string]time.Time     // repo root -> last time a session in it was Running (guarded by workerMu)
 	ghAvailable   bool                     // cached gh CLI availability
@@ -257,6 +263,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		sessionByID:           make(map[string]*session.Session),
 		repoExpanded:          make(map[string]bool),
 		idleFolded:            make(map[string]bool),
+		lastTmuxStatusBar:     make(map[string]string),
 		slotBindings:          make(map[int]string),
 		lastSlotTapSlot:       -1,
 		toasts:                NewToastStack(),
@@ -3059,6 +3066,93 @@ drainPriority:
 
 	repos := h.uniqueRepoPathsFromSessions(sessions)
 	h.refreshAllGitAndPR(repos, 4, 0, nil)
+
+	// 6. Repaint tmux status bars for sessions whose state changed since the
+	// last cycle. Sessions whose status + theme key matches the last applied
+	// value are skipped — a single tmux set-option round-trip is fast but
+	// running it for 100 idle sessions every 2s is wasteful.
+	h.refreshTmuxStatusBars(sessions)
+}
+
+// refreshTmuxStatusBars re-applies the theme + state pill on every session's
+// tmux chrome whose (status, theme) key has changed since the last refresh.
+// Called from the status worker, so map access is single-threaded — no lock.
+func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
+	if len(sessions) == 0 {
+		return
+	}
+	themeKey := string(ColorBg) + string(ColorAccent) // any theme-change invalidates the cache
+	h.workerMu.Lock()
+	gitSnap := make(map[string]*git.RepoInfo, len(h.gitInfoCache))
+	for k, v := range h.gitInfoCache {
+		gitSnap[k] = v
+	}
+	h.workerMu.Unlock()
+
+	for _, s := range sessions {
+		if s == nil {
+			continue
+		}
+		tmuxS := s.GetTmuxSession()
+		if tmuxS == nil {
+			continue
+		}
+		status := s.GetStatus()
+		key := string(status) + "|" + themeKey
+		if last, ok := h.lastTmuxStatusBar[s.ID]; ok && last == key {
+			continue
+		}
+		opts := h.buildTmuxStatusBarOpts(s, gitSnap[session.GetRepoRoot(s.ProjectPath)])
+		// Apply in a fresh goroutine so a slow tmux server can't stall the
+		// worker cycle. Each session is its own goroutine; tmux serialises
+		// set-option per server, so concurrent calls just queue.
+		go tmuxS.ApplyStatusBar(opts)
+		h.lastTmuxStatusBar[s.ID] = key
+	}
+}
+
+// buildTmuxStatusBarOpts converts the live theme + session state into the
+// tmux-agnostic struct ApplyStatusBar consumes.
+func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tmux.StatusBarOpts {
+	branch := ""
+	if info != nil {
+		branch = info.Branch
+	}
+	stateLabel := ""
+	var stateBg string
+	switch s.GetStatus() {
+	case session.StatusRunning:
+		stateLabel = "RUNNING"
+		stateBg = string(ColorGreen)
+	case session.StatusWaiting:
+		stateLabel = "WAITING"
+		stateBg = string(ColorYellow)
+	case session.StatusError:
+		stateLabel = "ERROR"
+		stateBg = string(ColorRed)
+	case session.StatusFinished:
+		stateLabel = "DONE"
+		stateBg = string(ColorBlue)
+	case session.StatusStarting:
+		stateLabel = "STARTING"
+		stateBg = string(ColorAccent)
+	default:
+		// Idle: leave the state pill empty so the strip stays calm.
+		stateBg = string(ColorAccent)
+	}
+	return tmux.StatusBarOpts{
+		Bg:          string(ColorSurface),
+		Fg:          string(ColorText),
+		Dim:         string(ColorTextDim),
+		BorderColor: string(ColorBorder),
+		StateBg:     stateBg,
+		StateFg:     string(ColorBg),
+		DetachHint:  "ctrl+q detach",
+		StateLabel:  stateLabel,
+		DisplayName: s.Title,
+		Folder:      filepath.Base(s.ProjectPath),
+		Branch:      branch,
+	}
 }
 
 // PR-refresh TTL constants. Hot repos refresh fast so an actively-used
@@ -3608,8 +3702,18 @@ func (h *Home) repoInfoFromSnap(snap map[string]*git.RepoInfo) *git.RepoInfo {
 // --- Internal helpers ---
 
 func (h *Home) rebuildFlatItems() {
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.originOf, h.idleFolded)
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.originOf, h.isWorktreeOf, h.idleFolded)
 	h.sidebarDirty = true
+}
+
+// isWorktreeOf reads the IsWorktreeRepo flag from the worker-managed cache.
+// Returns false when the row hasn't been resolved yet — BuildFlatItems falls
+// back to alphabetical ordering in that case, which the next rebuild fixes.
+func (h *Home) isWorktreeOf(repoRoot string) bool {
+	if info := h.gitInfoCache[repoRoot]; info != nil {
+		return info.IsWorktreeRepo
+	}
+	return false
 }
 
 // originOf maps a repo root to its stable origin key, falling back to

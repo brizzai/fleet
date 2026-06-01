@@ -309,8 +309,9 @@ func (s *Session) RespawnClaude() error {
 		return err
 	}
 
-	// Reconfigure status bar after respawn.
-	s.tmuxSession.ConfigureStatusBar()
+	// Reset to a baseline status bar; the UI worker will re-apply with
+	// active fleet theme + live state on the next tick.
+	s.tmuxSession.ApplyStatusBar(tmux.StatusBarOpts{})
 
 	s.mu.Lock()
 	s.Status = StatusRunning
