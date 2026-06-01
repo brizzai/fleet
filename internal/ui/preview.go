@@ -2,94 +2,49 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/brizzai/fleet/internal/git"
+	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
-// RenderPreview renders the preview pane for the selected session.
+// RenderPreview renders the inner content of the preview pane: a single dim
+// italic prompt strip plus the live pane capture. All session metadata
+// (name, status, PR, path, last-used) now rides the panel border via
+// BuildPreviewTitle / BuildPreviewFooter, freeing 5+ rows of vertical space
+// previously eaten by a metadata header block.
 func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, width, height int, focused bool) string {
 	if s == nil {
-		return RenderPanelTitle(" PREVIEW", width) + "\n" + DimStyle.Render("  No session selected")
+		return DimStyle.Render("  No session selected")
 	}
 
 	var b strings.Builder
 
-	// Panel title.
-	if focused {
-		b.WriteString(RenderFocusedPanelTitle(" PREVIEW [FOCUSED]", width))
-	} else {
-		b.WriteString(RenderPanelTitle(" PREVIEW", width))
-	}
-	b.WriteString("\n")
-
-	// Header: title + status.
-	header := fmt.Sprintf("  %s %s  %s",
-		StatusSymbol(s.GetStatus()),
-		PreviewHeaderStyle.Render(s.Title),
-		StatusLabel(s.GetStatus()),
-	)
-	b.WriteString(header)
-	b.WriteString("\n")
-
-	// Metadata.
-	metaLine := s.ProjectPath
-	if !s.LastAccessedAt.IsZero() {
-		metaLine += "  ·  last used " + relativeTime(s.LastAccessedAt)
-	}
-	b.WriteString(DimStyle.Render(fmt.Sprintf("  %s", metaLine)))
-	b.WriteString("\n")
-
-	// Git info line.
-	usedLines := 5 // panel title + underline + header + path + separator
-	if gitLine := renderGitInfoLine(repoInfo); gitLine != "" {
-		b.WriteString("  " + gitLine)
-		b.WriteString("\n")
-		usedLines++
-	}
-
-	// Workspace name.
-	if s.WorkspaceName != "" {
-		b.WriteString(DimStyle.Render(fmt.Sprintf("  workspace: %s", s.WorkspaceName)))
-		b.WriteString("\n")
-		usedLines++
-	}
-
-	// Last prompt.
+	// Always-on prompt strip — dim italic so it reads as "context, not content".
+	promptRow := ""
 	if s.FirstPrompt != "" {
 		prompt := s.FirstPrompt
-		// Take first line only.
 		if idx := strings.IndexByte(prompt, '\n'); idx != -1 {
-			prompt = prompt[:idx]
-			if len(prompt) < len(s.FirstPrompt) {
-				prompt += "…"
-			}
+			prompt = prompt[:idx] + "…"
 		}
-		// Truncate to fit width.
-		maxLen := width - 6
-		if maxLen > 80 {
-			maxLen = 80
+		full := "  > " + prompt
+		if lipgloss.Width(full) > width {
+			full = ansi.Truncate(full, width, "…")
 		}
-		if maxLen > 0 && len(prompt) > maxLen {
-			prompt = prompt[:maxLen] + "…"
-		}
-		b.WriteString(DimStyle.Render(fmt.Sprintf("  > %s", prompt)))
-		b.WriteString("\n")
-		usedLines++
-	}
-
-	// Separator.
-	sep := strings.Repeat("─", width-2)
-	if len(sep) > 0 {
-		b.WriteString(DimStyle.Render("  " + sep))
+		promptRow = lipgloss.NewStyle().Foreground(ColorTextDim).Italic(true).Render(full)
+		b.WriteString(promptRow)
 		b.WriteString("\n")
 	}
 
-	// Terminal content.
-	contentHeight := height - usedLines
+	contentHeight := height - 1 // 1 row for the prompt strip
+	if promptRow == "" {
+		contentHeight = height
+	}
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -103,30 +58,173 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 		return b.String()
 	}
 
-	// Strip OSC-8 hyperlinks to prevent dotted underlines in preview.
 	content = stripOSC8(content)
-
-	// Show last N lines that fit.
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	start := len(lines) - contentHeight
 	if start < 0 {
 		start = 0
 	}
-
 	for i := start; i < len(lines); i++ {
 		line := lines[i]
-		// Truncate long lines (ANSI-aware to avoid cutting escape sequences).
 		if ansi.StringWidth(line) > width-2 {
 			line = ansi.Truncate(line, width-2, "")
 		}
-		// Reset ANSI at end of each line to prevent background color bleed.
 		b.WriteString("  " + line + "\x1b[0m")
 		if i < len(lines)-1 {
 			b.WriteString("\n")
 		}
 	}
-
 	return b.String()
+}
+
+// BuildPreviewTitle renders the rich top-border title for the preview panel:
+// "Preview · <session> · <status> · <PR>". Pre-styled with the per-segment
+// colors; RenderBorderedPanel passes it through verbatim. Truncates the
+// session title from the end if the result is too wide for the border.
+func BuildPreviewTitle(s *session.Session, repoInfo *git.RepoInfo, focused bool, maxWidth int) string {
+	previewLabel := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("Preview")
+	if s == nil {
+		return previewLabel
+	}
+	sep := DimStyle.Render(" · ")
+
+	statusSeg := StatusStyle(s.GetStatus()).Render(string(s.GetStatus()))
+
+	prSeg := ""
+	var pr *github.PR
+	if repoInfo != nil {
+		pr = repoInfo.PR
+	}
+	if pr != nil {
+		if txt := previewPRSummary(pr); txt != "" {
+			prSeg = prBadgeStyle(pr).Render(txt)
+		}
+	}
+
+	focusSeg := ""
+	if focused {
+		focusSeg = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("focus")
+	}
+
+	// Title is truncated to whatever budget remains after the fixed segments.
+	used := lipgloss.Width(previewLabel) + lipgloss.Width(sep)
+	used += lipgloss.Width(statusSeg) + lipgloss.Width(sep)
+	if prSeg != "" {
+		used += lipgloss.Width(prSeg) + lipgloss.Width(sep)
+	}
+	if focusSeg != "" {
+		used += lipgloss.Width(focusSeg) + lipgloss.Width(sep)
+	}
+	titleBudget := maxWidth - used
+	if titleBudget < 6 {
+		titleBudget = 6
+	}
+	rawTitle := s.Title
+	if lipgloss.Width(rawTitle) > titleBudget {
+		rawTitle = ansi.Truncate(rawTitle, titleBudget, "…")
+	}
+	titleSeg := PreviewHeaderStyle.Render(rawTitle)
+
+	parts := []string{previewLabel, titleSeg, statusSeg}
+	if prSeg != "" {
+		parts = append(parts, prSeg)
+	}
+	if focusSeg != "" {
+		parts = append(parts, focusSeg)
+	}
+	return strings.Join(parts, sep)
+}
+
+// previewPRSummary returns a verbose human-readable PR summary like
+// "PR #2874 (CI failing, 3 unresolved, conflicts)". Glyph-only badges work
+// in the sidebar because there's a learning curve users opt into; in the
+// preview title we spell the problems out so newcomers can read state
+// without a legend.
+func previewPRSummary(pr *github.PR) string {
+	if pr == nil || pr.State == "CLOSED" {
+		return ""
+	}
+	base := fmt.Sprintf("PR #%d", pr.Number)
+
+	if pr.State == "MERGED" {
+		return base + " (merged)"
+	}
+
+	var details []string
+	if pr.CIStatus == "FAILURE" {
+		details = append(details, "CI failing")
+	}
+	if pr.HasConflicts {
+		details = append(details, "conflicts")
+	}
+	if pr.ReviewDecision == "CHANGES_REQUESTED" {
+		details = append(details, "changes requested")
+	}
+	if pr.UnresolvedThreads > 0 {
+		details = append(details, fmt.Sprintf("%d unresolved", pr.UnresolvedThreads))
+	}
+	if pr.CIStatus == "PENDING" && len(details) == 0 {
+		details = append(details, "CI pending")
+	}
+	if pr.ReviewDecision == "REVIEW_REQUIRED" && len(details) == 0 {
+		details = append(details, "review pending")
+	}
+	if pr.CIStatus == "SUCCESS" && pr.ReviewDecision == "APPROVED" && len(details) == 0 {
+		return base + " (ready)"
+	}
+
+	if len(details) == 0 {
+		return base
+	}
+	return base + " (" + strings.Join(details, ", ") + ")"
+}
+
+// BuildPreviewFooter renders the rich bottom-border footer for the preview
+// panel: "<path> · <relative-time>". Path is shortened to use ~ for home and
+// truncated from the start ("…trailing/components") when too long.
+func BuildPreviewFooter(s *session.Session, maxWidth int) string {
+	if s == nil {
+		return ""
+	}
+	path := shortenPath(s.ProjectPath)
+	if maxWidth > 4 && lipgloss.Width(path) > maxWidth {
+		path = "…" + ansi.Truncate(reverseString(path), maxWidth-1, "")
+		path = reverseString(path)
+	}
+	// Path + last-used time render in bright text so they actually read on
+	// the bottom border instead of fading into the panel chrome. Separator
+	// stays dim to keep the two chips visually grouped.
+	bright := lipgloss.NewStyle().Foreground(ColorText)
+	parts := []string{bright.Render(path)}
+	if !s.LastAccessedAt.IsZero() {
+		parts = append(parts, bright.Render(relativeTime(s.LastAccessedAt)))
+	}
+	return strings.Join(parts, DimStyle.Render(" · "))
+}
+
+// shortenPath replaces the user's home dir with "~". Falls back to the
+// original path if HOME isn't set or doesn't match. Requires a path-separator
+// boundary so a home of /Users/me doesn't match /Users/meg/project.
+func shortenPath(p string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if p == home {
+			return "~"
+		}
+		if rest, ok := strings.CutPrefix(p, home+string(os.PathSeparator)); ok {
+			return "~" + string(os.PathSeparator) + rest
+		}
+	}
+	return p
+}
+
+// reverseString reverses a string rune-by-rune. Used by BuildPreviewFooter to
+// truncate paths from the start while preserving rune boundaries.
+func reverseString(s string) string {
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	return string(runes)
 }
 
 // relativeTime formats a time as a human-readable relative duration (e.g., "5m ago", "2h ago").
@@ -150,78 +248,6 @@ func relativeTime(t time.Time) string {
 		}
 		return fmt.Sprintf("%dd ago", days)
 	}
-}
-
-// renderGitInfoLine renders a line with branch, dirty status, and PR info.
-func renderGitInfoLine(info *git.RepoInfo) string {
-	if info == nil || info.Branch == "" {
-		return ""
-	}
-
-	var parts []string
-
-	// Branch.
-	parts = append(parts, BranchStyle.Render(branchIcon+" "+info.Branch))
-
-	// Dirty indicator.
-	if info.IsDirty {
-		parts = append(parts, DirtyStyle.Render("* uncommitted"))
-	}
-
-	// PR info.
-	if info.PR != nil && info.PR.State != "CLOSED" {
-		pr := info.PR
-		prText := fmt.Sprintf("PR #%d", pr.Number)
-
-		if pr.State == "MERGED" {
-			parts = append(parts, PRMergedStyle.Render(prText+" (merged)"))
-		} else {
-			var details []string
-			if pr.CIStatus == "FAILURE" {
-				details = append(details, "CI failing")
-			}
-			if pr.ReviewDecision == "CHANGES_REQUESTED" {
-				details = append(details, "changes requested")
-			}
-			if pr.ReviewDecision == "APPROVED" {
-				details = append(details, "approved")
-			}
-			if pr.CIStatus == "SUCCESS" && pr.ReviewDecision != "APPROVED" {
-				details = append(details, "CI passing")
-			}
-			if pr.CIStatus == "PENDING" {
-				details = append(details, "CI pending")
-			}
-			if pr.ReviewDecision == "REVIEW_REQUIRED" {
-				details = append(details, "review pending")
-			}
-			if pr.UnresolvedThreads > 0 {
-				details = append(details, fmt.Sprintf("%d unresolved", pr.UnresolvedThreads))
-			}
-			if pr.HasConflicts {
-				details = append(details, "conflicts")
-			}
-			if len(details) > 0 {
-				prText += " (" + strings.Join(details, ", ") + ")"
-			}
-
-			ciFail := pr.CIStatus == "FAILURE"
-			changesReq := pr.ReviewDecision == "CHANGES_REQUESTED"
-			approved := pr.ReviewDecision == "APPROVED"
-			ciPass := pr.CIStatus == "SUCCESS"
-			hasThreads := pr.UnresolvedThreads > 0
-
-			style := PRPendingStyle // default: yellow
-			if ciFail || changesReq || hasThreads || pr.HasConflicts {
-				style = PRFailStyle
-			} else if approved && ciPass {
-				style = PROpenStyle
-			}
-			parts = append(parts, style.Render(prText))
-		}
-	}
-
-	return strings.Join(parts, "  ")
 }
 
 // stripOSC8 removes OSC-8 hyperlink sequences while preserving the visible link text.

@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -113,8 +112,10 @@ func (s *Session) Start(command string, env ...string) error {
 		}
 	}
 
-	// Configure status bar.
-	s.ConfigureStatusBar()
+	// Lay down a baseline status bar with default colours so the pane has
+	// readable chrome from the first frame. The UI worker re-applies with
+	// the active fleet theme + live state on the next tick.
+	s.ApplyStatusBar(StatusBarOpts{})
 
 	// Immediately register in cache.
 	sessionCacheMu.Lock()
@@ -127,20 +128,140 @@ func (s *Session) Start(command string, env ...string) error {
 	return nil
 }
 
-// ConfigureStatusBar sets up the tmux status bar with detach hint and session info.
-func (s *Session) ConfigureStatusBar() {
-	folderName := filepath.Base(s.WorkDir)
-	rightStatus := fmt.Sprintf("#[fg=#565f89]ctrl+q detach#[default] │ 📁 %s | %s ", s.DisplayName, folderName)
-	cmd := exec.Command("tmux",
+// StatusBarOpts holds the theme + content inputs for ApplyStatusBar. All
+// colors are tmux-format hex strings (#RRGGBB); leaving any color blank
+// falls back to a sane default.
+type StatusBarOpts struct {
+	// Theme.
+	StripBg     string // status bar background — should be brighter than pane bg so the strip is visibly distinct
+	StripFg     string // primary text on the strip
+	Dim         string // secondary text (separators, detach hint)
+	BorderColor string // tmux pane-border-style (inactive pane outline)
+	AccentColor string // tmux pane-active-border-style + brand emphasis
+
+	// Content shown on the bottom status bar.
+	Origin    string // e.g. "brizzai/fleet" — left side, brand-coloured
+	PRSummary string // e.g. "PR #100 (CI passing, 3 unresolved)" — middle, semantic colour
+	PRColor   string // hex for the PR segment (green/yellow/red/purple). Defaults to Dim.
+
+	// Content shown on the always-visible pane-border header (top of pane).
+	DisplayName string // session title
+	Branch      string
+	Path        string // shortened to "~/..." by the caller
+
+	// Detach hint, rendered dim on the bottom-right of the status bar.
+	DetachHint string
+}
+
+// ApplyStatusBar repaints the tmux session chrome using the supplied opts.
+// Idempotent and cheap (a single batched set-option call) so callers can
+// re-apply on every status change without worry.
+//
+// Layout — three sides of chrome around the pane content:
+//
+//	───── 📁 <session-title> · <branch> ──────────── ~/code/<path> ─────
+//	... session content ...
+//	  <origin>  ·  PR #N (status)                         ctrl+q detach
+//	  Branch lifecycle / additional context                   (line 2)
+//
+// Vertical sides are a tmux limitation — pane borders only draw *between*
+// panes, so a single-pane session can't get left/right edges. We give it
+// the most chrome tmux allows: a top horizontal rule (pane-border-status
+// top, with the session identity inset into it) and a two-line bottom
+// status bar with origin/PR/path/detach.
+func (s *Session) ApplyStatusBar(o StatusBarOpts) {
+	if o.StripBg == "" {
+		o.StripBg = "#1a1b26"
+	}
+	if o.StripFg == "" {
+		o.StripFg = "#a9b1d6"
+	}
+	if o.Dim == "" {
+		o.Dim = "#565f89"
+	}
+	if o.BorderColor == "" {
+		o.BorderColor = o.Dim
+	}
+	if o.AccentColor == "" {
+		o.AccentColor = o.StripFg
+	}
+	if o.PRColor == "" {
+		o.PRColor = o.Dim
+	}
+	if o.DetachHint == "" {
+		o.DetachHint = "ctrl+q detach"
+	}
+	if o.DisplayName == "" {
+		o.DisplayName = s.DisplayName
+	}
+
+	// Top border header carries ALL the useful info: session identity, origin,
+	// PR status, branch (left to right by importance) and path right-aligned.
+	// The bottom strip is reserved for the detach hint only.
+	// User-derived fields are escaped so a literal `#` (e.g. in a branch
+	// name like `fix/#123`) doesn't look like the start of a tmux format
+	// sequence to the parser.
+	topLeftParts := []string{}
+	if o.DisplayName != "" {
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, escapeTmuxFormat(o.DisplayName)))
+	}
+	if o.Origin != "" {
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, escapeTmuxFormat(o.Origin)))
+	}
+	if o.Branch != "" {
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, escapeTmuxFormat(o.Branch)))
+	}
+	if o.PRSummary != "" {
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, escapeTmuxFormat(o.PRSummary)))
+	}
+	paneFmt := " " + strings.Join(topLeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
+	if o.Path != "" {
+		paneFmt += fmt.Sprintf("#[align=right,fg=%s]%s ", o.Dim, escapeTmuxFormat(o.Path))
+	}
+
+	// Bottom: detach hint rendered in the regular fleet hotkey style —
+	// accent-coloured key + plain-text description, left-aligned. Matches
+	// the contextual footer in the main TUI so muscle memory carries over.
+	key, desc, _ := strings.Cut(o.DetachHint, " ")
+	if desc == "" {
+		desc = "detach"
+		key = o.DetachHint
+	}
+	bottomLeft := fmt.Sprintf(" #[fg=%s,bold]%s #[fg=%s,nobold]%s",
+		o.AccentColor, escapeTmuxFormat(key), o.StripFg, escapeTmuxFormat(desc))
+
+	// Bounded shell-out — a stalled tmux server can't hang session startup
+	// or the periodic refresh path. Matches the pattern used by IsPaneDead /
+	// PaneDeadInfo elsewhere in this file.
+	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux",
 		"set-option", "-t", s.Name, "status", "on", ";",
-		"set-option", "-t", s.Name, "status-style", "bg=#1a1b26,fg=#a9b1d6", ";",
-		"set-option", "-t", s.Name, "status-left", " ", ";",
-		"set-option", "-t", s.Name, "status-right", rightStatus, ";",
-		"set-option", "-t", s.Name, "status-right-length", "80",
+		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.StripBg, o.StripFg), ";",
+		"set-option", "-t", s.Name, "status-justify", "left", ";",
+		"set-option", "-t", s.Name, "status-left", bottomLeft, ";",
+		"set-option", "-t", s.Name, "status-left-length", "40", ";",
+		"set-option", "-t", s.Name, "status-right", "", ";",
+		"set-option", "-t", s.Name, "status-right-length", "0", ";",
+		"set-option", "-t", s.Name, "window-status-current-format", "", ";",
+		"set-option", "-t", s.Name, "window-status-format", "", ";",
+		// Top horizontal rule with all the orientation info.
+		"set-option", "-t", s.Name, "pane-border-status", "top", ";",
+		"set-option", "-t", s.Name, "pane-border-format", paneFmt, ";",
+		"set-option", "-t", s.Name, "pane-border-style", fmt.Sprintf("fg=%s", o.BorderColor), ";",
+		"set-option", "-t", s.Name, "pane-active-border-style", fmt.Sprintf("fg=%s", o.AccentColor),
 	)
 	if err := cmd.Run(); err != nil {
-		debuglog.Logger.Error("tmux configure status bar failed", "session", s.Name, "err", err)
+		debuglog.Logger.Error("tmux apply status bar failed", "session", s.Name, "err", err)
 	}
+}
+
+// escapeTmuxFormat doubles literal `#` so user-derived strings embedded in
+// `status-left` / `pane-border-format` don't get parsed as tmux format
+// sequences (e.g. a branch like `fix/#123` would otherwise look like the
+// start of `#{...}`). Tmux treats `##` as a literal `#`.
+func escapeTmuxFormat(s string) string {
+	return strings.ReplaceAll(s, "#", "##")
 }
 
 // RespawnPane kills the current pane process and restarts with the given command.
