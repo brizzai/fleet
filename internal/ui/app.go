@@ -1824,7 +1824,7 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 	repoPath := session.GetRepoRoot(s.ProjectPath)
 
 	details := []string{
-		"Press z to undo within 5s",
+		"Press u to undo within 5s",
 	}
 	// Discoverability nudge: when this is the last session in a destroyable
 	// worktree, the worktree dir is kept — point the user at the header.
@@ -1860,7 +1860,7 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 		title = "Remove Worktree?"
 		details = []string{
 			fmt.Sprintf("Deletes %d session(s) + the worktree directory", count),
-			"Press z to undo within 5s",
+			"Press u to undo within 5s",
 		}
 	case isWorktree: // empty worktree
 		title = "Remove Worktree?"
@@ -1869,7 +1869,7 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 		title = "Remove repo from fleet?"
 		details = []string{
 			fmt.Sprintf("Deletes %d session(s) — folder untouched", count),
-			"Press z to undo within 5s",
+			"Press u to undo within 5s",
 		}
 	}
 
@@ -2294,8 +2294,8 @@ func (h *Home) jumpToNextAttentionSession() {
 		"filterText", h.filterText,
 	)
 
-	// Expand the repo group if collapsed.
-	h.repoExpanded[target.repo] = true
+	// Expand both header levels (origin group + checkout) so the target is visible.
+	h.revealCheckout(target.repo)
 	h.rebuildFlatItems()
 
 	// Set cursor to the target session.
@@ -2311,10 +2311,9 @@ func (h *Home) jumpToNextAttentionSession() {
 		return
 	}
 
-	// Target found by findNext but absent from flatItems after expanding only
-	// the checkout key — it's hidden under a collapsed ORIGIN header (we never
-	// expand the "origin:" key here) or filtered out. Cursor does NOT move:
-	// this is the silent "nothing happens" the user reported.
+	// Target found by findNext but still absent from flatItems even after
+	// expanding both the origin and checkout keys — it's filtered out by the
+	// active filter. Cursor does NOT move.
 	debuglog.Logger.Warn("spacejump: target HIDDEN, cursor NOT moved",
 		"targetID", target.s.ID,
 		"targetRepo", target.repo,
@@ -2785,9 +2784,9 @@ func (h *Home) buildUndoFlashMessage() string {
 	last := h.pendingDeletes[n-1]
 	title := last.Session.Title
 	if n == 1 {
-		return fmt.Sprintf("Deleted %q. z to undo", title)
+		return fmt.Sprintf("Deleted %q. u to undo", title)
 	}
-	return fmt.Sprintf("Deleted %q. z to undo (%d pending)", title, n)
+	return fmt.Sprintf("Deleted %q. u to undo (%d pending)", title, n)
 }
 
 // countSessionsForRepo counts live sessions for a given repo path.
@@ -3888,6 +3887,16 @@ func (h *Home) originOf(repoRoot string) string {
 	return "local:" + filepath.Base(repoRoot)
 }
 
+// revealCheckout expands both header levels that contain a checkout — the origin
+// group and the checkout itself — so a row inside them becomes visible in the
+// flat tree. The two levels collapse independently (see IsExpanded /
+// OriginExpandKey), so revealing a row means expanding both keys. Callers must
+// rebuildFlatItems afterward.
+func (h *Home) revealCheckout(repo string) {
+	h.repoExpanded[OriginExpandKey(h.originOf(repo))] = true
+	h.repoExpanded[repo] = true
+}
+
 func (h *Home) removePendingWorkspace(id string) {
 	for i, pw := range h.pendingWorkspaces {
 		if pw.ID == id {
@@ -4180,10 +4189,10 @@ func (h *Home) pushRecentPaletteID(id string) {
 // jumpToRepoHeader moves the cursor to the given repo header in the sidebar,
 // expanding the group if collapsed. Mirrors jumpToSlot's pattern.
 func (h *Home) jumpToRepoHeader(repoPath string) (tea.Model, tea.Cmd) {
-	if !h.repoExpanded[repoPath] {
-		h.repoExpanded[repoPath] = true
-		h.rebuildFlatItems()
-	}
+	// Expand both header levels (origin group + checkout) so the header is visible
+	// even when its origin group is collapsed.
+	h.revealCheckout(repoPath)
+	h.rebuildFlatItems()
 	idx := -1
 	for i, item := range h.flatItems {
 		if item.IsRepoHeader && item.RepoPath == repoPath {
