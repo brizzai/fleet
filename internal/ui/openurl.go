@@ -12,5 +12,11 @@ func openURL(url string) error {
 	if runtime.GOOS == "linux" {
 		bin = "xdg-open"
 	}
-	return exec.Command(bin, url).Start()
+	cmd := exec.Command(bin, url)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Reap the short-lived launcher so it doesn't linger as a zombie in the long-running TUI.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

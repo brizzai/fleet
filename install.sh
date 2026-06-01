@@ -20,7 +20,7 @@ done
 
 # Require gh CLI
 if ! command -v gh &>/dev/null; then
-    echo "Error: gh CLI is required. Install it: brew install gh"
+    echo "Error: gh CLI is required. Install it: https://cli.github.com/"
     exit 1
 fi
 
@@ -87,7 +87,7 @@ if command -v tmux &>/dev/null; then
     echo "$(tmux -V 2>/dev/null) [OK]"
 else
     echo "Warning: tmux is not installed (required)"
-    echo "  brew install tmux"
+    echo "  Install via your package manager (brew install tmux / apt install tmux)"
 fi
 
 if command -v git &>/dev/null; then

@@ -2180,7 +2180,7 @@ func (h *Home) openPRInBrowser() tea.Cmd {
 		_, err := client.Send(cmd)
 		if err != nil {
 			// Fallback to opening in the default browser (open / xdg-open).
-			debuglog.Logger.Debug("chrome extension unavailable, falling back to open", "err", err)
+			debuglog.Logger.Debug("chrome extension unavailable, falling back to browser (open/xdg-open)", "err", err)
 			if openErr := openURL(prURL); openErr != nil {
 				debuglog.Logger.Error("failed to open PR in browser", "url", prURL, "err", openErr)
 				return openPRMsg{err: fmt.Errorf("open PR: %w", openErr)}
