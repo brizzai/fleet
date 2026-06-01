@@ -153,18 +153,22 @@ type StatusBarOpts struct {
 	DetachHint string
 }
 
-// ApplyStatusBar repaints the tmux session chrome — bottom status bar, pane
-// border style, and pane-border header — using the supplied opts. Idempotent
-// and cheap (a single batched set-option call) so callers can re-apply on
-// every status change without worry. Replaces the old ConfigureStatusBar
-// helper which hardcoded Tokyo Night colours and skipped the border header.
+// ApplyStatusBar repaints the tmux session chrome — a two-line status bar
+// at the bottom of the pane — using the supplied opts. Idempotent and cheap
+// (a single batched set-option call) so callers can re-apply on every status
+// change without worry.
 //
-// Layout:
+// We render two stacked status lines instead of using pane-border-status so
+// the chrome looks complete even with a single pane. tmux pane borders are
+// only drawn *between* panes, so a single-pane session with border-status
+// shows a half-drawn frame (top line only, no sides or bottom). Two real
+// status lines at the bottom give a solid, balanced footer instead.
 //
-//	┌─ 📁 <session-title> · <branch>                       ~/code/<path> ─┐
-//	│  (pane content)                                                     │
-//	└─────────────────────────────────────────────────────────────────────┘
-//	  <origin>  PR #N (status)                              ctrl+q detach
+// Layout (bottom of terminal):
+//
+//	... session content ...
+//	  📁 <session-title> · <branch>                      ~/code/<path>
+//	  <origin>  ·  PR #N (status)                         ctrl+q detach
 func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 	if o.StripBg == "" {
 		o.StripBg = "#1a1b26"
@@ -191,51 +195,50 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 		o.DisplayName = s.DisplayName
 	}
 
-	// Bottom status bar: origin (brand) on the left, PR status middle, detach hint right.
-	leftParts := []string{}
-	if o.Origin != "" {
-		leftParts = append(leftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, o.Origin))
-	}
-	if o.PRSummary != "" {
-		leftParts = append(leftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, o.PRSummary))
-	}
-	statusLeft := " "
-	if len(leftParts) > 0 {
-		sepFmt := fmt.Sprintf("#[fg=%s]  ·  ", o.Dim)
-		statusLeft = " " + strings.Join(leftParts, sepFmt) + " "
-	}
-	statusRight := fmt.Sprintf("#[fg=%s,noBold]%s ", o.Dim, o.DetachHint)
-
-	// Pane-border header (shown above each pane): session title + branch left,
-	// short path right. Survives `clear` and scrolling — always-visible
-	// orientation strip.
-	leftBorderParts := []string{}
+	// Line 1 (upper of the two): session identity left, path right.
+	line1LeftParts := []string{}
 	if o.DisplayName != "" {
-		leftBorderParts = append(leftBorderParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, o.DisplayName))
+		line1LeftParts = append(line1LeftParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, o.DisplayName))
 	}
 	if o.Branch != "" {
-		leftBorderParts = append(leftBorderParts,
-			fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, o.Branch))
+		line1LeftParts = append(line1LeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, o.Branch))
 	}
-	paneFmt := " " + strings.Join(leftBorderParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim))
+	line1Left := " " + strings.Join(line1LeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
+	line1Right := ""
 	if o.Path != "" {
-		// Right-align the path on the border line.
-		paneFmt += fmt.Sprintf("#[align=right,fg=%s]%s ", o.Dim, o.Path)
-	} else {
-		paneFmt += " "
+		line1Right = fmt.Sprintf("#[fg=%s]%s ", o.Dim, o.Path)
 	}
 
+	// Line 2 (lower, the conventional status line): origin + PR left, detach right.
+	line2LeftParts := []string{}
+	if o.Origin != "" {
+		line2LeftParts = append(line2LeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, o.Origin))
+	}
+	if o.PRSummary != "" {
+		line2LeftParts = append(line2LeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, o.PRSummary))
+	}
+	line2Left := " "
+	if len(line2LeftParts) > 0 {
+		line2Left = " " + strings.Join(line2LeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
+	}
+	line2Right := fmt.Sprintf("#[fg=%s,noBold]%s ", o.Dim, o.DetachHint)
+
 	cmd := exec.Command("tmux",
-		"set-option", "-t", s.Name, "status", "on", ";",
+		"set-option", "-t", s.Name, "status", "2", ";",
 		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.StripBg, o.StripFg), ";",
-		"set-option", "-t", s.Name, "status-left", statusLeft, ";",
-		"set-option", "-t", s.Name, "status-left-length", "120", ";",
-		"set-option", "-t", s.Name, "status-right", statusRight, ";",
+		// Lower line (closest to terminal bottom) — origin + PR + detach hint.
+		"set-option", "-t", s.Name, "status-left", line2Left, ";",
+		"set-option", "-t", s.Name, "status-left-length", "200", ";",
+		"set-option", "-t", s.Name, "status-right", line2Right, ";",
 		"set-option", "-t", s.Name, "status-right-length", "40", ";",
-		"set-option", "-t", s.Name, "pane-border-status", "top", ";",
-		"set-option", "-t", s.Name, "pane-border-format", paneFmt, ";",
-		"set-option", "-t", s.Name, "pane-border-style", fmt.Sprintf("fg=%s", o.BorderColor), ";",
-		"set-option", "-t", s.Name, "pane-active-border-style", fmt.Sprintf("fg=%s", o.AccentColor),
+		// Upper line — session identity + path.
+		"set-option", "-t", s.Name, "status-format[1]",
+			fmt.Sprintf("#[bg=%s,fg=%s]%s#[bg=%s,fg=%s,align=right]%s",
+				o.StripBg, o.StripFg, line1Left, o.StripBg, o.StripFg, line1Right), ";",
+		// Disable pane-border-status — it draws a misleading half-frame on
+		// single-pane sessions. The two-line status bar gives a complete
+		// chrome footer instead.
+		"set-option", "-t", s.Name, "pane-border-status", "off",
 	)
 	if err := cmd.Run(); err != nil {
 		debuglog.Logger.Error("tmux apply status bar failed", "session", s.Name, "err", err)
