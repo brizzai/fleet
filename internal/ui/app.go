@@ -3015,18 +3015,13 @@ func (h *Home) syncHookStatuses(sessions []*session.Session) []string {
 					debuglog.Logger.Error("storage: UpdateClaudeSessionID", "id", s.ID, "err", err)
 				}
 			}
-			// Persist prompt changes and reset title on every new prompt
-			// (for non-manually-renamed, non-Claude-named sessions).
+			// Persist prompt changes. Re-titling on later prompts is driven by
+			// Claude's own ai-title (read from the JSONL in the worker cycle),
+			// not by re-running the heuristic per prompt.
 			if s.PromptCount != oldPromptCount {
 				h.markSessionAccessed(s)
 				if err := h.storage.UpdatePromptCount(s.ID, s.PromptCount); err != nil {
 					debuglog.Logger.Error("storage: UpdatePromptCount", "id", s.ID, "err", err)
-				}
-				if h.cfg.IsAutoNameEnabled() && s.TitleGenerated && !s.ManuallyRenamed && s.ClaudeSessionName == "" {
-					s.TitleGenerated = false
-					if err := h.storage.ResetTitleGenerated(s.ID); err != nil {
-						debuglog.Logger.Error("storage: ResetTitleGenerated", "id", s.ID, "err", err)
-					}
 				}
 			}
 			if s.FirstPrompt != "" && s.FirstPrompt != oldFirstPrompt {
@@ -3096,15 +3091,17 @@ func (h *Home) statusWorkerCycle() {
 	h.syncHookStatuses(sessions)
 
 	// 3b. Auto-name: generate title for ONE session per cycle.
-	// Priority: manual (R key) > Claude session name > last prompt heuristic.
+	// Priority: manual (R key) > custom-title > ai-title > last prompt heuristic.
 	if h.cfg.IsAutoNameEnabled() {
 		for _, s := range sessions {
 			if s.ManuallyRenamed {
 				continue
 			}
 
-			// Periodically re-read Claude's session name from JSONL (~every 30s per session).
-			if s.ClaudeSessionID != "" && time.Since(s.ClaudeNameLastChecked) > 30*time.Second {
+			// Re-read Claude's title from the JSONL. Until we have one, check
+			// every cycle so a fresh session adopts its ai-title promptly;
+			// after that, re-check ~every 30s to follow custom-title/ai-title drift.
+			if s.ClaudeSessionID != "" && (s.ClaudeSessionName == "" || time.Since(s.ClaudeNameLastChecked) > 30*time.Second) {
 				s.ClaudeNameLastChecked = time.Now()
 				name := session.ReadClaudeSessionName(s.ClaudeSessionID, s.ProjectPath)
 				if name != "" && name != s.ClaudeSessionName {
