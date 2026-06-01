@@ -204,7 +204,7 @@ func installFleetNextTo(brizzExe string) (string, error) {
 		return "", fmt.Errorf("fetch release: %w", err)
 	}
 	ver := strings.TrimPrefix(rel.TagName, "v")
-	archiveName := fmt.Sprintf("fleet_%s_darwin_%s.tar.gz", ver, runtime.GOARCH)
+	archiveName := fmt.Sprintf("fleet_%s_%s_%s.tar.gz", ver, runtime.GOOS, runtime.GOARCH)
 
 	var archiveURL, checksumsURL string
 	for _, a := range rel.Assets {

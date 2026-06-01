@@ -138,7 +138,7 @@ func Update(currentVersion string) (string, error) {
 		return "", nil
 	}
 
-	archiveName := fmt.Sprintf("fleet_%s_darwin_%s.tar.gz", latest, runtime.GOARCH)
+	archiveName := fmt.Sprintf("fleet_%s_%s_%s.tar.gz", latest, runtime.GOOS, runtime.GOARCH)
 	assetURL := findAssetURL(release.Assets, archiveName)
 	if assetURL == "" {
 		return "", fmt.Errorf("asset %s not found in release", archiveName)
