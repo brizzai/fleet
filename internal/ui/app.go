@@ -112,6 +112,16 @@ type (
 	// finishes (or hits its deadline). It dismisses the boot splash and
 	// hands control to the steady-state status worker.
 	bootstrapDoneMsg struct{}
+	// gitInfoUpdateMsg carries a per-repo refresh result from a worker
+	// goroutine back to Update — Update is the sole writer of
+	// h.gitInfoCache, so workers push proposed updates through this msg
+	// instead of taking workerMu and mutating the map directly. nil info
+	// is allowed (signals "no data yet"); Update overwrites whatever was
+	// in the cache for `repo`.
+	gitInfoUpdateMsg struct {
+		repo string
+		info *git.RepoInfo
+	}
 	// splashFrameMsg advances the boot-splash spinner. Self-rescheduled
 	// while !booted; not emitted after bootstrapDoneMsg.
 	splashFrameMsg time.Time
@@ -226,6 +236,13 @@ type Home struct {
 	cancel                context.CancelFunc
 	workerStarted         bool
 
+	// program is the running tea.Program, injected by cmd/fleet/main.go via
+	// SetProgram before p.Run(). Worker goroutines push state updates back
+	// to Update via h.send(msg) so Update remains the sole writer of model
+	// fields — no lock contracts to honor at call sites. Nil during tests
+	// that drive Update directly; send() is a no-op in that case.
+	program *tea.Program
+
 	startTime time.Time // app start time for uptime tracking
 
 	// Throttles the "gh rate-limited" WARN log so it doesn't fire every
@@ -305,6 +322,21 @@ func (h *Home) Init() tea.Cmd {
 		h.tick(),
 		h.previewTick(),
 	)
+}
+
+// SetProgram wires up the running tea.Program so worker goroutines can
+// push state updates back to Update via h.send. Called once from
+// cmd/fleet/main.go after tea.NewProgram and before p.Run().
+func (h *Home) SetProgram(p *tea.Program) {
+	h.program = p
+}
+
+// send pushes a message to the Update loop from a background goroutine.
+// No-op when program isn't set (tests that drive Update directly).
+func (h *Home) send(msg tea.Msg) {
+	if h.program != nil {
+		h.program.Send(msg)
+	}
 }
 
 // Update implements tea.Model.
@@ -781,6 +813,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				pw.Frame++
 			}
 			return h, spinnerTickCmd
+		}
+		return h, nil
+
+	case gitInfoUpdateMsg:
+		// Workers push per-repo refresh results here so Update remains the
+		// sole writer of gitInfoCache — no lock contracts at call sites,
+		// no chance of self-deadlock. Empty repo paths are filtered (defensive
+		// against early-cycle calls before a path is known).
+		if msg.repo != "" {
+			h.gitInfoCache[msg.repo] = msg.info
+			h.rebuildFlatItems()
 		}
 		return h, nil
 
