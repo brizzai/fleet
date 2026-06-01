@@ -216,22 +216,27 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 		paneFmt += fmt.Sprintf("#[align=right,fg=%s]%s ", o.Dim, o.Path)
 	}
 
-	// Bottom: just the detach hint, centred, painted in accent colours so
-	// the strip pops out as a brand-matched footer instead of fading into
-	// the pane background.
-	bottomCenter := fmt.Sprintf("#[bg=%s,fg=%s,bold] %s #[default]",
-		o.AccentColor, o.StripBg, o.DetachHint)
+	// Bottom: detach hint rendered in the regular fleet hotkey style —
+	// accent-coloured key + plain-text description, right-aligned. Matches
+	// the contextual footer in the main TUI so muscle memory carries over.
+	key, desc, _ := strings.Cut(o.DetachHint, " ")
+	if desc == "" {
+		desc = "detach"
+		key = o.DetachHint
+	}
+	bottomRight := fmt.Sprintf("#[fg=%s,bold]%s #[fg=%s,nobold]%s ",
+		o.AccentColor, key, o.StripFg, desc)
 
 	cmd := exec.Command("tmux",
 		"set-option", "-t", s.Name, "status", "on", ";",
 		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.StripBg, o.StripFg), ";",
-		"set-option", "-t", s.Name, "status-justify", "centre", ";",
+		"set-option", "-t", s.Name, "status-justify", "left", ";",
 		"set-option", "-t", s.Name, "status-left", "", ";",
 		"set-option", "-t", s.Name, "status-left-length", "0", ";",
-		"set-option", "-t", s.Name, "status-right", "", ";",
-		"set-option", "-t", s.Name, "status-right-length", "0", ";",
-		"set-option", "-t", s.Name, "window-status-current-format", bottomCenter, ";",
-		"set-option", "-t", s.Name, "window-status-format", bottomCenter, ";",
+		"set-option", "-t", s.Name, "status-right", bottomRight, ";",
+		"set-option", "-t", s.Name, "status-right-length", "40", ";",
+		"set-option", "-t", s.Name, "window-status-current-format", "", ";",
+		"set-option", "-t", s.Name, "window-status-format", "", ";",
 		// Top horizontal rule with all the orientation info.
 		"set-option", "-t", s.Name, "pane-border-status", "top", ";",
 		"set-option", "-t", s.Name, "pane-border-format", paneFmt, ";",
