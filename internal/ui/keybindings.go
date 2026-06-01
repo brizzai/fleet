@@ -66,10 +66,10 @@ var allKeyBindings = []KeyBinding{
 type BarContext int
 
 const (
-	BarContextEmpty BarContext = iota // no items, or unknown
-	BarContextOrigin                  // cursor on an origin header (▾ brizzai 16)
-	BarContextCheckout                // cursor on a checkout header (▾ new-ui #100)
-	BarContextSession                 // cursor on a real session row
+	BarContextEmpty    BarContext = iota // no items, or unknown
+	BarContextOrigin                     // cursor on an origin header (▾ brizzai 16)
+	BarContextCheckout                   // cursor on a checkout header (▾ new-ui #100)
+	BarContextSession                    // cursor on a real session row
 )
 
 // HelpBarBindings returns ALL bar bindings; kept for places that want the

@@ -106,8 +106,8 @@ var (
 	HelpSepStyle = lipgloss.NewStyle().Foreground(ColorBorder)
 
 	// Git info styles.
-	BranchStyle      = lipgloss.NewStyle().Foreground(ColorBlue)
-	DirtyStyle       = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
+	BranchStyle    = lipgloss.NewStyle().Foreground(ColorBlue)
+	DirtyStyle     = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	PROpenStyle    = lipgloss.NewStyle().Foreground(ColorGreen)
 	PRFailStyle    = lipgloss.NewStyle().Foreground(ColorRed)
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)

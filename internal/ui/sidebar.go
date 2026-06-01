@@ -12,7 +12,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-
 // SidebarItem represents a flattened row for cursor navigation.
 //
 // IsRepoHeader is the umbrella flag for "any non-session row" — it stays true
