@@ -153,22 +153,22 @@ type StatusBarOpts struct {
 	DetachHint string
 }
 
-// ApplyStatusBar repaints the tmux session chrome — a two-line status bar
-// at the bottom of the pane — using the supplied opts. Idempotent and cheap
-// (a single batched set-option call) so callers can re-apply on every status
-// change without worry.
+// ApplyStatusBar repaints the tmux session chrome using the supplied opts.
+// Idempotent and cheap (a single batched set-option call) so callers can
+// re-apply on every status change without worry.
 //
-// We render two stacked status lines instead of using pane-border-status so
-// the chrome looks complete even with a single pane. tmux pane borders are
-// only drawn *between* panes, so a single-pane session with border-status
-// shows a half-drawn frame (top line only, no sides or bottom). Two real
-// status lines at the bottom give a solid, balanced footer instead.
+// Layout — three sides of chrome around the pane content:
 //
-// Layout (bottom of terminal):
-//
+//	───── 📁 <session-title> · <branch> ──────────── ~/code/<path> ─────
 //	... session content ...
-//	  📁 <session-title> · <branch>                      ~/code/<path>
 //	  <origin>  ·  PR #N (status)                         ctrl+q detach
+//	  Branch lifecycle / additional context                   (line 2)
+//
+// Vertical sides are a tmux limitation — pane borders only draw *between*
+// panes, so a single-pane session can't get left/right edges. We give it
+// the most chrome tmux allows: a top horizontal rule (pane-border-status
+// top, with the session identity inset into it) and a two-line bottom
+// status bar with origin/PR/path/detach.
 func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 	if o.StripBg == "" {
 		o.StripBg = "#1a1b26"
@@ -195,50 +195,48 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 		o.DisplayName = s.DisplayName
 	}
 
-	// Line 1 (upper of the two): session identity left, path right.
-	line1LeftParts := []string{}
+	// Top border header (rendered on the pane-border-status top line):
+	// session identity left, path right. Tmux draws the horizontal rule
+	// itself — our format fills in the labels.
+	topLeftParts := []string{}
 	if o.DisplayName != "" {
-		line1LeftParts = append(line1LeftParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, o.DisplayName))
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, o.DisplayName))
 	}
 	if o.Branch != "" {
-		line1LeftParts = append(line1LeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, o.Branch))
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, o.Branch))
 	}
-	line1Left := " " + strings.Join(line1LeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
-	line1Right := ""
+	paneFmt := " " + strings.Join(topLeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
 	if o.Path != "" {
-		line1Right = fmt.Sprintf("#[fg=%s]%s ", o.Dim, o.Path)
+		paneFmt += fmt.Sprintf("#[align=right,fg=%s]%s ", o.Dim, o.Path)
 	}
 
-	// Line 2 (lower, the conventional status line): origin + PR left, detach right.
-	line2LeftParts := []string{}
+	// Bottom status line: origin + PR left, detach hint right.
+	bottomLeftParts := []string{}
 	if o.Origin != "" {
-		line2LeftParts = append(line2LeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, o.Origin))
+		bottomLeftParts = append(bottomLeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, o.Origin))
 	}
 	if o.PRSummary != "" {
-		line2LeftParts = append(line2LeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, o.PRSummary))
+		bottomLeftParts = append(bottomLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, o.PRSummary))
 	}
-	line2Left := " "
-	if len(line2LeftParts) > 0 {
-		line2Left = " " + strings.Join(line2LeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
+	bottomLeft := " "
+	if len(bottomLeftParts) > 0 {
+		bottomLeft = " " + strings.Join(bottomLeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
 	}
-	line2Right := fmt.Sprintf("#[fg=%s,noBold]%s ", o.Dim, o.DetachHint)
+	bottomRight := fmt.Sprintf("#[fg=%s,noBold]%s ", o.Dim, o.DetachHint)
 
 	cmd := exec.Command("tmux",
-		"set-option", "-t", s.Name, "status", "2", ";",
+		"set-option", "-t", s.Name, "status", "on", ";",
 		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.StripBg, o.StripFg), ";",
-		// Lower line (closest to terminal bottom) — origin + PR + detach hint.
-		"set-option", "-t", s.Name, "status-left", line2Left, ";",
+		"set-option", "-t", s.Name, "status-left", bottomLeft, ";",
 		"set-option", "-t", s.Name, "status-left-length", "200", ";",
-		"set-option", "-t", s.Name, "status-right", line2Right, ";",
+		"set-option", "-t", s.Name, "status-right", bottomRight, ";",
 		"set-option", "-t", s.Name, "status-right-length", "40", ";",
-		// Upper line — session identity + path.
-		"set-option", "-t", s.Name, "status-format[1]",
-			fmt.Sprintf("#[bg=%s,fg=%s]%s#[bg=%s,fg=%s,align=right]%s",
-				o.StripBg, o.StripFg, line1Left, o.StripBg, o.StripFg, line1Right), ";",
-		// Disable pane-border-status — it draws a misleading half-frame on
-		// single-pane sessions. The two-line status bar gives a complete
-		// chrome footer instead.
-		"set-option", "-t", s.Name, "pane-border-status", "off",
+		// Top horizontal rule + content (the only "border" tmux can draw on
+		// a single-pane session).
+		"set-option", "-t", s.Name, "pane-border-status", "top", ";",
+		"set-option", "-t", s.Name, "pane-border-format", paneFmt, ";",
+		"set-option", "-t", s.Name, "pane-border-style", fmt.Sprintf("fg=%s", o.BorderColor), ";",
+		"set-option", "-t", s.Name, "pane-active-border-style", fmt.Sprintf("fg=%s", o.AccentColor),
 	)
 	if err := cmd.Run(); err != nil {
 		debuglog.Logger.Error("tmux apply status bar failed", "session", s.Name, "err", err)
