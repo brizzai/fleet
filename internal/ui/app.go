@@ -695,6 +695,23 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return h, nil
 		}
+		// Seed gitInfoCache for the new checkout from the source repo's
+		// OriginKey so the first sidebar render groups it under the
+		// parent origin instead of flickering through a "local:<dir>"
+		// header until the worker observes the new path. If the source
+		// itself isn't resolved yet (cold start), skip — RefreshGitInfo
+		// will fill it in on the next cycle.
+		if msg.info != nil && msg.info.Path != "" {
+			h.workerMu.Lock()
+			if src, ok := h.gitInfoCache[msg.repoPath]; ok && src != nil && src.OriginKey != "" {
+				h.gitInfoCache[msg.info.Path] = &git.RepoInfo{
+					OriginKey:      src.OriginKey,
+					IsWorktreeRepo: true,
+				}
+			}
+			h.workerMu.Unlock()
+		}
+
 		if ctx := h.pendingForkCtx; ctx != nil {
 			h.clearPendingFork()
 			return h, h.dispatchForkToWorktree(ctx, msg.info.Path, msg.info.Name)
