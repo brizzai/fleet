@@ -4,7 +4,7 @@ type: improved
 
 Sidebar and Preview now live in their own rounded-border cards with corner-inset titles (`╭─ Sessions ─...─╮` / `╭─ Preview ─...─╮`), so the two regions read as distinct surfaces instead of one stream split by a hairline. The focused panel switches its border to the accent color in focus mode.
 
-New `fleet-pink` flagship theme (accent `#dc88c0`) is the default for first-run users. Tokyo Night, Catppuccin Mocha, Rosé Pine, Nord and Gruvbox remain available via the `S` settings dialog.
+New `fleet-pink` flagship theme (accent `#ff77c6`) is the default for first-run users. Tokyo Night, Catppuccin Mocha, Rosé Pine, Nord and Gruvbox remain available via the `S` settings dialog.
 
 Sidebar cleanup: selected sessions drop the leading `▶` (it collided with the `▸` chevron used on collapsed headers — the inverted-background title was already carrying the selection signal). Worktree branch names render in italic so you can tell the main clone apart from its worktrees at a glance without an extra prefix column. In the default `icon` indicator mode, idle/starting sessions render a dim `·` anchor so the eye has a leftmost mark on every row (bar mode keeps them blank — the gutter bar carries the signal there). Selection background is one contiguous span across each row (PR badge and dirty marker sit inside the highlighted pill instead of bleeding out as separate boxes).
 

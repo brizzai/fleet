@@ -22,7 +22,13 @@ func GetOriginKey(repoPath string) string {
 		return "local:" + filepath.Base(repoPath)
 	}
 
+	// Normalize trailing slashes around the optional `.git` so that
+	// `…/repo`, `…/repo/`, `…/repo.git`, and `…/repo.git/` all land on the
+	// same origin key (otherwise the sidebar splits groups for what's
+	// really the same remote).
+	url = strings.TrimRight(url, "/")
 	url = strings.TrimSuffix(url, ".git")
+	url = strings.TrimRight(url, "/")
 
 	// git@host:org/repo
 	if rest, ok := strings.CutPrefix(url, "git@"); ok {

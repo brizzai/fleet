@@ -195,7 +195,7 @@ type Home struct {
 	// pair, which deadlocked when callers double-locked via rebuildFlatItems.
 	gitInfoCache  atomic.Pointer[map[string]*git.RepoInfo]
 	repoLastHotAt map[string]time.Time // repo root -> last time a session in it was Running (worker-only access)
-	ghAvailable   bool                     // cached gh CLI availability
+	ghAvailable   bool                 // cached gh CLI availability
 
 	hookWatcher *hooks.HookWatcher
 
@@ -245,10 +245,10 @@ type Home struct {
 	// git/PR cache moved off the lock entirely — see h.gitInfoCache /
 	// h.gitInfo / h.writeGitInfo, which use an atomic.Pointer with
 	// copy-on-write writes for fully lock-free reads.
-	workerMu sync.Mutex
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	workerStarted         bool
+	workerMu      sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	workerStarted bool
 
 	// program is the running tea.Program, injected by cmd/fleet/main.go via
 	// SetProgram before p.Run(). Worker goroutines push state updates back
@@ -330,7 +330,6 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	h.gitInfoCache.Store(&emptyCache)
 	return h
 }
-
 
 // Init implements tea.Model.
 func (h *Home) Init() tea.Cmd {
@@ -664,19 +663,20 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setError(fmt.Errorf("checkout: %w", msg.err))
 			return h, nil
 		}
-		// Refresh git info for the repo.
-		info := git.RefreshGitInfo(msg.repoPath)
-		h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
-			next[msg.repoPath] = info
-			return true
-		})
-		h.rebuildFlatItems()
+		// Refresh git info off the Update goroutine — RefreshGitInfo shells
+		// out to git, which would otherwise block repaint/key handling until
+		// it returns. The existing gitInfoUpdateMsg pipeline writes the new
+		// info into the lock-free cache and rebuilds the sidebar.
+		repoPath := msg.repoPath
+		refresh := func() tea.Msg {
+			return gitInfoUpdateMsg{repo: repoPath, info: git.RefreshGitInfo(repoPath)}
+		}
 		// Trigger PR refresh for new branch.
 		select {
 		case h.statusTrigger <- struct{}{}:
 		default:
 		}
-		return h, nil
+		return h, refresh
 
 	case statusSnapshotMsg:
 		if msg.err != nil {
@@ -1880,15 +1880,20 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	return nil
 }
 
-// repoIsWorktree reports whether a repo group is a git worktree. Uses the cached
-// git info when available (populated by the worker for repos with sessions); for
-// an empty worktree header the worker never refreshes it, so fall back to a direct
-// git check — cheap, and only on the keypress that opens the delete dialog.
+// repoIsWorktree reports whether a repo group is a git worktree, reading from
+// the lock-free git/PR snapshot. Cold cache → false. bootstrapGitInfo pre-warms
+// every visible repo within 6s of launch and the steady-state worker covers
+// every session-repo each cycle, so the realistic cold-cache window is empty.
+// If a brand-new worktree header is somehow hit before the worker resolves it,
+// `d` falls through to "forget repo" (instant unpin, no disk touch) instead of
+// "Remove Worktree?" — the worktree directory stays put and the user can
+// `git worktree remove` it manually. Never shells out, so Update() stays
+// blocking-I/O-free per project rules.
 func (h *Home) repoIsWorktree(repoPath string) bool {
 	if info := h.gitInfo()[repoPath]; info != nil {
 		return info.IsWorktreeRepo
 	}
-	return git.IsWorktree(repoPath)
+	return false
 }
 
 // unpinRepoHeader unpins a repo from the sidebar and fixes the cursor.
@@ -3871,17 +3876,6 @@ func (h *Home) rebuildFlatItems() {
 
 	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
 	h.sidebarDirty = true
-}
-
-// isWorktreeOf reads the IsWorktreeRepo flag from the immutable git/PR
-// snapshot. Returns false when the row hasn't been resolved yet —
-// BuildFlatItems falls back to alphabetical ordering in that case, which
-// the next rebuild fixes.
-func (h *Home) isWorktreeOf(repoRoot string) bool {
-	if info := h.gitInfo()[repoRoot]; info != nil {
-		return info.IsWorktreeRepo
-	}
-	return false
 }
 
 // originOf maps a repo root to its stable origin key, falling back to
