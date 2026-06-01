@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -235,10 +236,10 @@ type Home struct {
 	// every visible repo's OriginKey (or the 4s deadline expires); while
 	// false, View() returns the splash and the steady-state worker has
 	// not started.
-	booted             bool
-	splashFrame        int
-	bootstrapRepos     int          // total repos the bootstrap is waiting on (for progress UI)
-	bootstrapResolved  atomic.Int32 // goroutines that have finished within the current bootstrap fan-out
+	booted            bool
+	splashFrame       int
+	bootstrapRepos    int          // total repos the bootstrap is waiting on (for progress UI)
+	bootstrapResolved atomic.Int32 // goroutines that have finished within the current bootstrap fan-out
 
 	// Rendering diagnostics (accumulated counters for bug reports).
 	renderStats RenderStats
@@ -352,8 +353,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so they get a full UpdateStatus() within ~100ms instead of waiting for round-robin.
 		h.workerMu.Lock()
 		changed := h.syncHookStatuses(h.sessions)
-		h.rebuildFlatItems()
 		h.workerMu.Unlock()
+		h.rebuildFlatItems()
 		h.enqueuePriorityUpdates(changed)
 		return h, h.listenForHookChanges
 
@@ -363,8 +364,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Immediate hook sync (data already in HookWatcher from hooks that fired during attach).
 		h.workerMu.Lock()
 		changed := h.syncHookStatuses(h.sessions)
-		h.rebuildFlatItems()
 		h.workerMu.Unlock()
+		h.rebuildFlatItems()
 		h.enqueuePriorityUpdates(changed)
 		// Also trigger full background refresh for pane captures, git, etc.
 		select {
@@ -785,7 +786,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bootstrapDoneMsg:
 		h.booted = true
-		h.workerMu.Lock()
+		// rebuildFlatItems self-locks workerMu to snapshot gitInfoCache;
+		// don't wrap it in an outer Lock (sync.Mutex isn't re-entrant —
+		// that deadlocks the splash forever).
 		h.rebuildFlatItems()
 		// Land the cursor on the first actionable row (a session) instead
 		// of the first origin header — first keystroke does something
@@ -794,7 +797,6 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.cursor = idx
 			h.syncViewport()
 		}
-		h.workerMu.Unlock()
 		go h.statusWorker()
 		return h, nil
 
@@ -2720,10 +2722,10 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	default: // worker busy, skip
 	}
 
-	// Read worker results under lock and rebuild.
-	h.workerMu.Lock()
+	// rebuildFlatItems self-locks workerMu now; wrapping it in an outer
+	// Lock would self-deadlock (sync.Mutex isn't re-entrant) and freeze
+	// the Update goroutine — that's how the splash was hanging.
 	h.rebuildFlatItems()
-	h.workerMu.Unlock()
 
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	return h, h.tick()
@@ -3229,72 +3231,87 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
-	for _, repo := range repos {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(r string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if progress != nil {
-				defer progress.Add(1)
-			}
-			info := git.RefreshGitInfo(r)
-
-			// Carry PR + last-refresh stamp forward from the cache, but
-			// ONLY if the cached row's branch matches what RefreshGitInfo
-			// just observed. A branch switch (interactive or external)
-			// invalidates the cached PR for that checkout — better to
-			// re-fetch than show a badge for the wrong branch.
-			//
-			// `LastPRRefresh` must be preserved even when `old.PR == nil`,
-			// because a recent "no PR for this branch" result is still a
-			// completed check that resets the TTL. Otherwise repos with
-			// no open PR re-fetch on every 2s tick → blows the gh rate
-			// limit the moment we fan out across all repos in parallel.
-			h.workerMu.Lock()
-			if old, ok := h.gitInfoCache[r]; ok && old.Branch == info.Branch {
-				info.PR = old.PR
-				info.LastPRRefresh = old.LastPRRefresh
-				info.PRRateLimitedAt = old.PRRateLimitedAt
-			}
-			h.workerMu.Unlock()
-
-			ttl := repoTTL[r]
-			if ttl == 0 {
-				ttl = prTTLHot
-			}
-			if h.ghAvailable && shouldRefreshPR(info, ttl) {
-				prFetches.Add(1)
-				git.RefreshPRInfo(info, r, workspace.IgnorePatterns(r))
-				if !info.PRRateLimitedAt.IsZero() && time.Since(info.PRRateLimitedAt) < time.Second {
-					rateLimitedHits.Add(1)
+	// Move dispatch into the gated goroutine so the deadline preempts BOTH
+	// the per-repo wait AND the dispatch loop. Otherwise, with many repos
+	// and slow gh calls, the for-loop sits on `sem <- struct{}{}` for the
+	// entire batch and the deadline select below never runs — the splash
+	// hangs past the intended 6s cutoff. Goroutines spawned before the
+	// deadline keep running; their results land in the cache and the
+	// steady-state worker carries them forward.
+	dispatchAndWait := func() {
+		for _, repo := range repos {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(r string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if progress != nil {
+					defer progress.Add(1)
 				}
-			}
+				defer func() {
+					if pErr := recover(); pErr != nil {
+						debuglog.Logger.Error("bootstrap: panic in repo goroutine", "repo", r, "panic", fmt.Sprintf("%v", pErr), "stack", string(debug.Stack()))
+					}
+				}()
+				info := git.RefreshGitInfo(r)
 
-			h.workerMu.Lock()
-			h.gitInfoCache[r] = info
-			h.workerMu.Unlock()
+				// Carry PR + last-refresh stamp forward from the cache, but
+				// ONLY if the cached row's branch matches what RefreshGitInfo
+				// just observed. A branch switch (interactive or external)
+				// invalidates the cached PR for that checkout — better to
+				// re-fetch than show a badge for the wrong branch.
+				//
+				// `LastPRRefresh` must be preserved even when `old.PR == nil`,
+				// because a recent "no PR for this branch" result is still a
+				// completed check that resets the TTL. Otherwise repos with
+				// no open PR re-fetch on every 2s tick → blows the gh rate
+				// limit the moment we fan out across all repos in parallel.
+				h.workerMu.Lock()
+				if old, ok := h.gitInfoCache[r]; ok && old.Branch == info.Branch {
+					info.PR = old.PR
+					info.LastPRRefresh = old.LastPRRefresh
+					info.PRRateLimitedAt = old.PRRateLimitedAt
+				}
+				h.workerMu.Unlock()
 
-			// Persist to SQLite so the next launch can carry this forward
-			// instead of re-firing gh. Storage method logs errors itself;
-			// a failed write doesn't affect the in-memory cache.
-			_ = h.storage.SavePRCacheRow(&session.PRCacheRow{
-				RepoPath:        r,
-				Branch:          info.Branch,
-				OriginKey:       info.OriginKey,
-				PR:              info.PR,
-				LastPRRefresh:   info.LastPRRefresh,
-				PRRateLimitedAt: info.PRRateLimitedAt,
-			})
-		}(repo)
+				ttl := repoTTL[r]
+				if ttl == 0 {
+					ttl = prTTLHot
+				}
+				if h.ghAvailable && shouldRefreshPR(info, ttl) {
+					prFetches.Add(1)
+					git.RefreshPRInfo(info, r, workspace.IgnorePatterns(r))
+					if !info.PRRateLimitedAt.IsZero() && time.Since(info.PRRateLimitedAt) < time.Second {
+						rateLimitedHits.Add(1)
+					}
+				}
+
+				h.workerMu.Lock()
+				h.gitInfoCache[r] = info
+				h.workerMu.Unlock()
+
+				// Persist to SQLite so the next launch can carry this forward
+				// instead of re-firing gh. Storage method logs errors itself;
+				// a failed write doesn't affect the in-memory cache.
+				_ = h.storage.SavePRCacheRow(&session.PRCacheRow{
+					RepoPath:        r,
+					Branch:          info.Branch,
+					OriginKey:       info.OriginKey,
+					PR:              info.PR,
+					LastPRRefresh:   info.LastPRRefresh,
+					PRRateLimitedAt: info.PRRateLimitedAt,
+				})
+			}(repo)
+		}
+		wg.Wait()
 	}
 
 	if deadline <= 0 {
-		wg.Wait()
+		dispatchAndWait()
 	} else {
 		done := make(chan struct{})
 		go func() {
-			wg.Wait()
+			dispatchAndWait()
 			close(done)
 		}()
 		select {
