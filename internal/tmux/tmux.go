@@ -217,24 +217,24 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 	}
 
 	// Bottom: detach hint rendered in the regular fleet hotkey style —
-	// accent-coloured key + plain-text description, right-aligned. Matches
+	// accent-coloured key + plain-text description, left-aligned. Matches
 	// the contextual footer in the main TUI so muscle memory carries over.
 	key, desc, _ := strings.Cut(o.DetachHint, " ")
 	if desc == "" {
 		desc = "detach"
 		key = o.DetachHint
 	}
-	bottomRight := fmt.Sprintf("#[fg=%s,bold]%s #[fg=%s,nobold]%s ",
+	bottomLeft := fmt.Sprintf(" #[fg=%s,bold]%s #[fg=%s,nobold]%s",
 		o.AccentColor, key, o.StripFg, desc)
 
 	cmd := exec.Command("tmux",
 		"set-option", "-t", s.Name, "status", "on", ";",
 		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.StripBg, o.StripFg), ";",
 		"set-option", "-t", s.Name, "status-justify", "left", ";",
-		"set-option", "-t", s.Name, "status-left", "", ";",
-		"set-option", "-t", s.Name, "status-left-length", "0", ";",
-		"set-option", "-t", s.Name, "status-right", bottomRight, ";",
-		"set-option", "-t", s.Name, "status-right-length", "40", ";",
+		"set-option", "-t", s.Name, "status-left", bottomLeft, ";",
+		"set-option", "-t", s.Name, "status-left-length", "40", ";",
+		"set-option", "-t", s.Name, "status-right", "", ";",
+		"set-option", "-t", s.Name, "status-right-length", "0", ";",
 		"set-option", "-t", s.Name, "window-status-current-format", "", ";",
 		"set-option", "-t", s.Name, "window-status-format", "", ";",
 		// Top horizontal rule with all the orientation info.
