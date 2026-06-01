@@ -114,9 +114,9 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Error history: ring buffer (max 50) of errors that flash for 5s — persists for bug reporting
 - Action log: ring buffer (max 100) of user actions (attach, delete, restart, editor, approve, etc.) for "steps to reproduce"
 - Diagnostics: app version, macOS version, tmux/claude/gh versions, config, last 100 lines of debug.log; home dir sanitized to `~`
-- Auto-naming: sessions auto-titled from user prompt via smart heuristic (filler stripping, word-boundary truncation)
-- Auto-naming pipeline: UserPromptSubmit hook → status file → HookWatcher → Session.FirstPrompt → worker cycle → naming.GenerateTitle
-- Retitle: after 3 prompts, title regenerated from latest prompt (better reflects session scope)
+- Auto-naming: sessions titled from Claude's own session title, read from the conversation JSONL (`session.ReadClaudeSessionName`); falls back to fleet's prompt heuristic (filler stripping, word-boundary truncation) only when Claude has written no title yet
+- Title precedence: manual R-key rename (`ManuallyRenamed`) > Claude `custom-title` (`/rename` in-session) > Claude `ai-title` (auto, model-generated, evolves with the work) > fleet prompt heuristic
+- Auto-naming pipeline: worker cycle re-reads the JSONL each cycle until a Claude title appears (prompt pickup within ~2s), then ~every 30s to follow `ai-title`/`custom-title` drift; heuristic fallback uses UserPromptSubmit hook → status file → HookWatcher → Session.FirstPrompt → naming.GenerateTitle
 - Manual rename (R key) sets ManuallyRenamed flag, prevents auto-rename
 - Chrome tab control: `p` opens PR in Chrome via extension (reuses existing tab), falls back to `open <url>` if unavailable
 - Chrome extension architecture: TUI →[unix socket]→ native host (`fleet chrome-host`) →[stdio]→ Chrome service worker

@@ -287,4 +287,112 @@ func TestReadClaudeSessionName(t *testing.T) {
 			t.Errorf("expected %q, got %q", "Valid Title", got)
 		}
 	})
+
+	// writeTranscript writes a JSONL transcript under a temp HOME and returns the
+	// (claudeSessionID, projectPath) to read it back.
+	writeTranscript := func(t *testing.T, name, content string) (string, string) {
+		t.Helper()
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		projectPath := "/test/" + name
+		claudeSessionID := "sid-" + name
+		projectDir := filepath.Join(tmpHome, ".claude", "projects", ClaudeProjectDirName(projectPath))
+		if err := os.MkdirAll(projectDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(projectDir, claudeSessionID+".jsonl"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write jsonl: %v", err)
+		}
+		return claudeSessionID, projectPath
+	}
+
+	t.Run("ai-title only returns last aiTitle", func(t *testing.T) {
+		id, path := writeTranscript(t, "ai-only", `{"type":"message","content":"hi"}
+{"type":"ai-title","aiTitle":"First Topic"}
+{"type":"message","content":"more"}
+{"type":"ai-title","aiTitle":"Second Topic"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "Second Topic" {
+			t.Errorf("got %q, want %q", got, "Second Topic")
+		}
+	})
+
+	t.Run("custom-title wins over ai-title regardless of order", func(t *testing.T) {
+		id, path := writeTranscript(t, "custom-wins", `{"type":"ai-title","aiTitle":"Auto Title"}
+{"type":"custom-title","customTitle":"My Name"}
+{"type":"ai-title","aiTitle":"Auto Title Drifted"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "My Name" {
+			t.Errorf("got %q, want %q", got, "My Name")
+		}
+	})
+
+	t.Run("evolving ai-title returns the latest", func(t *testing.T) {
+		id, path := writeTranscript(t, "evolving", `{"type":"ai-title","aiTitle":"Boot Splash Work"}
+{"type":"ai-title","aiTitle":"Mutex Refactor"}
+{"type":"ai-title","aiTitle":"Title Swap"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "Title Swap" {
+			t.Errorf("got %q, want %q", got, "Title Swap")
+		}
+	})
+
+	t.Run("empty aiTitle is skipped", func(t *testing.T) {
+		id, path := writeTranscript(t, "empty-ai", `{"type":"ai-title","aiTitle":""}
+{"type":"message","content":"hi"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("kebab ai-title is de-slugified, case preserved", func(t *testing.T) {
+		id, path := writeTranscript(t, "kebab-ai", `{"type":"ai-title","aiTitle":"native-ai-title-integration"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "native ai title integration" {
+			t.Errorf("got %q, want %q", got, "native ai title integration")
+		}
+	})
+
+	t.Run("de-slugify keeps existing uppercase acronyms", func(t *testing.T) {
+		id, path := writeTranscript(t, "acronym-ai", `{"type":"ai-title","aiTitle":"fix-API-client"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "fix API client" {
+			t.Errorf("got %q, want %q", got, "fix API client")
+		}
+	})
+
+	t.Run("sentence-case ai-title is left unchanged", func(t *testing.T) {
+		id, path := writeTranscript(t, "sentence-ai", `{"type":"ai-title","aiTitle":"Improve onboarding for Brizz users"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "Improve onboarding for Brizz users" {
+			t.Errorf("got %q, want unchanged", got)
+		}
+	})
+
+	t.Run("custom-title slug is NOT de-slugified (explicit rename)", func(t *testing.T) {
+		id, path := writeTranscript(t, "custom-slug", `{"type":"ai-title","aiTitle":"some-auto-title"}
+{"type":"custom-title","customTitle":"my-pinned-name"}
+`)
+		if got := ReadClaudeSessionName(id, path); got != "my-pinned-name" {
+			t.Errorf("got %q, want %q (custom-title verbatim)", got, "my-pinned-name")
+		}
+	})
+}
+
+func TestDeslugify(t *testing.T) {
+	cases := map[string]string{
+		"native-ai-title-integration":  "native ai title integration",
+		"fix-API-client":               "fix API client",
+		"snake_case_title":             "snake case title",
+		"Improve onboarding for Brizz": "Improve onboarding for Brizz", // has spaces → unchanged
+		"single":                       "single",                       // no separator → unchanged
+		"":                             "",
+		"well-known issue":             "well-known issue", // contains a space → natural language, unchanged
+	}
+	for in, want := range cases {
+		if got := deslugify(in); got != want {
+			t.Errorf("deslugify(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

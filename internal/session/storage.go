@@ -368,12 +368,6 @@ func (s *StateDB) MarkTitleGenerated(id string) error {
 	return err
 }
 
-// ResetTitleGenerated clears the title_generated flag to allow re-generation.
-func (s *StateDB) ResetTitleGenerated(id string) error {
-	_, err := s.db.Exec("UPDATE sessions SET title_generated = 0 WHERE id = ?", id)
-	return err
-}
-
 // UpdatePromptCount updates the prompt count for a session.
 func (s *StateDB) UpdatePromptCount(id string, count int) error {
 	_, err := s.db.Exec("UPDATE sessions SET prompt_count = ? WHERE id = ?", count, id)
