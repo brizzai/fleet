@@ -84,9 +84,10 @@ func TestViewGitInfoCacheRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
-			home.workerMu.Lock()
-			home.gitInfoCache[repo] = &git.RepoInfo{Branch: "main"}
-			home.workerMu.Unlock()
+			home.writeGitInfo(func(m map[string]*git.RepoInfo) bool {
+				m[repo] = &git.RepoInfo{Branch: "main"}
+				return true
+			})
 		}
 	}()
 
@@ -132,10 +133,9 @@ func TestRefreshAllGitAndPR_AllReposPopulated(t *testing.T) {
 
 	home.refreshAllGitAndPR(repos, 4, 0, nil)
 
-	home.workerMu.Lock()
-	defer home.workerMu.Unlock()
+	snap := home.gitInfo()
 	for _, r := range repos {
-		if _, ok := home.gitInfoCache[r]; !ok {
+		if _, ok := snap[r]; !ok {
 			t.Errorf("gitInfoCache missing entry for %q after bootstrap", r)
 		}
 	}

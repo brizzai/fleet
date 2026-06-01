@@ -184,8 +184,16 @@ type Home struct {
 	// lock needed.
 	lastTmuxStatusBar map[string]string // sessionID -> "status|theme"
 
-	gitInfoCache  map[string]*git.RepoInfo // repo root path -> git info
-	repoLastHotAt map[string]time.Time     // repo root -> last time a session in it was Running (guarded by workerMu)
+	// gitInfoCache holds the latest known git+PR state per repo. Stored as
+	// an atomic pointer to an immutable map so reads are lock-free and
+	// writes are copy-on-write: workers carry-forward by reading the
+	// loaded snapshot; Update applies gitInfoUpdateMsg by copying the
+	// current map, mutating the copy, and atomically swapping it in. The
+	// loaded map MUST NOT be mutated by readers — always make a fresh map
+	// for any write. Replaces the prior `map[string]*RepoInfo` + workerMu
+	// pair, which deadlocked when callers double-locked via rebuildFlatItems.
+	gitInfoCache  atomic.Pointer[map[string]*git.RepoInfo]
+	repoLastHotAt map[string]time.Time // repo root -> last time a session in it was Running (worker-only access)
 	ghAvailable   bool                     // cached gh CLI availability
 
 	hookWatcher *hooks.HookWatcher
@@ -231,7 +239,12 @@ type Home struct {
 	// Background worker for async status/git/PR updates.
 	statusTrigger         chan struct{} // buffered(1), triggers worker
 	priorityStatusUpdates chan string   // buffered, session IDs with fresh hook changes — drained before round-robin
-	workerMu              sync.Mutex    // protects sessions/gitInfoCache from concurrent worker access
+	// workerMu now protects only h.sessions (worker snapshots the slice at
+	// the top of each cycle; Update mutates on add/remove/restore). The
+	// git/PR cache moved off the lock entirely — see h.gitInfoCache /
+	// h.gitInfo / h.writeGitInfo, which use an atomic.Pointer with
+	// copy-on-write writes for fully lock-free reads.
+	workerMu sync.Mutex
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	workerStarted         bool
@@ -276,7 +289,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	ApplyPalette(PaletteByName(cfg.Theme))
 	StatusIndicatorMode = cfg.GetStatusIndicator()
 
-	return &Home{
+	h := &Home{
 		storage:               storage,
 		sessionByID:           make(map[string]*session.Session),
 		repoExpanded:          make(map[string]bool),
@@ -299,7 +312,6 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		bugReport:             NewBugReportDialog(),
 		previewCache:          make(map[string]string),
 		previewCacheTime:      make(map[string]time.Time),
-		gitInfoCache:          make(map[string]*git.RepoInfo),
 		repoLastHotAt:         make(map[string]time.Time),
 		filterInput:           fi,
 		cfg:                   cfg,
@@ -313,7 +325,11 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		cancel:                cancel,
 		startTime:             time.Now(),
 	}
+	emptyCache := make(map[string]*git.RepoInfo)
+	h.gitInfoCache.Store(&emptyCache)
+	return h
 }
+
 
 // Init implements tea.Model.
 func (h *Home) Init() tea.Cmd {
@@ -331,10 +347,47 @@ func (h *Home) SetProgram(p *tea.Program) {
 	h.program = p
 }
 
+// gitInfo returns the current immutable snapshot of the git/PR cache.
+// Safe to read from any goroutine. The returned map MUST NOT be mutated —
+// readers are guaranteed it won't change underneath them only because
+// writers copy-on-write via writeGitInfo.
+func (h *Home) gitInfo() map[string]*git.RepoInfo {
+	if p := h.gitInfoCache.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// writeGitInfo COW-updates the cache: copies the current map, runs the
+// mutation, and CAS-swaps the new map in. CAS retries on contention so
+// concurrent writers (production: only Update; tests: bootstrap per-repo
+// goroutines) can all succeed without locks. If mutate returns false the
+// swap is skipped.
+func (h *Home) writeGitInfo(mutate func(m map[string]*git.RepoInfo) bool) {
+	for {
+		oldP := h.gitInfoCache.Load()
+		var old map[string]*git.RepoInfo
+		if oldP != nil {
+			old = *oldP
+		}
+		next := make(map[string]*git.RepoInfo, len(old)+1)
+		for k, v := range old {
+			next[k] = v
+		}
+		if mutate != nil && !mutate(next) {
+			return
+		}
+		if h.gitInfoCache.CompareAndSwap(oldP, &next) {
+			return
+		}
+	}
+}
+
 // send pushes a message to the Update loop from a background goroutine.
 // In production h.program is wired by main.go; tests skip that, so we
-// fall back to applying state-mutating messages directly under workerMu
-// (still race-safe; the test asserts end state, not the path it took).
+// fall back to applying state-mutating messages directly. writeGitInfo
+// is safe to call from any goroutine — it COWs the underlying map and
+// atomic-swaps; the test asserts end state, not the path it took.
 func (h *Home) send(msg tea.Msg) {
 	if h.program != nil {
 		h.program.Send(msg)
@@ -343,10 +396,13 @@ func (h *Home) send(msg tea.Msg) {
 	switch m := msg.(type) {
 	case gitInfoUpdateMsg:
 		if m.repo != "" {
-			h.workerMu.Lock()
-			h.gitInfoCache[m.repo] = m.info
-			h.workerMu.Unlock()
+			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+				next[m.repo] = m.info
+				return true
+			})
 		}
+	default:
+		_ = m
 	}
 }
 
@@ -608,9 +664,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		// Refresh git info for the repo.
-		h.workerMu.Lock()
-		h.gitInfoCache[msg.repoPath] = git.RefreshGitInfo(msg.repoPath)
-		h.workerMu.Unlock()
+		info := git.RefreshGitInfo(msg.repoPath)
+		h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+			next[msg.repoPath] = info
+			return true
+		})
 		h.rebuildFlatItems()
 		// Trigger PR refresh for new branch.
 		select {
@@ -746,14 +804,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// itself isn't resolved yet (cold start), skip — RefreshGitInfo
 		// will fill it in on the next cycle.
 		if msg.info != nil && msg.info.Path != "" {
-			h.workerMu.Lock()
-			if src, ok := h.gitInfoCache[msg.repoPath]; ok && src != nil && src.OriginKey != "" {
-				h.gitInfoCache[msg.info.Path] = &git.RepoInfo{
+			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+				src, ok := next[msg.repoPath]
+				if !ok || src == nil || src.OriginKey == "" {
+					return false
+				}
+				next[msg.info.Path] = &git.RepoInfo{
 					OriginKey:      src.OriginKey,
 					IsWorktreeRepo: true,
 				}
-			}
-			h.workerMu.Unlock()
+				return true
+			})
 		}
 
 		if ctx := h.pendingForkCtx; ctx != nil {
@@ -828,21 +889,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case gitInfoUpdateMsg:
-		// Workers push per-repo refresh results here so Update remains the
-		// sole writer of gitInfoCache — no lock contracts at call sites,
-		// no chance of self-deadlock. Empty repo paths are filtered (defensive
-		// against early-cycle calls before a path is known).
+		// Workers push per-repo refresh results here. Update is the sole
+		// writer of gitInfoCache and goes through writeGitInfo's COW so
+		// concurrent readers (View, worker carry-forward) see a stable
+		// immutable snapshot. Empty repo paths are filtered defensively.
 		if msg.repo != "" {
-			h.gitInfoCache[msg.repo] = msg.info
+			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+				next[msg.repo] = msg.info
+				return true
+			})
 			h.rebuildFlatItems()
 		}
 		return h, nil
 
 	case bootstrapDoneMsg:
 		h.booted = true
-		// rebuildFlatItems self-locks workerMu to snapshot gitInfoCache;
-		// don't wrap it in an outer Lock (sync.Mutex isn't re-entrant —
-		// that deadlocks the splash forever).
 		h.rebuildFlatItems()
 		// Land the cursor on the first actionable row (a session) instead
 		// of the first origin header — first keystroke does something
@@ -912,18 +973,23 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.prCache != nil {
 			cutoff := 24 * time.Hour
 			now := time.Now()
-			for repo, row := range msg.prCache {
-				if now.Sub(row.LastPRRefresh) > cutoff {
-					continue
+			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+				wrote := false
+				for repo, row := range msg.prCache {
+					if now.Sub(row.LastPRRefresh) > cutoff {
+						continue
+					}
+					next[repo] = &git.RepoInfo{
+						Branch:          row.Branch,
+						OriginKey:       row.OriginKey,
+						PR:              row.PR,
+						LastPRRefresh:   row.LastPRRefresh,
+						PRRateLimitedAt: row.PRRateLimitedAt,
+					}
+					wrote = true
 				}
-				h.gitInfoCache[repo] = &git.RepoInfo{
-					Branch:          row.Branch,
-					OriginKey:       row.OriginKey,
-					PR:              row.PR,
-					LastPRRefresh:   row.LastPRRefresh,
-					PRRateLimitedAt: row.PRRateLimitedAt,
-				}
-			}
+				return wrote
+			})
 		}
 		h.rebuildFlatItems()
 		if len(h.flatItems) > 0 && h.cursor == 0 {
@@ -1053,14 +1119,10 @@ func (h *Home) renderBody() string {
 
 	var b strings.Builder
 
-	// Snapshot gitInfoCache under lock — the worker goroutine writes to
-	// it concurrently, and View() must not read the live map without a lock.
-	h.workerMu.Lock()
-	gitInfoSnap := make(map[string]*git.RepoInfo, len(h.gitInfoCache))
-	for k, v := range h.gitInfoCache {
-		gitInfoSnap[k] = v
-	}
-	h.workerMu.Unlock()
+	// Load the immutable git/PR snapshot. Lock-free — writers COW into a
+	// new map and atomic-swap, so the returned map is stable for the rest
+	// of this render pass.
+	gitInfoSnap := h.gitInfo()
 
 	// Header.
 	header := h.renderHeader()
@@ -1820,11 +1882,7 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 // an empty worktree header the worker never refreshes it, so fall back to a direct
 // git check — cheap, and only on the keypress that opens the delete dialog.
 func (h *Home) repoIsWorktree(repoPath string) bool {
-	// Snapshot under workerMu — the status worker writes gitInfoCache concurrently.
-	h.workerMu.Lock()
-	info := h.gitInfoCache[repoPath]
-	h.workerMu.Unlock()
-	if info != nil {
+	if info := h.gitInfo()[repoPath]; info != nil {
 		return info.IsWorktreeRepo
 	}
 	return git.IsWorktree(repoPath)
@@ -2445,9 +2503,7 @@ func (h *Home) openPRInBrowser() tea.Cmd {
 		return nil
 	}
 
-	h.workerMu.Lock()
-	info := h.gitInfoCache[repo]
-	h.workerMu.Unlock()
+	info := h.gitInfo()[repo]
 	if info == nil || info.PR == nil || info.PR.URL == "" {
 		debuglog.Logger.Debug("openPR: no PR for branch", "repo", repo)
 		h.setError(fmt.Errorf("no PR for this branch"))
@@ -2776,9 +2832,6 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	default: // worker busy, skip
 	}
 
-	// rebuildFlatItems self-locks workerMu now; wrapping it in an outer
-	// Lock would self-deadlock (sync.Mutex isn't re-entrant) and freeze
-	// the Update goroutine — that's how the splash was hanging.
 	h.rebuildFlatItems()
 
 	// Preview is now handled by the faster previewTick, no need to fetch here.
@@ -2835,9 +2888,7 @@ func (h *Home) allExpandKeys() []string {
 	}
 
 	originFor := func(repo string) string {
-		h.workerMu.Lock()
-		info := h.gitInfoCache[repo]
-		h.workerMu.Unlock()
+		info := h.gitInfo()[repo]
 		if info != nil && info.OriginKey != "" {
 			return info.OriginKey
 		}
@@ -3127,15 +3178,15 @@ drainPriority:
 	//
 	// First: stamp `repoLastHotAt` so the TTL classifier (next call) can
 	// see who's active right now. A repo is "hot" if any of its sessions
-	// is currently Running — checked every cycle, cheap.
+	// is currently Running — checked every cycle, cheap. repoLastHotAt
+	// is only ever touched from this worker cycle and from bootstrap; the
+	// two never run concurrently, so no lock needed.
 	now := time.Now()
-	h.workerMu.Lock()
 	for _, s := range sessions {
 		if s.GetStatus() == session.StatusRunning {
 			h.repoLastHotAt[session.GetRepoRoot(s.ProjectPath)] = now
 		}
 	}
-	h.workerMu.Unlock()
 
 	repos := h.uniqueRepoPathsFromSessions(sessions)
 	h.refreshAllGitAndPR(repos, 4, 0, nil)
@@ -3155,12 +3206,7 @@ func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
 		return
 	}
 	themeKey := string(ColorBg) + string(ColorAccent) // any theme-change invalidates the cache
-	h.workerMu.Lock()
-	gitSnap := make(map[string]*git.RepoInfo, len(h.gitInfoCache))
-	for k, v := range h.gitInfoCache {
-		gitSnap[k] = v
-	}
-	h.workerMu.Unlock()
+	gitSnap := h.gitInfo()
 
 	for _, s := range sessions {
 		if s == nil {
@@ -3240,7 +3286,7 @@ const (
 
 // repoTTLFor returns the per-repo PR refresh TTL. A repo is hot if any of
 // its sessions was Running within `prHotnessWindow`; cold otherwise.
-// Caller must hold workerMu.
+// repoLastHotAt is worker-only state — no synchronization required.
 func (h *Home) repoTTLFor(repo string, now time.Time) time.Duration {
 	if t, ok := h.repoLastHotAt[repo]; ok && now.Sub(t) < prHotnessWindow {
 		return prTTLHot
@@ -3271,17 +3317,16 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 	var prFetches atomic.Int32
 	var rateLimitedHits atomic.Int32
 
-	// Precompute per-repo TTL under the lock so the per-repo goroutines
-	// don't need to grab workerMu just for classification. Bootstrap and
-	// any cycle where `repoLastHotAt` is empty produce all-cold TTLs;
-	// that's fine — the bootstrap honors carried-forward LastPRRefresh
-	// values from the persisted cache the same way.
-	h.workerMu.Lock()
+	// Precompute per-repo TTL once so the per-repo goroutines don't all
+	// hammer repoLastHotAt. The map is only ever touched from the
+	// bootstrap or worker cycle that called us — both single-goroutine.
+	// Bootstrap and any cycle where `repoLastHotAt` is empty produce
+	// all-cold TTLs; that's fine — bootstrap honors carried-forward
+	// LastPRRefresh values from the persisted cache the same way.
 	repoTTL := make(map[string]time.Duration, len(repos))
 	for _, r := range repos {
 		repoTTL[r] = h.repoTTLFor(r, cycleStart)
 	}
-	h.workerMu.Unlock()
 
 	sem := make(chan struct{}, maxParallel)
 	var wg sync.WaitGroup
@@ -3320,13 +3365,13 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 				// completed check that resets the TTL. Otherwise repos with
 				// no open PR re-fetch on every 2s tick → blows the gh rate
 				// limit the moment we fan out across all repos in parallel.
-				h.workerMu.Lock()
-				if old, ok := h.gitInfoCache[r]; ok && old.Branch == info.Branch {
+				// Carry-forward PR data is now a lock-free atomic load —
+				// h.gitInfo() returns an immutable map snapshot.
+				if old, ok := h.gitInfo()[r]; ok && old != nil && old.Branch == info.Branch {
 					info.PR = old.PR
 					info.LastPRRefresh = old.LastPRRefresh
 					info.PRRateLimitedAt = old.PRRateLimitedAt
 				}
-				h.workerMu.Unlock()
 
 				ttl := repoTTL[r]
 				if ttl == 0 {
@@ -3340,11 +3385,10 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 					}
 				}
 
-				// Push the refresh result to Update — it's the sole writer
-				// of h.gitInfoCache, so we avoid taking workerMu here. Send
-				// is buffered + drained synchronously by Tea's main loop;
-				// next worker cycle's carry-forward read will see the write
-				// as long as Update isn't catastrophically backed up.
+				// Push the refresh result to Update — Update is the sole
+				// writer of h.gitInfoCache. Send is buffered + drained
+				// synchronously by Tea's main loop, so the next worker
+				// cycle's carry-forward read sees this update.
 				h.send(gitInfoUpdateMsg{repo: r, info: info})
 
 				// Persist to SQLite so the next launch can carry this forward
@@ -3411,15 +3455,14 @@ func shouldRefreshPR(info *git.RepoInfo, ttl time.Duration) bool {
 // every 2s tick would re-warn until the hourly reset.
 func (h *Home) maybeWarnRateLimited() {
 	const cooldown = 5 * time.Minute
-	h.workerMu.Lock()
+	// lastRateLimitWarn is only touched from background workers (status
+	// cycle + bootstrap) that never run concurrently. No lock needed.
 	last := h.lastRateLimitWarn
 	now := time.Now()
 	if !last.IsZero() && now.Sub(last) < cooldown {
-		h.workerMu.Unlock()
 		return
 	}
 	h.lastRateLimitWarn = now
-	h.workerMu.Unlock()
 	debuglog.Logger.Warn("gh rate-limited — PR badges paused; resets hourly. Run: gh api rate_limit --jq .resources.graphql")
 }
 
@@ -3571,11 +3614,9 @@ func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
 
 	if item.RepoPath != "" && !item.IsOriginHeader {
 		branch := ""
-		h.workerMu.Lock()
-		if info := h.gitInfoCache[item.RepoPath]; info != nil {
+		if info := h.gitInfo()[item.RepoPath]; info != nil {
 			branch = info.Branch
 		}
-		h.workerMu.Unlock()
 		if branch == "" {
 			branch = filepath.Base(item.RepoPath)
 		}
@@ -3788,14 +3829,14 @@ func (h *Home) repoInfoFromSnap(snap map[string]*git.RepoInfo) *git.RepoInfo {
 // --- Internal helpers ---
 
 func (h *Home) rebuildFlatItems() {
-	// Snapshot the two gitInfoCache fields the sidebar closures need under
-	// workerMu — the worker goroutines write the same map under that lock,
-	// and rebuildFlatItems is called from ~30 Update() sites without it.
-	// Closing over the live map would be a concurrent map read/write race.
-	h.workerMu.Lock()
-	originSnap := make(map[string]string, len(h.gitInfoCache))
-	worktreeSnap := make(map[string]bool, len(h.gitInfoCache))
-	for k, v := range h.gitInfoCache {
+	// Build origin / worktree lookup maps from the immutable git/PR
+	// snapshot. h.gitInfo() is a lock-free atomic load — writers always
+	// publish a fresh map, so the entries we read here can't shift
+	// underneath us mid-pass.
+	snap := h.gitInfo()
+	originSnap := make(map[string]string, len(snap))
+	worktreeSnap := make(map[string]bool, len(snap))
+	for k, v := range snap {
 		if v == nil {
 			continue
 		}
@@ -3806,7 +3847,6 @@ func (h *Home) rebuildFlatItems() {
 			worktreeSnap[k] = true
 		}
 	}
-	h.workerMu.Unlock()
 
 	originOf := func(repoRoot string) string {
 		if key, ok := originSnap[repoRoot]; ok {
@@ -3822,11 +3862,12 @@ func (h *Home) rebuildFlatItems() {
 	h.sidebarDirty = true
 }
 
-// isWorktreeOf reads the IsWorktreeRepo flag from the worker-managed cache.
-// Returns false when the row hasn't been resolved yet — BuildFlatItems falls
-// back to alphabetical ordering in that case, which the next rebuild fixes.
+// isWorktreeOf reads the IsWorktreeRepo flag from the immutable git/PR
+// snapshot. Returns false when the row hasn't been resolved yet —
+// BuildFlatItems falls back to alphabetical ordering in that case, which
+// the next rebuild fixes.
 func (h *Home) isWorktreeOf(repoRoot string) bool {
-	if info := h.gitInfoCache[repoRoot]; info != nil {
+	if info := h.gitInfo()[repoRoot]; info != nil {
 		return info.IsWorktreeRepo
 	}
 	return false
@@ -3834,10 +3875,9 @@ func (h *Home) isWorktreeOf(repoRoot string) bool {
 
 // originOf maps a repo root to its stable origin key, falling back to
 // "local:<basename>" for repos whose RepoInfo hasn't been refreshed yet.
-// Reads the snapshot directly from the worker-managed cache; callers that
-// hold workerMu can pass it as a function value safely.
+// Lock-free read from the atomic gitInfo snapshot.
 func (h *Home) originOf(repoRoot string) string {
-	if info := h.gitInfoCache[repoRoot]; info != nil && info.OriginKey != "" {
+	if info := h.gitInfo()[repoRoot]; info != nil && info.OriginKey != "" {
 		return info.OriginKey
 	}
 	return "local:" + filepath.Base(repoRoot)
@@ -4039,13 +4079,8 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		commands[i].Haystack = commands[i].Name
 	}
 
-	// Snapshot gitInfoCache so we can read it without holding workerMu during fuzzy match.
-	h.workerMu.Lock()
-	gitSnap := make(map[string]*git.RepoInfo, len(h.gitInfoCache))
-	for k, v := range h.gitInfoCache {
-		gitSnap[k] = v
-	}
-	h.workerMu.Unlock()
+	// Lock-free read of the immutable git/PR snapshot.
+	gitSnap := h.gitInfo()
 
 	// Build the place list from the unfiltered repo universe — the sidebar
 	// filter shouldn't strip repos from the palette (it's a global navigator).

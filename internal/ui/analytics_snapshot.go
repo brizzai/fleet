@@ -23,7 +23,7 @@ func (h *Home) collectSnapshot() analytics.SnapshotStats {
 	perRepo := make([]int, 0, len(groups))
 	for repo, sessions := range groups {
 		perRepo = append(perRepo, len(sessions))
-		if info := h.gitInfoCache[repo]; info != nil && info.IsWorktreeRepo {
+		if info := h.gitInfo()[repo]; info != nil && info.IsWorktreeRepo {
 			worktreeCount++
 		}
 	}
