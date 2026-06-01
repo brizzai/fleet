@@ -30,7 +30,7 @@ type SidebarItem struct {
 	RepoPath    string // checkout (repo root) — also set on session/pending/idle-fold
 
 	Expanded     bool
-	SessionCount int                    // header: total sessions in group
+	SessionCount int                    // origin header: checkouts (repos+worktrees) in group. checkout header: sessions in checkout.
 	StatusCounts map[session.Status]int // header: per-status breakdown for the group (origin or checkout)
 	IdleCount    int                    // IsIdleFold: number of folded idle sessions
 	Session      *session.Session
@@ -173,7 +173,6 @@ func BuildFlatItems(
 			statusCounts map[session.Status]int
 		}
 		var blocks []checkoutBlock
-		originSessionCount := 0
 		originStatusCounts := make(map[session.Status]int)
 		for _, repo := range repos {
 			coSessions := sessionsBy[repo]
@@ -191,7 +190,6 @@ func BuildFlatItems(
 				}
 				coSessions = filtered
 			}
-			originSessionCount += len(coSessions)
 			coCounts := make(map[session.Status]int)
 			for _, s := range coSessions {
 				st := s.GetStatus()
@@ -221,7 +219,7 @@ func BuildFlatItems(
 			OriginKey:      origin,
 			OriginLabel:    labelForOrigin(origin),
 			Expanded:       originExpanded,
-			SessionCount:   originSessionCount,
+			SessionCount:   len(blocks),
 			StatusCounts:   originStatusCounts,
 		})
 
