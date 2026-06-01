@@ -18,6 +18,7 @@ import (
 	"github.com/brizzai/fleet/internal/chrome"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/discovery"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
@@ -135,6 +136,11 @@ type (
 	// splashFrameMsg advances the boot-splash spinner. Self-rescheduled
 	// while !booted; not emitted after bootstrapDoneMsg.
 	splashFrameMsg time.Time
+	// discoveryMsg carries the launchpad's scan of ~/.claude/projects back to
+	// Update. Fired once, only on an empty fleet.
+	discoveryMsg struct {
+		items []discovery.Recent
+	}
 )
 
 func spinnerTickCmd() tea.Msg {
@@ -171,6 +177,12 @@ type Home struct {
 	branchDialog          *BranchCheckoutDialog
 	commandPalette        *CommandPaletteDialog
 	consentDialog         *ConsentDialog
+
+	// launchpad is the first-run experience shown when the fleet is empty:
+	// recent repos mined from Claude Code history, ready to resume.
+	// launchpadDismissed lets the user Esc out to the bare empty state.
+	launchpad          *Launchpad
+	launchpadDismissed bool
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingForkCtx    *forkContext        // set while Shift+F worktree picker is open; consumed on pick/cancel
@@ -319,6 +331,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		branchDialog:          NewBranchCheckoutDialog(),
 		commandPalette:        NewCommandPaletteDialog(),
 		consentDialog:         NewConsentDialog(),
+		launchpad:             NewLaunchpad(),
 		bugReport:             NewBugReportDialog(),
 		previewCache:          make(map[string]string),
 		previewCacheTime:      make(map[string]time.Time),
@@ -932,6 +945,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.splashFrame++
 		return h, h.splashTick()
 
+	case discoveryMsg:
+		h.launchpad.SetItems(msg.items)
+		// The boot splash stayed up during the scan; reveal the UI now in one
+		// transition (launchpad if we found anything, bare empty state if not).
+		if !h.booted {
+			h.booted = true
+			go h.statusWorker()
+		}
+		if len(msg.items) > 0 {
+			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
+				"discovered_repos": len(msg.items),
+			})
+		}
+		return h, nil
+
 	case loadSessionsMsg:
 		if msg.err != nil {
 			h.setError(msg.err)
@@ -1031,9 +1059,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			repos := h.bootstrapRepoSet()
 			h.bootstrapRepos = len(repos)
 			if len(repos) == 0 {
-				// Empty fleet: no probes to wait on. Skip the splash entirely.
-				h.booted = true
-				go h.statusWorker()
+				// Empty fleet → first-run launchpad. Keep the boot splash up as
+				// the single loading page while we scan Claude history, then
+				// flip to the launchpad in one transition (see discoveryMsg).
+				// This avoids a splash → "scanning" → list flicker. booted and
+				// the status worker are deferred to discoveryMsg.
+				startupCmd = tea.Batch(h.scanDiscovery(), h.splashTick())
 			} else {
 				startupCmd = tea.Batch(h.bootstrapGitInfo(repos), h.splashTick())
 			}
@@ -1125,6 +1156,11 @@ func (h *Home) renderBody() string {
 	}
 	if h.renameDialog.IsVisible() {
 		return h.renameDialog.View()
+	}
+
+	// First-run launchpad owns the screen while the fleet is empty.
+	if h.launchpadActive() {
+		return h.launchpad.View(h.width, h.height)
 	}
 
 	var b strings.Builder
@@ -1360,6 +1396,31 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		dialog, cmd := h.renameDialog.Update(msg)
 		h.renameDialog = dialog
 		return h, cmd
+	}
+
+	// First-run launchpad: drive the recent-repos picker. Space multi-selects,
+	// Enter launches the checked set (or the cursor row). Unhandled keys
+	// (n to type a path, ?, S, q, …) fall through to the main switch below.
+	if h.launchpadActive() {
+		switch msg.String() {
+		case "j", "down":
+			h.launchpad.Move(1)
+			return h, nil
+		case "k", "up":
+			h.launchpad.Move(-1)
+			return h, nil
+		case " ":
+			h.launchpad.Toggle()
+			return h, nil
+		case "A":
+			h.launchpad.ToggleAll()
+			return h, nil
+		case "enter":
+			return h, h.launchLaunchpadSet(h.launchpad.LaunchSet())
+		case "esc":
+			h.launchpadDismissed = true
+			return h, nil
+		}
 	}
 
 	// Focus mode: forward keys to tmux session.
@@ -1756,21 +1817,80 @@ func (a attachCmd) SetStdin(r io.Reader)  {}
 func (a attachCmd) SetStdout(w io.Writer) {}
 func (a attachCmd) SetStderr(w io.Writer) {}
 
+// scanDiscovery reads the user's Claude Code history off the UI thread and
+// feeds the launchpad. Best-effort: a nil/empty result just leaves the bare
+// empty state in place.
+func (h *Home) scanDiscovery() tea.Cmd {
+	return func() tea.Msg {
+		return discoveryMsg{items: discovery.RecentRepos(8)}
+	}
+}
+
+// launchpadActive reports whether the launchpad should own the screen: a truly
+// empty fleet (no sessions, no pinned repos), not dismissed, with the scan
+// having found something. The scan completes before booted flips (the splash
+// covers it), so by the time this can return true the items are already in;
+// an empty scan steps aside for the bare empty state.
+func (h *Home) launchpadActive() bool {
+	if !h.booted || h.launchpadDismissed {
+		return false
+	}
+	if len(h.sessions) > 0 || len(h.pinnedRepos) > 0 {
+		return false
+	}
+	return h.launchpad.HasItems()
+}
+
 func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
 		return h, nil
 	}
-	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path)
+	return h, h.startSessionCmd(msg)
+}
+
+// startSessionCmd builds the tea.Cmd that creates and starts one session off
+// the UI thread. Shared by the new-session flow and the launchpad (which fires
+// several at once). A non-empty resumeClaudeID makes buildClaudeCmd() launch
+// `claude --resume <id>` to continue an existing conversation.
+func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
+	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path, "resume", msg.resumeClaudeID)
 	s := session.NewSession(msg.title, msg.path)
 	s.WorkspaceName = msg.workspaceName
-	return h, func() tea.Msg {
+	if msg.resumeClaudeID != "" {
+		s.ClaudeSessionID = msg.resumeClaudeID
+	}
+	return func() tea.Msg {
 		if err := s.Start(); err != nil {
 			debuglog.Logger.Error("session Start() failed", "title", msg.title, "path", msg.path, "err", err)
 			return sessionCreateResultMsg{err: err}
 		}
 		return sessionCreateResultMsg{session: s}
 	}
+}
+
+// launchLaunchpadSet starts every chosen recent project at once, resuming each
+// one's most recent Claude conversation. This is the launchpad's payoff:
+// rehydrate a whole working set in a single keystroke.
+func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
+	if len(items) == 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
+		return nil
+	}
+	analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{"count": len(items)})
+	cmds := make([]tea.Cmd, 0, len(items))
+	for _, it := range items {
+		h.actionLog.Add("launchpad add", it.Path, true)
+		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
+			path:           it.Path,
+			title:          it.Title,
+			resumeClaudeID: it.ClaudeSessionID,
+		}))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model, tea.Cmd) {
@@ -2956,8 +3076,9 @@ func (h *Home) bootstrapGitInfo(repos []string) tea.Cmd {
 // Returns 0 before bootstrapRepos has been initialized — there's a one-frame
 // window between the first paint and loadSessionsMsg arriving where the
 // splash renders without yet knowing the repo count. The empty-fleet path
-// flips `booted=true` in the same Update tick, so the splash never appears
-// for users with no repos either way.
+// keeps the splash up (bar at 0, spinner animating) through the Claude-history
+// scan and reveals the launchpad when discoveryMsg lands — one transition, no
+// splash → scanning → list flicker.
 func (h *Home) bootProgress() float64 {
 	if h.bootstrapRepos <= 0 {
 		return 0
@@ -3794,12 +3915,13 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	// Expand the repo group if collapsed, so the session is visible and selectable.
+	// Reveal the session: expand both its origin group and its checkout if
+	// collapsed, so a bound session folded away under either header still
+	// becomes visible and selectable. (Expanding only the checkout left a
+	// collapsed origin hiding the row — it then read as "hidden by filter".)
 	repo := session.GetRepoRoot(s.ProjectPath)
-	if !h.repoExpanded[repo] {
-		h.repoExpanded[repo] = true
-		h.rebuildFlatItems()
-	}
+	h.revealCheckout(repo)
+	h.rebuildFlatItems()
 
 	idx := -1
 	for i, item := range h.flatItems {

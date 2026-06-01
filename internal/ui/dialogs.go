@@ -12,10 +12,14 @@ import (
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
+// resumeClaudeID, when set, starts the session with `claude --resume <id>` so
+// the user continues an existing conversation (e.g. one begun in plain Claude
+// Code, surfaced by the launchpad) instead of a fresh one.
 type sessionCreateMsg struct {
-	path          string
-	title         string
-	workspaceName string
+	path           string
+	title          string
+	workspaceName  string
+	resumeClaudeID string
 }
 
 // forkSessionMsg is sent when the user forks an existing session.
