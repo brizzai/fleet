@@ -203,11 +203,15 @@ func BuildPreviewFooter(s *session.Session, maxWidth int) string {
 }
 
 // shortenPath replaces the user's home dir with "~". Falls back to the
-// original path if HOME isn't set or doesn't match.
+// original path if HOME isn't set or doesn't match. Requires a path-separator
+// boundary so a home of /Users/me doesn't match /Users/meg/project.
 func shortenPath(p string) string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if rest, ok := strings.CutPrefix(p, home); ok {
-			return "~" + rest
+		if p == home {
+			return "~"
+		}
+		if rest, ok := strings.CutPrefix(p, home+string(os.PathSeparator)); ok {
+			return "~" + string(os.PathSeparator) + rest
 		}
 	}
 	return p

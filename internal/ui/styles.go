@@ -5,6 +5,7 @@ import (
 
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Initial colors match the default Fleet Pink palette. ApplyPalette reassigns
@@ -225,12 +226,14 @@ func renderBorderedPanel(content, title, titleRight, footerRight string, width, 
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
 	titleStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 
-	// Top border: ╭─ title ─...─ titleRight ─╮ (titleRight optional)
-	titleText := titleStyle.Render(title)
+	// Top border: ╭─ title ─...─ titleRight ─╮ (titleRight optional).
+	// Pre-styled inputs (callers like BuildPreviewTitle / statusCountsLine that
+	// already render per-segment colors) are passed through verbatim; only
+	// plain strings get the default title/right wrap.
+	titleText := styleIfPlain(title, titleStyle)
 	titleWidth := lipgloss.Width(titleText)
 	if titleRight != "" {
-		rightStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
-		rightText := rightStyle.Render(titleRight)
+		rightText := styleIfPlain(titleRight, lipgloss.NewStyle().Foreground(ColorTextDim))
 		rightW := lipgloss.Width(rightText)
 		// Layout: ╭ ─ ' ' title ' ' ─*K ' ' titleRight ' ' ─ ╮
 		// 8 fixed chars: 2 corners + 2 dashes + 4 spaces.
@@ -245,14 +248,25 @@ func renderBorderedPanel(content, title, titleRight, footerRight string, width, 
 	// Layout: ╭ ─ ' ' title ' ' ─*K ╮ — leading dash count is 1, K fills the rest.
 	fillRight := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space*/ - titleWidth - 1 /*space*/
 	if fillRight < 1 {
-		// Title too wide; truncate it so the border still closes.
+		// Title too wide; truncate it so the border still closes. ansi.Truncate
+		// is escape-sequence aware, so pre-styled titles stay intact.
 		maxTitle := max(width-6, 1)
-		titleText = titleStyle.Render(ansiTruncate(title, maxTitle))
+		titleText = styleIfPlain(ansi.Truncate(title, maxTitle, ""), titleStyle)
 		titleWidth = lipgloss.Width(titleText)
 		fillRight = max(width-5-titleWidth, 1)
 	}
 	top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", fillRight)+"╮")
 	return finishBorderedPanel(top, content, footerRight, width, height, borderStyle)
+}
+
+// styleIfPlain renders s with style only when s is plain text. If s already
+// contains an ANSI escape, return it untouched so per-segment colors set by
+// the caller (e.g. BuildPreviewTitle's status pill) survive the outer wrap.
+func styleIfPlain(s string, style lipgloss.Style) string {
+	if strings.Contains(s, "\x1b") {
+		return s
+	}
+	return style.Render(s)
 }
 
 func finishBorderedPanel(top, content, footerRight string, width, height int, borderStyle lipgloss.Style) string {
@@ -261,14 +275,14 @@ func finishBorderedPanel(top, content, footerRight string, width, height int, bo
 	var bottom string
 	if footerRight != "" {
 		footerStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
-		footerText := footerStyle.Render(footerRight)
+		footerText := styleIfPlain(footerRight, footerStyle)
 		footerW := lipgloss.Width(footerText)
 		// Layout: ╰─*K ' ' footer ' '─╯ — trailing dash count is 1.
 		fillLeft := width - 2 /*corners*/ - 1 /*space*/ - footerW - 1 /*space*/ - 1 /*trailing dash*/
 		if fillLeft < 1 {
-			// Footer too wide; truncate.
+			// Footer too wide; truncate (ANSI-aware via ansi.Truncate).
 			maxFooter := max(width-6, 1)
-			footerText = footerStyle.Render(ansiTruncate(footerRight, maxFooter))
+			footerText = styleIfPlain(ansi.Truncate(footerRight, maxFooter, ""), footerStyle)
 			footerW = lipgloss.Width(footerText)
 			fillLeft = max(width-5-footerW, 1)
 		}
@@ -290,7 +304,7 @@ func finishBorderedPanel(top, content, footerRight string, width, height int, bo
 		}
 		lineW := lipgloss.Width(line)
 		if lineW > innerWidth {
-			line = ansiTruncate(line, innerWidth)
+			line = ansi.Truncate(line, innerWidth, "")
 		} else if lineW < innerWidth {
 			line += strings.Repeat(" ", innerWidth-lineW)
 		}
@@ -317,32 +331,6 @@ func dimBackdrop(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// ansiTruncate is a thin wrapper around lipgloss/ANSI-aware truncation that
-// works on strings with embedded escape sequences (status colors, accents).
-func ansiTruncate(s string, w int) string {
-	if w <= 0 {
-		return ""
-	}
-	// lipgloss exposes a helper via the underlying rendering — we re-use
-	// a simple width-aware loop here to avoid a new dependency.
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	// Fallback: drop runes from the end until we're within budget. Loses
-	// trailing styling but is correct for visible width.
-	var b strings.Builder
-	cur := 0
-	for _, r := range s {
-		rw := lipgloss.Width(string(r))
-		if cur+rw > w {
-			break
-		}
-		b.WriteRune(r)
-		cur += rw
-	}
-	return b.String()
-}
-
 // RenderPanelTitle renders a panel title with a divider underline.
 func RenderPanelTitle(title string, width int) string {
 	titleLine := PanelTitleStyle.Render(title)
@@ -364,9 +352,10 @@ func RenderFocusedPanelTitle(title string, width int) string {
 }
 
 // StatusIndicatorMode controls how StatusSymbol renders session state in the
-// sidebar. "icon" (default) uses semantic circles (●◐✕); "bar" uses a single
-// colored vertical bar in the leftmost column, VS Code gutter style. Idle is
-// always blank in either mode — only non-idle states get a glyph.
+// sidebar. "icon" (default) uses semantic circles (●◐✕) and anchors idle/
+// starting rows with a dim `·` so every row has a leftmost mark. "bar" uses
+// a single colored vertical bar in the leftmost column (VS Code gutter style)
+// and keeps idle/starting blank — the gutter bar carries the signal there.
 var StatusIndicatorMode = "icon"
 
 const StatusBarChar = "┃"

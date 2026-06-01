@@ -198,22 +198,25 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 	// Top border header carries ALL the useful info: session identity, origin,
 	// PR status, branch (left to right by importance) and path right-aligned.
 	// The bottom strip is reserved for the detach hint only.
+	// User-derived fields are escaped so a literal `#` (e.g. in a branch
+	// name like `fix/#123`) doesn't look like the start of a tmux format
+	// sequence to the parser.
 	topLeftParts := []string{}
 	if o.DisplayName != "" {
-		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, o.DisplayName))
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]📁 %s", o.StripFg, escapeTmuxFormat(o.DisplayName)))
 	}
 	if o.Origin != "" {
-		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, o.Origin))
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,bold]%s", o.AccentColor, escapeTmuxFormat(o.Origin)))
 	}
 	if o.Branch != "" {
-		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, o.Branch))
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.StripFg, escapeTmuxFormat(o.Branch)))
 	}
 	if o.PRSummary != "" {
-		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, o.PRSummary))
+		topLeftParts = append(topLeftParts, fmt.Sprintf("#[fg=%s,nobold]%s", o.PRColor, escapeTmuxFormat(o.PRSummary)))
 	}
 	paneFmt := " " + strings.Join(topLeftParts, fmt.Sprintf(" #[fg=%s]·#[default] ", o.Dim)) + " "
 	if o.Path != "" {
-		paneFmt += fmt.Sprintf("#[align=right,fg=%s]%s ", o.Dim, o.Path)
+		paneFmt += fmt.Sprintf("#[align=right,fg=%s]%s ", o.Dim, escapeTmuxFormat(o.Path))
 	}
 
 	// Bottom: detach hint rendered in the regular fleet hotkey style —
@@ -225,9 +228,14 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 		key = o.DetachHint
 	}
 	bottomLeft := fmt.Sprintf(" #[fg=%s,bold]%s #[fg=%s,nobold]%s",
-		o.AccentColor, key, o.StripFg, desc)
+		o.AccentColor, escapeTmuxFormat(key), o.StripFg, escapeTmuxFormat(desc))
 
-	cmd := exec.Command("tmux",
+	// Bounded shell-out — a stalled tmux server can't hang session startup
+	// or the periodic refresh path. Matches the pattern used by IsPaneDead /
+	// PaneDeadInfo elsewhere in this file.
+	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux",
 		"set-option", "-t", s.Name, "status", "on", ";",
 		"set-option", "-t", s.Name, "status-style", fmt.Sprintf("bg=%s,fg=%s", o.StripBg, o.StripFg), ";",
 		"set-option", "-t", s.Name, "status-justify", "left", ";",
@@ -246,6 +254,14 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 	if err := cmd.Run(); err != nil {
 		debuglog.Logger.Error("tmux apply status bar failed", "session", s.Name, "err", err)
 	}
+}
+
+// escapeTmuxFormat doubles literal `#` so user-derived strings embedded in
+// `status-left` / `pane-border-format` don't get parsed as tmux format
+// sequences (e.g. a branch like `fix/#123` would otherwise look like the
+// start of `#{...}`). Tmux treats `##` as a literal `#`.
+func escapeTmuxFormat(s string) string {
+	return strings.ReplaceAll(s, "#", "##")
 }
 
 // RespawnPane kills the current pane process and restarts with the given command.

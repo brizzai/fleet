@@ -108,7 +108,7 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - `.fleet.json` / `.fleet.local.json` may also set `{"copy_files": {"paths": ["path", "dir", "glob/*", ...]}}` to copy gitignored files/dirs/globs from the source repo into each new worktree (filepath.Glob semantics, repo-relative only; lists from both files merge additively; opt-in, empty by default; applies to both git-worktree and shell providers; independent of `copy_claude_settings`)
 - Claude session resume: captures Claude session_id from hooks, uses `claude --resume <id>` on restart
 - Editor: config.editor > $EDITOR > "code" (VS Code)
-- Themes: tokyo-night (default), catppuccin-mocha, rose-pine, nord, gruvbox — configurable via settings (S key)
+- Themes: fleet-pink (default, flagship brand accent `#dc88c0`), tokyo-night, catppuccin-mocha, rose-pine, nord, gruvbox — configurable via settings (S key)
 - Settings dialog: S key opens settings overlay, live theme preview, auto-name toggle, copy .claude toggle, auto-saves on close
 - Bug report: `!` key opens dialog showing error history, action log, system diagnostics; `g` opens GitHub issue with pre-filled markdown via `gh issue create --web`
 - Error history: ring buffer (max 50) of errors that flash for 5s — persists for bug reporting

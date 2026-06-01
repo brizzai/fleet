@@ -46,6 +46,24 @@ var (
 		Gray:   lipgloss.Color("#807888"),
 	}
 
+	// fleet-pink-bubblegum — vivid candy pink (#ff77c6), sky-blue support.
+	PaletteFleetPinkBubblegum = Palette{
+		Name:    "fleet-pink-bubblegum",
+		Bg:      lipgloss.Color("#17121f"),
+		Surface: lipgloss.Color("#241a2e"),
+		Border:  lipgloss.Color("#6a4d78"),
+		Text:    lipgloss.Color("#f6eaf4"),
+		TextDim: lipgloss.Color("#857a8c"),
+		Accent:  lipgloss.Color("#ff77c6"),
+		Blue:    lipgloss.Color("#7dcfff"),
+		Green:   lipgloss.Color("#8ad698"),
+		Yellow:  lipgloss.Color("#e8c590"),
+		Red:     lipgloss.Color("#e07685"),
+		Orange:  lipgloss.Color("#ffa05c"),
+		Purple:  lipgloss.Color("#bb9af7"),
+		Gray:    lipgloss.Color("#857a8c"),
+	}
+
 	PaletteTokyoNight = Palette{
 		Name:    "tokyo-night",
 		Bg:      lipgloss.Color("#1a1b26"),
@@ -135,6 +153,7 @@ var (
 // BuiltinPalettes lists all available themes. Fleet Pink is the flagship default.
 var BuiltinPalettes = []Palette{
 	PaletteFleetPink,
+	PaletteFleetPinkBubblegum,
 	PaletteTokyoNight,
 	PaletteCatppuccin,
 	PaletteRosePine,
@@ -161,6 +180,8 @@ func PaletteDisplayName(name string) string {
 	switch name {
 	case "fleet-pink":
 		return "Fleet Pink"
+	case "fleet-pink-bubblegum":
+		return "Fleet Pink · Bubblegum"
 	case "tokyo-night":
 		return "Tokyo Night"
 	case "catppuccin-mocha":

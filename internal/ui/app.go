@@ -39,6 +39,7 @@ const (
 	layoutBreakpointSingle = 50
 	layoutBreakpointDual   = 80
 	helpBarHeight          = 1 // single row of contextual hotkeys, no top rule
+	focusFilterFooterRows  = 2 // border + content line — focus mode / filter active
 	statusRoundRobin       = 5 // sessions per tick
 	undoDeleteTimeout      = 5 * time.Second
 )
@@ -1129,9 +1130,11 @@ func (h *Home) renderBody() string {
 	b.WriteString(header)
 	b.WriteString("\n") // line break that starts panel row 0 — NOT a blank padding row
 
-	// Content area. Header is 1 row, help bar is helpBarHeight rows, leaving
-	// the rest for the panels.
-	contentHeight := h.height - 1 - helpBarHeight
+	// Content area. Header is 1 row, footer is helpBarHeight rows (or
+	// focusFilterFooterRows when focus/filter UI is showing the border+content
+	// stack), leaving the rest for the panels.
+	footerH := h.footerHeight()
+	contentHeight := h.height - 1 - footerH
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -1227,7 +1230,7 @@ func (h *Home) renderBody() string {
 
 	// Pad to fill content area.
 	lineCount := strings.Count(b.String(), "\n") + 1
-	for lineCount < h.height-helpBarHeight {
+	for lineCount < h.height-footerH {
 		b.WriteString("\n")
 		lineCount++
 	}
@@ -3217,11 +3220,19 @@ func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
 			continue
 		}
 		status := s.GetStatus()
-		key := string(status) + "|" + themeKey
+		opts := h.buildTmuxStatusBarOpts(s, gitSnap[session.GetRepoRoot(s.ProjectPath)])
+		// Cache key must cover every input to ApplyStatusBar, not just status
+		// and theme. A branch switch / PR refresh / auto-rename changes
+		// opts.DisplayName/Origin/Branch/PRSummary/Path but leaves status
+		// alone — without those in the key we'd skip the re-apply and the
+		// pane chrome would go stale.
+		key := strings.Join([]string{
+			string(status), themeKey,
+			opts.DisplayName, opts.Origin, opts.Branch, opts.PRSummary, opts.Path,
+		}, "\x00")
 		if last, ok := h.lastTmuxStatusBar[s.ID]; ok && last == key {
 			continue
 		}
-		opts := h.buildTmuxStatusBarOpts(s, gitSnap[session.GetRepoRoot(s.ProjectPath)])
 		// Apply in a fresh goroutine so a slow tmux server can't stall the
 		// worker cycle. Each session is its own goroutine; tmux serialises
 		// set-option per server, so concurrent calls just queue.
@@ -3667,7 +3678,7 @@ func (h *Home) statusCountsLine(bg lipgloss.Color) string {
 }
 
 func (h *Home) renderHelpBar() string {
-	contextKeys, globalKeys := HelpBarBindingsFor(h.cursorBarContext())
+	contextKeys, globalKeys := HelpBarBindingsFor(h.cursorBarContext(), h.cfg.GetEnterMode())
 
 	var parts []string
 	for _, kd := range contextKeys {
@@ -3905,7 +3916,7 @@ func (h *Home) rebuildSessionMap() {
 // Stacked mode gives the sidebar ~55% of the content area; single/dual give
 // it the full content area. Mirrors the arithmetic in View() (app.go:794+).
 func (h *Home) sidebarListHeight() int {
-	contentHeight := h.height - 1 - helpBarHeight
+	contentHeight := h.height - 1 - h.footerHeight()
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -3917,6 +3928,18 @@ func (h *Home) sidebarListHeight() int {
 		return sh
 	}
 	return contentHeight
+}
+
+// footerHeight returns the number of rows reserved at the bottom of the screen
+// below the panel area. The default help bar takes 1 row, but focus mode and
+// the filter overlay both render a border-rule plus a content line — 2 rows.
+// Sizing the panel area against the wrong footer height is what makes the
+// body overflow `h.height` by one row in those modes.
+func (h *Home) footerHeight() int {
+	if h.focusMode || h.filterActive || h.filterText != "" {
+		return focusFilterFooterRows
+	}
+	return helpBarHeight
 }
 
 // sidebarMinVisibleRows is the conservative lower bound on visible session rows
