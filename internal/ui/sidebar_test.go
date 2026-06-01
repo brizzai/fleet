@@ -30,6 +30,7 @@ func TestBuildFlatItems_OriginGrouping(t *testing.T) {
 		nil,
 		originOf,
 		nil,
+		nil,
 	)
 
 	// Expect: acme-origin header, two checkouts (with one session each),
@@ -87,6 +88,7 @@ func TestBuildFlatItems_IdleFold(t *testing.T) {
 		"",
 		nil,
 		originOf,
+		nil,
 		idleFolded,
 	)
 
@@ -118,6 +120,7 @@ func TestBuildFlatItems_IdleFold(t *testing.T) {
 		"",
 		nil,
 		originOf,
+		nil,
 		nil,
 	)
 	sessionItems = 0

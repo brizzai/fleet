@@ -31,8 +31,9 @@ type SidebarItem struct {
 	RepoPath    string // checkout (repo root) — also set on session/pending/idle-fold
 
 	Expanded     bool
-	SessionCount int // header: total sessions in group
-	IdleCount    int // IsIdleFold: number of folded idle sessions
+	SessionCount int                    // header: total sessions in group
+	StatusCounts map[session.Status]int // header: per-status breakdown for the group (origin or checkout)
+	IdleCount    int                    // IsIdleFold: number of folded idle sessions
 	Session      *session.Session
 	IsLast       bool // retained for layout decisions
 	Pending      *PendingWorkspace
@@ -47,6 +48,12 @@ type RepoGroupInfo struct {
 // OriginOf maps a repo root to its origin key. Callers normally read this from
 // a cached RepoInfo; the lookup falls back to "local:<basename>" when unknown.
 type OriginOf func(repoRoot string) string
+
+// IsWorktreeOf reports whether a checkout is a git worktree (vs. the main
+// clone). Used to sort main repos before their worktrees within an origin
+// group. Returns false when the repo info isn't cached yet — the row falls
+// back to alphabetical order in that case.
+type IsWorktreeOf func(repoRoot string) bool
 
 // IsExpanded resolves the expand state for a header key.
 //
@@ -78,8 +85,10 @@ func labelForOrigin(originKey string) string {
 
 // BuildFlatItems flattens sessions into an origin → checkout → session list.
 //
-// originOf maps each repo root to its origin key. idleFolded[checkoutPath]
-// collapses that checkout's idle sessions into a single "+ N idle" row.
+// originOf maps each repo root to its origin key. isWorktreeOf reports whether
+// a checkout is a git worktree (so main clones sort before worktrees inside
+// an origin). idleFolded[checkoutPath] collapses that checkout's idle sessions
+// into a single "+ N idle" row.
 func BuildFlatItems(
 	sessions []*session.Session,
 	pending []*PendingWorkspace,
@@ -87,10 +96,14 @@ func BuildFlatItems(
 	filter string,
 	pinnedRepos map[string]bool,
 	originOf OriginOf,
+	isWorktreeOf IsWorktreeOf,
 	idleFolded map[string]bool,
 ) []SidebarItem {
 	if originOf == nil {
 		originOf = func(string) string { return "" }
+	}
+	if isWorktreeOf == nil {
+		isWorktreeOf = func(string) bool { return false }
 	}
 
 	// Collect all checkouts (repo roots) we know about — from sessions,
@@ -129,7 +142,11 @@ func BuildFlatItems(
 		originKeys = append(originKeys, k)
 	}
 	sort.Slice(originKeys, func(i, j int) bool {
-		return strings.ToLower(labelForOrigin(originKeys[i])) < strings.ToLower(labelForOrigin(originKeys[j]))
+		li, lj := strings.ToLower(labelForOrigin(originKeys[i])), strings.ToLower(labelForOrigin(originKeys[j]))
+		if li != lj {
+			return li < lj
+		}
+		return originKeys[i] < originKeys[j]
 	})
 
 	lowerFilter := strings.ToLower(filter)
@@ -137,17 +154,28 @@ func BuildFlatItems(
 
 	for _, origin := range originKeys {
 		repos := originCheckouts[origin]
-		sort.Strings(repos)
+		// Main repos sort before worktrees within an origin; ties break
+		// alphabetically by path. Worktrees without resolved git info fall
+		// back into the "main" bucket and will re-sort once info loads.
+		sort.Slice(repos, func(i, j int) bool {
+			wi, wj := isWorktreeOf(repos[i]), isWorktreeOf(repos[j])
+			if wi != wj {
+				return !wi // false (main) < true (worktree)
+			}
+			return repos[i] < repos[j]
+		})
 
 		// Filter / build the checkout rows first so we can skip empty origins
 		// and compute an accurate session count for the origin header.
 		type checkoutBlock struct {
-			repo     string
-			sessions []*session.Session
-			pending  []*PendingWorkspace
+			repo         string
+			sessions     []*session.Session
+			pending      []*PendingWorkspace
+			statusCounts map[session.Status]int
 		}
 		var blocks []checkoutBlock
 		originSessionCount := 0
+		originStatusCounts := make(map[session.Status]int)
 		for _, repo := range repos {
 			coSessions := sessionsBy[repo]
 			coPending := pendingBy[repo]
@@ -165,7 +193,13 @@ func BuildFlatItems(
 				coSessions = filtered
 			}
 			originSessionCount += len(coSessions)
-			blocks = append(blocks, checkoutBlock{repo: repo, sessions: coSessions, pending: coPending})
+			coCounts := make(map[session.Status]int)
+			for _, s := range coSessions {
+				st := s.GetStatus()
+				coCounts[st]++
+				originStatusCounts[st]++
+			}
+			blocks = append(blocks, checkoutBlock{repo: repo, sessions: coSessions, pending: coPending, statusCounts: coCounts})
 		}
 
 		if len(blocks) == 0 {
@@ -189,6 +223,7 @@ func BuildFlatItems(
 			OriginLabel:    labelForOrigin(origin),
 			Expanded:       originExpanded,
 			SessionCount:   originSessionCount,
+			StatusCounts:   originStatusCounts,
 		})
 
 		if !originExpanded {
@@ -204,6 +239,7 @@ func BuildFlatItems(
 				RepoPath:         blk.repo,
 				Expanded:         checkoutExpanded,
 				SessionCount:     len(blk.sessions),
+				StatusCounts:     blk.statusCounts,
 			})
 
 			if !checkoutExpanded {
@@ -382,7 +418,53 @@ func renderEmptyState(width, height int) string {
 	return b.String()
 }
 
-// renderOriginHeader → "▾ originLabel  N"
+// renderStatusSummary builds a compact "N● N◐ N✕ N●" pill from per-status
+// counts. Order: errors first (most urgent), then waiting, running, finished.
+// Idle is omitted (it's the dominant state — including it would add noise).
+// Counts of 1 render as the glyph alone; counts > 1 prefix the number.
+// Returns "" if no non-idle sessions are present.
+func renderStatusSummary(counts map[session.Status]int) string {
+	return renderStatusSummaryOpts(counts, false)
+}
+
+// renderStatusSummaryOpts is the configurable form. When alwaysShowCount is
+// true, even single-status counts render with the number prefix ("1 ●"
+// instead of "●") — used by the global Sessions header where the fleet-wide
+// count is the point.
+func renderStatusSummaryOpts(counts map[session.Status]int, alwaysShowCount bool) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	type chip struct {
+		count int
+		style lipgloss.Style
+		glyph string
+	}
+	chips := []chip{
+		{counts[session.StatusError], StatusErrorStyle, "✕"},
+		{counts[session.StatusWaiting], StatusWaitingStyle, "◐"},
+		{counts[session.StatusRunning] + counts[session.StatusStarting], StatusRunningStyle, "●"},
+		{counts[session.StatusFinished], StatusFinishedStyle, "●"},
+	}
+	var parts []string
+	for _, c := range chips {
+		if c.count == 0 {
+			continue
+		}
+		text := c.glyph
+		if c.count > 1 || alwaysShowCount {
+			text = fmt.Sprintf("%d %s", c.count, c.glyph)
+		}
+		parts = append(parts, c.style.Render(text))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	sep := DimStyle.Render(" · ")
+	return strings.Join(parts, sep)
+}
+
+// renderOriginHeader → "▾ originLabel  N  2● 1◐"
 // The blank row inserted before each non-first origin (see BuildFlatItems)
 // carries the section break on its own; no trailing rule needed.
 func renderOriginHeader(item SidebarItem, width int, selected bool) string {
@@ -391,17 +473,26 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 		chevron = "▾"
 	}
 	countStr := fmt.Sprintf("%d", item.SessionCount)
+	summary := renderStatusSummary(item.StatusCounts)
 
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
 		name := SessionTitleSelStyle.Render(" " + item.OriginLabel + " ")
 		count := SessionStatusSelStyle.Render(countStr)
-		return fmt.Sprintf("%s %s %s", icon, name, count)
+		out := fmt.Sprintf("%s %s %s", icon, name, count)
+		if summary != "" {
+			out += "  " + summary
+		}
+		return out
 	}
 	icon := DimStyle.Render(chevron)
 	name := RepoHeaderStyle.Render(item.OriginLabel)
 	count := DimStyle.Render(countStr)
-	return fmt.Sprintf("%s %s %s", icon, name, count)
+	out := fmt.Sprintf("%s %s %s", icon, name, count)
+	if summary != "" {
+		out += "  " + summary
+	}
+	return out
 }
 
 // renderCheckoutHeader → "   ⎇ branch * #PR"  for a git checkout,
@@ -446,6 +537,12 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 		prBadge = " " + renderPRBadge(repoInfo.PR, selected)
 	}
 
+	summary := renderStatusSummary(item.StatusCounts)
+	summarySuffix := ""
+	if summary != "" {
+		summarySuffix = "  " + summary
+	}
+
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
 		// Selection bg is one contiguous span over title + dirty + PR badge,
@@ -455,7 +552,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 			inner += " " + prText
 		}
 		inner += " "
-		return fmt.Sprintf("  %s %s", icon, SessionTitleSelStyle.Italic(repoInfo.IsWorktreeRepo).Render(inner))
+		return fmt.Sprintf("  %s %s", icon, SessionTitleSelStyle.Italic(repoInfo.IsWorktreeRepo).Render(inner)) + summarySuffix
 	}
 	icon := DimStyle.Render(chevron)
 	branchStyled := branchFG.Render(label)
@@ -463,7 +560,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	if dirty != "" {
 		dirtyStyled = DirtyStyle.Render(dirty)
 	}
-	return fmt.Sprintf("  %s %s%s%s", icon, branchStyled, dirtyStyled, prBadge)
+	return fmt.Sprintf("  %s %s%s%s", icon, branchStyled, dirtyStyled, prBadge) + summarySuffix
 }
 
 // renderCheckoutHeaderNonGit renders a checkout row for a folder that isn't

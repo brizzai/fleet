@@ -191,9 +191,13 @@ func BuildPreviewFooter(s *session.Session, maxWidth int) string {
 		path = "…" + ansi.Truncate(reverseString(path), maxWidth-1, "")
 		path = reverseString(path)
 	}
-	parts := []string{DimStyle.Render(path)}
+	// Path + last-used time render in bright text so they actually read on
+	// the bottom border instead of fading into the panel chrome. Separator
+	// stays dim to keep the two chips visually grouped.
+	bright := lipgloss.NewStyle().Foreground(ColorText)
+	parts := []string{bright.Render(path)}
 	if !s.LastAccessedAt.IsZero() {
-		parts = append(parts, DimStyle.Render(relativeTime(s.LastAccessedAt)))
+		parts = append(parts, bright.Render(relativeTime(s.LastAccessedAt)))
 	}
 	return strings.Join(parts, DimStyle.Render(" · "))
 }

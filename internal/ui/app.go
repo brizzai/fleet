@@ -3508,35 +3508,30 @@ func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
 	return strings.Join(parts, sep)
 }
 
-// statusCountsLine renders the global session-status pill ("N RUN · N WAIT ·
-// N idle") for the right side of the header bar. Same content as the old
-// sidebarStatusFooter; now lives in the top dashboard instead.
+// statusCountsLine renders the global session-status pill embedded in the
+// Sessions panel's top border. Uses the same glyph language as the per-row
+// origin/checkout pills (renderStatusSummary) so the visual language stays
+// consistent across the sidebar. Idle keeps its "N idle" text — knowing the
+// total fleet size is useful info, but it doesn't deserve a glyph.
 func (h *Home) statusCountsLine(bg lipgloss.Color) string {
 	counts := make(map[session.Status]int)
 	for _, s := range h.sessions {
 		counts[s.GetStatus()]++
 	}
-	var parts []string
-	if n := counts[session.StatusRunning] + counts[session.StatusStarting]; n > 0 {
-		parts = append(parts, StatusRunningStyle.Background(bg).Render(fmt.Sprintf("%d RUN", n)))
-	}
-	if n := counts[session.StatusWaiting]; n > 0 {
-		parts = append(parts, StatusWaitingStyle.Background(bg).Render(fmt.Sprintf("%d WAIT", n)))
-	}
-	if n := counts[session.StatusError]; n > 0 {
-		parts = append(parts, StatusErrorStyle.Background(bg).Render(fmt.Sprintf("%d ERR", n)))
-	}
-	if n := counts[session.StatusFinished]; n > 0 {
-		parts = append(parts, StatusFinishedStyle.Background(bg).Render(fmt.Sprintf("%d FIN", n)))
-	}
-	if n := counts[session.StatusIdle]; n > 0 {
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(fmt.Sprintf("%d idle", n)))
-	}
-	if len(parts) == 0 {
+	summary := renderStatusSummaryOpts(counts, true)
+	idleN := counts[session.StatusIdle]
+	if summary == "" && idleN == 0 {
 		return ""
 	}
-	sep := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(" · ")
-	return strings.Join(parts, sep)
+	if idleN == 0 {
+		return summary
+	}
+	idleText := lipgloss.NewStyle().Foreground(ColorTextDim).Render(fmt.Sprintf("%d idle", idleN))
+	if summary == "" {
+		return idleText
+	}
+	sep := lipgloss.NewStyle().Foreground(ColorTextDim).Render(" · ")
+	return summary + sep + idleText
 }
 
 func (h *Home) renderHelpBar() string {
@@ -3702,7 +3697,37 @@ func (h *Home) repoInfoFromSnap(snap map[string]*git.RepoInfo) *git.RepoInfo {
 // --- Internal helpers ---
 
 func (h *Home) rebuildFlatItems() {
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.originOf, h.isWorktreeOf, h.idleFolded)
+	// Snapshot the two gitInfoCache fields the sidebar closures need under
+	// workerMu — the worker goroutines write the same map under that lock,
+	// and rebuildFlatItems is called from ~30 Update() sites without it.
+	// Closing over the live map would be a concurrent map read/write race.
+	h.workerMu.Lock()
+	originSnap := make(map[string]string, len(h.gitInfoCache))
+	worktreeSnap := make(map[string]bool, len(h.gitInfoCache))
+	for k, v := range h.gitInfoCache {
+		if v == nil {
+			continue
+		}
+		if v.OriginKey != "" {
+			originSnap[k] = v.OriginKey
+		}
+		if v.IsWorktreeRepo {
+			worktreeSnap[k] = true
+		}
+	}
+	h.workerMu.Unlock()
+
+	originOf := func(repoRoot string) string {
+		if key, ok := originSnap[repoRoot]; ok {
+			return key
+		}
+		return "local:" + filepath.Base(repoRoot)
+	}
+	isWorktreeOf := func(repoRoot string) bool {
+		return worktreeSnap[repoRoot]
+	}
+
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
 	h.sidebarDirty = true
 }
 
