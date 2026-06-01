@@ -61,6 +61,49 @@ func TestJumpSkipsCollapsedOrigin(t *testing.T) {
 	}
 }
 
+// TestJumpEntersCollapsedCheckout: a collapsed CHECKOUT (branch) under an
+// expanded origin is NOT muted — jump reaches its waiting session and expands
+// just that checkout to reveal it.
+func TestJumpEntersCollapsedCheckout(t *testing.T) {
+	main := session.NewSession("main", "/tmp/jc-main")
+	main.SetStatus(session.StatusIdle)
+	wt := session.NewSession("wt-wait", "/tmp/jc-wt")
+	wt.SetStatus(session.StatusWaiting)
+
+	h := &Home{
+		sessions:     []*session.Session{main, wt},
+		repoExpanded: map[string]bool{},
+		idleFolded:   map[string]bool{},
+		pinnedRepos:  map[string]bool{},
+	}
+	gi := map[string]*git.RepoInfo{
+		"/tmp/jc-main": {OriginKey: "github.com/acme/repo"},
+		"/tmp/jc-wt":   {OriginKey: "github.com/acme/repo", IsWorktreeRepo: true},
+	}
+	h.gitInfoCache.Store(&gi)
+
+	// Collapse only the worktree CHECKOUT; the origin stays expanded.
+	h.repoExpanded["/tmp/jc-wt"] = false
+	h.rebuildFlatItems()
+	if visibleHasSession(h, wt.ID) {
+		t.Fatal("precondition failed: waiting session should be hidden under collapsed checkout")
+	}
+	if !IsExpanded(h.repoExpanded, OriginExpandKey("github.com/acme/repo")) {
+		t.Fatal("precondition failed: origin should be expanded")
+	}
+
+	h.cursor = 0
+	h.jumpToNextAttentionSession()
+
+	if !IsExpanded(h.repoExpanded, "/tmp/jc-wt") {
+		t.Error("jump should expand the collapsed checkout under an expanded origin")
+	}
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) || h.flatItems[h.cursor].Session == nil ||
+		h.flatItems[h.cursor].Session.ID != wt.ID {
+		t.Errorf("jump should land on the waiting session inside the now-expanded checkout")
+	}
+}
+
 // TestSlotJumpExpandsCollapsedOrigin: jumping to a slot-bound session must
 // also expand a collapsed origin group, not just the checkout.
 func TestSlotJumpExpandsCollapsedOrigin(t *testing.T) {

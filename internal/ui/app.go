@@ -2328,46 +2328,81 @@ func (h *Home) collapseRepoAtCursor() {
 }
 
 // jumpToNextAttentionSession moves the cursor to the next session needing
-// attention — waiting first, then finished — cycling in on-screen order and
-// wrapping. It only considers rows that are CURRENTLY VISIBLE in the sidebar:
-// sessions inside a collapsed origin/checkout, idle-folded, or filtered out
-// are skipped, so folding a group mutes it from the jump cycle (and never
-// auto-expands it). Silent no-op when nothing visible needs attention.
+// attention — waiting first, then finished — cycling in on-screen (tree) order
+// and wrapping.
+//
+// Collapse semantics: a COLLAPSED ORIGIN is muted — its sessions are never jump
+// targets. A collapsed CHECKOUT (branch) under an expanded origin is NOT muted:
+// jump reaches its sessions and expands just that checkout to reveal the target.
+// Filtered-out sessions are skipped. Silent no-op when nothing qualifies.
 func (h *Home) jumpToNextAttentionSession() {
-	n := len(h.flatItems)
+	// Candidate order: the tree with every checkout force-expanded but origins
+	// keeping their real collapse state. So a target in a folded checkout is
+	// reachable, while one inside a folded origin stays excluded.
+	cand := h.buildJumpTree()
+	n := len(cand)
 	if n == 0 {
 		return
 	}
-	start := h.cursor
-	if start < 0 || start >= n {
-		start = 0
-	}
 
-	// findNext scans forward from the cursor (wrapping) for a visible session
-	// row of the given status.
-	findNext := func(status session.Status) int {
-		for off := 1; off <= n; off++ {
-			i := (start + off) % n
-			it := h.flatItems[i]
-			if !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status {
-				return i
+	// Anchor at the current session's position in the candidate order.
+	start := -1
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) && !h.flatItems[h.cursor].IsRepoHeader {
+		if cur := h.flatItems[h.cursor].Session; cur != nil {
+			for i, it := range cand {
+				if it.Session != nil && it.Session.ID == cur.ID {
+					start = i
+					break
+				}
 			}
 		}
-		return -1
+	}
+
+	findNext := func(status session.Status) *session.Session {
+		for off := 1; off <= n; off++ {
+			it := cand[(start+off+n)%n] // +n keeps the index non-negative when start == -1
+			if !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status {
+				return it.Session
+			}
+		}
+		return nil
 	}
 
 	target := findNext(session.StatusWaiting)
-	if target < 0 {
+	if target == nil {
 		target = findNext(session.StatusFinished)
 	}
-	if target < 0 {
-		debuglog.Logger.Debug("spacejump: no visible waiting/finished target", "cursor", h.cursor)
+	if target == nil {
+		debuglog.Logger.Debug("spacejump: no waiting/finished target outside collapsed origins", "cursor", h.cursor)
 		return // Silent no-op.
 	}
 
-	debuglog.Logger.Debug("spacejump: landed", "oldCursor", h.cursor, "newCursor", target)
-	h.cursor = target
-	h.syncViewport()
+	// Reveal just the target's checkout (its origin is already expanded — a
+	// collapsed origin would have excluded it above), then land on it.
+	h.repoExpanded[session.GetRepoRoot(target.ProjectPath)] = true
+	h.rebuildFlatItems()
+	for i, it := range h.flatItems {
+		if !it.IsRepoHeader && it.Session != nil && it.Session.ID == target.ID {
+			debuglog.Logger.Debug("spacejump: landed", "targetID", target.ID, "newCursor", i)
+			h.cursor = i
+			h.syncViewport()
+			return
+		}
+	}
+}
+
+// buildJumpTree returns the sidebar tree as jump should see it: origins keep
+// their real collapse state (collapsed origins are muted), but checkouts are
+// forced expanded so a session in a folded branch is still reachable.
+func (h *Home) buildJumpTree() []SidebarItem {
+	exp := make(map[string]bool, len(h.repoExpanded))
+	for k, v := range h.repoExpanded {
+		if strings.HasPrefix(k, originExpandPrefix) {
+			exp[k] = v // keep origin collapse; drop checkout keys → default expanded
+		}
+	}
+	originOf, isWorktreeOf := h.originResolvers()
+	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
 }
 
 func (h *Home) renameSelected() tea.Cmd {
@@ -3896,11 +3931,11 @@ func (h *Home) repoInfoFromSnap(snap map[string]*git.RepoInfo) *git.RepoInfo {
 
 // --- Internal helpers ---
 
-func (h *Home) rebuildFlatItems() {
-	// Build origin / worktree lookup maps from the immutable git/PR
-	// snapshot. h.gitInfo() is a lock-free atomic load — writers always
-	// publish a fresh map, so the entries we read here can't shift
-	// underneath us mid-pass.
+// originResolvers builds the origin/worktree lookup closures from the
+// immutable git/PR snapshot. h.gitInfo() is a lock-free atomic load — writers
+// always publish a fresh map, so the entries can't shift underneath us. Shared
+// by rebuildFlatItems and the jump tree so both group identically.
+func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 	snap := h.gitInfo()
 	originSnap := make(map[string]string, len(snap))
 	worktreeSnap := make(map[string]bool, len(snap))
@@ -3915,7 +3950,6 @@ func (h *Home) rebuildFlatItems() {
 			worktreeSnap[k] = true
 		}
 	}
-
 	originOf := func(repoRoot string) string {
 		if key, ok := originSnap[repoRoot]; ok {
 			return key
@@ -3925,7 +3959,11 @@ func (h *Home) rebuildFlatItems() {
 	isWorktreeOf := func(repoRoot string) bool {
 		return worktreeSnap[repoRoot]
 	}
+	return originOf, isWorktreeOf
+}
 
+func (h *Home) rebuildFlatItems() {
+	originOf, isWorktreeOf := h.originResolvers()
 	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
 	h.sidebarDirty = true
 }
