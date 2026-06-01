@@ -154,7 +154,7 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 		issueURL := strings.TrimSpace(string(out))
 		debuglog.Logger.Info("bug report: issue created", "url", issueURL)
 		if issueURL != "" {
-			_ = exec.Command("open", issueURL).Start()
+			_ = openURL(issueURL)
 		}
 		return bugReportClosedMsg{}
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
@@ -23,9 +24,14 @@ type nmhManifest struct {
 }
 
 // NMHManifestPath returns the path where the NMH manifest should be installed.
+// Chrome's NativeMessagingHosts dir differs per OS.
 func NMHManifestPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts", nmhName+".json")
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts", nmhName+".json")
+	}
+	// Linux Chrome.
+	return filepath.Join(home, ".config", "google-chrome", "NativeMessagingHosts", nmhName+".json")
 }
 
 // InstallNativeMessagingHost writes the NMH manifest JSON so Chrome can find the host.

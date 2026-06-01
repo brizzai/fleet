@@ -29,12 +29,12 @@ if ! gh auth status &>/dev/null; then
     exit 1
 fi
 
-# macOS only
+# Detect OS (macOS or Linux)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-if [[ "$OS" != "darwin" ]]; then
-    echo "Error: fleet only supports macOS"
-    exit 1
-fi
+case "$OS" in
+    darwin|linux) ;;
+    *) echo "Error: fleet supports macOS and Linux only (got: $OS)"; exit 1 ;;
+esac
 
 # Detect architecture
 ARCH=$(uname -m)
