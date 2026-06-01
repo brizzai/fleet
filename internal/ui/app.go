@@ -1416,7 +1416,13 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			h.launchpad.ToggleAll()
 			return h, nil
 		case "enter":
-			return h, h.launchLaunchpadSet(h.launchpad.LaunchSet())
+			// Consume the launchpad as we fire the set: launching is async, so
+			// without this a second Enter (before the new sessions register)
+			// would re-launch the whole set and duplicate every resumed
+			// conversation.
+			set := h.launchpad.LaunchSet()
+			h.launchpadDismissed = true
+			return h, h.launchLaunchpadSet(set)
 		case "esc":
 			h.launchpadDismissed = true
 			return h, nil

@@ -23,7 +23,6 @@ type Launchpad struct {
 	cursor   int
 	selected map[int]bool // multi-select: item indices checked for launch
 	loading  bool
-	loaded   bool
 }
 
 // NewLaunchpad returns a launchpad in its pre-scan loading state.
@@ -44,7 +43,6 @@ func (l *Launchpad) SetItems(items []discovery.Recent) {
 		l.selected[i] = true
 	}
 	l.loading = false
-	l.loaded = true
 	if l.cursor >= len(l.items) {
 		l.cursor = 0
 	}
@@ -67,9 +65,6 @@ func groupByOrigin(items []discovery.Recent) []discovery.Recent {
 	}
 	return out
 }
-
-// Loading reports whether the background scan is still running.
-func (l *Launchpad) Loading() bool { return l.loading }
 
 // HasItems reports whether discovery surfaced at least one repo.
 func (l *Launchpad) HasItems() bool { return len(l.items) > 0 }
@@ -157,20 +152,38 @@ func (l *Launchpad) View(width, height int) string {
 	b.WriteString(DimStyle.Render("Add the repos & worktrees you regularly work in."))
 	b.WriteString("\n\n")
 
-	// Fit the list to the available height. Items take 2 rows each (branch +
-	// title); origin headers and group separators add a little more, so budget
-	// conservatively at 3 rows/item.
+	// Window the list to the available height, keeping the cursor in view.
+	// Items take 2 rows each (branch + title); origin headers and group
+	// separators add a little more, so budget conservatively at 3 rows/item.
 	budget := height - 9
-	maxItems := budget / 3
-	if maxItems < 1 {
-		maxItems = 1
+	winSize := budget / 3
+	if winSize < 1 {
+		winSize = 1
 	}
-	shown := l.items
-	overflow := 0
-	if len(shown) > maxItems {
-		overflow = len(shown) - (maxItems - 1) // reserve a row for the "+N more" note
-		shown = shown[:maxItems-1]
+	// Reserve a row for the "+N more" note when the list doesn't fully fit.
+	if len(l.items) > winSize {
+		winSize--
+		if winSize < 1 {
+			winSize = 1
+		}
 	}
+	// Scroll so the cursor sits inside [start, start+winSize).
+	start := 0
+	if l.cursor >= winSize {
+		start = l.cursor - winSize + 1
+	}
+	if start > len(l.items)-winSize {
+		start = len(l.items) - winSize
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + winSize
+	if end > len(l.items) {
+		end = len(l.items)
+	}
+	shown := l.items[start:end]
+	hidden := len(l.items) - len(shown)
 
 	originCounts := make(map[string]int)
 	for _, it := range shown {
@@ -179,6 +192,7 @@ func (l *Launchpad) View(width, height int) string {
 
 	prevOrigin := ""
 	for i, it := range shown {
+		idx := start + i // absolute index for cursor + selection lookup
 		if it.OriginKey != prevOrigin {
 			if i > 0 {
 				b.WriteString("\n") // blank row before a new origin group
@@ -187,12 +201,12 @@ func (l *Launchpad) View(width, height int) string {
 			b.WriteString("\n")
 			prevOrigin = it.OriginKey
 		}
-		b.WriteString(l.renderItem(it, i == l.cursor, l.selected[i], rowW))
+		b.WriteString(l.renderItem(it, idx == l.cursor, l.selected[idx], rowW))
 		b.WriteString("\n")
 	}
-	if overflow > 0 {
+	if hidden > 0 {
 		b.WriteString("\n")
-		b.WriteString(DimStyle.Render(fmt.Sprintf("   +%d more in your history", overflow)))
+		b.WriteString(DimStyle.Render(fmt.Sprintf("   +%d more in your history", hidden)))
 		b.WriteString("\n")
 	}
 
