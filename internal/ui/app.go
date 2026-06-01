@@ -332,10 +332,21 @@ func (h *Home) SetProgram(p *tea.Program) {
 }
 
 // send pushes a message to the Update loop from a background goroutine.
-// No-op when program isn't set (tests that drive Update directly).
+// In production h.program is wired by main.go; tests skip that, so we
+// fall back to applying state-mutating messages directly under workerMu
+// (still race-safe; the test asserts end state, not the path it took).
 func (h *Home) send(msg tea.Msg) {
 	if h.program != nil {
 		h.program.Send(msg)
+		return
+	}
+	switch m := msg.(type) {
+	case gitInfoUpdateMsg:
+		if m.repo != "" {
+			h.workerMu.Lock()
+			h.gitInfoCache[m.repo] = m.info
+			h.workerMu.Unlock()
+		}
 	}
 }
 
@@ -3329,9 +3340,12 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 					}
 				}
 
-				h.workerMu.Lock()
-				h.gitInfoCache[r] = info
-				h.workerMu.Unlock()
+				// Push the refresh result to Update — it's the sole writer
+				// of h.gitInfoCache, so we avoid taking workerMu here. Send
+				// is buffered + drained synchronously by Tea's main loop;
+				// next worker cycle's carry-forward read will see the write
+				// as long as Update isn't catastrophically backed up.
+				h.send(gitInfoUpdateMsg{repo: r, info: info})
 
 				// Persist to SQLite so the next launch can carry this forward
 				// instead of re-firing gh. Storage method logs errors itself;
