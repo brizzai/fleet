@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/fsnotify/fsnotify"
 )
@@ -202,12 +203,42 @@ func (w *HookWatcher) processFile(filePath string) {
 	}
 
 	w.mu.Lock()
+	prev := w.statuses[instanceID]
 	w.statuses[instanceID] = hookStatus
 	w.mu.Unlock()
+
+	emitHookMetrics(prev, hookStatus)
 
 	// Notify listeners of the change (non-blocking).
 	select {
 	case w.onChange <- struct{}{}:
 	default:
+	}
+}
+
+// emitHookMetrics fires analytics counters for new Claude prompt submissions
+// and Stop events. Deduped against `prev` so repeated fsnotify writes for the
+// same status don't double-count. loadExisting() also passes through this
+// path on startup; nil-prev there means "first time we've seen this session
+// in *this* fleet process" — that's expected, the counters are best-effort
+// usage proxies, not exact tallies.
+func emitHookMetrics(prev, curr *HookStatus) {
+	if curr == nil {
+		return
+	}
+	switch curr.Event {
+	case "UserPromptSubmit":
+		if prev == nil || curr.PromptCount > prev.PromptCount {
+			analytics.Track(analytics.EventClaudePromptSubmitted, nil)
+		}
+	case "Stop":
+		if prev == nil || prev.Event != "Stop" || !prev.UpdatedAt.Equal(curr.UpdatedAt) {
+			analytics.Track(analytics.EventClaudeResponseReceived, nil)
+			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstClaudeResponse) {
+				analytics.Track(analytics.EventOnboardingFirstClaudeResponse, map[string]interface{}{
+					"seconds_since_install": int(analytics.SecondsSinceInstall()),
+				})
+			}
+		}
 	}
 }

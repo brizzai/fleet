@@ -2,14 +2,31 @@ package session
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/github"
 	_ "modernc.org/sqlite"
 )
+
+// PRCacheRow is the persisted form of a repo's PR-refresh state. It carries
+// just enough metadata to reconstitute the in-memory cache without re-firing
+// `gh` on restart: the PR data itself, the branch the PR was fetched against
+// (so a branch switch invalidates the cache), the origin key (so the sidebar
+// paints with the right grouping on frame 0), and the two timestamps that
+// drive the TTL + rate-limit back-off gates.
+type PRCacheRow struct {
+	RepoPath        string
+	Branch          string
+	OriginKey       string
+	PR              *github.PR // nil when there is no PR for this branch
+	LastPRRefresh   time.Time
+	PRRateLimitedAt time.Time // zero = clean (not rate-limited)
+}
 
 // StateDB wraps a SQLite database for session persistence.
 type StateDB struct {
@@ -180,6 +197,24 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	// Per-repo PR cache: survives fleet restarts so we don't re-fire `gh` for
+	// every repo on launch. The worker carries pr_json forward (subject to a
+	// branch-match check) until the TTL gate decides to refresh.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS repo_pr_cache (
+			repo_path          TEXT PRIMARY KEY,
+			branch             TEXT NOT NULL,
+			origin_key         TEXT NOT NULL,
+			pr_json            TEXT NOT NULL,
+			last_pr_refresh    INTEGER NOT NULL,
+			pr_rate_limited_at INTEGER NOT NULL
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create repo_pr_cache table", "error", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -342,12 +377,6 @@ func (s *StateDB) MarkTitleGenerated(id string) error {
 	return err
 }
 
-// ResetTitleGenerated clears the title_generated flag to allow re-generation.
-func (s *StateDB) ResetTitleGenerated(id string) error {
-	_, err := s.db.Exec("UPDATE sessions SET title_generated = 0 WHERE id = ?", id)
-	return err
-}
-
 // UpdatePromptCount updates the prompt count for a session.
 func (s *StateDB) UpdatePromptCount(id string, count int) error {
 	_, err := s.db.Exec("UPDATE sessions SET prompt_count = ? WHERE id = ?", count, id)
@@ -445,6 +474,98 @@ func (s *StateDB) LoadPinnedRepos() ([]string, error) {
 		repos = append(repos, path)
 	}
 	return repos, rows.Err()
+}
+
+// SavePRCacheRow upserts a single repo's PR-refresh state. Called per-repo
+// after each successful refresh in the worker. JSON-encodes the PR; on
+// nil PR we persist an empty string (distinct from row absence, which
+// means "we've never refreshed this repo").
+func (s *StateDB) SavePRCacheRow(row *PRCacheRow) error {
+	if row == nil || row.RepoPath == "" {
+		return nil
+	}
+	var prJSON string
+	if row.PR != nil {
+		b, err := json.Marshal(row.PR)
+		if err != nil {
+			debuglog.Logger.Error("failed to marshal PR for cache", "repo", row.RepoPath, "error", err)
+			return err
+		}
+		prJSON = string(b)
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO repo_pr_cache (repo_path, branch, origin_key, pr_json, last_pr_refresh, pr_rate_limited_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(repo_path) DO UPDATE SET
+			branch             = excluded.branch,
+			origin_key         = excluded.origin_key,
+			pr_json            = excluded.pr_json,
+			last_pr_refresh    = excluded.last_pr_refresh,
+			pr_rate_limited_at = excluded.pr_rate_limited_at
+	`,
+		row.RepoPath,
+		row.Branch,
+		row.OriginKey,
+		prJSON,
+		row.LastPRRefresh.UnixNano(),
+		row.PRRateLimitedAt.UnixNano(),
+	)
+	if err != nil {
+		debuglog.Logger.Error("failed to save PR cache row", "repo", row.RepoPath, "error", err)
+	}
+	return err
+}
+
+// LoadPRCache returns all persisted PR-refresh rows keyed by repo_path.
+// Callers apply their own freshness filters (e.g. drop rows older than 24h)
+// — this method itself returns everything that's in the table.
+func (s *StateDB) LoadPRCache() (map[string]*PRCacheRow, error) {
+	rows, err := s.db.Query(`
+		SELECT repo_path, branch, origin_key, pr_json, last_pr_refresh, pr_rate_limited_at
+		FROM repo_pr_cache
+	`)
+	if err != nil {
+		debuglog.Logger.Error("failed to load PR cache", "error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]*PRCacheRow)
+	for rows.Next() {
+		var (
+			repoPath      string
+			branch        string
+			originKey     string
+			prJSON        string
+			lastRefreshNS int64
+			rateLimitedNS int64
+		)
+		if err := rows.Scan(&repoPath, &branch, &originKey, &prJSON, &lastRefreshNS, &rateLimitedNS); err != nil {
+			debuglog.Logger.Error("failed to scan PR cache row", "error", err)
+			return nil, err
+		}
+		row := &PRCacheRow{
+			RepoPath:      repoPath,
+			Branch:        branch,
+			OriginKey:     originKey,
+			LastPRRefresh: time.Unix(0, lastRefreshNS),
+		}
+		if rateLimitedNS != 0 {
+			row.PRRateLimitedAt = time.Unix(0, rateLimitedNS)
+		}
+		if prJSON != "" {
+			var pr github.PR
+			if err := json.Unmarshal([]byte(prJSON), &pr); err != nil {
+				// Corrupt row: skip, log, keep going. Re-fetching on next
+				// cycle is harmless.
+				debuglog.Logger.Warn("PR cache row JSON parse failed; skipping", "repo", repoPath, "error", err)
+				continue
+			}
+			row.PR = &pr
+		}
+		out[repoPath] = row
+	}
+	return out, rows.Err()
 }
 
 func boolToInt(b bool) int {

@@ -23,7 +23,7 @@ var allKeyBindings = []KeyBinding{
 	// Session actions.
 	{Key: "Enter", BarKey: "⏎", BarDesc: "Open", Desc: "Attach / toggle group", Section: "session"},
 	{Key: "Tab", BarKey: "⇥", BarDesc: "Focus", Desc: "Focus preview / attach (swap)", Section: "session"},
-	{Key: "Space", BarKey: "␣", BarDesc: "Next", Desc: "Jump to next waiting/finished", Section: "session"},
+	{Key: "Space", BarKey: "␣", BarDesc: "Jump", Desc: "Jump to next waiting/finished", Section: "session"},
 	{Key: "← / h", Desc: "Collapse group", Section: "session"},
 	{Key: "→ / l", Desc: "Expand group", Section: "session"},
 	{Key: "a", BarKey: "a", BarDesc: "New", Desc: "New session (default agent)", Section: "session"},
@@ -33,7 +33,8 @@ var allKeyBindings = []KeyBinding{
 	{Key: "f", Desc: "Fork session", Section: "session"},
 	{Key: "F", Desc: "Fork to worktree", Section: "session"},
 	{Key: "d", BarKey: "d", BarDesc: "Del", Desc: "Delete session / repo / worktree", Section: "session"},
-	{Key: "z", Desc: "Undo delete", Section: "session"},
+	{Key: "u", Desc: "Undo delete", Section: "session"},
+	{Key: "z", BarKey: "z", BarDesc: "Fold", Desc: "Fold/unfold idle sessions in this checkout", Section: "session"},
 	{Key: "r", BarKey: "r", BarDesc: "Restart", Desc: "Restart session", Section: "session"},
 	{Key: "R", Desc: "Rename session", Section: "session"},
 	{Key: "e", Desc: "Open in editor", Section: "session"},
@@ -47,7 +48,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "= = then digit", Desc: "Unbind slot", Section: "session"},
 
 	// Global.
-	{Key: ": / Ctrl+P", BarKey: ":", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
+	{Key: "Ctrl+K", BarKey: "⌃K", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
 	{Key: "S", BarKey: "S", BarDesc: "Set", Desc: "Open settings", Section: "global"},
 	{Key: "!", BarKey: "!", BarDesc: "Bug", Desc: "Bug report / diagnostics", Section: "global"},
 	{Key: "?", BarKey: "?", BarDesc: "Help", Desc: "Toggle help", Section: "global"},
@@ -61,8 +62,20 @@ var allKeyBindings = []KeyBinding{
 	{Key: "Ctrl+Q", Desc: "Detach from session", Section: "attach"},
 }
 
-// HelpBarBindings returns the bindings to show in the bottom help bar.
-// Returns (contextKeys, globalKeys) as (key, desc) pairs.
+// BarContext identifies what the cursor is on, so the footer can show only
+// the keys that actually apply to the current row.
+type BarContext int
+
+const (
+	BarContextEmpty    BarContext = iota // no items, or unknown
+	BarContextOrigin                     // cursor on an origin header (▾ brizzai 16)
+	BarContextCheckout                   // cursor on a checkout header (▾ new-ui #100)
+	BarContextSession                    // cursor on a real session row
+)
+
+// HelpBarBindings returns ALL bar bindings; kept for places that want the
+// full unfiltered list (settings dialog, debug). New callers should prefer
+// HelpBarBindingsFor for the context-aware subset.
 func HelpBarBindings() (context, global []struct{ Key, Desc string }) {
 	for _, kb := range allKeyBindings {
 		if kb.BarKey == "" {
@@ -74,6 +87,46 @@ func HelpBarBindings() (context, global []struct{ Key, Desc string }) {
 		} else {
 			context = append(context, entry)
 		}
+	}
+	return
+}
+
+// HelpBarBindingsFor returns a curated subset of bar bindings for the row
+// type currently under the cursor. Keeps the footer scannable (5-6 keys
+// per context) instead of dumping the whole keymap on every paint.
+// `enterMode` is the active Config.EnterMode ("attach" or "split"). In
+// split mode handleKey swaps Enter↔Tab, so the session footer needs to
+// follow suit or it points users at the wrong action.
+func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []struct{ Key, Desc string }) {
+	switch ctx {
+	case BarContextSession:
+		if enterMode == "split" {
+			context = []struct{ Key, Desc string }{
+				{"⇥", "Attach"}, {"⏎", "Focus"}, {"␣", "Jump"},
+				{"Y", "Approve"}, {"d", "Del"}, {"p", "PR"},
+			}
+		} else {
+			context = []struct{ Key, Desc string }{
+				{"⏎", "Attach"}, {"␣", "Jump"}, {"Y", "Approve"},
+				{"d", "Del"}, {"r", "Restart"}, {"p", "PR"},
+			}
+		}
+	case BarContextCheckout:
+		context = []struct{ Key, Desc string }{
+			{"⏎", "Expand"}, {"d", "Del"}, {"w", "Wktree"},
+			{"F", "Fork"}, {"b", "Branch"},
+		}
+	case BarContextOrigin:
+		context = []struct{ Key, Desc string }{
+			{"⏎", "Expand"}, {"d", "Forget"}, {"w", "Wktree"},
+		}
+	default: // empty
+		context = []struct{ Key, Desc string }{
+			{"a", "New"}, {"n", "Repo"}, {"w", "Wktree"},
+		}
+	}
+	global = []struct{ Key, Desc string }{
+		{"⌃K", "Cmd"}, {"/", "Filter"}, {"?", "Help"}, {"q", "Quit"},
 	}
 	return
 }

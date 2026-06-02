@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-06-02
+
+### Added
+
+- First-run launchpad: when the fleet is empty, fleet now scans your Claude Code history (`~/.claude/projects`) and offers the repos & worktrees you've recently worked in — grouped by origin with nested branches, exactly like the sidebar — instead of a blank "No Sessions Yet" screen. They're all pre-checked, so a single `↵` adds your whole working set: each repo/worktree is pinned and its last conversation resumed (`claude --resume`). `space` toggles a row, `A` selects all/none, `n` types a path, `Esc` falls back to the bare empty state. The boot splash stays up through the scan and reveals the launchpad in one transition. Non-git and missing paths are dropped.
+- Linux support. `install.sh` now installs on Linux (x86_64/arm64), release builds ship Linux binaries, in-app self-update fetches the matching `linux` asset, browser launches (PR open, bug-report URL) use `xdg-open`, and the Chrome native-messaging host installs into the Chrome/Chromium config dirs under `~/.config/` (Chromium and the beta/unstable channels when present).
+- When you decline the first-launch analytics prompt, fleet now sends a single anonymous `telemetry_declined` event so opt-out rates are visible alongside opt-ins. It carries only the anonymous device hash fleet already generates — never your git name/email, file paths, repo/branch names, or prompts — and fires exactly once per install. It is fully suppressed when telemetry is disabled via `FLEET_TELEMETRY_DISABLED` or `DO_NOT_TRACK`.
+
+### Improved
+
+- Session titles now use Claude's own model-generated title. fleet reads Claude Code's `ai-title` from the conversation transcript — the same title that evolves as the work shifts — instead of guessing from your first prompt and re-running a heuristic every few prompts. An in-session `/rename` (`custom-title`) still takes precedence, and fleet's `R` rename always wins. When Claude writes no title (e.g. title generation disabled), the old prompt heuristic remains as a fallback. Claude's occasional kebab-case slug titles (e.g. `native-ai-title-integration`) are spaced out for readability (`native ai title integration`) with their casing preserved, so acronyms like `API` survive.
+- Sidebar redesigned around a calmer origin → checkout → session tree. Worktrees of the same GitHub repo collapse under one origin header (e.g. `brizzai/fleet`); no-remote repos get their own `local:<name>` group. `z` folds/unfolds idle sessions for a checkout; `u` is the new undo-delete (was `z`).
+Boot is now gated by a one-shot bootstrap that resolves every repo's origin + branch + PR status in parallel (8 workers, 6s deadline) — the sidebar paints once in its final shape instead of regrouping as data trickles in. While bootstrap runs, fleet shows a gradient FLEET wordmark splash with rotating ops-humor labels and a progress bar.
+Steady-state git/PR refresh now fans out across all session repos every 2s (bounded 4-worker pool) instead of round-robining one repo per tick, so branch/dirty/PR badges feel near-instant after any change.
+- Sidebar and Preview now live in their own rounded-border cards with corner-inset titles (`╭─ Sessions ─...─╮` / `╭─ Preview ─...─╮`), so the two regions read as distinct surfaces instead of one stream split by a hairline. The focused panel switches its border to the accent color in focus mode.
+New `fleet-pink` flagship theme (accent `#ff77c6`) is the default for first-run users. Tokyo Night, Catppuccin Mocha, Rosé Pine, Nord and Gruvbox remain available via the `S` settings dialog.
+Sidebar cleanup: selected sessions drop the leading `▶` (it collided with the `▸` chevron used on collapsed headers — the inverted-background title was already carrying the selection signal). Worktree branch names render in italic so you can tell the main clone apart from its worktrees at a glance without an extra prefix column. In the default `icon` indicator mode, idle/starting sessions render a dim `·` anchor so the eye has a leftmost mark on every row (bar mode keeps them blank — the gutter bar carries the signal there). Selection background is one contiguous span across each row (PR badge and dirty marker sit inside the highlighted pill instead of bleeding out as separate boxes).
+Sidebar width is now responsive: targets 65 absolute columns capped at 45% of terminal width. On a Mac 14" (~150 cols) that's ~43% so long titles fit; on a wide monitor it shrinks to ~26% so the preview keeps its share. Scroll indicators replaced the `⋮` glyph (which rendered as `:` in some fonts) with `… N more above/below`.
+Visual rhythm pass: one blank row between origin groups carries the section break, and the indent tightened across the tree so long titles get more horizontal room. On boot, the cursor lands on the first session instead of the first origin, so your first keystroke does something useful.
+New `Status style` setting (`icon` default, or `bar` for a VS-Code gutter-style `┃`) lets you pick how non-idle state is shown. Toggle live in the settings dialog.
+Running/waiting/idle counts moved out of the top header and into a right-aligned pill embedded in the Sessions panel's top border, next to the title (`╭─ Sessions ── 2 RUN · 1 WAIT · 51 idle ─╮`). The header is just the `❯_ fleet` wordmark now.
+Command palette dims the underlying UI via an SGR-faint backdrop so it visually lifts above the content instead of merging with the preview pane.
+
+### Changed
+
+- Command palette is now `Ctrl+K` (replacing `:` / `Ctrl+P`), renders as an overlay over the sidebar/preview instead of taking over the screen, and fuzzy-searches your repos and worktrees in addition to commands. Picking a repo/worktree jumps the sidebar cursor to that header. Tip: map `Cmd+K → Ctrl+K` in your terminal prefs (iTerm2 Key Mappings; Ghostty: `keybind = cmd+k=text:\x0b`) for the native macOS feel.
+- `Space` (jump to next waiting/finished) now cycles in on-screen order and skips sessions inside a **collapsed origin** — fold an origin to mute its sessions from the jump cycle. A collapsed branch/checkout under an *expanded* origin is still reached: jump expands just that checkout to reveal the target. (This also fixes jump sometimes only moving in one direction.) Jumping to a slot-bound session with the digit keys still reveals it, expanding its origin group and checkout if folded. `Space` is now labelled "Jump" in the session footer.
+
+### Fixed
+
+- Sessions now flip from **Waiting → Running** within ~500ms after you approve a permission, instead of lagging several seconds (or tens of seconds) when many sessions are open. No Claude hook fires on permission approval, so that transition can only be seen by scanning the session's pane — and the background worker only scanned 5 sessions every 2s, so at ~40 sessions each one was revisited just once every ~18s. The worker now re-checks active sessions (running/waiting/starting) on a fast ~500ms cadence while keeping the heavier work (git/PR refresh, idle-session sweep, auto-naming, tmux status bars) on the existing ~2s cadence. The reverse `running → waiting` flip (e.g. a sub-agent hitting a permission prompt) is just as responsive.
+- Worktree creation now works in git-crypt repos. git-crypt resolves its key via the per-worktree git dir, which has no key, so the smudge filter aborted checkout with `git-crypt: Error: Unable to open key file`. fleet now detects git-crypt repos and creates the worktree with `--no-checkout`, links the shared key into the worktree's git dir, then checks out.
+
+## [2.4.1] - 2026-05-28
+
+### Added
+
+- Documentation site at brizzai.github.io/fleet — landing page with an interactive in-page TUI demo (arrow keys, Enter to approve, `a` to spawn, Space to jump to attention) plus full docs ported from the README. Built on Next.js + Fumadocs and auto-deployed to GitHub Pages on every push to master.
+
+### Fixed
+
+- `brew install brizzai/tap/fleet` no longer trips macOS Gatekeeper on first launch — the cask now strips the `com.apple.quarantine` attribute via a postflight hook. Also fixed the legacy `brizz-code` shim's brew-path message to point at `brew uninstall brizz-code` + `brew install brizzai/tap/fleet` instead of the incorrect `rm -f` line.
+
+## [2.4.0] - 2026-05-28
+
+### Added
+
+- Compatibility shim for users still on the legacy `brizz-code` binary. Released as `brizz-code_<version>_darwin_<arch>.tar.gz` so v1.x auto-updates land on a small wrapper that prints a deprecation warning (rate-limited to once/day), then either execs `fleet` if installed, falls back to auto-installing the latest fleet release next to itself (verifying via `checksums.txt`), or — if running from a Homebrew prefix — points the user at `brew install brizzai/tap/fleet`.
+
+## [2.3.0] - 2026-05-27
+
+### Added
+
+- Fork a Claude session into a different worktree — press `Shift+F` to open the worktree picker (pick an existing worktree or create a new one), and the forked conversation continues in the chosen destination instead of the parent's cwd. Available as "Fork to Worktree" in the command palette. Claude-only for this release.
+
+### Changed
+
+- Switched the analytics backend from Amplitude to Mixpanel and added a first-launch consent prompt: on the first run you'll see a dialog explaining exactly what fleet sends (including your git `user.name` and `user.email`, used as the Mixpanel `distinct_id` so the same person shows up across machines) and choose Yes or No with one keystroke. Choice persists in `~/.config/fleet/config.json` and can be changed any time in Settings (`S`). The standard opt-outs (`FLEET_TELEMETRY_DISABLED`, `DO_NOT_TRACK`, `telemetry: false`) still work and skip the prompt entirely. Significantly expanded the event set — onboarding funnel, shape gauges (repos, worktrees, sessions, slot bindings), engagement distributions, and frustration signals — to help spot when new users get stuck. Mixpanel HTTP calls run on a buffered worker goroutine so the TUI's Update() loop never blocks on the network.
+
 ## [2.2.0] - 2026-05-23
 
 ### Added
@@ -139,7 +198,11 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/brizzai/fleet/releases/tag/v2.5.0
+[2.4.1]: https://github.com/brizzai/fleet/releases/tag/v2.4.1
+[2.4.0]: https://github.com/brizzai/fleet/releases/tag/v2.4.0
+[2.3.0]: https://github.com/brizzai/fleet/releases/tag/v2.3.0
 [2.2.0]: https://github.com/brizzai/fleet/releases/tag/v2.2.0
 [2.1.0]: https://github.com/brizzai/fleet/releases/tag/v2.1.0
 [2.0.0]: https://github.com/brizzai/fleet/releases/tag/v2.0.0

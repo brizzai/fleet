@@ -22,6 +22,27 @@ type Palette struct {
 
 // Built-in palette definitions.
 var (
+	// Fleet Pink — vivid candy pink (#ff77c6) accent with sky-blue support.
+	// Accent carries the brand; sky blue is the secondary cool tone (branch
+	// names, finished status). The supporting status palette sits a notch
+	// quieter so semantic colors stay readable without out-shouting the accent.
+	PaletteFleetPink = Palette{
+		Name:    "fleet-pink",
+		Bg:      lipgloss.Color("#17121f"),
+		Surface: lipgloss.Color("#241a2e"),
+		Border:  lipgloss.Color("#6a4d78"),
+		Text:    lipgloss.Color("#f6eaf4"),
+		TextDim: lipgloss.Color("#857a8c"),
+		Accent:  lipgloss.Color("#ff77c6"),
+		Blue:    lipgloss.Color("#7dcfff"),
+		Green:   lipgloss.Color("#8ad698"),
+		Yellow:  lipgloss.Color("#e8c590"),
+		Red:     lipgloss.Color("#e07685"),
+		Orange:  lipgloss.Color("#ffa05c"),
+		Purple:  lipgloss.Color("#bb9af7"),
+		Gray:    lipgloss.Color("#857a8c"),
+	}
+
 	PaletteTokyoNight = Palette{
 		Name:    "tokyo-night",
 		Bg:      lipgloss.Color("#1a1b26"),
@@ -108,8 +129,9 @@ var (
 	}
 )
 
-// BuiltinPalettes lists all available themes.
+// BuiltinPalettes lists all available themes. Fleet Pink is the flagship default.
 var BuiltinPalettes = []Palette{
+	PaletteFleetPink,
 	PaletteTokyoNight,
 	PaletteCatppuccin,
 	PaletteRosePine,
@@ -117,19 +139,25 @@ var BuiltinPalettes = []Palette{
 	PaletteGruvbox,
 }
 
-// PaletteByName returns the palette matching the given name, or Tokyo Night as default.
+// DefaultPaletteName is the theme used when no theme is configured or the
+// configured name doesn't match a built-in.
+const DefaultPaletteName = "fleet-pink"
+
+// PaletteByName returns the palette matching the given name, or the default as fallback.
 func PaletteByName(name string) Palette {
 	for _, p := range BuiltinPalettes {
 		if p.Name == name {
 			return p
 		}
 	}
-	return PaletteTokyoNight
+	return PaletteFleetPink
 }
 
 // PaletteDisplayName returns a human-readable display name for a palette.
 func PaletteDisplayName(name string) string {
 	switch name {
+	case "fleet-pink":
+		return "Fleet Pink"
 	case "tokyo-night":
 		return "Tokyo Night"
 	case "catppuccin-mocha":

@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 
+	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/migration"
@@ -95,6 +96,11 @@ func runTUI() {
 
 	cfg := config.Load()
 
+	// Analytics is initialized inside the TUI, after the first-launch
+	// consent prompt is answered. We still defer Shutdown unconditionally
+	// because Shutdown is a no-op when Init was never called.
+	defer analytics.Shutdown()
+
 	// Auto-update: check for newer version on launch.
 	if cfg.IsAutoUpdateEnabled() && version != "dev" && update.ShouldCheck() {
 		debuglog.Logger.Info("checking for updates", "current", version)
@@ -118,12 +124,20 @@ func runTUI() {
 	}
 	defer storage.Close()
 
-	model := ui.NewHome(storage, cfg, version)
+	// Resolve per-install identity (device hash, git name/email, OS version)
+	// here so the Bubble Tea Update() loop never has to wait on git/ioreg/
+	// sw_vers. analytics.Init then becomes pure in-memory plumbing.
+	identity := analytics.DiscoverIdentity()
+
+	model := ui.NewHome(storage, cfg, version, identity)
 	p := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
+	// Wire the program back into the model so worker goroutines can push
+	// state updates to the Update loop via h.send. Must happen before Run.
+	model.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

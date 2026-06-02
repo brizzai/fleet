@@ -63,7 +63,7 @@ internal/ui/errors.go        # Ring buffer keeping error history (errors that fl
 internal/ui/keybindings.go   # Centralized keybinding definitions
 internal/ui/workspace_picker.go  # Worktree dialog (base branch + new branch + existing worktrees)
 internal/ui/workspace_create.go  # Create workspace sub-dialog + PendingWorkspace phantom entries
-internal/ui/command_palette.go   # Command palette dialog (: / Ctrl+P) with fuzzy search
+internal/ui/command_palette.go   # Command palette dialog (Ctrl+K) — fuzzy search over commands + repos/worktrees, renders as overlay
 internal/chrome/protocol.go      # Command/Response types, action constants, socket path
 internal/chrome/native_host.go   # Native messaging host with Unix socket bridge
 internal/chrome/client.go        # TUI-side client (connects to socket, sends commands)
@@ -78,10 +78,10 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Sessions grouped by git repo root in sidebar with tree lines (├─/└─)
 - Status: Running, Waiting, Finished, Idle, Error, Starting
 - Status icons: ● (running/finished), ◐ (waiting), ○ (idle/starting), ✕ (error)
-- Keybindings: j/k nav, Enter attach, Space jump to next waiting/finished, a new session (instant, repo-scoped, default agent), A new session with agent picker (Claude/Codex), n new session (any repo, path autocomplete), w new worktree session (base branch + new branch), F fork to worktree (Claude-only), d delete (scope follows cursor: session = that session; worktree header = sessions + git worktree remove; repo header = forget repo from fleet, folder untouched; empty repo header = unpin), z undo delete (5s window), r restart, R rename, e editor, p open PR in browser, Y quick approve (waiting sessions), / filter, : or Ctrl+P command palette, S settings, ! bug report/diagnostics, ? help, q quit
+- Keybindings: j/k nav, Enter attach, Space jump to next waiting/finished, a new session (instant, repo-scoped, default agent), A new session with agent picker (Claude/Codex), n new session (any repo, path autocomplete), w new worktree session (base branch + new branch), F fork to worktree (Claude-only), d delete (scope follows cursor: session = that session; worktree header = sessions + git worktree remove; repo header = forget repo from fleet, folder untouched; empty repo header = unpin), u undo delete (5s window), z fold/unfold idle sessions in this checkout, r restart, R rename, e editor, p open PR in browser, Y quick approve (waiting sessions), / filter, Ctrl+K command palette, S settings, ! bug report/diagnostics, ? help, q quit
 - Session hotkeys (RTS-style): `Alt+0-9` (or `=` then digit) binds the selected session to a slot; re-pressing `Alt+<N>` on a session already in slot N unbinds; `==` then digit clears any slot; plain `0-9` jumps to the bound session (double-tap within 400ms also attaches); `[N]` badge in sidebar marks bound sessions; bindings persist in SQLite `slot_bindings` table (FK cascade on session delete)
-- Command palette (: / Ctrl+P): fuzzy-searchable list of all actions; palette-only commands include "Reload All Sessions" (restarts all dead/error sessions)
-- Undo delete: `z` key restores last deleted session within 5s window (stacked — multiple deletes each undoable). Tmux kept alive during window for full restore.
+- Command palette (Ctrl+K): renders as an overlay over the sidebar/preview (not a full-screen takeover); fuzzy-searches commands plus every repo/worktree currently in the sidebar (name, branch, full path all matched); picking a repo/worktree jumps the sidebar cursor to that header (auto-expand if collapsed); palette-only commands include "Reload All Sessions" (restarts all dead/error sessions). For a native Cmd+K feel on macOS, map Cmd+K → Ctrl+K in your terminal prefs (iTerm2: Profiles → Keys → Key Mappings → +; Ghostty: `keybind = cmd+k=text:\x0b`).
+- Undo delete: `u` key restores last deleted session within 5s window (stacked — multiple deletes each undoable). Tmux kept alive during window for full restore.
 - Pinned repos: repos auto-pinned on session creation, persist in SQLite. Empty repos show dimmed with "(empty)". `d` on empty repo header unpins it.
 - Delete scope follows the cursor (single-purpose `y`/`n` confirm, no extra buttons): `d` on a session deletes only that session; `d` on a worktree header deletes its sessions + runs `git worktree remove` + unpins; `d` on a real-repo header "forgets" the repo (deletes its sessions + unpins, folder untouched); `d` on an empty real-repo header unpins instantly (no dialog). Worktree-vs-repo detected via cached `RepoInfo.IsWorktreeRepo`, falling back to a direct `git.IsWorktree` check for empty headers the worker hasn't cached yet. Header deletes route through the same deferred-delete machinery, so `z` undo works (LIFO, per-session).
 - Tmux status bar configured per session with detach hint (ctrl+q)
@@ -111,15 +111,15 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Codex trust: dir-trust pre-seeded to `~/.codex/config.toml` (`[projects."<path>"] trust_level="trusted"`, via `EnsureCodexDirTrust`) before launch; hook-trust is a one-time global TUI prompt the user accepts on first Codex launch (persists in config.toml `[hooks.state]`).
 - Session resume: captures the agent's session_id from hooks, uses `claude --resume <id>` / `codex resume <id>` on restart
 - Editor: config.editor > $EDITOR > "code" (VS Code)
-- Themes: tokyo-night (default), catppuccin-mocha, rose-pine, nord, gruvbox — configurable via settings (S key)
+- Themes: fleet-pink (default, flagship brand accent `#dc88c0`), tokyo-night, catppuccin-mocha, rose-pine, nord, gruvbox — configurable via settings (S key)
 - Settings dialog: S key opens settings overlay, live theme preview, auto-name toggle, copy .claude toggle, auto-saves on close
 - Bug report: `!` key opens dialog showing error history, action log, system diagnostics; `g` opens GitHub issue with pre-filled markdown via `gh issue create --web`
 - Error history: ring buffer (max 50) of errors that flash for 5s — persists for bug reporting
 - Action log: ring buffer (max 100) of user actions (attach, delete, restart, editor, approve, etc.) for "steps to reproduce"
 - Diagnostics: app version, macOS version, tmux/claude/codex/gh versions, config, last 100 lines of debug.log; home dir sanitized to `~`
-- Auto-naming: sessions auto-titled from user prompt via smart heuristic (filler stripping, word-boundary truncation)
-- Auto-naming pipeline: UserPromptSubmit hook → status file → HookWatcher → Session.FirstPrompt → worker cycle → naming.GenerateTitle
-- Retitle: after 3 prompts, title regenerated from latest prompt (better reflects session scope)
+- Auto-naming: sessions titled from Claude's own session title, read from the conversation JSONL (`session.ReadClaudeSessionName`); falls back to fleet's prompt heuristic (filler stripping, word-boundary truncation) only when Claude has written no title yet
+- Title precedence: manual R-key rename (`ManuallyRenamed`) > Claude `custom-title` (`/rename` in-session) > Claude `ai-title` (auto, model-generated, evolves with the work) > fleet prompt heuristic
+- Auto-naming pipeline: worker cycle re-reads the JSONL each cycle until a Claude title appears (prompt pickup within ~2s), then ~every 30s to follow `ai-title`/`custom-title` drift; heuristic fallback uses UserPromptSubmit hook → status file → HookWatcher → Session.FirstPrompt → naming.GenerateTitle
 - Manual rename (R key) sets ManuallyRenamed flag, prevents auto-rename
 - Chrome tab control: `p` opens PR in Chrome via extension (reuses existing tab), falls back to `open <url>` if unavailable
 - Chrome extension architecture: TUI →[unix socket]→ native host (`fleet chrome-host`) →[stdio]→ Chrome service worker

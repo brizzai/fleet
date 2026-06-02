@@ -1,7 +1,9 @@
 package github
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path"
@@ -9,6 +11,24 @@ import (
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
+
+// ErrRateLimited is returned when gh reports a GitHub API rate-limit error.
+// Callers use this to back off subsequent PR refreshes instead of hammering
+// the API every TTL window.
+var ErrRateLimited = errors.New("github: API rate limit exceeded")
+
+// classifyGHError inspects gh's stderr for known error patterns. The output
+// is matched case-insensitively against substrings GitHub returns on the
+// "API rate limit exceeded" / "secondary rate limit" paths. Returns
+// ErrRateLimited when it matches, nil otherwise (treated as "no PR" or
+// other benign error by the caller).
+func classifyGHError(stderr string) error {
+	low := strings.ToLower(stderr)
+	if strings.Contains(low, "rate limit") || strings.Contains(low, "rate-limit") {
+		return ErrRateLimited
+	}
+	return nil
+}
 
 // PR represents a GitHub pull request.
 type PR struct {
@@ -49,24 +69,41 @@ type statusCheckEntry struct {
 // ignorePatterns are path.Match globs applied to check names; matching checks are
 // dropped from the rollup before CI status is derived (lets repos suppress noisy
 // gates without affecting real check failures).
+//
+// Returns (nil, ErrRateLimited) when gh reports a GitHub API rate limit; the
+// caller should back off rather than refire the request. Other failures
+// (including "no PR for this branch", which gh signals via exit code 1)
+// return (nil, nil).
 func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, error) {
 	if branch == "" || branch == "HEAD" {
 		return nil, nil
 	}
 
+	debuglog.Logger.Debug("PR fetch: start", "path", repoPath, "branch", branch)
+
 	cmd := exec.Command("gh", "pr", "view", branch,
 		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable",
 	)
 	cmd.Dir = repoPath
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		// gh returns exit code 1 when no PR exists for the branch — expected, not an error.
+		stderrStr := strings.TrimSpace(stderr.String())
+		if rlErr := classifyGHError(stderrStr); rlErr != nil {
+			debuglog.Logger.Debug("PR fetch: rate-limited", "path", repoPath, "branch", branch, "stderr", stderrStr)
+			return nil, rlErr
+		}
+		// Most common case: gh exits 1 when no PR exists for the branch. Log
+		// at DEBUG with stderr so unexpected failures (auth, network) are
+		// still inspectable when FLEET_DEBUG=1.
+		debuglog.Logger.Debug("PR fetch: no PR or gh error", "path", repoPath, "branch", branch, "stderr", stderrStr)
 		return nil, nil
 	}
 
 	var resp ghPRResponse
 	if err := json.Unmarshal(output, &resp); err != nil {
-		debuglog.Logger.Debug("GetPRForBranch JSON parse failed", "path", repoPath, "branch", branch, "error", err)
+		debuglog.Logger.Debug("PR fetch: JSON parse failed", "path", repoPath, "branch", branch, "error", err)
 		return nil, nil
 	}
 
@@ -81,6 +118,7 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 		HasConflicts:      resp.Mergeable == "CONFLICTING",
 	}
 
+	debuglog.Logger.Debug("PR fetch: ok", "path", repoPath, "branch", branch, "pr", pr.Number, "state", pr.State, "ci", pr.CIStatus)
 	return pr, nil
 }
 

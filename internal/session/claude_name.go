@@ -40,8 +40,12 @@ func claudeProjectDir(cwd string) (string, error) {
 	return filepath.Join(home, ".claude", "projects", ClaudeProjectDirName(cwd)), nil
 }
 
-// ReadClaudeSessionName reads the custom session name from Claude's JSONL conversation file.
-// Returns empty string if not found.
+// ReadClaudeSessionName reads Claude's best title for a session from its JSONL
+// conversation file. Claude writes two kinds of title entries: "custom-title"
+// (an explicit /rename inside the session) and "ai-title" (a model-generated
+// title that updates as the work evolves). A custom title wins when present;
+// otherwise the latest ai-title is returned. Returns empty string if neither
+// is found.
 func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 	if claudeSessionID == "" || projectPath == "" {
 		return ""
@@ -62,27 +66,63 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max buffer
 
-	var lastTitle string
+	var lastCustom, lastAI string
 	for scanner.Scan() {
 		line := scanner.Text()
-		// Quick check before JSON parsing.
-		if !strings.Contains(line, "custom-title") {
+		// Quick check before JSON parsing. Matches both "custom-title" and
+		// "ai-title"; the Type check below filters any incidental hits.
+		if !strings.Contains(line, "-title") {
 			continue
 		}
 
 		var entry struct {
 			Type        string `json:"type"`
 			CustomTitle string `json:"customTitle"`
+			AITitle     string `json:"aiTitle"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
-		if entry.Type == "custom-title" && entry.CustomTitle != "" {
-			lastTitle = entry.CustomTitle
+		switch entry.Type {
+		case "custom-title":
+			if entry.CustomTitle != "" {
+				lastCustom = entry.CustomTitle
+			}
+		case "ai-title":
+			if entry.AITitle != "" {
+				lastAI = entry.AITitle
+			}
 		}
 	}
 
-	return lastTitle
+	if lastCustom != "" {
+		return lastCustom
+	}
+	return deslugify(lastAI)
+}
+
+// slugSeparators replaces a slug's word separators with spaces. Case is left
+// untouched on purpose.
+var slugSeparators = strings.NewReplacer("-", " ", "_", " ")
+
+// deslugify turns a kebab/snake slug into spaced words while preserving each
+// character's original case, so Claude's slug-style ai-titles read naturally:
+//
+//	native-ai-title-integration -> native ai title integration
+//	fix-API-client              -> fix API client
+//
+// It deliberately does NOT capitalize anything (no sentence/title/pascal case),
+// so an already-uppercase acronym like "API" survives but a lowercase word
+// stays lowercase. Titles that already contain spaces are natural language, not
+// slugs, and are returned unchanged.
+func deslugify(s string) string {
+	if s == "" || strings.Contains(s, " ") {
+		return s
+	}
+	if !strings.ContainsAny(s, "-_") {
+		return s
+	}
+	return slugSeparators.Replace(s)
 }
 
 // ErrParentTranscriptMissing is returned by CopyClaudeForkTranscript when the
