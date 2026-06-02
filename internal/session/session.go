@@ -385,10 +385,19 @@ func (s *Session) UpdateStatus() {
 	// pane settles to idle.
 	if s.Agent == agent.Codex {
 		paneWaiting, paneRunning := false, false
+		captured := false
 		if content, err := s.getCapturer().CapturePane(); err == nil {
 			clean := StripANSI(content)
 			paneWaiting = codexPaneWaiting(clean)
 			paneRunning = codexPaneRunning(clean)
+			captured = true
+		} else {
+			log.Warn("codex pane capture failed", "err", err)
+		}
+		// A transient capture failure must not downgrade an active session: with
+		// no pane signal and no hook to fall back on, preserve the current status.
+		if !captured && !hasHook {
+			return
 		}
 		switch {
 		case paneWaiting:
