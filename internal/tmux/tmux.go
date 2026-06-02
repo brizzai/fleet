@@ -37,10 +37,13 @@ type Session struct {
 	captureSf    singleflight.Group
 }
 
-// Package-level session cache: single tmux list-windows call per tick.
+// Package-level session cache: a single `tmux list-panes -a` call per tick
+// populates both maps, so per-session Exists/GetActivity/IsPaneDead lookups are
+// served from memory instead of one shell-out each.
 var (
 	sessionCacheMu   sync.RWMutex
 	sessionCacheData map[string]int64 // session_name -> window_activity timestamp
+	sessionDeadData  map[string]bool  // session_name -> pane_dead
 	sessionCacheTime time.Time
 )
 
@@ -122,7 +125,11 @@ func (s *Session) Start(command string, env ...string) error {
 	if sessionCacheData == nil {
 		sessionCacheData = make(map[string]int64)
 	}
+	if sessionDeadData == nil {
+		sessionDeadData = make(map[string]bool)
+	}
 	sessionCacheData[s.Name] = time.Now().Unix()
+	sessionDeadData[s.Name] = false
 	sessionCacheMu.Unlock()
 
 	return nil
@@ -281,8 +288,20 @@ func (s *Session) RespawnPane(command string, env ...string) error {
 	return nil
 }
 
-// IsPaneDead checks if the pane's process has exited.
+// IsPaneDead checks if the pane's process has exited. It reads the per-tick
+// batch cache (populated by RefreshSessionCache via a single `list-panes -a`)
+// when fresh, falling back to a live list-panes call for sessions the batch
+// hasn't seen yet.
 func (s *Session) IsPaneDead() bool {
+	sessionCacheMu.RLock()
+	if sessionDeadData != nil && time.Since(sessionCacheTime) < sessionCacheTTL {
+		if dead, ok := sessionDeadData[s.Name]; ok {
+			sessionCacheMu.RUnlock()
+			return dead
+		}
+	}
+	sessionCacheMu.RUnlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}").Output()
@@ -385,6 +404,7 @@ func (s *Session) Kill() error {
 	// Remove from cache.
 	sessionCacheMu.Lock()
 	delete(sessionCacheData, s.Name)
+	delete(sessionDeadData, s.Name)
 	sessionCacheMu.Unlock()
 
 	return nil
@@ -440,31 +460,123 @@ func (s *Session) CapturePane() (string, error) {
 	return result.(string), nil
 }
 
-// RefreshSessionCache makes a single tmux list-windows call and updates the global cache.
+// SeedCapture pre-fills the capture cache with content obtained out-of-band
+// (e.g. a batched capture), so a subsequent CapturePane() within captureCacheTTL
+// returns it without shelling out. Empty content is ignored — CapturePane treats
+// "" as a cache miss, so a missing/aborted batch entry falls back to a live
+// per-session capture automatically.
+func (s *Session) SeedCapture(content string) {
+	if content == "" {
+		return
+	}
+	s.cacheMu.Lock()
+	s.cacheContent = content
+	s.cacheTime = time.Now()
+	s.cacheMu.Unlock()
+}
+
+// BatchCapturePanes captures several sessions' panes in a single tmux client
+// invocation, chaining one capture-pane per name and delimiting each with a
+// high-entropy sentinel emitted by display-message. It returns name->content for
+// every session captured cleanly. A dead/missing pane aborts the tmux command
+// chain (subsequent captures never run), so callers MUST treat any name absent
+// from the result as "not captured" and fall back to a per-session capture —
+// the cache-seeding path does this for free (a cold cache → live CapturePane).
+func BatchCapturePanes(names []string) map[string]string {
+	if len(names) == 0 {
+		return nil
+	}
+	sentinel := captureSentinel()
+	args := make([]string, 0, len(names)*10)
+	for i, n := range names {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args,
+			"capture-pane", "-p", "-e", "-t", n,
+			";", "display-message", "-p", sentinel+"\t"+n)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	// Output() returns whatever reached stdout before a non-zero exit, so a
+	// mid-chain abort still yields the panes captured up to that point.
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	parsed := parseBatchCapture(string(out), sentinel)
+	if err != nil && len(parsed) < len(names) {
+		debuglog.Logger.Debug("tmux batch capture partial; missing sessions fall back to live capture",
+			"want", len(names), "got", len(parsed))
+	}
+	return parsed
+}
+
+// parseBatchCapture splits BatchCapturePanes stdout into name->content. Each
+// pane's raw capture bytes precede its "<sentinel>\t<name>\n" marker, so slicing
+// on the sentinel preserves content exactly (including trailing newlines and
+// ANSI escapes). Trailing bytes after the last marker — produced when the chain
+// aborted before emitting that session's marker — are dropped.
+func parseBatchCapture(stdout, sentinel string) map[string]string {
+	out := make(map[string]string)
+	token := sentinel + "\t"
+	rest := stdout
+	for {
+		idx := strings.Index(rest, token)
+		if idx < 0 {
+			break
+		}
+		content := rest[:idx]
+		rest = rest[idx+len(token):]
+		name := rest
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			name = rest[:nl]
+			rest = rest[nl+1:]
+		} else {
+			rest = ""
+		}
+		out[name] = content
+	}
+	return out
+}
+
+// captureSentinel returns a 32-hex-char nonce used to delimit batched captures.
+// The entropy makes accidental collision with real pane content negligible.
+func captureSentinel() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
+// RefreshSessionCache makes a single `tmux list-panes -a` call and updates the
+// global cache with each session's window activity and pane-dead state. One
+// call feeds Exists, GetActivity and IsPaneDead for every session, so the
+// status worker never shells out per-session for these.
 func RefreshSessionCache() {
-	cmd := exec.Command("tmux", "list-windows", "-a", "-F", "#{session_name}\t#{window_activity}")
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{session_name}\t#{window_activity}\t#{pane_dead}")
 	output, err := cmd.Output()
 	if err != nil {
 		return // tmux server may not be running.
 	}
 
-	newCache := make(map[string]int64)
+	activityCache := make(map[string]int64)
+	deadCache := make(map[string]bool)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) < 2 {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
 			continue
 		}
 		name := parts[0]
 		var activity int64
 		fmt.Sscanf(parts[1], "%d", &activity)
-		newCache[name] = activity
+		activityCache[name] = activity
+		deadCache[name] = parts[2] == "1"
 	}
 
 	sessionCacheMu.Lock()
-	sessionCacheData = newCache
+	sessionCacheData = activityCache
+	sessionDeadData = deadCache
 	sessionCacheTime = time.Now()
 	sessionCacheMu.Unlock()
 }
