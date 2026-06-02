@@ -6,12 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
+// An empty agent means "use the configured default" (resolved in handleSessionCreate).
 // resumeClaudeID, when set, starts the session with `claude --resume <id>` so
 // the user continues an existing conversation (e.g. one begun in plain Claude
 // Code, surfaced by the launchpad) instead of a fresh one.
@@ -19,6 +21,7 @@ type sessionCreateMsg struct {
 	path           string
 	title          string
 	workspaceName  string
+	agent          agent.Type
 	resumeClaudeID string
 }
 
@@ -33,6 +36,7 @@ type forkSessionMsg struct {
 	path                  string
 	title                 string
 	workspaceName         string
+	agent                 agent.Type // inherited from the parent session
 }
 
 // NewSessionDialog handles the new session creation flow with directory autocomplete.

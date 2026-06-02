@@ -21,10 +21,23 @@ type Config struct {
 	EnterMode          string `json:"enter_mode,omitempty"`       // "attach" or "split"
 	StatusIndicator    string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
 	Telemetry          *bool  `json:"telemetry,omitempty"`
+	DefaultAgent       string `json:"default_agent,omitempty"` // "claude" or "codex"
 	// AnalyticsConsentSeen is true once the user has been shown the
 	// first-launch consent prompt and answered it (either way). When false,
 	// the TUI shows the prompt before initializing analytics.
 	AnalyticsConsentSeen bool `json:"analytics_consent_seen,omitempty"`
+}
+
+// GetDefaultAgent returns the default coding agent for new sessions ("claude" or "codex").
+// The stored value is normalized (trimmed + lower-cased) so hand-edited configs
+// like "Codex" or " codex " resolve correctly instead of silently falling back.
+func (c *Config) GetDefaultAgent() string {
+	switch strings.TrimSpace(strings.ToLower(c.DefaultAgent)) {
+	case "codex":
+		return "codex"
+	default:
+		return "claude"
+	}
 }
 
 // IsAutoNameEnabled returns whether auto-naming is enabled (default: true).

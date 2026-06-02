@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/chrome"
 	"github.com/brizzai/fleet/internal/config"
@@ -177,6 +178,7 @@ type Home struct {
 	createWorkspaceDialog *CreateWorkspaceDialog
 	branchDialog          *BranchCheckoutDialog
 	commandPalette        *CommandPaletteDialog
+	sessionCreateDialog   *SessionCreateDialog
 	consentDialog         *ConsentDialog
 
 	// launchpad is the first-run experience shown when the fleet is empty:
@@ -332,6 +334,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		createWorkspaceDialog: NewCreateWorkspaceDialog(),
 		branchDialog:          NewBranchCheckoutDialog(),
 		commandPalette:        NewCommandPaletteDialog(),
+		sessionCreateDialog:   NewSessionCreateDialog(),
 		consentDialog:         NewConsentDialog(),
 		launchpad:             NewLaunchpad(),
 		bugReport:             NewBugReportDialog(),
@@ -459,6 +462,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.createWorkspaceDialog.SetSize(msg.Width, msg.Height)
 		h.branchDialog.SetSize(msg.Width, msg.Height)
 		h.commandPalette.SetSize(msg.Width, msg.Height)
+		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
@@ -501,9 +505,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h.handleSessionCreate(msg)
 
 	case forkSessionMsg:
+		ag := msg.agent
+		if ag == "" {
+			ag = agent.Parse(h.cfg.GetDefaultAgent())
+		}
+		if ag == agent.Codex {
+			if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), msg.path); err != nil {
+				debuglog.Logger.Error("codex dir trust seeding failed", "path", msg.path, "err", err)
+			}
+		}
 		s := session.NewSession(msg.title, msg.path)
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
+		s.Agent = ag
 		parentSessionID := msg.parentClaudeSessionID
 		sourcePath := msg.sourcePath
 		destPath := msg.path
@@ -1153,6 +1167,9 @@ func (h *Home) renderBody() string {
 	if h.branchDialog.IsVisible() {
 		return h.branchDialog.View()
 	}
+	if h.sessionCreateDialog.IsVisible() {
+		return h.sessionCreateDialog.View()
+	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
 	}
@@ -1387,6 +1404,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.commandPalette = dialog
 		return h, cmd
 	}
+	if h.sessionCreateDialog.IsVisible() {
+		dialog, cmd := h.sessionCreateDialog.Update(msg)
+		h.sessionCreateDialog = dialog
+		return h, cmd
+	}
 	if h.newDialog.IsVisible() {
 		dialog, cmd := h.newDialog.Update(msg)
 		h.newDialog = dialog
@@ -1567,6 +1589,15 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			path:  repoPath,
 			title: repoName,
 		})
+	case "A":
+		// Session creation dialog with agent picker.
+		repoPath := h.resolveCurrentRepo()
+		if repoPath == "" {
+			h.newDialog.Show()
+			return h, nil
+		}
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		return h, nil
 	case "n":
 		// New session at any repo path.
 		h.newDialog.Show()
@@ -1853,21 +1884,36 @@ func (h *Home) launchpadActive() bool {
 }
 
 func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
+	// Empty agent → configured default.
+	ag := msg.agent
+	if ag == "" {
+		ag = agent.Parse(h.cfg.GetDefaultAgent())
+	}
+	if _, err := exec.LookPath(ag.Binary()); err != nil {
+		h.setError(fmt.Errorf("%s CLI not found — install %s to create sessions", ag.Binary(), ag.DisplayName()))
 		return h, nil
 	}
+	// Codex prompts to trust a new directory on first launch; pre-seed trust so
+	// the session opens straight to the prompt.
+	if ag == agent.Codex {
+		if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), msg.path); err != nil {
+			debuglog.Logger.Error("codex dir trust seeding failed", "path", msg.path, "err", err)
+		}
+	}
+	msg.agent = ag
 	return h, h.startSessionCmd(msg)
 }
 
 // startSessionCmd builds the tea.Cmd that creates and starts one session off
 // the UI thread. Shared by the new-session flow and the launchpad (which fires
 // several at once). A non-empty resumeClaudeID makes buildClaudeCmd() launch
-// `claude --resume <id>` to continue an existing conversation.
+// `claude --resume <id>` to continue an existing conversation. An empty agent
+// falls back to agent.Default (Claude) at launch.
 func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
-	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path, "resume", msg.resumeClaudeID)
+	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path, "agent", msg.agent, "resume", msg.resumeClaudeID)
 	s := session.NewSession(msg.title, msg.path)
 	s.WorkspaceName = msg.workspaceName
+	s.Agent = msg.agent
 	if msg.resumeClaudeID != "" {
 		s.ClaudeSessionID = msg.resumeClaudeID
 	}
@@ -2154,6 +2200,7 @@ func (h *Home) forkSelected() tea.Cmd {
 	claudeSessionID := s.ClaudeSessionID
 	path := s.ProjectPath
 	workspaceName := s.WorkspaceName
+	parentAgent := s.Agent
 	return func() tea.Msg {
 		return forkSessionMsg{
 			parentClaudeSessionID: claudeSessionID,
@@ -2161,6 +2208,7 @@ func (h *Home) forkSelected() tea.Cmd {
 			path:                  path,
 			title:                 title,
 			workspaceName:         workspaceName,
+			agent:                 parentAgent,
 		}
 	}
 }
@@ -2213,6 +2261,14 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	s := h.selectedSession()
 	if s == nil {
 		h.setError(fmt.Errorf("cannot fork to worktree: no session selected"))
+		return nil
+	}
+	// Fork-to-worktree stages the parent's Claude transcript into the new cwd so
+	// `claude --resume --fork-session` finds it — a Claude-only mechanism. Codex
+	// resumes from its own store and has no such staging, so reject it here
+	// rather than dropping the agent and launching a broken Claude fork.
+	if s.Agent == agent.Codex {
+		h.setError(fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this Codex session in place"))
 		return nil
 	}
 	if s.ClaudeSessionID == "" {
@@ -4268,6 +4324,11 @@ func (h *Home) loadSessions() tea.Msg {
 	// These block but run in the tea.Cmd goroutine, not Update().
 	configDir := hooks.GetClaudeConfigDir()
 	hooks.InjectClaudeHooks(configDir)
+	// Install Codex hooks too, but only if Codex is present — never create
+	// ~/.codex for users who don't have it.
+	if _, err := exec.LookPath("codex"); err == nil {
+		hooks.InjectCodexHooks(hooks.GetCodexConfigDir())
+	}
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()
 
@@ -4320,6 +4381,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "focus", Name: "Focus Preview", Shortcut: "Tab"},
 		{Kind: PaletteKindCommand, ID: "jump_next", Name: "Jump to Next Waiting", Shortcut: "Space"},
 		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
+		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -4480,6 +4542,14 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 			path:  repoPath,
 			title: filepath.Base(repoPath),
 		})
+	case "new_session_pick":
+		repoPath := h.resolveCurrentRepo()
+		if repoPath == "" {
+			h.newDialog.Show()
+			return h, nil
+		}
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		return h, nil
 	case "new_repo":
 		h.newDialog.Show()
 		return h, nil

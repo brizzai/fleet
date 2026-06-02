@@ -2,10 +2,10 @@
   <img src=".github/assets/logo.svg" alt="fleet logo" width="80" />
   <h1 align="center">fleet</h1>
   <p align="center">
-    <strong>Run 10 Claude Code agents. Stay sane.</strong>
+    <strong>Run 10 coding agents. Stay sane.</strong>
   </p>
   <p align="center">
-    A terminal cockpit for orchestrating Claude Code sessions in parallel.
+    A terminal cockpit for orchestrating Claude Code &amp; Codex sessions in parallel.
     <br />
     See which agents need you. Jump in, direct, jump out.
   </p>
@@ -64,7 +64,7 @@ Requires Go 1.26+.
 
 - macOS
 - [tmux](https://github.com/tmux/tmux) (`brew install tmux`)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or [Codex](https://developers.openai.com/codex) — at least one
 
 ## Quick Start
 
@@ -72,16 +72,21 @@ Requires Go 1.26+.
 # Launch
 fleet
 
-# 'a' — new session in current repo
-# 'n' — workspace picker with path autocomplete
+# 'a' — new session in current repo (default agent)
+# 'A' — new session, pick the agent (Claude Code / Codex)
+# 'n' — new session at any path (autocomplete)
 # '?' — all keybindings
 ```
 
 ## Features
 
+### Claude Code or Codex — per session
+
+Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run a Claude session and a Codex session side by side in the same repo. Status, resume, and auto-naming work identically for both — all driven by each agent's hooks, not terminal scraping.
+
 ### Real-Time Status
 
-Every agent's state, always visible. Hook-based detection — no polling, no delay.
+Every agent's state, always visible. Hook-based detection for both Claude Code and Codex — no polling, no delay.
 
 `● running` &nbsp; `◐ waiting` &nbsp; `● finished` &nbsp; `○ idle` &nbsp; `✕ error`
 
@@ -99,11 +104,11 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 ### Fork Sessions
 
-**`f`** forks a session — branches off the Claude conversation at that point. Try a different approach without losing the original. Both sessions keep running independently.
+**`f`** forks a session — branches off the agent's conversation at that point. Try a different approach without losing the original. Both sessions keep running independently.
 
 ### And more
 
-- **Session resume** — restart with **`r`**, Claude picks up exactly where it left off
+- **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume`)
 - **Full terminal attach** — **`Enter`** for full PTY, **`Tab`** for split mode (beta), **`Ctrl+Q`** to detach
 - **Auto-naming** — sessions title themselves from your prompt
 - **5 themes** — tokyo-night, catppuccin-mocha, rose-pine, nord, gruvbox (**`S`** to switch)
@@ -112,9 +117,9 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 ## Why fleet?
 
-There are a dozen multi-agent session managers now. Most try to support every AI CLI under the sun. fleet takes the opposite approach: **go deep on Claude Code, and nothing else.**
+There are a dozen multi-agent session managers now. Most try to support every AI CLI under the sun by shimming keystrokes and scraping terminal output — broad support, shallow understanding of any one agent.
 
-Every feature is designed around how Claude Code actually works — hooks, conversation resume, session IDs, prompt structure. No generic "send keystrokes and hope" abstraction layer.
+fleet goes the other way: **deep integration with the agents that expose real hooks — Claude Code and Codex.** Every feature is built on how those agents actually work — hook events, conversation resume, session IDs, prompt structure — not a generic "send keystrokes and hope" layer. Pick the agent per session (**`A`**), or set a default and fire with **`a`**.
 
 ### vs. the alternatives
 
@@ -127,13 +132,14 @@ Every feature is designed around how Claude Code actually works — hooks, conve
 | **Open PR in browser**             | ✅ | — | — | — |
 | **Session resume**                  | ✅ | — | — | ✅ |
 | **Git worktrees**                   | ✅ | ✅ | ✅ | ✅ |
-| **Multi-agent** (Codex, Gemini…)    | — | ✅ | ✅ | ✅ |
+| **Hook-based multi-agent**          | ✅ Claude + Codex | — | — | — |
+| **Many agents** (Gemini, Aider…)    | — | ✅ | ✅ | ✅ |
 | **Linux**                           | — | ✅ | ✅ | ✅ |
 | **No tmux dependency**              | — | — | ✅ | — |
 
-**The trade-off is intentional.** Claude-squad and ccmanager support 5+ agents — but treat them all the same. fleet knows what Claude Code *is*. It reads hook status files. It resumes conversations. It knows your PR has 2 unresolved threads. It names sessions from your actual prompt. That depth is only possible by going narrow.
+**The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code and Codex, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
 
-If you use Claude Code as your primary agent and want the tightest integration, this is it.
+If you drive Claude Code, Codex, or both and want the tightest integration, this is it.
 
 ## Keybindings
 
@@ -144,8 +150,9 @@ If you use Claude Code as your primary agent and want the tightest integration, 
 | `Ctrl+Q` | Detach from session |
 | `Tab` | Focus/unfocus preview (split mode, beta) |
 | `Space` | Jump to next waiting/finished session |
-| `a` | New session (current repo) |
-| `n` | New session (workspace picker) |
+| `a` | New session (current repo, default agent) |
+| `A` | New session (pick agent: Claude Code / Codex) |
+| `n` | New session (any path, autocomplete) |
 | `w` | New worktree session |
 | `Y` | Quick approve waiting prompt |
 | `f` | Fork session |

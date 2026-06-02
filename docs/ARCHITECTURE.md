@@ -4,7 +4,7 @@ This document explains how fleet works internally, for contributors.
 
 ## Overview
 
-fleet is a Go TUI that orchestrates multiple Claude Code sessions running in tmux. The core challenge is **status detection** — knowing what each Claude session is doing without interfering with it.
+fleet is a Go TUI that orchestrates multiple Claude Code and Codex sessions running in tmux (agent chosen per session). The core challenge is **status detection** — knowing what each session is doing without interfering with it. Both agents expose hooks with matching payloads, so the detection pipeline is shared; Codex adds a narrow pane check for its hook-less wait prompts.
 
 ```text
 ┌──────────────────────────────────────────────────┐

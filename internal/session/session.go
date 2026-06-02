@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -40,6 +41,7 @@ type Session struct {
 	ID                    string
 	Title                 string
 	ProjectPath           string
+	Agent                 agent.Type // which coding agent runs in this session (claude/codex)
 	Status                Status
 	TmuxSessionName       string
 	CreatedAt             time.Time
@@ -85,15 +87,24 @@ func NewSession(title, projectPath string) *Session {
 	}
 }
 
-// buildClaudeCmd returns the claude command with optional --resume/--fork-session flags.
-func (s *Session) buildClaudeCmd() string {
-	cmd := "claude"
-	if s.ForkFromID != "" {
-		cmd += fmt.Sprintf(" --resume %s --fork-session", s.ForkFromID)
-	} else if s.ClaudeSessionID != "" {
-		cmd += fmt.Sprintf(" --resume %s", s.ClaudeSessionID)
+// buildAgentCmd returns the launch command for this session's agent, with
+// optional resume/fork details. ClaudeSessionID stores the agent's own
+// conversation id (Claude or Codex) captured from hooks.
+func (s *Session) buildAgentCmd() string {
+	return agent.Parse(string(s.Agent)).BuildLaunchCmd(agent.LaunchOpts{
+		ResumeID: s.ClaudeSessionID,
+		ForkID:   s.ForkFromID,
+	})
+}
+
+// initialRunStatus is the status to show right after launching the agent.
+// Codex fires no hook until its first turn and has no pane fallback, so it
+// starts idle (sitting at its prompt) rather than flashing running.
+func (s *Session) initialRunStatus() Status {
+	if s.Agent == agent.Codex {
+		return StatusIdle
 	}
-	return cmd
+	return StatusRunning
 }
 
 // sessionEnv returns the env vars to set on the tmux session for this fleet session.
@@ -111,7 +122,7 @@ func (s *Session) Start() error {
 	s.Status = StatusStarting
 	s.mu.Unlock()
 
-	cmd := s.buildClaudeCmd()
+	cmd := s.buildAgentCmd()
 	if err := s.tmuxSession.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
@@ -121,7 +132,7 @@ func (s *Session) Start() error {
 	}
 
 	s.mu.Lock()
-	s.Status = StatusRunning
+	s.Status = s.initialRunStatus()
 	s.ForkFromID = "" // Clear after first start so restarts use session's own ClaudeSessionID.
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
@@ -274,7 +285,7 @@ func (s *Session) Restart() error {
 	s.deathRecorded = false
 	s.mu.Unlock()
 
-	cmd := s.buildClaudeCmd()
+	cmd := s.buildAgentCmd()
 	if err := newTmux.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
@@ -284,7 +295,7 @@ func (s *Session) Restart() error {
 	}
 
 	s.mu.Lock()
-	s.Status = StatusRunning
+	s.Status = s.initialRunStatus()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session restarted", "id", s.ID, "title", s.Title)
 	return nil
@@ -300,7 +311,7 @@ func (s *Session) RespawnClaude() error {
 	s.deathRecorded = false
 	s.mu.Unlock()
 
-	cmd := s.buildClaudeCmd()
+	cmd := s.buildAgentCmd()
 	if err := s.tmuxSession.RespawnPane(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
 		s.Status = StatusError
@@ -314,7 +325,7 @@ func (s *Session) RespawnClaude() error {
 	s.tmuxSession.ApplyStatusBar(tmux.StatusBarOpts{})
 
 	s.mu.Lock()
-	s.Status = StatusRunning
+	s.Status = s.initialRunStatus()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session respawned", "id", s.ID, "title", s.Title)
 	return nil
@@ -365,12 +376,94 @@ func (s *Session) UpdateStatus() {
 	hasHook := hookStatus != "" && !s.hookUpdatedAt.IsZero()
 	s.mu.RUnlock()
 
+	// Codex status is hook-driven, but we do NOT run Claude's pane heuristics on
+	// it. Codex's pane is authoritative when it shows a definite state: its hooks
+	// are incomplete (a wait/approval prompt and a permission approval both fire
+	// no hook), so the latest hook can be stale. A working footer (paneRunning)
+	// or a wait prompt (paneWaiting) overrides the hook; only an at-rest pane
+	// lets the hook decide running/finished/idle. With no hook at all, an at-rest
+	// pane settles to idle.
+	if s.Agent == agent.Codex {
+		paneWaiting, paneRunning := false, false
+		captured := false
+		if content, err := s.getCapturer().CapturePane(); err == nil {
+			clean := StripANSI(content)
+			paneWaiting = codexPaneWaiting(clean)
+			paneRunning = codexPaneRunning(clean)
+			captured = true
+		} else {
+			log.Warn("codex pane capture failed", "err", err)
+		}
+		// A transient capture failure must not downgrade an active session: with
+		// no pane signal and no hook to fall back on, preserve the current status.
+		if !captured && !hasHook {
+			return
+		}
+		switch {
+		case paneWaiting:
+			if oldStatus != StatusWaiting {
+				s.SetStatus(StatusWaiting)
+				log.Info("status changed (codex pane)", "old", oldStatus, "new", StatusWaiting)
+			}
+		case paneRunning:
+			if oldStatus != StatusRunning {
+				s.SetStatus(StatusRunning)
+				log.Info("status changed (codex pane)", "old", oldStatus, "new", StatusRunning)
+			}
+		case hasHook:
+			// Pane at rest — it can't tell running from finished from idle at the
+			// prompt, so the hook decides.
+			s.applyCodexHookAtRest(oldStatus, hookStatus, log)
+		case oldStatus != StatusIdle:
+			// At its prompt with no active turn and no hook — settle to idle.
+			s.SetStatus(StatusIdle)
+			log.Info("status changed (codex no-hook)", "old", oldStatus, "new", StatusIdle)
+		}
+		return
+	}
+
 	if hasHook {
 		s.updateStatusFromHook(oldStatus, hookStatus, hookAge, log)
 		return
 	}
 
 	s.updateStatusFromPane(oldStatus, log)
+}
+
+// applyCodexHookAtRest applies hook status for a Codex session whose pane is at
+// rest (no working footer, no wait prompt). The pane can't tell running from
+// finished from idle at the prompt, so the hook decides. Reached only from the
+// Codex branch of UpdateStatus, after the pane-authoritative checks.
+func (s *Session) applyCodexHookAtRest(oldStatus Status, hookStatus string, log *slog.Logger) {
+	hookSaysDead := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		switch hookStatus {
+		case "running":
+			s.Status = StatusRunning
+			s.Acknowledged = false
+		case "waiting":
+			s.Status = StatusWaiting
+			s.Acknowledged = false
+		case "finished":
+			if s.Acknowledged {
+				s.Status = StatusIdle
+			} else {
+				s.Status = StatusFinished
+			}
+		case "dead":
+			s.Status = StatusError
+			hookSaysDead = true
+		}
+		if s.Status != oldStatus {
+			log.Info("status changed (codex hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus)
+		}
+	}()
+
+	if hookSaysDead {
+		s.triggerCrashDump("hook_dead")
+	}
 }
 
 // updateStatusFromHook applies hook-based status with pane overrides.
@@ -692,6 +785,7 @@ func (s *Session) ToRow() *SessionRow {
 		ID:              s.ID,
 		Title:           s.Title,
 		ProjectPath:     s.ProjectPath,
+		Agent:           string(s.Agent),
 		Status:          string(s.Status),
 		TmuxSession:     s.TmuxSessionName,
 		CreatedAt:       s.CreatedAt,
@@ -762,6 +856,7 @@ func FromRow(row *SessionRow) *Session {
 		ID:              row.ID,
 		Title:           row.Title,
 		ProjectPath:     row.ProjectPath,
+		Agent:           agent.Parse(row.Agent),
 		Status:          status,
 		TmuxSessionName: row.TmuxSession,
 		CreatedAt:       row.CreatedAt,
@@ -804,6 +899,60 @@ var (
 		"tab to amend",  // Claude Code text input prompt
 	}
 )
+
+// codexWaitPatterns mark a Codex prompt blocked on the user. These prompts fire
+// no hook, so the pane is the only signal. Checked only in the recent (bottom)
+// lines to avoid false-positives from scrollback.
+var codexWaitPatterns = []string{
+	"enter to submit answer", // request_user_input question menu
+	"Press enter to confirm", // command/tool approval + plan-approval menus
+}
+
+// codexPaneWaiting reports whether Codex's pane shows a prompt awaiting the user.
+func codexPaneWaiting(content string) bool {
+	if content == "" {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	recent := strings.Join(extractRecentLines(lines, 15), "\n")
+	for _, p := range codexWaitPatterns {
+		if strings.Contains(recent, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexRunPatterns mark a Codex turn in progress. Codex shows this footer only
+// while actively working ("Working (… • esc to interrupt)"), so it's a reliable
+// running signal when no hook has arrived. Checked only in the recent (bottom)
+// lines to avoid false-positives from scrollback.
+var codexRunPatterns = []string{
+	"esc to interrupt",
+}
+
+// codexPaneRunning reports whether Codex's pane shows an in-progress turn. It is
+// the no-hook fallback for the running state, mirroring codexPaneWaiting.
+//
+// The request_user_input question menu also renders "esc to interrupt" (you can
+// interrupt while answering), so a waiting pane takes precedence — running means
+// an active turn that is NOT blocked on the user.
+func codexPaneRunning(content string) bool {
+	if content == "" {
+		return false
+	}
+	if codexPaneWaiting(content) {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	recent := strings.Join(extractRecentLines(lines, 15), "\n")
+	for _, p := range codexRunPatterns {
+		if strings.Contains(recent, p) {
+			return true
+		}
+	}
+	return false
+}
 
 func detectStatus(content string, log *slog.Logger) Status {
 	if content == "" {

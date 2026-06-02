@@ -62,6 +62,12 @@ var (
 	DimStyle = lipgloss.NewStyle().
 			Foreground(ColorTextDim)
 
+	// AgentGlyphStyle is the muted tone for the per-session agent sigil (✻/⬡):
+	// quiet, monochrome, theme-safe — identity is carried by shape, not color,
+	// so the status dot keeps sole ownership of the status color.
+	AgentGlyphStyle = lipgloss.NewStyle().
+			Foreground(ColorTextDim)
+
 	PanelStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorBorder)
@@ -150,6 +156,7 @@ func ApplyPalette(p Palette) {
 	HelpBarStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
 	ErrorStyle = lipgloss.NewStyle().Foreground(ColorRed)
 	DimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+	AgentGlyphStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
 	PanelStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(ColorBorder)
 	DialogStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(ColorAccent).Padding(1, 2)
 

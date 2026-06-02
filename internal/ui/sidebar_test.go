@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -162,6 +164,33 @@ func TestLabelForOrigin(t *testing.T) {
 	for in, want := range cases {
 		if got := labelForOrigin(in); got != want {
 			t.Errorf("labelForOrigin(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRenderSessionItem_AgentGlyph(t *testing.T) {
+	cases := []struct {
+		name      string
+		agentType agent.Type
+		want      string
+		notWant   string
+	}{
+		{"claude", agent.Claude, claudeGlyph, codexGlyph},
+		{"codex", agent.Codex, codexGlyph, claudeGlyph},
+		// Empty agent (legacy sessions) falls back to Claude.
+		{"empty falls back to claude", "", claudeGlyph, codexGlyph},
+	}
+	for _, tc := range cases {
+		for _, selected := range []bool{false, true} {
+			s := session.NewSession("a title", "/tmp/repo")
+			s.Agent = tc.agentType
+			out := renderSessionItem(s, 40, selected, -1)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("%s (selected=%v): output missing %q glyph: %q", tc.name, selected, tc.want, out)
+			}
+			if strings.Contains(out, tc.notWant) {
+				t.Errorf("%s (selected=%v): output unexpectedly contains %q glyph: %q", tc.name, selected, tc.notWant, out)
+			}
 		}
 	}
 }

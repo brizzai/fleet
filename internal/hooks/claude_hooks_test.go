@@ -4,8 +4,67 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestIsFleetHook(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"marker arg", "/usr/local/bin/fleet hook-handler --fleet-hook", true},
+		{"renamed binary with marker arg", "/tmp/go-build/exe/fleet-dev hook-handler --fleet-hook", true},
+		{"legacy command without arg", "/usr/local/bin/fleet hook-handler", true},
+		{"foreign tool", "/usr/local/bin/other-tool hook-handler", false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isFleetHook(c.command); got != c.want {
+				t.Errorf("isFleetHook(%q) = %v, want %v", c.command, got, c.want)
+			}
+		})
+	}
+}
+
+func TestGetHookCommandHasMarker(t *testing.T) {
+	if cmd := GetHookCommand(); !strings.Contains(cmd, fleetHookArg) {
+		t.Errorf("GetHookCommand() = %q, want it to contain the marker %q", cmd, fleetHookArg)
+	}
+}
+
+func TestMergeHookEventMarkerMigration(t *testing.T) {
+	current := GetHookCommand()
+
+	t.Run("legacy command (no arg) is upgraded in place, not duplicated", func(t *testing.T) {
+		existing := json.RawMessage(`[{"hooks":[{"type":"command","command":"/old/path/fleet hook-handler"}]}]`)
+		result := mergeHookEvent(existing, "", true)
+		var matchers []claudeHookMatcher
+		if err := json.Unmarshal(result, &matchers); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(matchers[0].Hooks) != 1 {
+			t.Fatalf("expected 1 hook (no duplicate), got %d", len(matchers[0].Hooks))
+		}
+		if matchers[0].Hooks[0].Command != current {
+			t.Errorf("command = %q, want upgraded to %q", matchers[0].Hooks[0].Command, current)
+		}
+	})
+
+	t.Run("renamed binary carrying the marker arg is recognized, not duplicated", func(t *testing.T) {
+		existing := json.RawMessage(`[{"hooks":[{"type":"command","command":"/tmp/exe/fleet-dev hook-handler --fleet-hook"}]}]`)
+		result := mergeHookEvent(existing, "", true)
+		var matchers []claudeHookMatcher
+		if err := json.Unmarshal(result, &matchers); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(matchers[0].Hooks) != 1 {
+			t.Fatalf("expected 1 hook (no duplicate), got %d", len(matchers[0].Hooks))
+		}
+	})
+}
 
 func TestMergeHookEvent(t *testing.T) {
 	t.Run("nil input creates new matcher", func(t *testing.T) {

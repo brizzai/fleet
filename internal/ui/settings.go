@@ -53,7 +53,7 @@ func (d *SettingsDialog) Update(msg tea.Msg) (*SettingsDialog, tea.Cmd) {
 		return d, nil
 	}
 
-	numRows := 9 // theme, status-style, editor, tick, auto-name, auto-update, copy-claude, enter-mode, telemetry
+	numRows := 10 // theme, status-style, editor, tick, auto-name, auto-update, copy-claude, enter-mode, telemetry, default-agent
 	switch keyMsg.String() {
 	case "j", "down":
 		d.cursor = (d.cursor + 1) % numRows
@@ -145,6 +145,13 @@ func (d *SettingsDialog) cycleValue(dir int) {
 		enabled := d.cfg.IsTelemetryEnabled()
 		enabled = !enabled
 		d.cfg.Telemetry = &enabled
+
+	case 9: // Default agent
+		if d.cfg.GetDefaultAgent() == "codex" {
+			d.cfg.DefaultAgent = "claude"
+		} else {
+			d.cfg.DefaultAgent = "codex"
+		}
 	}
 }
 
@@ -182,6 +189,11 @@ func (d *SettingsDialog) View() string {
 		telemetryValue = "off"
 	}
 
+	agentValue := "Claude"
+	if d.cfg.GetDefaultAgent() == "codex" {
+		agentValue = "Codex"
+	}
+
 	rows := []row{
 		{"Theme", PaletteDisplayName(theme)},
 		{"Status style", d.cfg.GetStatusIndicator()},
@@ -192,6 +204,7 @@ func (d *SettingsDialog) View() string {
 		{"Copy .claude", copyClaudeValue},
 		{"Enter mode", d.cfg.GetEnterMode()},
 		{"Telemetry", telemetryValue},
+		{"Default agent", agentValue},
 	}
 
 	for i, r := range rows {
