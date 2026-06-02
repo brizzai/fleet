@@ -377,19 +377,38 @@ func (s *Session) UpdateStatus() {
 	s.mu.RUnlock()
 
 	// Codex status is hook-driven. We do NOT run Claude's pane heuristics on it,
-	// but Codex's "ask the user" prompts (request_user_input questions, approval
-	// menus) fire no hook, so a narrow structural pane check detects those.
+	// but Codex's pane is the only signal for states that fire no hook: an
+	// "ask the user" prompt (waiting) and — as a fallback when hooks are absent
+	// entirely (e.g. hook trust lapsed) — an in-progress turn (running).
 	if s.Agent == agent.Codex {
+		paneWaiting, paneRunning := false, false
+		if content, err := s.getCapturer().CapturePane(); err == nil {
+			clean := StripANSI(content)
+			paneWaiting = codexPaneWaiting(clean)
+			paneRunning = codexPaneRunning(clean)
+		}
 		if hasHook {
-			paneWaiting := false
-			if content, err := s.getCapturer().CapturePane(); err == nil {
-				paneWaiting = codexPaneWaiting(StripANSI(content))
-			}
 			s.updateStatusFromHookNoPane(oldStatus, hookStatus, paneWaiting, log)
-		} else if oldStatus != StatusIdle {
-			// No hook yet — Codex fires SessionStart only on the first turn, so a
-			// freshly launched session sits idle at its prompt with no hook. Don't
-			// leave it stuck on the running status that Start() set.
+			return
+		}
+		// No hook yet — Codex fires SessionStart only on the first turn, and hook
+		// trust can lapse, so fall back to the pane. A waiting prompt or an
+		// in-progress turn overrides the idle-at-prompt default; this keeps an
+		// actively-working Codex session from being stuck on idle when its hooks
+		// never fired.
+		switch {
+		case paneWaiting:
+			if oldStatus != StatusWaiting {
+				s.SetStatus(StatusWaiting)
+				log.Info("status changed (codex pane no-hook)", "old", oldStatus, "new", StatusWaiting)
+			}
+		case paneRunning:
+			if oldStatus != StatusRunning {
+				s.SetStatus(StatusRunning)
+				log.Info("status changed (codex pane no-hook)", "old", oldStatus, "new", StatusRunning)
+			}
+		case oldStatus != StatusIdle:
+			// Sitting at its prompt with no active turn — settle to idle.
 			s.SetStatus(StatusIdle)
 			log.Info("status changed (codex no-hook)", "old", oldStatus, "new", StatusIdle)
 		}
@@ -894,6 +913,37 @@ func codexPaneWaiting(content string) bool {
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	recent := strings.Join(extractRecentLines(lines, 15), "\n")
 	for _, p := range codexWaitPatterns {
+		if strings.Contains(recent, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexRunPatterns mark a Codex turn in progress. Codex shows this footer only
+// while actively working ("Working (… • esc to interrupt)"), so it's a reliable
+// running signal when no hook has arrived. Checked only in the recent (bottom)
+// lines to avoid false-positives from scrollback.
+var codexRunPatterns = []string{
+	"esc to interrupt",
+}
+
+// codexPaneRunning reports whether Codex's pane shows an in-progress turn. It is
+// the no-hook fallback for the running state, mirroring codexPaneWaiting.
+//
+// The request_user_input question menu also renders "esc to interrupt" (you can
+// interrupt while answering), so a waiting pane takes precedence — running means
+// an active turn that is NOT blocked on the user.
+func codexPaneRunning(content string) bool {
+	if content == "" {
+		return false
+	}
+	if codexPaneWaiting(content) {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	recent := strings.Join(extractRecentLines(lines, 15), "\n")
+	for _, p := range codexRunPatterns {
 		if strings.Contains(recent, p) {
 			return true
 		}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
@@ -41,6 +42,7 @@ type ScenarioCheck struct {
 // Scenario is a named sequence of events and status checks.
 type Scenario struct {
 	Name   string
+	Agent  agent.Type // empty = Claude (the default status path)
 	Events []ScenarioEvent
 	Checks []ScenarioCheck
 }
@@ -63,6 +65,7 @@ func runScenario(t *testing.T, sc Scenario) {
 		ID:           "test-scenario",
 		Title:        sc.Name,
 		Status:       StatusStarting,
+		Agent:        sc.Agent,
 		paneCapturer: mock,
 	}
 
@@ -173,6 +176,46 @@ func loadPaneContent(t *testing.T, content string) string {
 }
 
 // --- Scenarios ---
+
+// TestScenarioCodexNoHookRunningFromPane reproduces the stuck-idle bug: a Codex
+// session whose hooks never fire (e.g. hook trust lapsed under a dev build) sits
+// idle at its prompt, runs a turn, and must be promoted to running from the pane
+// alone — then settle back to idle when the turn ends. Before the pane fallback,
+// it stayed idle the whole time.
+func TestScenarioCodexNoHookRunningFromPane(t *testing.T) {
+	runScenario(t, Scenario{
+		Name:  "codex no-hook: idle → working (pane) → idle",
+		Agent: agent.Codex,
+		Events: []ScenarioEvent{
+			{At: 0, Pane: "› \n\n  gpt-5.5 high · ~/code/proj\n"},
+			// User sends a prompt; Codex works but no hook fires.
+			{At: 2 * time.Second, Pane: "› sleep 10\n\n• Sleeping for 10 seconds.\n\n• Working (5s • esc to interrupt) · 1 background terminal running\n"},
+			// Turn ends, back to the prompt — still no hook.
+			{At: 6 * time.Second, Pane: "› \n\n  gpt-5.5 high · ~/code/proj\n"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusIdle},                  // idle at prompt, no hook
+			{At: 2 * time.Second, Expected: StatusRunning}, // pane fallback catches the active turn
+			{At: 6 * time.Second, Expected: StatusIdle},    // settles back to idle
+		},
+	})
+}
+
+// TestScenarioCodexNoHookWaitingFromPane guards the precedence: a Codex prompt
+// blocked on the user renders "esc to interrupt" too, but it's waiting, not
+// running — even with no hook.
+func TestScenarioCodexNoHookWaitingFromPane(t *testing.T) {
+	runScenario(t, Scenario{
+		Name:  "codex no-hook: request_user_input menu is waiting",
+		Agent: agent.Codex,
+		Events: []ScenarioEvent{
+			{At: 0, Pane: "› ask\n\n  Question 1/1 (1 unanswered)\n  Which option?\n\n  › 1. A\n    2. B\n\n  tab to add notes | enter to submit answer | esc to interrupt\n"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},
+		},
+	})
+}
 
 func TestScenarioHappyPath(t *testing.T) {
 	runScenario(t, Scenario{
