@@ -58,6 +58,7 @@ type Session struct {
 	hookStatus       string
 	hookUpdatedAt    time.Time
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
+	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
 
 	lastContentHash     string
 	lastContentChangeAt time.Time
@@ -219,6 +220,20 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Ignore events from a different Claude session than the one we own.
+	// Nested `claude` processes (eval harnesses that spawn child Claudes)
+	// inherit FLEET_INSTANCE_ID and would otherwise clobber our status, resume
+	// id, and auto-naming with their lifecycle events. The owner is the first
+	// Claude to report after launch/restart; foreign sessions are dropped.
+	if hs.SessionID != "" {
+		if s.ownerSessionID == "" {
+			s.ownerSessionID = hs.SessionID // claim ownership
+		} else if hs.SessionID != s.ownerSessionID {
+			return false // foreign (nested) Claude — ignore entirely
+		}
+	}
+
 	changed := s.hookStatus != hs.Status || s.hookUpdatedAt != hs.UpdatedAt
 	// Reset tracking when hook genuinely changes (new event or new status).
 	if changed {
@@ -237,6 +252,11 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	s.hookUpdatedAt = hs.UpdatedAt
 	if hs.SessionID != "" {
 		s.ClaudeSessionID = hs.SessionID
+	}
+	// Owner ended — release ownership so the next Claude (resume, /clear, or an
+	// in-pane relaunch) can claim it.
+	if hs.Status == "dead" && hs.SessionID == s.ownerSessionID {
+		s.ownerSessionID = ""
 	}
 	// Track user prompts for auto-naming (always update to latest).
 	if hs.PromptCount > s.PromptCount {
@@ -330,6 +350,7 @@ func (s *Session) clearHookState() {
 	s.hookStatus = ""
 	s.hookUpdatedAt = time.Time{}
 	s.hookOverriddenAt = time.Time{}
+	s.ownerSessionID = ""
 	s.mu.Unlock()
 	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
 	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
@@ -773,7 +794,10 @@ func FromRow(row *SessionRow) *Session {
 		FirstPrompt:     row.FirstPrompt,
 		TitleGenerated:  row.TitleGenerated,
 		PromptCount:     row.PromptCount,
-		tmuxSession:     ts,
+		// Pre-pin the last-known owner so a nested Claude can't grab ownership
+		// in the window after a fleet restart while an eval is mid-flight.
+		ownerSessionID: row.ClaudeSessionID,
+		tmuxSession:    ts,
 	}
 }
 

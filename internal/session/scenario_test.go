@@ -27,6 +27,7 @@ func (m *mockPane) IsPaneDead() bool             { return m.dead }
 type ScenarioEvent struct {
 	At          time.Duration // relative to scenario start
 	Hook        string        // hook status: "running", "waiting", "finished", "dead", or "" (no change)
+	SessionID   string        // Claude session_id reporting this hook (for nested/foreign-session tests)
 	Pane        string        // pane content to set (raw string or "@fixture:filename.txt" for golden file)
 	PaneDead    bool          // simulate pane death
 	Acknowledge bool          // simulate user acknowledging the session
@@ -97,6 +98,7 @@ func runScenario(t *testing.T, sc Scenario) {
 				hookUpdatedAt = time.Now()
 				s.UpdateHookStatus(&HookStatus{
 					Status:    e.Hook,
+					SessionID: e.SessionID,
 					UpdatedAt: hookUpdatedAt,
 				})
 			}
@@ -306,6 +308,45 @@ func TestScenarioPaneDeath(t *testing.T) {
 		Events: []ScenarioEvent{
 			{At: 0, Hook: "running", Pane: "⠋ Working...\nctrl+c to interrupt\n"},
 			{At: 2 * time.Second, PaneDead: true},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 2 * time.Second, Expected: StatusError},
+		},
+	})
+}
+
+// TestScenarioNestedClaudeIgnored guards against nested `claude` processes
+// (eval harnesses that spawn child Claudes) clobbering the owner's status.
+// The child inherits FLEET_INSTANCE_ID, so its lifecycle hooks land on the
+// same fleet session; they must be ignored while the owner is alive.
+func TestScenarioNestedClaudeIgnored(t *testing.T) {
+	running := "⠋ Working...\nctrl+c to interrupt\n"
+	runScenario(t, Scenario{
+		Name: "nested child SessionEnd must not flip live owner to error",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "running", SessionID: "owner-aaa", Pane: running},
+			// A nested child fires its full lifecycle on the same instance.
+			{At: 2 * time.Second, Hook: "running", SessionID: "child-bbb", Pane: running},
+			{At: 3 * time.Second, Hook: "dead", SessionID: "child-bbb", Pane: running},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 2 * time.Second, Expected: StatusRunning}, // child running ignored
+			{At: 3 * time.Second, Expected: StatusRunning}, // child dead ignored — NOT error
+		},
+	})
+}
+
+// TestScenarioOwnerEndStillReported ensures the owner-filter doesn't
+// over-suppress: the owning Claude's own death must still surface as error.
+func TestScenarioOwnerEndStillReported(t *testing.T) {
+	running := "⠋ Working...\nctrl+c to interrupt\n"
+	runScenario(t, Scenario{
+		Name: "owner SessionEnd → error",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "running", SessionID: "owner-aaa", Pane: running},
+			{At: 2 * time.Second, Hook: "dead", SessionID: "owner-aaa", Pane: running},
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusRunning},
