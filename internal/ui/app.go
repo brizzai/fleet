@@ -2351,15 +2351,24 @@ func (h *Home) jumpToNextAttentionSession() {
 		return
 	}
 
-	// Anchor at the current session's position in the candidate order.
+	// Anchor at the current row's position in the candidate order — including
+	// header rows, so jumping from an origin/checkout header continues from
+	// that header instead of restarting at the top. A collapsed origin header
+	// has no children in cand, so the scan simply moves on to the next group.
 	start := -1
-	if h.cursor >= 0 && h.cursor < len(h.flatItems) && !h.flatItems[h.cursor].IsRepoHeader {
-		if cur := h.flatItems[h.cursor].Session; cur != nil {
-			for i, it := range cand {
-				if it.Session != nil && it.Session.ID == cur.ID {
-					start = i
-					break
-				}
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+		cur := h.flatItems[h.cursor]
+		for i, it := range cand {
+			switch {
+			case cur.Session != nil && it.Session != nil && it.Session.ID == cur.Session.ID:
+				start = i
+			case cur.IsOriginHeader && it.IsOriginHeader && it.OriginKey == cur.OriginKey:
+				start = i
+			case cur.IsCheckoutHeader && it.IsCheckoutHeader && it.RepoPath == cur.RepoPath:
+				start = i
+			}
+			if start != -1 {
+				break
 			}
 		}
 	}

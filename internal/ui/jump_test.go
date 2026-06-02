@@ -104,6 +104,49 @@ func TestJumpEntersCollapsedCheckout(t *testing.T) {
 	}
 }
 
+// TestJumpFromHeaderAnchorsAfterIt: with the cursor on an origin header, jump
+// must continue from that header (landing in its group) rather than restarting
+// at the first candidate and wrapping to an earlier origin.
+func TestJumpFromHeaderAnchorsAfterIt(t *testing.T) {
+	aWait := session.NewSession("alpha-wait", "/tmp/jh-alpha")
+	aWait.SetStatus(session.StatusWaiting)
+	bWait := session.NewSession("beta-wait", "/tmp/jh-beta")
+	bWait.SetStatus(session.StatusWaiting)
+
+	h := &Home{
+		sessions:     []*session.Session{aWait, bWait},
+		repoExpanded: map[string]bool{},
+		idleFolded:   map[string]bool{},
+		pinnedRepos:  map[string]bool{},
+	}
+	gi := map[string]*git.RepoInfo{
+		"/tmp/jh-alpha": {OriginKey: "github.com/acme/alpha"},
+		"/tmp/jh-beta":  {OriginKey: "github.com/acme/beta"},
+	}
+	h.gitInfoCache.Store(&gi)
+	h.rebuildFlatItems()
+
+	// Park the cursor on the beta origin header (it sorts after alpha).
+	betaHeader := -1
+	for i, it := range h.flatItems {
+		if it.IsOriginHeader && it.OriginKey == "github.com/acme/beta" {
+			betaHeader = i
+			break
+		}
+	}
+	if betaHeader < 0 {
+		t.Fatal("beta origin header not found in flatItems")
+	}
+	h.cursor = betaHeader
+
+	h.jumpToNextAttentionSession()
+
+	landed := h.flatItems[h.cursor].Session
+	if landed == nil || landed.ID != bWait.ID {
+		t.Errorf("jump from beta header should land on beta's waiting session, not wrap to alpha; got %v", landed)
+	}
+}
+
 // TestSlotJumpExpandsCollapsedOrigin: jumping to a slot-bound session must
 // also expand a collapsed origin group, not just the checkout.
 func TestSlotJumpExpandsCollapsedOrigin(t *testing.T) {
