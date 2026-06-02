@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
@@ -582,10 +583,11 @@ func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 	return fmt.Sprintf("  %s %s", icon, nameStyled)
 }
 
-// renderSessionItem → "  │ <status> title [slot]"  (under a checkout)
+// renderSessionItem → "  │ <status> <agent> title [slot]"  (under a checkout)
 func renderSessionItem(s *session.Session, width int, selected bool, slot int) string {
 	status := s.GetStatus()
 	symbolRaw := StatusSymbolRaw(status)
+	glyphRaw := agentGlyph(s.Agent)
 	title := s.Title
 
 	slotRaw := ""
@@ -593,8 +595,9 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 		slotRaw = fmt.Sprintf(" [%d]", slot)
 	}
 
-	// Reserve: 2 leading spaces + "│ " guide + 1 selection prefix + symbol + space + slot.
-	maxTitleLen := width - 11 - len(slotRaw)
+	// Reserve: 2 leading spaces + "│ " guide + 1 selection prefix + symbol +
+	// space + agent glyph + space + slot.
+	maxTitleLen := width - 13 - len(slotRaw)
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -604,20 +607,44 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 
 	// Selection: the inverted-background title carries the "you are here"
 	// signal on its own — no leading ▶ arrow (it collided with the chevron
-	// glyph used for collapsed headers). Bg fill spans symbol + title + slot
-	// in one continuous render so the row reads as a single pill.
+	// glyph used for collapsed headers). Bg fill spans symbol + agent glyph +
+	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
-		row := " " + symbolRaw + " " + title + slotRaw + " "
+		row := " " + symbolRaw + " " + glyphRaw + " " + title + slotRaw + " "
 		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render(row))
 	}
 
 	styledSymbol := StatusSymbol(status)
+	styledGlyph := AgentGlyphStyle.Render(glyphRaw)
 	styledTitle := TitleStyleForStatus(status).Render(title)
 	styledSlot := ""
 	if slotRaw != "" {
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
 	}
-	return fmt.Sprintf("    %s %s%s", styledSymbol, styledTitle, styledSlot)
+	return fmt.Sprintf("    %s %s %s%s", styledSymbol, styledGlyph, styledTitle, styledSlot)
+}
+
+// Agent glyphs mark which coding agent a session runs — a quiet, dim,
+// monochrome sigil that sits between the status dot and the title. Identity is
+// carried by shape alone: the status dot keeps the (dynamic) status color, so
+// the glyph is always rendered muted via AgentGlyphStyle regardless of status.
+const (
+	// Both glyphs are width-1 and live in well-covered Unicode blocks so they
+	// render cleanly in base monospace fonts (Menlo/SF Mono) and stay aligned:
+	// ✻ is Dingbats; ◇ is Geometric Shapes — the same block as the status dots
+	// (●○◐). A hexagon (U+2B21) was tried first but falls back to a wider glyph
+	// in those fonts, shifting the title.
+	claudeGlyph = "✻"
+	codexGlyph  = "◇"
+)
+
+// agentGlyph returns the sigil for a session's agent. An empty or unrecognized
+// agent falls back to Claude (the default), so legacy sessions render ✻.
+func agentGlyph(t agent.Type) string {
+	if agent.Parse(string(t)) == agent.Codex {
+		return codexGlyph
+	}
+	return claudeGlyph
 }
 
 // renderIdleFold → "      + N idle"  (under a checkout, in dim)
