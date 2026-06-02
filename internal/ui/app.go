@@ -3136,7 +3136,9 @@ func (h *Home) syncHookStatuses(sessions []*session.Session) []string {
 
 // updateAndPersistStatus runs a full UpdateStatus() on the session and persists
 // the result to storage if the status changed. Called from the worker goroutine.
-func (h *Home) updateAndPersistStatus(s *session.Session) {
+// Returns true if the status changed (so callers can repaint just the sessions
+// that flipped).
+func (h *Home) updateAndPersistStatus(s *session.Session) bool {
 	oldStatus := s.GetStatus()
 	s.UpdateStatus()
 	newStatus := s.GetStatus()
@@ -3144,7 +3146,9 @@ func (h *Home) updateAndPersistStatus(s *session.Session) {
 		if err := h.storage.UpdateStatus(s.ID, string(newStatus)); err != nil {
 			debuglog.Logger.Error("storage: UpdateStatus", "id", s.ID, "status", newStatus, "err", err)
 		}
+		return true
 	}
+	return false
 }
 
 // enqueuePriorityUpdates pushes session IDs into the worker's priority queue
@@ -3193,6 +3197,28 @@ func fastPassSessions(sessions []*session.Session, processed map[string]bool) []
 	return active
 }
 
+// roundRobinBatch returns up to `budget` sessions not already handled this cycle,
+// scanning forward from `start` (wrapping), and the cursor to resume from next
+// cycle. The cursor advances only past sessions actually examined — not by a
+// fixed window — so when the list is dominated by active (already-processed)
+// sessions the scan still reaches the idle/finished sessions instead of stepping
+// over them and starving them of their periodic pane re-check.
+func roundRobinBatch(sessions []*session.Session, processed map[string]bool, start, budget int) (picked []*session.Session, next int) {
+	n := len(sessions)
+	if n == 0 {
+		return nil, start
+	}
+	examined := 0
+	for examined < n && len(picked) < budget {
+		idx := (start + examined) % n
+		examined++
+		if s := sessions[idx]; !processed[s.ID] {
+			picked = append(picked, s)
+		}
+	}
+	return picked, (start + examined) % n
+}
+
 func (h *Home) statusWorkerCycle() {
 	// Recover from panics to keep the worker alive.
 	defer func() {
@@ -3201,19 +3227,15 @@ func (h *Home) statusWorkerCycle() {
 		}
 	}()
 
-	// Heavy work (tmux cache refresh, full round-robin over idle sessions,
-	// git/PR fan-out, auto-naming, status-bar repaint) runs at most every
-	// tickInterval. The fast path (priority hook updates + active-session pane
-	// re-checks) runs every invocation (~activeStatusInterval) so waiting<->
-	// running flips — which fire no Claude hook on permission approval —
-	// surface within ~500ms instead of starving on the 2s round-robin.
+	// Heavy work (full round-robin over idle sessions, git/PR fan-out,
+	// auto-naming, full status-bar repaint) runs at most every tickInterval.
+	// The fast path (priority hook updates + active-session pane re-checks)
+	// runs every invocation (~activeStatusInterval) so waiting<->running flips
+	// — which fire no Claude hook on permission approval — surface within
+	// ~500ms instead of starving on the 2s round-robin.
 	heavy := heavyCycleDue(h.lastHeavyCycleAt, time.Now())
 	if heavy {
 		h.lastHeavyCycleAt = time.Now()
-		// Refresh tmux session cache (blocking but in background). Only the
-		// 3s/10s running/finished hold heuristics read its activity data, and
-		// they tolerate ≤2s staleness; the waiting→running path never reads it.
-		tmux.RefreshSessionCache()
 	}
 
 	// Take a snapshot of sessions under lock.
@@ -3225,6 +3247,14 @@ func (h *Home) statusWorkerCycle() {
 	if len(sessions) == 0 {
 		return
 	}
+
+	// Refresh the tmux activity cache every cycle. This is a single
+	// `tmux list-windows -a` call — O(1) in session count, not O(N) — and the
+	// 3s/10s running/finished hold heuristics in UpdateStatus read its data on
+	// the fast (~500ms) path too. Gating it to the 2s heavy cadence would let
+	// those windows read activity up to ~2s stale, shrinking the 3s hold to
+	// ~1s and flipping busy sessions to finished prematurely.
+	tmux.RefreshSessionCache()
 
 	// 3. Sync hook status (fast: in-memory map lookups).
 	h.syncHookStatuses(sessions)
@@ -3298,11 +3328,17 @@ drainPriority:
 		}
 	}
 	processed := make(map[string]bool, len(priorityIDs))
+	// Sessions whose status flipped on the fast (non-heavy) path; their tmux
+	// status bars are repainted immediately below so the in-pane pill tracks
+	// the sidebar within ~500ms instead of lagging until the next heavy cycle.
+	var changedBars []*session.Session
 	for _, s := range sessions {
 		if !priorityIDs[s.ID] {
 			continue
 		}
-		h.updateAndPersistStatus(s)
+		if h.updateAndPersistStatus(s) {
+			changedBars = append(changedBars, s)
+		}
 		processed[s.ID] = true
 	}
 
@@ -3313,29 +3349,30 @@ drainPriority:
 	// session counts (≈18s at N=43). Idle/finished stay on the round-robin
 	// below; their important transitions (→running) ride the hook priority queue.
 	for _, s := range fastPassSessions(sessions, processed) {
-		h.updateAndPersistStatus(s)
+		if h.updateAndPersistStatus(s) {
+			changedBars = append(changedBars, s)
+		}
 		processed[s.ID] = true
 	}
 
-	// Everything below is heavy work — only on the ~2s cadence.
+	// Everything below is heavy work — only on the ~2s cadence. On fast cycles
+	// repaint just the status bars whose session flipped, then bail.
+	// refreshTmuxStatusBars is cache-guarded, so the next heavy cycle's full
+	// repaint won't redundantly re-apply these.
 	if !heavy {
+		if len(changedBars) > 0 {
+			h.refreshTmuxStatusBars(changedBars)
+		}
 		return
 	}
 
-	// 5. Round-robin status updates (pane capture — blocking), skipping already-processed.
-	count := statusRoundRobin
-	if count > len(sessions) {
-		count = len(sessions)
-	}
-	for i := 0; i < count; i++ {
-		idx := (h.statusRRIndex + i) % len(sessions)
-		s := sessions[idx]
-		if processed[s.ID] {
-			continue
-		}
+	// 5. Round-robin status updates (pane capture — blocking) over the sessions
+	// not already handled this cycle, capped at statusRoundRobin real updates.
+	batch, next := roundRobinBatch(sessions, processed, h.statusRRIndex, statusRoundRobin)
+	for _, s := range batch {
 		h.updateAndPersistStatus(s)
 	}
-	h.statusRRIndex = (h.statusRRIndex + count) % len(sessions)
+	h.statusRRIndex = next
 
 	// 5. Git+PR refresh: fan out across all session repos in parallel,
 	// bounded to 4 concurrent goroutines so the subprocess load stays
