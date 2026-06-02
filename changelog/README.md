@@ -13,6 +13,15 @@ type: added
 Description of the change for end users
 ```
 
+## Keep it concise
+
+Aim for **1–2 sentences** that lead with the user-facing change. A reader
+skimming the release notes should grasp it at a glance:
+
+- Drop implementation detail, marketing tone, and exhaustive sub-point lists.
+- If a change is genuinely large, link the PR rather than narrating every facet.
+- Prefer "what changed for the user" over "how it was built."
+
 ## Valid Types
 
 | Type | Section |

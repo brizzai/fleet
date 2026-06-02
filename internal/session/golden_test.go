@@ -34,6 +34,7 @@ var goldenTests = []struct {
 	{"pane_running_plan_checklist_deep.txt", StatusRunning, "plan execution with whimsical activity line pushed deep by expanding checklist"},
 	{"pane_finished_quoted_crashdump_whimsical.txt", StatusFinished, "idle prompt with embedded crash-dump example containing a whimsical activity line in scrollback (~30 lines from bottom)"},
 	{"pane_waiting_askuserquestion_checkbox_focus.txt", StatusWaiting, "AskUserQuestion dialog with focus on checkbox question header (no `❯ N.` cursor in numbered options)"},
+	{"finished_idle_background_agent.txt", StatusFinished, "idle prompt while a background agent runs (`✻ Waiting for 1 background agent to finish` in scrollback + active sub-agent footer)"},
 }
 
 func TestGoldenDetection(t *testing.T) {

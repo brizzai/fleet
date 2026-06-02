@@ -13,13 +13,16 @@ import (
 // --- Mock pane capturer ---
 
 type mockPane struct {
-	content string
-	dead    bool
-	alive   bool // controls IsAlive via !IsPaneDead
+	content      string
+	dead         bool
+	alive        bool  // controls IsAlive via !IsPaneDead
+	activityUnix int64 // simulated tmux window_activity timestamp
+	hasActivity  bool  // false → GetActivity reports unknown
 }
 
 func (m *mockPane) CapturePane() (string, error) { return m.content, nil }
 func (m *mockPane) IsPaneDead() bool             { return m.dead }
+func (m *mockPane) GetActivity() (int64, bool)   { return m.activityUnix, m.hasActivity }
 
 // --- Scenario types ---
 
@@ -31,6 +34,8 @@ type ScenarioEvent struct {
 	Pane        string        // pane content to set (raw string or "@fixture:filename.txt" for golden file)
 	PaneDead    bool          // simulate pane death
 	Acknowledge bool          // simulate user acknowledging the session
+	ActivityAge time.Duration // simulate tmux window_activity this long ago (0 = no activity data)
+	HookAge     time.Duration // backdate the hook's UpdatedAt by this much (0 = now); simulates a stale hook
 }
 
 // ScenarioCheck asserts the session status at a point in time.
@@ -95,7 +100,7 @@ func runScenario(t *testing.T, sc Scenario) {
 			// Apply hook status change.
 			if e.Hook != "" {
 				currentHook = e.Hook
-				hookUpdatedAt = time.Now()
+				hookUpdatedAt = time.Now().Add(-e.HookAge)
 				s.UpdateHookStatus(&HookStatus{
 					Status:    e.Hook,
 					SessionID: e.SessionID,
@@ -110,6 +115,12 @@ func runScenario(t *testing.T, sc Scenario) {
 
 			// Set pane dead state.
 			mock.dead = e.PaneDead
+
+			// Simulate tmux window_activity (e.g. a background agent redrawing the pane).
+			mock.hasActivity = e.ActivityAge > 0
+			if e.ActivityAge > 0 {
+				mock.activityUnix = time.Now().Add(-e.ActivityAge).Unix()
+			}
 
 			// Acknowledge.
 			if e.Acknowledge {
@@ -537,6 +548,52 @@ func TestScenarioFinishedAutoResumeRunning(t *testing.T) {
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusRunning},
+		},
+	})
+}
+
+func TestScenarioFinishedNotHeldByBackgroundAgent(t *testing.T) {
+	// Regression: the main agent fired Stop (hook=finished) 24m ago and is idling
+	// on a background sub-agent that keeps redrawing the pane, so window_activity is
+	// perpetually <3s. The unbounded activity hold pinned the prior `waiting` state
+	// forever (acknowledged → should be idle). Bounding the hold by hook age releases
+	// it once the finished hook is stale.
+	// Captured from snapshot 2026-06-02T17-50-06_apply-ariels-strategy-to-voo-w.
+	runScenario(t, Scenario{
+		Name: "hook=finished (stale) + idle pane + fresh background activity → releases to idle",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", Pane: "permission prompt\n❯ 1. Yes\n  2. No\nEsc to cancel\n"},
+			// Parent Stop fired 24m ago; pane now idle; background agent keeps activity fresh.
+			{At: 1 * time.Second, Hook: "finished", HookAge: 24 * time.Minute,
+				Pane: "@fixture:finished_idle_background_agent.txt", ActivityAge: 200 * time.Millisecond, Acknowledge: true},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},
+			// Before the fix: activity <3s holds the stale `waiting`. After: hook stale → idle.
+			{At: 1 * time.Second, Expected: StatusIdle},
+		},
+	})
+}
+
+func TestScenarioFinishedBridgesRecentHookThenReleases(t *testing.T) {
+	// The activity bridge must survive the fix: right after a finished hook fires,
+	// a momentary no-spinner pane with fresh activity should hold the prior state
+	// (burst gap), then release to finished once the hook is no longer recent.
+	runScenario(t, Scenario{
+		Name: "hook=finished + fresh activity: bridges while hook recent, releases when stale",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "running", Pane: "⠋ Working...\nesc to interrupt\n"},
+			// Recent finished hook + fresh activity + idle pane → hold (bridge the gap).
+			{At: 1 * time.Second, Hook: "finished", HookAge: 1 * time.Second,
+				Pane: "@fixture:finished_idle_background_agent.txt", ActivityAge: 200 * time.Millisecond},
+			// Same pane/activity but the finished hook is now stale → release.
+			{At: 2 * time.Second, Hook: "finished", HookAge: 10 * time.Second,
+				Pane: "@fixture:finished_idle_background_agent.txt", ActivityAge: 200 * time.Millisecond},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 1 * time.Second, Expected: StatusRunning},  // bridged (held prior running)
+			{At: 2 * time.Second, Expected: StatusFinished}, // released (not acknowledged)
 		},
 	})
 }
