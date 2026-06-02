@@ -3219,6 +3219,34 @@ func roundRobinBatch(sessions []*session.Session, processed map[string]bool, sta
 	return picked, (start + examined) % n
 }
 
+// seedActiveCaptures captures every given session's pane in one batched tmux
+// call and seeds each session's capture cache, collapsing N per-session
+// capture-pane shell-outs into a single invocation on the hot ~500ms fast path.
+// Sessions the batch omits keep a cold cache and capture individually inside
+// UpdateStatus, so coverage is never lost — only the batch speedup.
+func (h *Home) seedActiveCaptures(active []*session.Session) {
+	if len(active) < 2 {
+		return // a single session saves nothing over its own direct capture
+	}
+	byName := make(map[string]*session.Session, len(active))
+	names := make([]string, 0, len(active))
+	for _, s := range active {
+		ts := s.GetTmuxSession()
+		if ts == nil {
+			continue
+		}
+		byName[ts.Name] = s
+		names = append(names, ts.Name)
+	}
+	for name, content := range tmux.BatchCapturePanes(names) {
+		if s := byName[name]; s != nil {
+			if ts := s.GetTmuxSession(); ts != nil {
+				ts.SeedCapture(content)
+			}
+		}
+	}
+}
+
 func (h *Home) statusWorkerCycle() {
 	// Recover from panics to keep the worker alive.
 	defer func() {
@@ -3248,12 +3276,14 @@ func (h *Home) statusWorkerCycle() {
 		return
 	}
 
-	// Refresh the tmux activity cache every cycle. This is a single
-	// `tmux list-windows -a` call — O(1) in session count, not O(N) — and the
-	// 3s/10s running/finished hold heuristics in UpdateStatus read its data on
-	// the fast (~500ms) path too. Gating it to the 2s heavy cadence would let
-	// those windows read activity up to ~2s stale, shrinking the 3s hold to
-	// ~1s and flipping busy sessions to finished prematurely.
+	// Refresh the tmux activity + pane-dead cache every cycle. This is a single
+	// `tmux list-panes -a` call — O(1) in session count, not O(N) — and feeds
+	// Exists/GetActivity/IsPaneDead for every session, so per-session
+	// UpdateStatus calls below never shell out for those. It also keeps the
+	// 3s/10s running/finished hold heuristics fresh on the fast (~500ms) path;
+	// gating it to the 2s heavy cadence would let them read activity up to ~2s
+	// stale, shrinking the 3s hold to ~1s and flipping busy sessions to finished
+	// prematurely.
 	tmux.RefreshSessionCache()
 
 	// 3. Sync hook status (fast: in-memory map lookups).
@@ -3348,7 +3378,14 @@ drainPriority:
 	// round-robin — up to ceil(N/statusRoundRobin)*tickInterval behind at high
 	// session counts (≈18s at N=43). Idle/finished stay on the round-robin
 	// below; their important transitions (→running) ride the hook priority queue.
-	for _, s := range fastPassSessions(sessions, processed) {
+	// Batch-capture the active sessions' panes in a single tmux invocation and
+	// seed each capture cache, so the per-session UpdateStatus calls below read
+	// warm caches instead of each shelling out to capture-pane. Sessions the
+	// batch misses (a dead pane aborts the chain) keep a cold cache and fall
+	// back to a live capture inside UpdateStatus.
+	active := fastPassSessions(sessions, processed)
+	h.seedActiveCaptures(active)
+	for _, s := range active {
 		if h.updateAndPersistStatus(s) {
 			changedBars = append(changedBars, s)
 		}
