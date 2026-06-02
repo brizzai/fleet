@@ -376,10 +376,13 @@ func (s *Session) UpdateStatus() {
 	hasHook := hookStatus != "" && !s.hookUpdatedAt.IsZero()
 	s.mu.RUnlock()
 
-	// Codex status is hook-driven. We do NOT run Claude's pane heuristics on it,
-	// but Codex's pane is the only signal for states that fire no hook: an
-	// "ask the user" prompt (waiting) and — as a fallback when hooks are absent
-	// entirely (e.g. hook trust lapsed) — an in-progress turn (running).
+	// Codex status is hook-driven, but we do NOT run Claude's pane heuristics on
+	// it. Codex's pane is authoritative when it shows a definite state: its hooks
+	// are incomplete (a wait/approval prompt and a permission approval both fire
+	// no hook), so the latest hook can be stale. A working footer (paneRunning)
+	// or a wait prompt (paneWaiting) overrides the hook; only an at-rest pane
+	// lets the hook decide running/finished/idle. With no hook at all, an at-rest
+	// pane settles to idle.
 	if s.Agent == agent.Codex {
 		paneWaiting, paneRunning := false, false
 		if content, err := s.getCapturer().CapturePane(); err == nil {
@@ -387,28 +390,23 @@ func (s *Session) UpdateStatus() {
 			paneWaiting = codexPaneWaiting(clean)
 			paneRunning = codexPaneRunning(clean)
 		}
-		if hasHook {
-			s.updateStatusFromHookNoPane(oldStatus, hookStatus, paneWaiting, log)
-			return
-		}
-		// No hook yet — Codex fires SessionStart only on the first turn, and hook
-		// trust can lapse, so fall back to the pane. A waiting prompt or an
-		// in-progress turn overrides the idle-at-prompt default; this keeps an
-		// actively-working Codex session from being stuck on idle when its hooks
-		// never fired.
 		switch {
 		case paneWaiting:
 			if oldStatus != StatusWaiting {
 				s.SetStatus(StatusWaiting)
-				log.Info("status changed (codex pane no-hook)", "old", oldStatus, "new", StatusWaiting)
+				log.Info("status changed (codex pane)", "old", oldStatus, "new", StatusWaiting)
 			}
 		case paneRunning:
 			if oldStatus != StatusRunning {
 				s.SetStatus(StatusRunning)
-				log.Info("status changed (codex pane no-hook)", "old", oldStatus, "new", StatusRunning)
+				log.Info("status changed (codex pane)", "old", oldStatus, "new", StatusRunning)
 			}
+		case hasHook:
+			// Pane at rest — it can't tell running from finished from idle at the
+			// prompt, so the hook decides.
+			s.applyCodexHookAtRest(oldStatus, hookStatus, log)
 		case oldStatus != StatusIdle:
-			// Sitting at its prompt with no active turn — settle to idle.
+			// At its prompt with no active turn and no hook — settle to idle.
 			s.SetStatus(StatusIdle)
 			log.Info("status changed (codex no-hook)", "old", oldStatus, "new", StatusIdle)
 		}
@@ -423,38 +421,34 @@ func (s *Session) UpdateStatus() {
 	s.updateStatusFromPane(oldStatus, log)
 }
 
-// updateStatusFromHookNoPane applies hook status for Codex. It skips Claude's
-// pane heuristics, but paneWaiting (a narrow structural check for Codex's
-// ask-the-user prompts that fire no hook) overrides to waiting.
-func (s *Session) updateStatusFromHookNoPane(oldStatus Status, hookStatus string, paneWaiting bool, log *slog.Logger) {
+// applyCodexHookAtRest applies hook status for a Codex session whose pane is at
+// rest (no working footer, no wait prompt). The pane can't tell running from
+// finished from idle at the prompt, so the hook decides. Reached only from the
+// Codex branch of UpdateStatus, after the pane-authoritative checks.
+func (s *Session) applyCodexHookAtRest(oldStatus Status, hookStatus string, log *slog.Logger) {
 	hookSaysDead := false
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		switch {
-		case paneWaiting:
-			// Codex is blocked on the user (request_user_input / approval menu),
-			// which fires no hook — so the latest hook (often "running") is stale.
-			s.Status = StatusWaiting
-			s.Acknowledged = false
-		case hookStatus == "running":
+		switch hookStatus {
+		case "running":
 			s.Status = StatusRunning
 			s.Acknowledged = false
-		case hookStatus == "waiting":
+		case "waiting":
 			s.Status = StatusWaiting
 			s.Acknowledged = false
-		case hookStatus == "finished":
+		case "finished":
 			if s.Acknowledged {
 				s.Status = StatusIdle
 			} else {
 				s.Status = StatusFinished
 			}
-		case hookStatus == "dead":
+		case "dead":
 			s.Status = StatusError
 			hookSaysDead = true
 		}
 		if s.Status != oldStatus {
-			log.Info("status changed (codex hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus, "paneWaiting", paneWaiting)
+			log.Info("status changed (codex hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus)
 		}
 	}()
 

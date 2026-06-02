@@ -217,6 +217,53 @@ func TestScenarioCodexNoHookWaitingFromPane(t *testing.T) {
 	})
 }
 
+// TestScenarioCodexStaleHookRunningFromPane covers the case the no-hook fallback
+// alone missed: once any Codex hook has fired, hasHook latches true, so a later
+// turn that fires NO hook (trust lapsed, or a missed UserPromptSubmit) used to be
+// judged by the stale "finished" hook and stay idle while actively working. The
+// pane is authoritative now, so a working footer promotes it to running even
+// though the latest hook is "finished".
+func TestScenarioCodexStaleHookRunningFromPane(t *testing.T) {
+	runScenario(t, Scenario{
+		Name:  "codex: hook fired then stale — working pane overrides to running",
+		Agent: agent.Codex,
+		Events: []ScenarioEvent{
+			// First turn: hook says running, pane shows the working footer.
+			{At: 0, Hook: "running", Pane: "› sleep 10\n\n• Working (5s • esc to interrupt) · 1 background terminal running\n"},
+			// Turn ends: hook says finished, pane back at the prompt, user acks.
+			{At: 2 * time.Second, Hook: "finished", Pane: "› \n\n  gpt-5.5 high · ~/code/proj\n", Acknowledge: true},
+			// New turn begins but NO hook fires; the stale hook is still "finished".
+			{At: 4 * time.Second, Pane: "› more\n\n• Working (3s • esc to interrupt)\n"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 2 * time.Second, Expected: StatusIdle},    // finished + acknowledged → idle
+			{At: 4 * time.Second, Expected: StatusRunning}, // pane overrides the stale "finished" hook
+		},
+	})
+}
+
+// TestScenarioCodexApprovalToRunningFromPane covers permission approval, which
+// fires no hook (like Claude): a PermissionRequest leaves a "waiting" hook, the
+// user approves, and Codex resumes working. The stale "waiting" hook would pin it
+// to waiting, but the working-footer pane overrides it to running.
+func TestScenarioCodexApprovalToRunningFromPane(t *testing.T) {
+	runScenario(t, Scenario{
+		Name:  "codex: approve permission (no hook) — working pane overrides stale waiting",
+		Agent: agent.Codex,
+		Events: []ScenarioEvent{
+			// Permission prompt: hook says waiting, pane shows the approval menu.
+			{At: 0, Hook: "waiting", Pane: "• Running touch x\n  Would you like to run the following command?\n  $ touch x\n  › 1. Yes, proceed (y)\n    2. No\n  Press enter to confirm or esc to cancel\n"},
+			// User approves; no hook fires. Pane shows the working footer again.
+			{At: 2 * time.Second, Pane: "• touch x\n\n• Working (1s • esc to interrupt)\n"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},
+			{At: 2 * time.Second, Expected: StatusRunning}, // pane overrides the stale "waiting" hook
+		},
+	})
+}
+
 func TestScenarioHappyPath(t *testing.T) {
 	runScenario(t, Scenario{
 		Name: "running → waiting → approved → running → finished",
