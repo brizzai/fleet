@@ -9,6 +9,10 @@ const (
 	EventAppStarted = "app_started"
 	EventAppQuit    = "app_quit"
 
+	// Consent. Sent once per install when the user declines the first-launch
+	// analytics prompt — see analytics.TrackDeclined.
+	EventTelemetryDeclined = "telemetry_declined"
+
 	// Sessions.
 	EventSessionCreated   = "session_created"
 	EventSessionAttached  = "session_attached"
