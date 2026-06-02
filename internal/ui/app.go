@@ -3166,6 +3166,33 @@ func (h *Home) enqueuePriorityUpdates(ids []string) {
 	}
 }
 
+// heavyCycleDue reports whether the worker should run its heavy ~2s pass this
+// cycle. A zero lastHeavy (fresh worker) is always due, so the first cycle runs
+// full init.
+func heavyCycleDue(lastHeavy, now time.Time) bool {
+	return now.Sub(lastHeavy) >= tickInterval
+}
+
+// fastPassSessions returns the active sessions the ~500ms fast pass should
+// pane-recheck — Running/Waiting/Starting — skipping any already handled by the
+// priority queue this cycle. These states transition via pane content (no hook
+// fires when a permission is approved), so they must not wait for the 2s
+// round-robin. Idle/Finished/Error stay on the round-robin; their →running
+// transitions ride the hook priority queue.
+func fastPassSessions(sessions []*session.Session, processed map[string]bool) []*session.Session {
+	var active []*session.Session
+	for _, s := range sessions {
+		if processed[s.ID] {
+			continue
+		}
+		switch s.GetStatus() {
+		case session.StatusRunning, session.StatusWaiting, session.StatusStarting:
+			active = append(active, s)
+		}
+	}
+	return active
+}
+
 func (h *Home) statusWorkerCycle() {
 	// Recover from panics to keep the worker alive.
 	defer func() {
@@ -3180,7 +3207,7 @@ func (h *Home) statusWorkerCycle() {
 	// re-checks) runs every invocation (~activeStatusInterval) so waiting<->
 	// running flips — which fire no Claude hook on permission approval —
 	// surface within ~500ms instead of starving on the 2s round-robin.
-	heavy := time.Since(h.lastHeavyCycleAt) >= tickInterval
+	heavy := heavyCycleDue(h.lastHeavyCycleAt, time.Now())
 	if heavy {
 		h.lastHeavyCycleAt = time.Now()
 		// Refresh tmux session cache (blocking but in background). Only the
@@ -3285,15 +3312,9 @@ drainPriority:
 	// round-robin — up to ceil(N/statusRoundRobin)*tickInterval behind at high
 	// session counts (≈18s at N=43). Idle/finished stay on the round-robin
 	// below; their important transitions (→running) ride the hook priority queue.
-	for _, s := range sessions {
-		if processed[s.ID] {
-			continue
-		}
-		switch s.GetStatus() {
-		case session.StatusRunning, session.StatusWaiting, session.StatusStarting:
-			h.updateAndPersistStatus(s)
-			processed[s.ID] = true
-		}
+	for _, s := range fastPassSessions(sessions, processed) {
+		h.updateAndPersistStatus(s)
+		processed[s.ID] = true
 	}
 
 	// Everything below is heavy work — only on the ~2s cadence.
