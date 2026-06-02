@@ -2263,6 +2263,14 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 		h.setError(fmt.Errorf("cannot fork to worktree: no session selected"))
 		return nil
 	}
+	// Fork-to-worktree stages the parent's Claude transcript into the new cwd so
+	// `claude --resume --fork-session` finds it — a Claude-only mechanism. Codex
+	// resumes from its own store and has no such staging, so reject it here
+	// rather than dropping the agent and launching a broken Claude fork.
+	if s.Agent == agent.Codex {
+		h.setError(fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this Codex session in place"))
+		return nil
+	}
 	if s.ClaudeSessionID == "" {
 		h.setError(fmt.Errorf("cannot fork to worktree: session has no Claude conversation ID yet"))
 		return nil
