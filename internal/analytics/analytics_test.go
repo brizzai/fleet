@@ -116,3 +116,26 @@ func TestMergeValueAttachesValueAndStrips(t *testing.T) {
 		t.Errorf("mergeValue mutated caller's map")
 	}
 }
+
+func TestDeclineShouldSendRespectsEnvOptOut(t *testing.T) {
+	// Not parallel: mutates process env via t.Setenv.
+
+	// Clear both opt-out vars so the default case is unambiguous regardless of
+	// the runner's environment.
+	t.Setenv("FLEET_TELEMETRY_DISABLED", "")
+	t.Setenv("DO_NOT_TRACK", "")
+	if !declineShouldSend() {
+		t.Error("declineShouldSend() = false with no opt-out env, want true")
+	}
+
+	t.Setenv("FLEET_TELEMETRY_DISABLED", "1")
+	if declineShouldSend() {
+		t.Error("declineShouldSend() = true with FLEET_TELEMETRY_DISABLED=1, want false")
+	}
+
+	t.Setenv("FLEET_TELEMETRY_DISABLED", "")
+	t.Setenv("DO_NOT_TRACK", "1")
+	if declineShouldSend() {
+		t.Error("declineShouldSend() = true with DO_NOT_TRACK=1, want false")
+	}
+}

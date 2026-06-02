@@ -1,6 +1,8 @@
 package ui
 
 import (
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/session"
 )
@@ -78,6 +80,17 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 	analytics.EmitSnapshot(h.collectSnapshot())
 	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
 		analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
+	}
+}
+
+// fireDeclineBeacon returns a Cmd that sends the one-shot telemetry_declined
+// event off the Update() loop. Captures version/identity by value so the
+// goroutine touches no shared Home state.
+func (h *Home) fireDeclineBeacon() tea.Cmd {
+	version, identity := h.version, h.identity
+	return func() tea.Msg {
+		analytics.TrackDeclined(version, identity)
+		return nil
 	}
 }
 

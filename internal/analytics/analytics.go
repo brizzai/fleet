@@ -476,3 +476,31 @@ func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMo
 		"repo_count":    repoCount,
 	})
 }
+
+// TrackDeclined sends a single anonymous "telemetry_declined" event keyed on the
+// hashed device ID. It is fully independent of the global queued client (which is
+// never initialized when the user declines) and carries no git name/email/path —
+// only the anonymous machine hash plus app/OS version. It is a no-op under env
+// opt-out (FLEET_TELEMETRY_DISABLED / DO_NOT_TRACK). Blocks up to 5s; call it
+// from a background goroutine (e.g. a tea.Cmd), not the Update() loop.
+func TrackDeclined(version string, identity Identity) {
+	if !declineShouldSend() {
+		return
+	}
+	mp := mixpanel.NewApiClient(mixpanelToken)
+	event := mp.NewEvent(EventTelemetryDeclined, identity.DeviceID, map[string]any{
+		"version":      version,
+		"os_version":   identity.OSVersion,
+		"arch":         runtime.GOARCH,
+		"machine_hash": identity.DeviceID,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := mp.Track(ctx, []*mixpanel.Event{event}); err != nil {
+		debuglog.Logger.Debug("mixpanel telemetry_declined track failed", "err", err)
+	}
+}
+
+// declineShouldSend reports whether the decline beacon may be sent. Split out so
+// the env opt-out guard is unit-testable without a network call.
+func declineShouldSend() bool { return !isOptedOut() }

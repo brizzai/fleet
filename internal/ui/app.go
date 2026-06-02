@@ -642,8 +642,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			repoCount := len(session.GroupByRepo(h.sessions))
 			h.workerMu.Unlock()
 			h.fireStartupAnalytics(repoCount)
+			return h, nil
 		}
-		return h, nil
+		// Declined: emit a single anonymous decline beacon (device hash only).
+		// Guarded against env opt-out inside TrackDeclined.
+		return h, h.fireDeclineBeacon()
 
 	case bugReportClosedMsg:
 		return h, nil
