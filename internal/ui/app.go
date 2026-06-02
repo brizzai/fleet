@@ -35,6 +35,7 @@ import (
 
 const (
 	tickInterval           = 2 * time.Second
+	activeStatusInterval   = 500 * time.Millisecond // fast pane re-check for active sessions
 	previewTickInterval    = 500 * time.Millisecond
 	previewCacheTTL        = 500 * time.Millisecond
 	layoutBreakpointSingle = 50
@@ -198,7 +199,8 @@ type Home struct {
 	idleFolded       map[string]bool // checkout path -> idle sessions folded ("z" key)
 	previewCache     map[string]string
 	previewCacheTime map[string]time.Time
-	statusRRIndex    int // round-robin index for status updates
+	statusRRIndex    int       // round-robin index for status updates
+	lastHeavyCycleAt time.Time // wall-clock gate: heavy worker work runs at most every tickInterval
 
 	// lastTmuxStatusBar tracks the most recent (status, theme) tuple applied
 	// to each session's tmux status bar so the worker can skip no-op
@@ -3068,7 +3070,7 @@ func (h *Home) splashTick() tea.Cmd {
 // statusWorker runs in its own goroutine, performing all blocking I/O
 // (tmux, git, gh) outside the Bubble Tea Update() loop.
 func (h *Home) statusWorker() {
-	ticker := time.NewTicker(tickInterval)
+	ticker := time.NewTicker(activeStatusInterval)
 	defer ticker.Stop()
 
 	for {
@@ -3172,10 +3174,22 @@ func (h *Home) statusWorkerCycle() {
 		}
 	}()
 
-	// 1. Refresh tmux session cache (blocking but in background).
-	tmux.RefreshSessionCache()
+	// Heavy work (tmux cache refresh, full round-robin over idle sessions,
+	// git/PR fan-out, auto-naming, status-bar repaint) runs at most every
+	// tickInterval. The fast path (priority hook updates + active-session pane
+	// re-checks) runs every invocation (~activeStatusInterval) so waiting<->
+	// running flips — which fire no Claude hook on permission approval —
+	// surface within ~500ms instead of starving on the 2s round-robin.
+	heavy := time.Since(h.lastHeavyCycleAt) >= tickInterval
+	if heavy {
+		h.lastHeavyCycleAt = time.Now()
+		// Refresh tmux session cache (blocking but in background). Only the
+		// 3s/10s running/finished hold heuristics read its activity data, and
+		// they tolerate ≤2s staleness; the waiting→running path never reads it.
+		tmux.RefreshSessionCache()
+	}
 
-	// 2. Take a snapshot of sessions under lock.
+	// Take a snapshot of sessions under lock.
 	h.workerMu.Lock()
 	sessions := make([]*session.Session, len(h.sessions))
 	copy(sessions, h.sessions)
@@ -3188,9 +3202,9 @@ func (h *Home) statusWorkerCycle() {
 	// 3. Sync hook status (fast: in-memory map lookups).
 	h.syncHookStatuses(sessions)
 
-	// 3b. Auto-name: generate title for ONE session per cycle.
+	// 3b. Auto-name: generate title for ONE session per cycle (heavy cadence).
 	// Priority: manual (R key) > custom-title > ai-title > last prompt heuristic.
-	if h.cfg.IsAutoNameEnabled() {
+	if heavy && h.cfg.IsAutoNameEnabled() {
 		for _, s := range sessions {
 			if s.ManuallyRenamed {
 				continue
@@ -3263,6 +3277,28 @@ drainPriority:
 		}
 		h.updateAndPersistStatus(s)
 		processed[s.ID] = true
+	}
+
+	// Fast active-session pass (every cycle): re-check Running/Waiting/Starting
+	// sessions. These transition via pane content (no hook fires when the user
+	// approves a permission), so without this they'd only refresh on the ~2s
+	// round-robin — up to ceil(N/statusRoundRobin)*tickInterval behind at high
+	// session counts (≈18s at N=43). Idle/finished stay on the round-robin
+	// below; their important transitions (→running) ride the hook priority queue.
+	for _, s := range sessions {
+		if processed[s.ID] {
+			continue
+		}
+		switch s.GetStatus() {
+		case session.StatusRunning, session.StatusWaiting, session.StatusStarting:
+			h.updateAndPersistStatus(s)
+			processed[s.ID] = true
+		}
+	}
+
+	// Everything below is heavy work — only on the ~2s cadence.
+	if !heavy {
+		return
 	}
 
 	// 5. Round-robin status updates (pane capture — blocking), skipping already-processed.
