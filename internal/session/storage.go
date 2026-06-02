@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/github"
 	_ "modernc.org/sqlite"
@@ -246,7 +247,7 @@ func (s *StateDB) SaveSession(row *SessionRow) error {
 		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		row.ID, row.Title, row.ProjectPath, row.Agent, row.Status, row.TmuxSession,
+		row.ID, row.Title, row.ProjectPath, string(agent.Parse(row.Agent)), row.Status, row.TmuxSession,
 		row.CreatedAt.Unix(), row.LastAccessed.Unix(), boolToInt(row.Acknowledged),
 		row.ClaudeSessionID, row.WorkspaceName,
 		boolToInt(row.ManuallyRenamed), row.FirstPrompt, boolToInt(row.TitleGenerated),

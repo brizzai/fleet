@@ -62,9 +62,12 @@ func InjectCodexHooks(configDir string) (bool, error) {
 
 	var events map[string]json.RawMessage
 	if raw, ok := root["hooks"]; ok {
+		// Fail closed: emptying `events` here would drop the user's existing hooks
+		// on the write below, contradicting this function's preserve-user-hooks
+		// contract. Refuse to touch the file when the section is unparseable.
 		if err := json.Unmarshal(raw, &events); err != nil {
 			debuglog.Logger.Error("codex hooks: failed to parse hooks section", "err", err)
-			events = make(map[string]json.RawMessage)
+			return false, fmt.Errorf("parse hooks section (refusing to overwrite user hooks): %w", err)
 		}
 	} else {
 		events = make(map[string]json.RawMessage)
@@ -130,6 +133,11 @@ func EnsureCodexDirTrust(configDir, projectPath string) error {
 		if strings.TrimSpace(scanner.Text()) == header {
 			return nil
 		}
+	}
+	// A scan error (e.g. a line exceeding the Scanner token limit) would read as
+	// "header not found" and append a duplicate trust block — bail instead.
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan config.toml: %w", err)
 	}
 
 	var b strings.Builder

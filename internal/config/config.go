@@ -29,11 +29,15 @@ type Config struct {
 }
 
 // GetDefaultAgent returns the default coding agent for new sessions ("claude" or "codex").
+// The stored value is normalized (trimmed + lower-cased) so hand-edited configs
+// like "Codex" or " codex " resolve correctly instead of silently falling back.
 func (c *Config) GetDefaultAgent() string {
-	if c.DefaultAgent == "codex" {
+	switch strings.TrimSpace(strings.ToLower(c.DefaultAgent)) {
+	case "codex":
 		return "codex"
+	default:
+		return "claude"
 	}
-	return "claude"
 }
 
 // IsAutoNameEnabled returns whether auto-naming is enabled (default: true).

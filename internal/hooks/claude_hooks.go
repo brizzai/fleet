@@ -10,8 +10,23 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
-// fleetHookMarker is the substring used to identify fleet hooks in settings.json.
-const fleetHookMarker = "fleet hook-handler"
+// fleetHookMarker is the legacy substring used to identify fleet hooks; it
+// depends on the binary being named "fleet". fleetHookArg is a
+// binary-name-independent marker appended to the injected command so renamed
+// builds (fleet-dev, *.test, go-build temp paths) are still recognized as fleet
+// hooks instead of being treated as foreign and duplicated on each startup.
+const (
+	fleetHookMarker = "fleet hook-handler"
+	fleetHookArg    = "--fleet-hook"
+)
+
+// isFleetHook reports whether a hook command belongs to fleet. It matches the
+// binary-name-independent marker arg or the legacy substring, so existing
+// installs (written before the arg) are recognized and upgraded in place rather
+// than duplicated.
+func isFleetHook(command string) bool {
+	return strings.Contains(command, fleetHookArg) || strings.Contains(command, fleetHookMarker)
+}
 
 // claudeHookEntry represents a single hook entry in Claude Code settings.
 type claudeHookEntry struct {
@@ -57,14 +72,14 @@ func GetClaudeConfigDir() string {
 func GetHookCommand() string {
 	exe, err := os.Executable()
 	if err != nil {
-		return "fleet hook-handler"
+		return "fleet hook-handler " + fleetHookArg
 	}
 	// Resolve symlinks for stable path.
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
-		return exe + " hook-handler"
+		return exe + " hook-handler " + fleetHookArg
 	}
-	return resolved + " hook-handler"
+	return resolved + " hook-handler " + fleetHookArg
 }
 
 // fleetHook returns a hook entry with the current binary path.
@@ -333,7 +348,7 @@ func hooksNeedUpdate(hooks map[string]json.RawMessage) bool {
 				continue
 			}
 			for _, h := range m.Hooks {
-				if strings.Contains(h.Command, fleetHookMarker) && h.Command != currentCmd {
+				if isFleetHook(h.Command) && h.Command != currentCmd {
 					return true
 				}
 			}
@@ -353,7 +368,7 @@ func eventHasFleetHookWithMatcher(raw json.RawMessage, matcher string) bool {
 			continue
 		}
 		for _, h := range m.Hooks {
-			if strings.Contains(h.Command, fleetHookMarker) {
+			if isFleetHook(h.Command) {
 				return true
 			}
 		}
@@ -369,7 +384,7 @@ func eventHasFleetHook(raw json.RawMessage) bool {
 	}
 	for _, m := range matchers {
 		for _, h := range m.Hooks {
-			if strings.Contains(h.Command, fleetHookMarker) {
+			if isFleetHook(h.Command) {
 				return true
 			}
 		}
@@ -393,7 +408,7 @@ func mergeHookEvent(existing json.RawMessage, matcher string, async bool) json.R
 	for i, m := range matchers {
 		if m.Matcher == matcher {
 			for j, h := range m.Hooks {
-				if strings.Contains(h.Command, fleetHookMarker) {
+				if isFleetHook(h.Command) {
 					// Update command path if changed.
 					if h.Command != currentCmd {
 						matchers[i].Hooks[j].Command = currentCmd
@@ -432,7 +447,7 @@ func removeFleetFromEvent(raw json.RawMessage) (json.RawMessage, bool) {
 	for _, m := range matchers {
 		var kept []claudeHookEntry
 		for _, h := range m.Hooks {
-			if strings.Contains(h.Command, fleetHookMarker) {
+			if isFleetHook(h.Command) {
 				removed = true
 				continue
 			}
