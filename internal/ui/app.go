@@ -18,6 +18,7 @@ import (
 	"github.com/brizzai/fleet/internal/chrome"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/discovery"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
@@ -135,6 +136,11 @@ type (
 	// splashFrameMsg advances the boot-splash spinner. Self-rescheduled
 	// while !booted; not emitted after bootstrapDoneMsg.
 	splashFrameMsg time.Time
+	// discoveryMsg carries the launchpad's scan of ~/.claude/projects back to
+	// Update. Fired once, only on an empty fleet.
+	discoveryMsg struct {
+		items []discovery.Recent
+	}
 )
 
 func spinnerTickCmd() tea.Msg {
@@ -171,6 +177,12 @@ type Home struct {
 	branchDialog          *BranchCheckoutDialog
 	commandPalette        *CommandPaletteDialog
 	consentDialog         *ConsentDialog
+
+	// launchpad is the first-run experience shown when the fleet is empty:
+	// recent repos mined from Claude Code history, ready to resume.
+	// launchpadDismissed lets the user Esc out to the bare empty state.
+	launchpad          *Launchpad
+	launchpadDismissed bool
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingForkCtx    *forkContext        // set while Shift+F worktree picker is open; consumed on pick/cancel
@@ -319,6 +331,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		branchDialog:          NewBranchCheckoutDialog(),
 		commandPalette:        NewCommandPaletteDialog(),
 		consentDialog:         NewConsentDialog(),
+		launchpad:             NewLaunchpad(),
 		bugReport:             NewBugReportDialog(),
 		previewCache:          make(map[string]string),
 		previewCacheTime:      make(map[string]time.Time),
@@ -932,6 +945,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.splashFrame++
 		return h, h.splashTick()
 
+	case discoveryMsg:
+		h.launchpad.SetItems(msg.items)
+		// The boot splash stayed up during the scan; reveal the UI now in one
+		// transition (launchpad if we found anything, bare empty state if not).
+		if !h.booted {
+			h.booted = true
+			go h.statusWorker()
+		}
+		if len(msg.items) > 0 {
+			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
+				"discovered_repos": len(msg.items),
+			})
+		}
+		return h, nil
+
 	case loadSessionsMsg:
 		if msg.err != nil {
 			h.setError(msg.err)
@@ -1031,9 +1059,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			repos := h.bootstrapRepoSet()
 			h.bootstrapRepos = len(repos)
 			if len(repos) == 0 {
-				// Empty fleet: no probes to wait on. Skip the splash entirely.
-				h.booted = true
-				go h.statusWorker()
+				// Empty fleet → first-run launchpad. Keep the boot splash up as
+				// the single loading page while we scan Claude history, then
+				// flip to the launchpad in one transition (see discoveryMsg).
+				// This avoids a splash → "scanning" → list flicker. booted and
+				// the status worker are deferred to discoveryMsg.
+				startupCmd = tea.Batch(h.scanDiscovery(), h.splashTick())
 			} else {
 				startupCmd = tea.Batch(h.bootstrapGitInfo(repos), h.splashTick())
 			}
@@ -1125,6 +1156,11 @@ func (h *Home) renderBody() string {
 	}
 	if h.renameDialog.IsVisible() {
 		return h.renameDialog.View()
+	}
+
+	// First-run launchpad owns the screen while the fleet is empty.
+	if h.launchpadActive() {
+		return h.launchpad.View(h.width, h.height)
 	}
 
 	var b strings.Builder
@@ -1360,6 +1396,37 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		dialog, cmd := h.renameDialog.Update(msg)
 		h.renameDialog = dialog
 		return h, cmd
+	}
+
+	// First-run launchpad: drive the recent-repos picker. Space multi-selects,
+	// Enter launches the checked set (or the cursor row). Unhandled keys
+	// (n to type a path, ?, S, q, …) fall through to the main switch below.
+	if h.launchpadActive() {
+		switch msg.String() {
+		case "j", "down":
+			h.launchpad.Move(1)
+			return h, nil
+		case "k", "up":
+			h.launchpad.Move(-1)
+			return h, nil
+		case " ":
+			h.launchpad.Toggle()
+			return h, nil
+		case "A":
+			h.launchpad.ToggleAll()
+			return h, nil
+		case "enter":
+			// Consume the launchpad as we fire the set: launching is async, so
+			// without this a second Enter (before the new sessions register)
+			// would re-launch the whole set and duplicate every resumed
+			// conversation.
+			set := h.launchpad.LaunchSet()
+			h.launchpadDismissed = true
+			return h, h.launchLaunchpadSet(set)
+		case "esc":
+			h.launchpadDismissed = true
+			return h, nil
+		}
 	}
 
 	// Focus mode: forward keys to tmux session.
@@ -1756,21 +1823,80 @@ func (a attachCmd) SetStdin(r io.Reader)  {}
 func (a attachCmd) SetStdout(w io.Writer) {}
 func (a attachCmd) SetStderr(w io.Writer) {}
 
+// scanDiscovery reads the user's Claude Code history off the UI thread and
+// feeds the launchpad. Best-effort: a nil/empty result just leaves the bare
+// empty state in place.
+func (h *Home) scanDiscovery() tea.Cmd {
+	return func() tea.Msg {
+		return discoveryMsg{items: discovery.RecentRepos(8)}
+	}
+}
+
+// launchpadActive reports whether the launchpad should own the screen: a truly
+// empty fleet (no sessions, no pinned repos), not dismissed, with the scan
+// having found something. The scan completes before booted flips (the splash
+// covers it), so by the time this can return true the items are already in;
+// an empty scan steps aside for the bare empty state.
+func (h *Home) launchpadActive() bool {
+	if !h.booted || h.launchpadDismissed {
+		return false
+	}
+	if len(h.sessions) > 0 || len(h.pinnedRepos) > 0 {
+		return false
+	}
+	return h.launchpad.HasItems()
+}
+
 func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
 		return h, nil
 	}
-	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path)
+	return h, h.startSessionCmd(msg)
+}
+
+// startSessionCmd builds the tea.Cmd that creates and starts one session off
+// the UI thread. Shared by the new-session flow and the launchpad (which fires
+// several at once). A non-empty resumeClaudeID makes buildClaudeCmd() launch
+// `claude --resume <id>` to continue an existing conversation.
+func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
+	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path, "resume", msg.resumeClaudeID)
 	s := session.NewSession(msg.title, msg.path)
 	s.WorkspaceName = msg.workspaceName
-	return h, func() tea.Msg {
+	if msg.resumeClaudeID != "" {
+		s.ClaudeSessionID = msg.resumeClaudeID
+	}
+	return func() tea.Msg {
 		if err := s.Start(); err != nil {
 			debuglog.Logger.Error("session Start() failed", "title", msg.title, "path", msg.path, "err", err)
 			return sessionCreateResultMsg{err: err}
 		}
 		return sessionCreateResultMsg{session: s}
 	}
+}
+
+// launchLaunchpadSet starts every chosen recent project at once, resuming each
+// one's most recent Claude conversation. This is the launchpad's payoff:
+// rehydrate a whole working set in a single keystroke.
+func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
+	if len(items) == 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
+		return nil
+	}
+	analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{"count": len(items)})
+	cmds := make([]tea.Cmd, 0, len(items))
+	for _, it := range items {
+		h.actionLog.Add("launchpad add", it.Path, true)
+		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
+			path:           it.Path,
+			title:          it.Title,
+			resumeClaudeID: it.ClaudeSessionID,
+		}))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model, tea.Cmd) {
@@ -2207,129 +2333,91 @@ func (h *Home) collapseRepoAtCursor() {
 	h.syncViewport()
 }
 
-// jumpToNextAttentionSession cycles through sessions needing attention:
-// waiting first, then finished. Wraps around, auto-expands collapsed groups.
+// jumpToNextAttentionSession moves the cursor to the next session needing
+// attention — waiting first, then finished — cycling in on-screen (tree) order
+// and wrapping.
+//
+// Collapse semantics: a COLLAPSED ORIGIN is muted — its sessions are never jump
+// targets. A collapsed CHECKOUT (branch) under an expanded origin is NOT muted:
+// jump reaches its sessions and expands just that checkout to reveal the target.
+// Filtered-out sessions are skipped. Silent no-op when nothing qualifies.
 func (h *Home) jumpToNextAttentionSession() {
-	// Build ordered list of ALL sessions (same order as sidebar).
-	groups := session.GroupByRepo(h.sessions)
-	repos := make([]string, 0, len(groups))
-	for repo := range groups {
-		repos = append(repos, repo)
-	}
-	sort.Strings(repos)
-
-	type candidate struct {
-		s    *session.Session
-		repo string
-	}
-	var allSessions []candidate
-	for _, repo := range repos {
-		for _, s := range groups[repo] {
-			allSessions = append(allSessions, candidate{s: s, repo: repo})
-		}
-	}
-	if len(allSessions) == 0 {
+	// Candidate order: the tree with every checkout force-expanded but origins
+	// keeping their real collapse state. So a target in a folded checkout is
+	// reachable, while one inside a folded origin stays excluded.
+	cand := h.buildJumpTree()
+	n := len(cand)
+	if n == 0 {
 		return
 	}
 
-	// Find the current session's position in allSessions.
-	var currentID string
-	if h.cursor >= 0 && h.cursor < len(h.flatItems) && !h.flatItems[h.cursor].IsRepoHeader {
-		if s := h.flatItems[h.cursor].Session; s != nil {
-			currentID = s.ID
-		}
-	}
-	currentIdx := -1
-	for i, c := range allSessions {
-		if c.s.ID == currentID {
-			currentIdx = i
-			break
+	// Anchor at the current row's position in the candidate order — including
+	// header rows, so jumping from an origin/checkout header continues from
+	// that header instead of restarting at the top. A collapsed origin header
+	// has no children in cand, so the scan simply moves on to the next group.
+	start := -1
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+		cur := h.flatItems[h.cursor]
+		for i, it := range cand {
+			switch {
+			case cur.Session != nil && it.Session != nil && it.Session.ID == cur.Session.ID:
+				start = i
+			case cur.IsOriginHeader && it.IsOriginHeader && it.OriginKey == cur.OriginKey:
+				start = i
+			case cur.IsCheckoutHeader && it.IsCheckoutHeader && it.RepoPath == cur.RepoPath:
+				start = i
+			}
+			if start != -1 {
+				break
+			}
 		}
 	}
 
-	// findNext scans forward (wrapping) for a session with the given status.
-	findNext := func(status session.Status) *candidate {
-		n := len(allSessions)
-		start := currentIdx + 1
-		for i := 0; i < n; i++ {
-			c := &allSessions[(start+i)%n]
-			if c.s.GetStatus() == status {
-				return c
+	findNext := func(status session.Status) *session.Session {
+		for off := 1; off <= n; off++ {
+			it := cand[(start+off+n)%n] // +n keeps the index non-negative when start == -1
+			if !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status {
+				return it.Session
 			}
 		}
 		return nil
 	}
 
-	// Priority: waiting > finished.
 	target := findNext(session.StatusWaiting)
-	targetKind := "waiting"
 	if target == nil {
 		target = findNext(session.StatusFinished)
-		targetKind = "finished"
 	}
-
-	// visIdx returns the index of a session ID in the visible flatItems, or -1.
-	visIdx := func(id string) int {
-		for i, item := range h.flatItems {
-			if !item.IsRepoHeader && item.Session != nil && item.Session.ID == id {
-				return i
-			}
-		}
-		return -1
-	}
-
 	if target == nil {
-		debuglog.Logger.Debug("spacejump: no waiting/finished target",
-			"cursor", h.cursor, "currentID", currentID, "allSessions", len(allSessions))
+		debuglog.Logger.Debug("spacejump: no waiting/finished target outside collapsed origins", "cursor", h.cursor)
 		return // Silent no-op.
 	}
 
-	// DIAGNOSTIC: capture orderings + collapse/filter state before we touch
-	// anything. allSessions is repo-path-sorted; flatItems is origin-tree
-	// sorted — when these diverge, "next" in the jump list isn't "next" on
-	// screen, which is the suspected "only works going down" bug.
-	debuglog.Logger.Debug("spacejump: target found",
-		"kind", targetKind,
-		"targetID", target.s.ID,
-		"targetRepo", target.repo,
-		"targetOrigin", h.originOf(target.repo),
-		"cursor", h.cursor,
-		"currentID", currentID,
-		"currentIdx_allSessions", currentIdx,
-		"currentVisIdx", visIdx(currentID),
-		"targetVisIdx_beforeExpand", visIdx(target.s.ID),
-		"originCollapsed", !IsExpanded(h.repoExpanded, OriginExpandKey(h.originOf(target.repo))),
-		"checkoutCollapsed", !IsExpanded(h.repoExpanded, target.repo),
-		"filterText", h.filterText,
-	)
-
-	// Expand both header levels (origin group + checkout) so the target is visible.
-	h.revealCheckout(target.repo)
+	// Reveal just the target's checkout (its origin is already expanded — a
+	// collapsed origin would have excluded it above), then land on it.
+	h.repoExpanded[session.GetRepoRoot(target.ProjectPath)] = true
 	h.rebuildFlatItems()
-
-	// Set cursor to the target session.
-	if i := visIdx(target.s.ID); i >= 0 {
-		dir := "down"
-		if i < h.cursor {
-			dir = "up"
+	for i, it := range h.flatItems {
+		if !it.IsRepoHeader && it.Session != nil && it.Session.ID == target.ID {
+			debuglog.Logger.Debug("spacejump: landed", "targetID", target.ID, "newCursor", i)
+			h.cursor = i
+			h.syncViewport()
+			return
 		}
-		debuglog.Logger.Debug("spacejump: landed",
-			"targetID", target.s.ID, "oldCursor", h.cursor, "newCursor", i, "direction", dir)
-		h.cursor = i
-		h.syncViewport()
-		return
 	}
+}
 
-	// Target found by findNext but still absent from flatItems even after
-	// expanding both the origin and checkout keys — it's filtered out by the
-	// active filter. Cursor does NOT move.
-	debuglog.Logger.Warn("spacejump: target HIDDEN, cursor NOT moved",
-		"targetID", target.s.ID,
-		"targetRepo", target.repo,
-		"targetOrigin", h.originOf(target.repo),
-		"originCollapsed", !IsExpanded(h.repoExpanded, OriginExpandKey(h.originOf(target.repo))),
-		"filterText", h.filterText,
-	)
+// buildJumpTree returns the sidebar tree as jump should see it: origins keep
+// their real collapse state (collapsed origins are muted), but checkouts are
+// forced expanded so a session in a folded branch is still reachable.
+func (h *Home) buildJumpTree() []SidebarItem {
+	exp := make(map[string]bool, len(h.repoExpanded))
+	for k, v := range h.repoExpanded {
+		if strings.HasPrefix(k, originExpandPrefix) {
+			exp[k] = v // keep origin collapse; drop checkout keys → default expanded
+		}
+	}
+	originOf, isWorktreeOf := h.originResolvers()
+	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
 }
 
 func (h *Home) renameSelected() tea.Cmd {
@@ -2956,8 +3044,9 @@ func (h *Home) bootstrapGitInfo(repos []string) tea.Cmd {
 // Returns 0 before bootstrapRepos has been initialized — there's a one-frame
 // window between the first paint and loadSessionsMsg arriving where the
 // splash renders without yet knowing the repo count. The empty-fleet path
-// flips `booted=true` in the same Update tick, so the splash never appears
-// for users with no repos either way.
+// keeps the splash up (bar at 0, spinner animating) through the Claude-history
+// scan and reveals the launchpad when discoveryMsg lands — one transition, no
+// splash → scanning → list flicker.
 func (h *Home) bootProgress() float64 {
 	if h.bootstrapRepos <= 0 {
 		return 0
@@ -3794,12 +3883,13 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	// Expand the repo group if collapsed, so the session is visible and selectable.
+	// Reveal the session: expand both its origin group and its checkout if
+	// collapsed, so a bound session folded away under either header still
+	// becomes visible and selectable. (Expanding only the checkout left a
+	// collapsed origin hiding the row — it then read as "hidden by filter".)
 	repo := session.GetRepoRoot(s.ProjectPath)
-	if !h.repoExpanded[repo] {
-		h.repoExpanded[repo] = true
-		h.rebuildFlatItems()
-	}
+	h.revealCheckout(repo)
+	h.rebuildFlatItems()
 
 	idx := -1
 	for i, item := range h.flatItems {
@@ -3856,11 +3946,11 @@ func (h *Home) repoInfoFromSnap(snap map[string]*git.RepoInfo) *git.RepoInfo {
 
 // --- Internal helpers ---
 
-func (h *Home) rebuildFlatItems() {
-	// Build origin / worktree lookup maps from the immutable git/PR
-	// snapshot. h.gitInfo() is a lock-free atomic load — writers always
-	// publish a fresh map, so the entries we read here can't shift
-	// underneath us mid-pass.
+// originResolvers builds the origin/worktree lookup closures from the
+// immutable git/PR snapshot. h.gitInfo() is a lock-free atomic load — writers
+// always publish a fresh map, so the entries can't shift underneath us. Shared
+// by rebuildFlatItems and the jump tree so both group identically.
+func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 	snap := h.gitInfo()
 	originSnap := make(map[string]string, len(snap))
 	worktreeSnap := make(map[string]bool, len(snap))
@@ -3875,7 +3965,6 @@ func (h *Home) rebuildFlatItems() {
 			worktreeSnap[k] = true
 		}
 	}
-
 	originOf := func(repoRoot string) string {
 		if key, ok := originSnap[repoRoot]; ok {
 			return key
@@ -3885,7 +3974,11 @@ func (h *Home) rebuildFlatItems() {
 	isWorktreeOf := func(repoRoot string) bool {
 		return worktreeSnap[repoRoot]
 	}
+	return originOf, isWorktreeOf
+}
 
+func (h *Home) rebuildFlatItems() {
+	originOf, isWorktreeOf := h.originResolvers()
 	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
 	h.sidebarDirty = true
 }

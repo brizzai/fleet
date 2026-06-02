@@ -67,8 +67,12 @@ func IsExpanded(expanded map[string]bool, key string) bool {
 	return v
 }
 
+// originExpandPrefix namespaces origin keys in the shared expand map so they
+// don't collide with checkout (repo-path) keys.
+const originExpandPrefix = "origin:"
+
 // OriginExpandKey returns the map key used for a given origin.
-func OriginExpandKey(originKey string) string { return "origin:" + originKey }
+func OriginExpandKey(originKey string) string { return originExpandPrefix + originKey }
 
 // labelForOrigin strips the host prefix from an origin key, leaving just the
 // short identifier ("brizzai/fleet" → "fleet", "local:scratch" → "scratch").

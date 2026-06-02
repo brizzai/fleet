@@ -23,7 +23,7 @@ var allKeyBindings = []KeyBinding{
 	// Session actions.
 	{Key: "Enter", BarKey: "⏎", BarDesc: "Open", Desc: "Attach / toggle group", Section: "session"},
 	{Key: "Tab", BarKey: "⇥", BarDesc: "Focus", Desc: "Focus preview / attach (swap)", Section: "session"},
-	{Key: "Space", BarKey: "␣", BarDesc: "Next", Desc: "Jump to next waiting/finished", Section: "session"},
+	{Key: "Space", BarKey: "␣", BarDesc: "Jump", Desc: "Jump to next waiting/finished", Section: "session"},
 	{Key: "← / h", Desc: "Collapse group", Section: "session"},
 	{Key: "→ / l", Desc: "Expand group", Section: "session"},
 	{Key: "a", BarKey: "a", BarDesc: "New", Desc: "New session", Section: "session"},
@@ -101,13 +101,13 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 	case BarContextSession:
 		if enterMode == "split" {
 			context = []struct{ Key, Desc string }{
-				{"⇥", "Attach"}, {"⏎", "Focus"}, {"Y", "Approve"},
-				{"d", "Del"}, {"p", "PR"},
+				{"⇥", "Attach"}, {"⏎", "Focus"}, {"␣", "Jump"},
+				{"Y", "Approve"}, {"d", "Del"}, {"p", "PR"},
 			}
 		} else {
 			context = []struct{ Key, Desc string }{
-				{"⏎", "Attach"}, {"Y", "Approve"}, {"d", "Del"},
-				{"r", "Restart"}, {"p", "PR"},
+				{"⏎", "Attach"}, {"␣", "Jump"}, {"Y", "Approve"},
+				{"d", "Del"}, {"r", "Restart"}, {"p", "PR"},
 			}
 		}
 	case BarContextCheckout:
