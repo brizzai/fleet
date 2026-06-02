@@ -11,6 +11,7 @@ import (
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // SidebarItem represents a flattened row for cursor navigation.
@@ -601,9 +602,10 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
-	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "…"
-	}
+	// ansi.Truncate is cell-width-aware and rune/ANSI-safe — it won't split a
+	// multibyte rune the way byte slicing would, and only appends "…" when it
+	// actually truncates.
+	title = ansi.Truncate(title, maxTitleLen, "…")
 
 	// Selection: the inverted-background title carries the "you are here"
 	// signal on its own — no leading ▶ arrow (it collided with the chevron
@@ -665,9 +667,7 @@ func renderPendingItem(pw *PendingWorkspace, width int, selected bool) string {
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
-	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "…"
-	}
+	title = ansi.Truncate(title, maxTitleLen, "…")
 
 	if selected {
 		row := " " + spinner + " " + title + " "
