@@ -789,6 +789,10 @@ func FromRow(row *SessionRow) *Session {
 	status := Status(row.Status)
 	// Don't check ts.Exists() here — let background worker detect dead sessions.
 
+	// ownerSessionID is intentionally left unset: ownership is established at
+	// runtime by the first hook and released on the owner's own death. Seeding
+	// it from the persisted (non-liveness-checked) ClaudeSessionID could re-pin
+	// a dead owner across an app restart and drop a relaunched Claude's hooks.
 	return &Session{
 		ID:              row.ID,
 		Title:           row.Title,
@@ -804,10 +808,7 @@ func FromRow(row *SessionRow) *Session {
 		FirstPrompt:     row.FirstPrompt,
 		TitleGenerated:  row.TitleGenerated,
 		PromptCount:     row.PromptCount,
-		// Pre-pin the last-known owner so a nested Claude can't grab ownership
-		// in the window after a fleet restart while an eval is mid-flight.
-		ownerSessionID: row.ClaudeSessionID,
-		tmuxSession:    ts,
+		tmuxSession:     ts,
 	}
 }
 
