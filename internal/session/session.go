@@ -18,10 +18,11 @@ import (
 	"github.com/brizzai/fleet/internal/tmux"
 )
 
-// PaneCapturer abstracts pane capture for testing.
+// PaneCapturer abstracts the tmux session view used by status detection, for testing.
 type PaneCapturer interface {
 	CapturePane() (string, error)
 	IsPaneDead() bool
+	GetActivity() (int64, bool) // window_activity unix ts; ok=false when unknown
 }
 
 // Status represents the current state of a session.
@@ -60,6 +61,7 @@ type Session struct {
 	hookStatus       string
 	hookUpdatedAt    time.Time
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
+	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
 
 	lastContentHash     string
 	lastContentChangeAt time.Time
@@ -230,6 +232,20 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Ignore events from a different Claude session than the one we own.
+	// Nested `claude` processes (eval harnesses that spawn child Claudes)
+	// inherit FLEET_INSTANCE_ID and would otherwise clobber our status, resume
+	// id, and auto-naming with their lifecycle events. The owner is the first
+	// Claude to report after launch/restart; foreign sessions are dropped.
+	if hs.SessionID != "" {
+		if s.ownerSessionID == "" {
+			s.ownerSessionID = hs.SessionID // claim ownership
+		} else if hs.SessionID != s.ownerSessionID {
+			return false // foreign (nested) Claude — ignore entirely
+		}
+	}
+
 	changed := s.hookStatus != hs.Status || s.hookUpdatedAt != hs.UpdatedAt
 	// Reset tracking when hook genuinely changes (new event or new status).
 	if changed {
@@ -248,6 +264,11 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	s.hookUpdatedAt = hs.UpdatedAt
 	if hs.SessionID != "" {
 		s.ClaudeSessionID = hs.SessionID
+	}
+	// Owner ended — release ownership so the next Claude (resume, /clear, or an
+	// in-pane relaunch) can claim it.
+	if hs.Status == "dead" && hs.SessionID == s.ownerSessionID {
+		s.ownerSessionID = ""
 	}
 	// Track user prompts for auto-naming (always update to latest).
 	if hs.PromptCount > s.PromptCount {
@@ -341,6 +362,7 @@ func (s *Session) clearHookState() {
 	s.hookStatus = ""
 	s.hookUpdatedAt = time.Time{}
 	s.hookOverriddenAt = time.Time{}
+	s.ownerSessionID = ""
 	s.mu.Unlock()
 	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
 	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
@@ -689,6 +711,11 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 	}
 }
 
+// finishedHoldMaxAge bounds how long after a finished hook the activity-bridge below
+// may hold a stale state. Long enough to cover a post-finish render burst, short enough
+// that a background agent keeping window_activity fresh can't pin the status forever.
+const finishedHoldMaxAge = 5 * time.Second
+
 // applyHookFinished handles hook status "finished" with pane override for active spinners.
 // Must be called with s.mu held.
 func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
@@ -710,26 +737,30 @@ func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
 		log.Info("hook says finished but pane shows waiting, overriding")
 		return
 	}
-	// Pane detection says "finished" or gave no signal. Before committing to
-	// that, corroborate with tmux window_activity: if the pane was written to
-	// in the last few seconds, Claude's TUI is actively rendering (spinner
-	// animation, sub-agent output bursts that briefly push the spinner line
-	// out of the recent-lines window). Hold the previous state instead of
-	// flipping, so a single-tick pane-detection miss doesn't cause idle/finished
-	// oscillation while Claude is actually working.
+	// Pane detection says "finished" or gave no signal. Before committing, bridge
+	// the brief burst-gap right after a finished hook fires (auto-resume, or Stop
+	// then a final render) where Claude's TUI momentarily shows no spinner: if the
+	// pane was written to in the last few seconds AND the finished hook itself is
+	// recent, hold the previous state for a tick instead of flipping.
 	//
-	// This is only safe in the hook=finished path: here recent activity means
-	// "Claude is writing output", which argues against finished. In the
-	// hook=waiting path (see applyHookWaiting), activity can be sub-agent
-	// output while the permission prompt sits unanswered, so activity there
-	// can't distinguish "user approved" from "user still deciding".
-	if s.tmuxSession != nil {
-		if activity, ok := s.tmuxSession.GetActivity(); ok {
-			if time.Since(time.Unix(activity, 0)) < 3*time.Second {
-				log.Info("hook says finished, pane ambiguous/idle, but tmux activity <3s — holding state",
-					"paneStatus", paneStatus, "current", s.Status)
-				return
-			}
+	// Both conditions are required. window_activity alone can't distinguish "Claude
+	// mid-burst" from "a long-running background/sub-agent redrawing the pane" — the
+	// latter keeps activity perpetually fresh, so the activity check by itself would
+	// pin a stale state forever (it once held `waiting` for 24m). Bounding by hook
+	// age releases once the finished hook is no longer fresh: a genuinely-working
+	// Claude shows a spinner (handled by the paneStatus==running branch above), so
+	// reaching here with a stale finished hook means the turn is really done.
+	//
+	// applyHookWaiting deliberately does NOT use activity at all (see its note):
+	// there activity can't distinguish "user approved" from "user still deciding".
+	if cap := s.getCapturer(); cap != nil {
+		if activity, ok := cap.GetActivity(); ok &&
+			time.Since(time.Unix(activity, 0)) < 3*time.Second &&
+			time.Since(s.hookUpdatedAt) < finishedHoldMaxAge {
+			log.Info("hook=finished, pane idle/ambiguous, recent activity + recent hook — bridging burst gap",
+				"paneStatus", paneStatus, "current", s.Status,
+				"hookAge", time.Since(s.hookUpdatedAt).Round(time.Millisecond))
+			return
 		}
 	}
 	if s.Acknowledged {
@@ -852,6 +883,10 @@ func FromRow(row *SessionRow) *Session {
 	status := Status(row.Status)
 	// Don't check ts.Exists() here — let background worker detect dead sessions.
 
+	// ownerSessionID is intentionally left unset: ownership is established at
+	// runtime by the first hook and released on the owner's own death. Seeding
+	// it from the persisted (non-liveness-checked) ClaudeSessionID could re-pin
+	// a dead owner across an app restart and drop a relaunched Claude's hooks.
 	return &Session{
 		ID:              row.ID,
 		Title:           row.Title,

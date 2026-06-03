@@ -27,6 +27,7 @@ Use [conventional commits](https://www.conventionalcommits.org/). Version is aut
 
 ## Changelog
 - Each PR adds a fragment file: `changelog/unreleased/<name>.md` with `type:` frontmatter (added/improved/fixed/changed/removed)
+- **Keep fragments concise: 1–2 sentences, lead with the user-facing change.** No implementation detail, marketing tone, or exhaustive sub-points — a user skimming the release notes should grasp it at a glance. e.g. "Status updates now respond in ~150ms instead of up to 2s."
 - CI checks for fragment presence; comment `/no-changelog` to skip
 - At release time, fragments are merged into CHANGELOG.md and deleted
 
