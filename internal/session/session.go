@@ -663,6 +663,13 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 
 	// Content change detection: if content changed since waiting started, user acted.
 	hash := hashContent(normalizeForHash(paneContent))
+	// A waiting hook that just fired is authoritative: the permission prompt may still
+	// be painting, and during that window detectStatus can read the streaming spinner as
+	// running (the menu's "Esc to cancel" footer hasn't rendered yet). Don't let that
+	// transient flip a fresh waiting hook to running — the user hasn't approved. A genuine
+	// approval changes pane content and is caught by the content-change branch below
+	// regardless of hook age; only the stable-hash spinner-trust paths are gated here.
+	hookFresh := time.Since(s.hookUpdatedAt) < waitingHookRenderWindow
 	if s.lastContentHash == "" {
 		// First tick in waiting state — save baseline hash.
 		// Don't set lastContentChangeAt here — it should only be set on actual
@@ -672,8 +679,9 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 		// user may have approved and Claude started working immediately.
 		// normalizeForHash strips spinner lines so the hash can appear stable
 		// even while Claude is actively working; without this the TUI stays in
-		// waiting for multiple ticks.
-		if paneStatus == StatusRunning {
+		// waiting for multiple ticks. Gated on !hookFresh so the permission
+		// prompt's own render spinner can't trip this on the first tick.
+		if paneStatus == StatusRunning && !hookFresh {
 			s.Status = StatusRunning
 			s.lastContentChangeAt = time.Now()
 		}
@@ -701,11 +709,13 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 		// Claude outputs in bursts; between bursts the hash is the same for a tick,
 		// causing oscillation back to waiting. The 15s cooldown covers burst gaps.
 		s.Status = StatusRunning
-	} else if paneStatus == StatusRunning {
+	} else if paneStatus == StatusRunning && !hookFresh {
 		// Content hash is stable (normalizeForHash strips spinner/whimsical lines)
 		// and cooldown expired, but pane detection sees an active running indicator
 		// (spinner char or whimsical activity). Trust the pane — Claude is working.
 		// Self-correcting: a Stop hook or idle prompt will override when done.
+		// Gated on !hookFresh: a just-fired waiting hook with a stable hash is the
+		// permission prompt still rendering, not Claude resuming after an approval.
 		s.Status = StatusRunning
 		s.lastContentChangeAt = time.Now()
 	}
@@ -715,6 +725,12 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 // may hold a stale state. Long enough to cover a post-finish render burst, short enough
 // that a background agent keeping window_activity fresh can't pin the status forever.
 const finishedHoldMaxAge = 5 * time.Second
+
+// waitingHookRenderWindow bounds how soon after a "waiting" hook a transient pane spinner
+// (the permission prompt still painting) may flip the session to running. Within this
+// window the fresh hook is authoritative; a genuine approval changes pane content and is
+// caught by the content-change branch in applyHookWaiting instead.
+const waitingHookRenderWindow = 3 * time.Second
 
 // applyHookFinished handles hook status "finished" with pane override for active spinners.
 // Must be called with s.mu held.

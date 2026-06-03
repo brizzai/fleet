@@ -721,19 +721,22 @@ func TestScenarioExtendedThinkingNoOscillation(t *testing.T) {
 }
 
 func TestScenarioWaitingFirstTickPaneRunning(t *testing.T) {
-	// Regression: when a waiting hook arrives but the pane already shows an
-	// active spinner (user approved a prior prompt and Claude is working on
-	// the next task), the first-tick baseline branch would only set the hash
-	// and return — leaving status=waiting for at least one tick. With slow
+	// Regression: when a (stale) waiting hook is first processed but the pane
+	// already shows an active spinner (user approved a prior prompt and Claude is
+	// working on the next task), the first-tick baseline branch would only set the
+	// hash and return — leaving status=waiting for at least one tick. With slow
 	// spinners (e.g. "✽ Blanching…"), the hash stays stable across ticks
 	// because normalizeForHash strips spinner lines, so it could persist.
 	//
-	// Fix: first-tick branch also trusts paneStatus=running.
+	// Fix: first-tick branch also trusts paneStatus=running, but only once the
+	// waiting hook is no longer fresh — a just-fired waiting hook with a pane
+	// spinner is the permission prompt still rendering, not an approved-and-working
+	// session. HookAge backdates the hook to model the prior-prompt approval.
 	// Captured from snapshot 2026-04-16T16-45-03_merge-master.
 	runScenario(t, Scenario{
 		Name: "first tick in waiting + pane shows running → running immediately",
 		Events: []ScenarioEvent{
-			{At: 0, Hook: "waiting", Pane: "output\n✽ Blanching…\n  ⎿  Tip: some tip\n\n❯ \n"},
+			{At: 0, Hook: "waiting", HookAge: 5 * time.Second, Pane: "output\n✽ Blanching…\n  ⎿  Tip: some tip\n\n❯ \n"},
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusRunning},
@@ -792,7 +795,11 @@ func TestScenarioStaleWaitingWithActiveSpinner(t *testing.T) {
 	// status reverted to waiting even though Claude was clearly running.
 	//
 	// Fix: applyHookWaiting checks paneStatus as a fallback — if pane detection
-	// sees running indicators after cooldown, trust the pane and stay running.
+	// sees running indicators after cooldown AND the waiting hook is no longer fresh
+	// (the user approved seconds ago, not a prompt that just rendered), trust the pane
+	// and stay running. HookAge backdates the waiting hook so it reads as stale, which
+	// is what "stale waiting hook" means — without it the freshness gate would (rightly)
+	// keep a just-fired waiting hook in waiting.
 	// Captured from snapshot 2026-04-15T14-07-00_align-button-figma-design-syst.
 	fixture := "pane_running_stale_waiting_spinner.txt"
 	if _, err := os.Stat(filepath.Join("testdata", fixture)); err != nil {
@@ -802,13 +809,34 @@ func TestScenarioStaleWaitingWithActiveSpinner(t *testing.T) {
 	runScenario(t, Scenario{
 		Name: "stale waiting hook + active spinner: stays running after cooldown",
 		Events: []ScenarioEvent{
-			{At: 0, Hook: "waiting", Pane: "permission prompt\n❯ 1. Yes\n  2. No\nEsc to cancel\n"},
+			{At: 0, Hook: "waiting", HookAge: 5 * time.Second, Pane: "permission prompt\n❯ 1. Yes\n  2. No\nEsc to cancel\n"},
 			{At: 3 * time.Second, Pane: "@fixture:" + fixture}, // user approved, Claude running
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusWaiting},
 			{At: 3 * time.Second, Expected: StatusRunning},  // content changed → running
 			{At: 20 * time.Second, Expected: StatusRunning}, // 15s cooldown expired, but pane says running → stays running
+		},
+	})
+}
+
+func TestScenarioFreshWaitingHookRenderSpinnerStaysWaiting(t *testing.T) {
+	// Regression: a PermissionRequest hook fires "waiting" while the permission menu is
+	// still rendering. During that window detectStatus reads the streaming spinner as
+	// running (the menu's "Esc to cancel" footer hasn't painted yet). Before the fix,
+	// applyHookWaiting trusted that transient pane=running over the fresh waiting hook,
+	// flipped to running, and armed the 15s cooldown — pinning the wrong status for ~15s.
+	// A fresh waiting hook must stay waiting: the user hasn't approved, the prompt is
+	// still painting. A genuine approval changes pane content (caught elsewhere) and is
+	// not gated by hook freshness.
+	// Captured from snapshot 2026-06-03T22-40-27_analyze-ariel-v3-strategy-perf.
+	runScenario(t, Scenario{
+		Name: "fresh waiting hook + transient render spinner: stays waiting",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", HookAge: 0, Pane: "⠋ Computing share P&L…\nesc to interrupt\n"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},
 		},
 	})
 }
