@@ -688,6 +688,14 @@ func prBadgeText(pr *github.PR) string {
 	if pr.State == "MERGED" {
 		return badge + " ⇡"
 	}
+	if pr.IsDraft {
+		// Draft = work-in-progress: dotted-circle prefix marks it, CI failure
+		// still surfaces, but review/approval glyphs don't apply to a draft.
+		if pr.CIStatus == "FAILURE" {
+			return "◌ " + badge + " ✕"
+		}
+		return "◌ " + badge
+	}
 	var icons string
 	if pr.CIStatus == "FAILURE" {
 		icons += "✕"
@@ -714,6 +722,9 @@ func prBadgeStyle(pr *github.PR) lipgloss.Style {
 	}
 	if pr.State == "MERGED" {
 		return PRMergedStyle
+	}
+	if pr.IsDraft {
+		return PRDraftStyle
 	}
 	ciFail := pr.CIStatus == "FAILURE"
 	changesReq := pr.ReviewDecision == "CHANGES_REQUESTED"

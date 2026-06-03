@@ -118,6 +118,7 @@ var (
 	PRFailStyle    = lipgloss.NewStyle().Foreground(ColorRed)
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
 	PRMergedStyle  = lipgloss.NewStyle().Foreground(ColorPurple)
+	PRDraftStyle   = lipgloss.NewStyle().Foreground(ColorTextDim)
 
 	// Slot badge style (RTS-style quick-access hotkey).
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
@@ -188,6 +189,7 @@ func ApplyPalette(p Palette) {
 	PRFailStyle = lipgloss.NewStyle().Foreground(ColorRed)
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
 	PRMergedStyle = lipgloss.NewStyle().Foreground(ColorPurple)
+	PRDraftStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
 	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)

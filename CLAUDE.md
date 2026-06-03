@@ -90,7 +90,7 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Attach uses PTY with Ctrl+Q intercept for clean detach (creack/pty + golang.org/x/term)
 - Repo headers show branch name (), dirty indicator (*), and PR badge (#N)
 - Git info refreshes every 2s (branch/dirty), PR info every 60s via `gh` CLI
-- PR badge: green ✓ (approved+CI passed), yellow (pending), red ✕ (CI fail) / ↩ (changes requested or unresolved threads), purple ⇡ (merged), hidden (closed)
+- PR badge: green ✓ (approved+CI passed), yellow (pending), red ✕ (CI fail) / ↩ (changes requested or unresolved threads), purple ⇡ (merged), gray ◌ (draft; ✕ appended on CI fail), hidden (closed)
 - PR info includes unresolved review thread count via GitHub GraphQL API
 - `gh` CLI optional — PR info hidden if not installed
 - Preview strips OSC-8 hyperlink sequences to prevent dotted underline artifacts

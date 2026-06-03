@@ -40,6 +40,7 @@ type PR struct {
 	CIStatus          string // SUCCESS, FAILURE, PENDING, ""
 	UnresolvedThreads int    // count of unresolved review threads
 	HasConflicts      bool   // true when GitHub reports merge conflicts
+	IsDraft           bool   // true while the PR is a draft (not ready for review)
 }
 
 // IsGHAvailable checks if the gh CLI is installed and accessible.
@@ -57,6 +58,7 @@ type ghPRResponse struct {
 	ReviewDecision    string             `json:"reviewDecision"`
 	StatusCheckRollup []statusCheckEntry `json:"statusCheckRollup"`
 	Mergeable         string             `json:"mergeable"` // MERGEABLE, CONFLICTING, UNKNOWN
+	IsDraft           bool               `json:"isDraft"`
 }
 
 type statusCheckEntry struct {
@@ -83,7 +85,7 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 	debuglog.Logger.Debug("PR fetch: start", "path", repoPath, "branch", branch)
 
 	cmd := exec.Command("gh", "pr", "view", branch,
-		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable",
+		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable,isDraft",
 	)
 	cmd.Dir = repoPath
 	var stderr bytes.Buffer
@@ -117,6 +119,7 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 		CIStatus:          deriveCIStatus(resp.StatusCheckRollup, ignorePatterns),
 		UnresolvedThreads: getUnresolvedThreadCount(repoPath, resp.Number, resp.URL),
 		HasConflicts:      resp.Mergeable == "CONFLICTING",
+		IsDraft:           resp.IsDraft,
 	}
 
 	debuglog.Logger.Debug("PR fetch: ok", "path", repoPath, "branch", branch, "pr", pr.Number, "state", pr.State, "ci", pr.CIStatus)
