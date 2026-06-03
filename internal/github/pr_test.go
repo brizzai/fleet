@@ -141,6 +141,60 @@ func TestDeriveCIStatus(t *testing.T) {
 			[]string{"noisy"},
 			"SUCCESS",
 		},
+		{
+			// Re-run in place: a check failed, then a later run of the same
+			// check passed. Only the latest run should count.
+			"rerun supersedes stale failure with success",
+			[]statusCheckEntry{
+				{Name: "validate", Status: "COMPLETED", Conclusion: "FAILURE", StartedAt: "2026-06-03T13:12:50Z"},
+				{Name: "validate", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: "2026-06-03T14:26:09Z"},
+			},
+			nil,
+			"SUCCESS",
+		},
+		{
+			"rerun supersedes stale success with failure",
+			[]statusCheckEntry{
+				{Name: "validate", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: "2026-06-03T13:12:50Z"},
+				{Name: "validate", Status: "COMPLETED", Conclusion: "FAILURE", StartedAt: "2026-06-03T14:26:09Z"},
+			},
+			nil,
+			"FAILURE",
+		},
+		{
+			"rerun latest run still in progress -> pending",
+			[]statusCheckEntry{
+				{Name: "build", Status: "COMPLETED", Conclusion: "FAILURE", StartedAt: "2026-06-03T13:00:00Z"},
+				{Name: "build", Status: "IN_PROGRESS", Conclusion: "", StartedAt: "2026-06-03T14:00:00Z"},
+			},
+			nil,
+			"PENDING",
+		},
+		{
+			// Real PR #3510 shape: validate failed twice, was cancelled, then
+			// passed — all on the same commit. Latest run is SUCCESS.
+			"multiple reruns, latest success",
+			[]statusCheckEntry{
+				{Name: "validate", Status: "COMPLETED", Conclusion: "FAILURE", StartedAt: "2026-06-03T13:12:50Z"},
+				{Name: "validate", Status: "COMPLETED", Conclusion: "FAILURE", StartedAt: "2026-06-03T13:14:51Z"},
+				{Name: "validate", Status: "COMPLETED", Conclusion: "CANCELLED", StartedAt: "2026-06-03T14:25:53Z"},
+				{Name: "validate", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: "2026-06-03T14:26:09Z"},
+				{Name: "secret-scan", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: "2026-06-03T14:26:00Z"},
+			},
+			nil,
+			"SUCCESS",
+		},
+		{
+			// No timestamps (e.g. older API shape): fall back to rollup order,
+			// last entry per name wins.
+			"no startedAt falls back to last-seen success",
+			[]statusCheckEntry{
+				{Name: "validate", Status: "COMPLETED", Conclusion: "FAILURE"},
+				{Name: "validate", Status: "COMPLETED", Conclusion: "SUCCESS"},
+			},
+			nil,
+			"SUCCESS",
+		},
 	}
 
 	for _, tt := range tests {
