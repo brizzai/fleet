@@ -63,6 +63,7 @@ type statusCheckEntry struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	StartedAt  string `json:"startedAt"` // RFC3339; used to pick the latest run when a check has several
 }
 
 // GetPRForBranch returns the PR associated with the current branch, or nil if none.
@@ -178,6 +179,35 @@ func getUnresolvedThreadCount(repoPath string, prNumber int, prURL string) int {
 	return count
 }
 
+// latestRunPerCheck collapses the rollup to the most recently started run per
+// check name. A single check can appear multiple times on one commit when its
+// workflow is re-run in place (rather than fixed by a new push) — GitHub keeps
+// every run in the rollup, including superseded ones. Without this, a check
+// that failed and was later re-run green would still mark the PR as failed.
+// This mirrors how `gh pr checks` and the GitHub UI report status.
+//
+// Ghost entries with no name (e.g. status contexts, which expose their name
+// under a different field) are dropped, matching prior behavior. On equal or
+// missing StartedAt, the later entry in rollup order wins (GitHub returns runs
+// roughly chronologically).
+func latestRunPerCheck(checks []statusCheckEntry) []statusCheckEntry {
+	latest := make(map[string]statusCheckEntry, len(checks))
+	for _, c := range checks {
+		if c.Name == "" {
+			continue
+		}
+		if prev, ok := latest[c.Name]; ok && c.StartedAt < prev.StartedAt {
+			continue // an existing, newer run wins
+		}
+		latest[c.Name] = c
+	}
+	out := make([]statusCheckEntry, 0, len(latest))
+	for _, c := range latest {
+		out = append(out, c)
+	}
+	return out
+}
+
 // deriveCIStatus determines overall CI status from status check rollup.
 // Checks whose name matches any ignorePatterns glob are dropped before rollup.
 func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
@@ -188,11 +218,7 @@ func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 	hasFailure := false
 	hasPending := false
 
-	for _, check := range checks {
-		// Skip ghost entries with no name (null checks from GitHub API).
-		if check.Name == "" {
-			continue
-		}
+	for _, check := range latestRunPerCheck(checks) {
 		if matchesAnyPattern(check.Name, ignorePatterns) {
 			continue
 		}
