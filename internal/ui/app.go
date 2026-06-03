@@ -3552,15 +3552,10 @@ func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tm
 		if info.PR != nil {
 			if txt := previewPRSummary(info.PR); txt != "" {
 				prSummary = txt
-				switch {
-				case info.PR.State == "MERGED":
-					prColor = string(ColorPurple)
-				case info.PR.CIStatus == "FAILURE" || info.PR.ReviewDecision == "CHANGES_REQUESTED" || info.PR.UnresolvedThreads > 0 || info.PR.HasConflicts:
-					prColor = string(ColorRed)
-				case info.PR.ReviewDecision == "APPROVED" && info.PR.CIStatus == "SUCCESS":
-					prColor = string(ColorGreen)
-				default:
-					prColor = string(ColorYellow)
+				// Reuse the sidebar/preview badge color logic so draft, merged,
+				// fail, approved, and pending stay consistent across the UI.
+				if c, ok := prBadgeStyle(info.PR).GetForeground().(lipgloss.Color); ok {
+					prColor = string(c)
 				}
 			}
 		}
