@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -192,5 +193,30 @@ func TestRenderSessionItem_AgentGlyph(t *testing.T) {
 				t.Errorf("%s (selected=%v): output unexpectedly contains %q glyph: %q", tc.name, selected, tc.notWant, out)
 			}
 		}
+	}
+}
+
+func TestPRBadge_Draft(t *testing.T) {
+	draft := &github.PR{Number: 133, State: "OPEN", IsDraft: true}
+	if got := prBadgeText(draft); got != "◌ #133" {
+		t.Errorf("draft badge: got %q, want %q", got, "◌ #133")
+	}
+	if got := prBadgeStyle(draft).GetForeground(); got != PRDraftStyle.GetForeground() {
+		t.Errorf("draft badge color = %v, want PRDraftStyle (dim)", got)
+	}
+
+	// CI failure still surfaces on a draft; review/approval glyphs do not.
+	draftFail := &github.PR{Number: 135, State: "OPEN", IsDraft: true, CIStatus: "FAILURE"}
+	if got := prBadgeText(draftFail); got != "◌ #135 ✕" {
+		t.Errorf("failing-draft badge: got %q, want %q", got, "◌ #135 ✕")
+	}
+
+	// Approval on a draft is ignored — no ✓, stays gray.
+	draftApproved := &github.PR{Number: 137, State: "OPEN", IsDraft: true, ReviewDecision: "APPROVED", CIStatus: "SUCCESS"}
+	if got := prBadgeText(draftApproved); got != "◌ #137" {
+		t.Errorf("approved-draft badge: got %q, want %q", got, "◌ #137")
+	}
+	if got := prBadgeStyle(draftApproved).GetForeground(); got != PRDraftStyle.GetForeground() {
+		t.Errorf("approved-draft badge color = %v, want PRDraftStyle (dim), not green", got)
 	}
 }

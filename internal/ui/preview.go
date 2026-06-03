@@ -151,6 +151,9 @@ func previewPRSummary(pr *github.PR) string {
 	}
 
 	var details []string
+	if pr.IsDraft {
+		details = append(details, "draft")
+	}
 	if pr.CIStatus == "FAILURE" {
 		details = append(details, "CI failing")
 	}
