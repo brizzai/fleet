@@ -66,6 +66,13 @@ type Session struct {
 	lastContentHash     string
 	lastContentChangeAt time.Time
 
+	// waitingPaneConfirmed records that we've structurally observed the permission
+	// prompt on screen (detectStatus returned StatusWaiting) for the current waiting
+	// hook. Until that happens, a pane that reads "running" is the prompt's own render
+	// spinner, not Claude resuming — so we don't trust it to flip waiting→running.
+	// Reset whenever a new hook arrives (see UpdateHookStatus).
+	waitingPaneConfirmed bool
+
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 
 	tmuxSession  *tmux.Session
@@ -252,6 +259,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 		s.lastContentHash = ""
 		s.lastContentChangeAt = time.Time{}
 		s.hookOverriddenAt = time.Time{} // allow fresh evaluation of new hook
+		s.waitingPaneConfirmed = false   // re-observe the prompt before trusting a pane spinner
 		// A non-dead hook means Claude is alive again. Re-arm the crash-dump
 		// trigger so the NEXT real death gets a dump even if a prior false
 		// transition (e.g. brief stale-hook flash before this fresh hook
@@ -663,13 +671,25 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 
 	// Content change detection: if content changed since waiting started, user acted.
 	hash := hashContent(normalizeForHash(paneContent))
-	// A waiting hook that just fired is authoritative: the permission prompt may still
-	// be painting, and during that window detectStatus can read the streaming spinner as
-	// running (the menu's "Esc to cancel" footer hasn't rendered yet). Don't let that
-	// transient flip a fresh waiting hook to running — the user hasn't approved. A genuine
-	// approval changes pane content and is caught by the content-change branch below
-	// regardless of hook age; only the stable-hash spinner-trust paths are gated here.
-	hookFresh := time.Since(s.hookUpdatedAt) < waitingHookRenderWindow
+
+	// Decide whether a pane=running signal can be trusted to flip waiting→running.
+	// The permission prompt may still be painting when its hook fires, and during
+	// that window detectStatus reads the streaming spinner as running (the menu's
+	// "Esc to cancel" footer hasn't rendered yet). A just-fired waiting hook with a
+	// pane spinner is therefore the prompt rendering, NOT Claude resuming — the user
+	// hasn't approved yet.
+	//
+	// The reliable "the prompt has finished painting" signal is detectStatus itself
+	// returning StatusWaiting (the menu is structurally on screen). Once we've seen
+	// that for this hook, a later pane=running means the menu went away → the user
+	// approved → trust it. The render speed no longer matters: we wait for the actual
+	// prompt, not a fixed timer. The time backstop only covers prompts detection never
+	// confirms structurally and genuinely stale waiting hooks, so neither a slow render
+	// nor the hook ts's whole-second granularity can pin the wrong status.
+	if paneStatus == StatusWaiting {
+		s.waitingPaneConfirmed = true
+	}
+	trustPane := s.waitingPaneConfirmed || time.Since(s.hookUpdatedAt) > waitingHookRenderBackstop
 	if s.lastContentHash == "" {
 		// First tick in waiting state — save baseline hash.
 		// Don't set lastContentChangeAt here — it should only be set on actual
@@ -679,9 +699,9 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 		// user may have approved and Claude started working immediately.
 		// normalizeForHash strips spinner lines so the hash can appear stable
 		// even while Claude is actively working; without this the TUI stays in
-		// waiting for multiple ticks. Gated on !hookFresh so the permission
-		// prompt's own render spinner can't trip this on the first tick.
-		if paneStatus == StatusRunning && !hookFresh {
+		// waiting for multiple ticks. Gated on trustPane so the permission
+		// prompt's own render spinner can't trip this before the prompt is seen.
+		if paneStatus == StatusRunning && trustPane {
 			s.Status = StatusRunning
 			s.lastContentChangeAt = time.Now()
 		}
@@ -709,13 +729,13 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 		// Claude outputs in bursts; between bursts the hash is the same for a tick,
 		// causing oscillation back to waiting. The 15s cooldown covers burst gaps.
 		s.Status = StatusRunning
-	} else if paneStatus == StatusRunning && !hookFresh {
+	} else if paneStatus == StatusRunning && trustPane {
 		// Content hash is stable (normalizeForHash strips spinner/whimsical lines)
 		// and cooldown expired, but pane detection sees an active running indicator
 		// (spinner char or whimsical activity). Trust the pane — Claude is working.
 		// Self-correcting: a Stop hook or idle prompt will override when done.
-		// Gated on !hookFresh: a just-fired waiting hook with a stable hash is the
-		// permission prompt still rendering, not Claude resuming after an approval.
+		// Gated on trustPane: before the permission prompt has been seen on screen,
+		// a stable-hash spinner is the prompt still rendering, not a resumed session.
 		s.Status = StatusRunning
 		s.lastContentChangeAt = time.Now()
 	}
@@ -726,11 +746,14 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 // that a background agent keeping window_activity fresh can't pin the status forever.
 const finishedHoldMaxAge = 5 * time.Second
 
-// waitingHookRenderWindow bounds how soon after a "waiting" hook a transient pane spinner
-// (the permission prompt still painting) may flip the session to running. Within this
-// window the fresh hook is authoritative; a genuine approval changes pane content and is
-// caught by the content-change branch in applyHookWaiting instead.
-const waitingHookRenderWindow = 3 * time.Second
+// waitingHookRenderBackstop bounds how long applyHookWaiting waits to observe the
+// permission prompt on screen (detectStatus == StatusWaiting) before falling back to
+// trusting a pane=running signal. The prompt being seen is the primary gate; this is
+// the safety net for prompts detection never structurally confirms and for genuinely
+// stale waiting hooks. Sized so a normally-rendered prompt is always observed first,
+// leaving render speed and the hook ts's whole-second granularity unable to flip the
+// status prematurely.
+const waitingHookRenderBackstop = 5 * time.Second
 
 // applyHookFinished handles hook status "finished" with pane override for active spinners.
 // Must be called with s.mu held.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -89,6 +90,17 @@ func runTUI() {
 	perfwatch.Init()
 	debuglog.Logger.Info("fleet TUI starting", "version", version)
 
+	// Bubble Tea prints loop/cmd panics to the terminal only, and a panic in
+	// this goroutine outside p.Run() would never reach debug.log at all. Record
+	// it before unwinding, then re-panic so the exit code and stack-to-terminal
+	// behavior are unchanged.
+	defer func() {
+		if r := recover(); r != nil {
+			debuglog.Logger.Error("fatal panic", "panic", r, "stack", string(debug.Stack()))
+			panic(r)
+		}
+	}()
+
 	if err := tmux.IsTmuxAvailable(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -140,6 +152,9 @@ func runTUI() {
 	model.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
+		// A Bubble Tea loop/cmd panic surfaces here as ErrProgramKilled rather
+		// than a Go panic, so log it — otherwise the exit is invisible in debug.log.
+		debuglog.Logger.Error("TUI exited with error", "err", err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
