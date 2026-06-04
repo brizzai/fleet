@@ -1746,6 +1746,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.helpOverlay.Show()
 		return h, nil
 	case "q", "ctrl+c":
+		debuglog.Logger.Info("quit requested", "key", msg.String())
 		h.cancel() // stops background worker
 		if h.hookWatcher != nil {
 			h.hookWatcher.Stop()

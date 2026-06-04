@@ -116,10 +116,27 @@ Location: `~/.config/fleet/snapshots/<timestamp>_<title>/`
 |------|----------|
 | `pane_raw.txt` | Raw ANSI pane capture (copy to `testdata/` for golden tests) |
 | `pane_clean.txt` | ANSI-stripped for human reading |
-| `snapshot.json` | Session state, hook state, content tracking, pane detection, `mismatch` flag |
+| `snapshot.json` | Session state, hook state, content tracking, pane detection, `mismatch` flag, `claude_log` block |
 | `debug_tail.txt` | Last 100 debug.log lines filtered for this session |
+| `claude_session.jsonl` | Frozen full copy of the Claude conversation transcript at capture time (absent for Codex sessions) |
 
 The `snapshot.json` `detection.mismatch` field is `true` when pane detection disagrees with the TUI status — the key signal for status bugs.
+
+The `snapshot.json` `claude_log` block derives activity-recency from the transcript:
+
+```json
+"claude_log": {
+  "file": "claude_session.jsonl",
+  "entries": 202,
+  "last_entry_at": "...Z", "last_entry_age": "1m2s",
+  "last_lead_entry_at": "...Z",      // last non-sidechain entry (ignores sub-agent output)
+  "seconds_past_hook": 3512.3,        // last_lead_entry_at minus the hook ts
+  "advanced_past_hook": true,         // >2s past ⇒ user acted, agent resumed ⇒ a lingering "waiting" hook is stale
+  "recent_gaps_s": [1.6, 0.5, 18.5]   // append cadence between recent entries (running leaves gaps up to ~50s)
+}
+```
+
+`advanced_past_hook` is the decisive signal for the stuck-at-waiting class: a `waiting` hook never gets a resume event (no hook fires on permission-grant or AskUserQuestion-answer), so the transcript advancing past it proves the agent is running even when pane detection is blind.
 
 Implementation: `internal/ui/snapshot.go` (capture logic), `internal/session/session.go` `SnapshotData()` (state export).
 

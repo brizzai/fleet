@@ -21,10 +21,12 @@ Status flows through a pipeline. Your job is to trace the pipeline and find wher
 ```text
 Claude Code → hook event → hook-handler binary → status file → fsnotify → UpdateStatus() → TUI
                                                                               ↓
-                                                                    pane capture (fallback/supplement)
+                                                  pane capture + conversation-log (JSONL) — fallback/supplement
 ```
 
 At each stage, ask: **what does this stage think the status is, and is it correct?**
+
+The **conversation log** (`~/.claude/projects/*/<claude_session_id>.jsonl`) is a fourth, often-decisive signal: it is appended on real conversation events (tool calls, results, thinking), so unlike the pane it is immune to repaint/spinner/queued-message quirks. Its key use: **if the log's last entry is newer than a `waiting` hook's timestamp, the user already acted and the agent resumed** — the session is running even though the hook still says waiting. (It can only *confirm running*, not waiting: a genuine unanswered prompt and a long-running tool both leave the log static — see Step 2.)
 
 ## Step 0: Check for snapshots (only if user mentions they took one)
 
@@ -37,13 +39,18 @@ ls -lt ~/.config/fleet/snapshots/ | head -10
 Then read the snapshot — it contains everything you need:
 
 ```bash
-cat ~/.config/fleet/snapshots/<dir>/snapshot.json   # Session state, hook, detection, mismatch flag
+cat ~/.config/fleet/snapshots/<dir>/snapshot.json   # Session state, hook, detection, mismatch flag, claude_log block
 cat ~/.config/fleet/snapshots/<dir>/pane_clean.txt   # Human-readable pane content
 cat ~/.config/fleet/snapshots/<dir>/debug_tail.txt   # Last 100 debug log lines for this session
-# pane_raw.txt = ANSI-preserved capture, ready to copy to testdata/ for golden tests
+# pane_raw.txt          = ANSI-preserved capture, ready to copy to testdata/ for golden tests
+# claude_session.jsonl  = frozen copy of the Claude conversation transcript at capture time
 ```
 
-The `snapshot.json` `detection.mismatch` field tells you immediately if pane detection disagrees with the TUI status. If a snapshot is available, you can often skip directly to Step 3 (Find the divergence).
+Two fields in `snapshot.json` resolve most cases immediately:
+- `detection.mismatch` — pane detection disagrees with the TUI status.
+- `claude_log.advanced_past_hook` — **`true` means the conversation advanced >2s past the `waiting` hook, so the agent already resumed and a lingering `waiting` is stale** (the classic stuck-at-waiting bug). Also surfaces `last_entry_age`, `seconds_past_hook`, and `recent_gaps_s` (append cadence). `claude_log` is absent for Codex sessions (no Claude transcript).
+
+If a snapshot is available, you can often skip directly to Step 3 (Find the divergence). The frozen `claude_session.jsonl` lets you replay the exact transcript offline without racing the live file.
 
 ## Step 1: Identify the session
 
@@ -66,7 +73,7 @@ sqlite3 ~/.config/fleet/state.db "SELECT tmux_session_name, title FROM sessions 
 
 ## Step 2: What does each layer say?
 
-Check all three layers and compare:
+Check all four layers and compare:
 
 **Hook file** (what hooks last reported):
 ```bash
@@ -88,9 +95,28 @@ Also check what detectStatus sees:
 grep "<instance_id>" ~/.config/fleet/debug.log | grep "detectStatus" | tail -10
 ```
 
+**Conversation log** (what the agent is actually doing — the ground truth pane scraping approximates):
+```bash
+CS=$(jq -r .session_id ~/.config/fleet/hooks/<instance_id>.json)
+F=$(ls ~/.claude/projects/*/$CS.jsonl 2>/dev/null | head -1)
+HOOK_TS=$(jq -r .ts ~/.config/fleet/hooks/<instance_id>.json)
+
+# Did the conversation advance PAST the hook? (filter sub-agent sidechain entries)
+echo "hook ts : $(date -r "$HOOK_TS" -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "last log: $(jq -rc 'select(.timestamp and (.isSidechain|not)) | .timestamp' "$F" | tail -1)"
+
+# Append cadence — is it actively growing right now?
+jq -rc 'select(.timestamp) | .timestamp' "$F" | tail -8
+```
+Read it as:
+- **last log entry NEWER than the hook `ts`** → the user already answered/approved and the agent resumed → **running** (even if the hook still says `waiting` — no hook fires on permission-grant or AskUserQuestion-answer).
+- **last entry == hook ts and file static** → genuinely still waiting (the prompt is unanswered).
+- Timestamps are **UTC (`Z`)**; the hook `ts` and `debug.log` are **local** — convert before comparing.
+- Caveats: a long-running tool or extended-thinking block leaves the log static for up to ~50s, so absence of growth ≠ idle. Sub-agents write `isSidechain:true` entries; filter them when asking "did the *lead* advance?". There is **no explicit status field** in the JSONL — infer from progress, not a flag.
+
 ## Step 3: Find the divergence
 
-Compare the three layers. The bug is where they disagree:
+Compare the layers. The bug is where they disagree:
 
 - **Hook file wrong, pane correct** → Hook event was missed or mapped incorrectly. Check `hook-handler: writing status` entries in the log — is there a gap? Which event should have fired but didn't?
 
@@ -99,6 +125,8 @@ Compare the three layers. The bug is where they disagree:
 - **Both correct but TUI shows wrong** → Acknowledged/Idle transition issue, or timing (status changed between ticks). Check if `Acknowledged` flag is involved.
 
 - **Pane detection wrong** → Pattern matching issue in `detectStatus()`. Look at what pattern it matched and whether that content is current or stale scrollback.
+
+- **Hook stuck on `waiting`, but the conversation log advanced past the hook `ts`** → the user approved a permission / answered an AskUserQuestion (no resume hook fires), and the `waiting→running` flip is starved because it depends entirely on pane detection (`applyHookWaiting`), which is blind when the activity line is pushed out of its line window (queued messages, long thinking). This is the known stuck-at-waiting class. Confirm with the conversation-log check in Step 2; the fix is detection-side (broaden `detectRunning`, or add a conversation-log progress signal).
 
 ## Step 4: Check the timeline
 
@@ -133,12 +161,18 @@ If the session uses Claude's agent team feature (sub-agents, `Explore(...)`, `@a
 
 ## Step 6: Go deeper if needed
 
-**Claude conversation log** (verify user actions):
+**Claude conversation log** (verify user actions / pin the real resume moment):
 ```bash
 # Find the log file
 jq -r .session_id ~/.config/fleet/hooks/<instance_id>.json
 # Then check ~/.claude/projects/*/<session_id>.jsonl
 ```
+See Step 2's **Conversation log** check for the timestamp-vs-hook comparison. To find exactly when the agent resumed after a permission/question, look for the first entry after the hook `ts` — e.g. the answering `tool_result`, then the agent's next `tool_use`:
+```bash
+F=$(ls ~/.claude/projects/*/<session_id>.jsonl | head -1)
+jq -rc 'select(.timestamp) | [.timestamp, .type, (.message.content[0].type // "")] | @tsv' "$F" | tail -40
+```
+The gap between that resume time and the TUI's `new=running` line in `debug.log` is the size of the stuck-waiting bug window.
 
 **Hook installation** (verify hooks are registered):
 ```bash
