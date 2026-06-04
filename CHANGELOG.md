@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-06-04
+
+### Added
+
+- Session rows now show a per-agent glyph between the status dot and the title — `✻` for Claude, `◇` for Codex — so you can tell at a glance which agent a session runs. The glyph is dim and monochrome (identity is carried by shape), leaving the status dot's color to mean status alone.
+- OpenAI Codex support — choose Claude or Codex per session. Press `A` to create a session with an agent picker, or set a default agent in Settings (`a` uses it). Codex sessions get the same live status, auto-naming, and resume via Codex's hooks.
+- Draft PRs now show a dimmed `◌ #N` badge so they stand out from ready PRs awaiting review (which look the same yellow `#N`). A failing CI check still surfaces as `◌ #N ✕`.
+
+### Fixed
+
+- Codex sessions no longer get stuck showing **idle** while actively working. Codex status is hook-driven, but when its hooks don't fire (e.g. hook trust lapses), the session had no way back to running. fleet now falls back to the pane: an in-progress Codex turn (`Working … esc to interrupt`) is detected as running, mirroring the existing waiting-prompt detection.
+- Sessions that finish while a background agent is still running no longer get stuck showing **Waiting**.
+- A session waiting on a permission prompt no longer briefly shows as **running** for ~15 seconds right after the prompt appears — the prompt's own loading spinner no longer overrides the fresh waiting status.
+- Worktree creation now works in git-crypt repos. git-crypt resolves its key via the per-worktree git dir, which has no key, so the smudge filter aborted checkout with `git-crypt: Error: Unable to open key file`. fleet now detects git-crypt repos and creates the worktree with `--no-checkout`, links the shared key into the worktree's git dir, then checks out.
+- Sessions whose Claude spawns nested Claude processes (eval harnesses, sub-agents launched as separate `claude` runs) no longer flash a false "error" status or resume the wrong conversation when a child exits.
+- A PR's CI badge no longer shows failed when a check failed and was then re-run green on the same commit — fleet now reads only the latest run per check, matching GitHub.
+
 ## [2.5.0] - 2026-06-02
 
 ### Added
@@ -198,7 +215,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.6.0...HEAD
+[2.6.0]: https://github.com/brizzai/fleet/releases/tag/v2.6.0
 [2.5.0]: https://github.com/brizzai/fleet/releases/tag/v2.5.0
 [2.4.1]: https://github.com/brizzai/fleet/releases/tag/v2.4.1
 [2.4.0]: https://github.com/brizzai/fleet/releases/tag/v2.4.0
