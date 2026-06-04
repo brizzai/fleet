@@ -40,6 +40,22 @@ func claudeProjectDir(cwd string) (string, error) {
 	return filepath.Join(home, ".claude", "projects", ClaudeProjectDirName(cwd)), nil
 }
 
+// ClaudeTranscriptPath returns the absolute path of the JSONL conversation
+// transcript Claude Code writes for claudeSessionID under projectPath's cwd.
+// Returns "" if inputs are empty or the home dir can't be resolved. The file
+// may not exist (e.g. Codex sessions have no Claude transcript) — callers should
+// treat a missing file as "no transcript".
+func ClaudeTranscriptPath(claudeSessionID, projectPath string) string {
+	if claudeSessionID == "" || projectPath == "" {
+		return ""
+	}
+	dir, err := claudeProjectDir(projectPath)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, claudeSessionID+".jsonl")
+}
+
 // ReadClaudeSessionName reads Claude's best title for a session from its JSONL
 // conversation file. Claude writes two kinds of title entries: "custom-title"
 // (an explicit /rename inside the session) and "ai-title" (a model-generated
