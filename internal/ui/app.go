@@ -1115,13 +1115,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.consentDialog.Show()
 			}
 
-			// The theme onboarding is a brand-new-user experience and follows
-			// the consent prompt (see consentResultMsg). When consent isn't
-			// shown the user is an existing/returning install — never surprise
-			// them with it (it would overwrite their theme); just remember it
-			// as seen so it doesn't pop up on a later launch either.
+			// The theme onboarding is a brand-new-user experience. When the
+			// consent prompt is shown it follows that (see consentResultMsg).
+			// When no consent prompt is shown we decide here based on whether
+			// this is a genuinely fresh install: a brand-new user who skipped
+			// consent only because they're env-opted-out of telemetry still
+			// deserves onboarding; an existing/returning install must never be
+			// surprised by it (it could overwrite their theme), so mark it seen.
 			if !h.consentDialog.IsVisible() {
-				h.markOnboardingSeen()
+				if h.cfg.IsFirstRun() {
+					h.maybeShowOnboarding()
+				} else {
+					h.markOnboardingSeen()
+				}
 			}
 		}
 

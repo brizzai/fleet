@@ -6,6 +6,7 @@ import (
 
 	"github.com/brizzai/fleet/internal/config"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // resetDisplayFlags restores the package display globals to their defaults so
@@ -23,6 +24,62 @@ func TestRenderSidebarPreview_ContainsVocabulary(t *testing.T) {
 	for _, want := range []string{"fleet", "scratch", "Refactor", "#128", claudeGlyph, codexGlyph} {
 		if !strings.Contains(out, want) {
 			t.Errorf("preview missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderSidebarPreview_CalloutRowAlignment guards the preview's flattened
+// row order. The onboarding annotated sample (renderAnnotatedSample) pins
+// teaching callouts to fixed row indices, so the preview must keep emitting the
+// expected row at each of those indices. The preview rows are produced by the
+// real BuildFlatItems, so this also catches drift from the live sidebar.
+func TestRenderSidebarPreview_CalloutRowAlignment(t *testing.T) {
+	resetDisplayFlags(t)
+	defer resetDisplayFlags(t)
+
+	lines := strings.Split(RenderSidebarPreview(44, 14), "\n")
+	want := []struct {
+		row int
+		sub string
+	}{
+		{1, "#128"},              // ← branch · PR approved
+		{2, "Refactor sidebar"},  // ← running · Claude
+		{3, "Add test coverage"}, // ← waiting · Codex
+		{4, "preview"},           // ← worktree · dirty
+		{5, "Fix flaky preview"}, // ← finished · hotkey [1]
+	}
+	for _, w := range want {
+		got := ""
+		if w.row < len(lines) {
+			got = lines[w.row]
+		}
+		if !strings.Contains(got, w.sub) {
+			t.Errorf("preview row %d should contain %q; got %q\nfull:\n%s",
+				w.row, w.sub, got, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// TestSettingsDialog_FitsTerminal locks the regression fix: the modal must
+// never render wider or taller than the terminal, including narrow panes where
+// the old dialog clamped its width. lipgloss.Place pads every line to the
+// terminal width, so any line wider than w means the box overflowed.
+func TestSettingsDialog_FitsTerminal(t *testing.T) {
+	resetDisplayFlags(t)
+	defer resetDisplayFlags(t)
+
+	d := NewSettingsDialog(&config.Config{})
+	d.Show()
+	for _, dim := range []struct{ w, h int }{{40, 30}, {50, 20}, {60, 24}, {80, 30}, {140, 40}} {
+		d.SetSize(dim.w, dim.h)
+		lines := strings.Split(d.View(), "\n")
+		if len(lines) > dim.h {
+			t.Errorf("at %dx%d the modal is %d rows tall (overflows)", dim.w, dim.h, len(lines))
+		}
+		for _, line := range lines {
+			if lw := lipgloss.Width(line); lw > dim.w {
+				t.Errorf("at %dx%d a rendered line is %d cols wide (overflows):\n%q", dim.w, dim.h, lw, line)
+			}
 		}
 	}
 }

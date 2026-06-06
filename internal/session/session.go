@@ -1484,6 +1484,15 @@ var (
 	repoRootCacheMu sync.RWMutex
 )
 
+// SeedRepoRoot pre-populates the repo-root cache so GetRepoRoot returns root for
+// projectPath without shelling out to git. Used by the sidebar preview to
+// resolve its synthetic paths hermetically (no disk access).
+func SeedRepoRoot(projectPath, root string) {
+	repoRootCacheMu.Lock()
+	repoRootCache[projectPath] = root
+	repoRootCacheMu.Unlock()
+}
+
 // GetRepoRoot returns the git repo root for a path, or the path itself if not a git repo.
 func GetRepoRoot(projectPath string) string {
 	repoRootCacheMu.RLock()

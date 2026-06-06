@@ -45,7 +45,18 @@ type Config struct {
 	// first-launch theme/onboarding screen (whether they picked a theme or
 	// skipped). When false, the TUI shows it after the consent prompt.
 	DisplayOnboardingSeen bool `json:"display_onboarding_seen,omitempty"`
+
+	// loadedFromDisk records whether Load read an existing config file. It is
+	// unexported (never serialized) and powers IsFirstRun: a brand-new install
+	// has no config.json, so this is the one signal that doesn't depend on the
+	// telemetry/consent path.
+	loadedFromDisk bool
 }
+
+// IsFirstRun reports whether this is a genuinely fresh install — no config file
+// existed when Load ran. Used to decide whether to show first-run experiences
+// (e.g. theme onboarding) on launches that skip the consent prompt.
+func (c *Config) IsFirstRun() bool { return !c.loadedFromDisk }
 
 // GetDefaultAgent returns the default coding agent for new sessions ("claude" or "codex").
 // The stored value is normalized (trimmed + lower-cased) so hand-edited configs
@@ -109,6 +120,7 @@ func Load() *Config {
 		debuglog.Logger.Info("config file not found, using defaults", "path", path)
 		return cfg
 	}
+	cfg.loadedFromDisk = true
 
 	if err := json.Unmarshal(data, cfg); err != nil {
 		debuglog.Logger.Error("failed to parse config file", "path", path, "error", err)

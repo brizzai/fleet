@@ -191,8 +191,23 @@ func (d *SettingsDialog) cycleCurrent(dir int) {
 
 // View renders the settings dialog.
 func (d *SettingsDialog) View() string {
-	railW := 14
+	const (
+		railW  = 14
+		ruleW  = 3 // " │ " vertical separator between columns
+		chrome = 6 // rounded border (2) + horizontal padding (2×2)
+	)
+
+	// The detail column flexes with the terminal so the modal fits narrow panes
+	// (the old dialog clamped its width the same way); the floor keeps values
+	// readable. detailW + railW + ruleW never exceeds the content area, so the
+	// bordered box stays within d.width.
 	detailW := 36
+	if fit := d.width - chrome - railW - ruleW; fit < detailW {
+		detailW = fit
+	}
+	if detailW < 20 {
+		detailW = 20
+	}
 
 	rail := d.renderRail()
 	detail := d.renderDetail()
@@ -202,13 +217,11 @@ func (d *SettingsDialog) View() string {
 
 	cat := d.categories[d.categoryCursor]
 
-	// The preview column's presence depends only on the terminal width, not on
-	// the selected category, so the modal keeps a constant size. Categories
-	// that don't use the preview leave that region blank rather than collapsing.
+	// The preview column appears only when there's room left beyond the rail,
+	// both rules, and the detail column — so the modal keeps a constant size and
+	// narrow terminals simply omit it (rather than overflowing).
 	previewW := 0
-	// box chrome (~8) + rail + two rules (3 each) + detail.
-	avail := d.width - 8 - railW - 3 - detailW - 3
-	if avail >= 24 {
+	if avail := d.width - chrome - railW - ruleW - detailW - ruleW; avail >= 24 {
 		previewW = min(avail, 44)
 	}
 
@@ -218,9 +231,9 @@ func (d *SettingsDialog) View() string {
 
 	// Fixed content width: always reserve room for the preview column when it
 	// fits the terminal, even on Behavior (whose right region is just blank).
-	contentW := railW + 3 + detailW
+	contentW := railW + ruleW + detailW
 	if previewW > 0 {
-		contentW += 3 + previewW
+		contentW += ruleW + previewW
 	}
 
 	var body string
@@ -247,6 +260,9 @@ func (d *SettingsDialog) View() string {
 		BorderForeground(ColorAccent).
 		Padding(1, 2)
 	box := boxStyle.Render(content)
+	// Safety net for extreme sizes: never exceed the terminal, so a too-small
+	// window truncates the modal rather than wrap-corrupting the surrounding UI.
+	box = lipgloss.NewStyle().MaxWidth(d.width).MaxHeight(d.height).Render(box)
 
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, box)
 }
@@ -330,22 +346,10 @@ func (d *SettingsDialog) renderPreviewColumn(w, h int) string {
 
 // --- column layout helpers ---
 
-// padBlock pads/truncates a multiline block to exactly w columns × h rows.
+// padBlock pads/truncates a multiline block to exactly w columns × h rows,
+// reusing the shared panel-sizing helpers (ensureExactHeight/ensureExactWidth).
 func padBlock(s string, w, h int) string {
-	lines := strings.Split(s, "\n")
-	out := make([]string, h)
-	for i := 0; i < h; i++ {
-		line := ""
-		if i < len(lines) {
-			line = lines[i]
-		}
-		lw := lipgloss.Width(line)
-		if lw < w {
-			line += strings.Repeat(" ", w-lw)
-		}
-		out[i] = line
-	}
-	return strings.Join(out, "\n")
+	return ensureExactWidth(ensureExactHeight(s, h), w)
 }
 
 // verticalRule returns a dim vertical separator h rows tall.

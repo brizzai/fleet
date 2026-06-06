@@ -146,9 +146,9 @@ func themeDots(idx, n int) string {
 }
 
 // renderAnnotatedSample renders the synthetic sidebar with teaching callouts
-// pointing at representative rows. Row indices match previewItems() ordering at
-// normal density, so the sample must be rendered tall enough to avoid scroll
-// indicators shifting the rows.
+// pointing at representative rows. Row indices match the RenderSidebarPreview
+// fixture's ordering at normal density, so the sample must be rendered tall
+// enough to avoid scroll indicators shifting the rows.
 func renderAnnotatedSample(width int) string {
 	callouts := map[int]string{
 		1: "← branch · PR approved",
