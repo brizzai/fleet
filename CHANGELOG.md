@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-06-06
+
+### Improved
+
+- Collapsed origins and repos/worktrees now stay collapsed across restarts.
+
+### Removed
+
+- Removed the `z` idle-session fold.
+
 ## [2.7.0] - 2026-06-06
 
 ### Added
@@ -221,7 +231,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.7.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.8.0...HEAD
+[2.8.0]: https://github.com/brizzai/fleet/releases/tag/v2.8.0
 [2.7.0]: https://github.com/brizzai/fleet/releases/tag/v2.7.0
 [2.6.0]: https://github.com/brizzai/fleet/releases/tag/v2.6.0
 [2.5.0]: https://github.com/brizzai/fleet/releases/tag/v2.5.0
