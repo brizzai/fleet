@@ -17,24 +17,22 @@ import (
 // SidebarItem represents a flattened row for cursor navigation.
 //
 // IsRepoHeader is the umbrella flag for "any non-session row" — it stays true
-// for origin headers, checkout headers, and idle-fold placeholders so existing
-// "this is not a session" guards keep working. IsOriginHeader / IsCheckoutHeader
-// / IsIdleFold pick the specific render path.
+// for origin headers and checkout headers so existing "this is not a session"
+// guards keep working. IsOriginHeader / IsCheckoutHeader pick the specific
+// render path.
 type SidebarItem struct {
 	IsRepoHeader     bool
 	IsOriginHeader   bool
 	IsCheckoutHeader bool
-	IsIdleFold       bool
 	IsSpacer         bool // visual gap row between origin groups; not selectable
 
 	OriginKey   string // origin grouping key (github org/repo or local:basename)
 	OriginLabel string // human-readable origin label
-	RepoPath    string // checkout (repo root) — also set on session/pending/idle-fold
+	RepoPath    string // checkout (repo root) — also set on session/pending
 
 	Expanded     bool
 	SessionCount int                    // origin header: checkouts (repos+worktrees) in group. checkout header: sessions in checkout.
 	StatusCounts map[session.Status]int // header: per-status breakdown for the group (origin or checkout)
-	IdleCount    int                    // IsIdleFold: number of folded idle sessions
 	Session      *session.Session
 	IsLast       bool // retained for layout decisions
 	Pending      *PendingWorkspace
@@ -92,8 +90,7 @@ func labelForOrigin(originKey string) string {
 //
 // originOf maps each repo root to its origin key. isWorktreeOf reports whether
 // a checkout is a git worktree (so main clones sort before worktrees inside
-// an origin). idleFolded[checkoutPath] collapses that checkout's idle sessions
-// into a single "+ N idle" row.
+// an origin).
 func BuildFlatItems(
 	sessions []*session.Session,
 	pending []*PendingWorkspace,
@@ -102,7 +99,6 @@ func BuildFlatItems(
 	pinnedRepos map[string]bool,
 	originOf OriginOf,
 	isWorktreeOf IsWorktreeOf,
-	idleFolded map[string]bool,
 ) []SidebarItem {
 	if originOf == nil {
 		originOf = func(string) string { return "" }
@@ -250,41 +246,15 @@ func BuildFlatItems(
 				continue
 			}
 
-			// Determine which sessions render directly vs. fold into "+ N idle".
-			var rendered []*session.Session
-			idleN := 0
-			fold := idleFolded[blk.repo]
-			for _, s := range blk.sessions {
-				if fold && s.GetStatus() == session.StatusIdle {
-					idleN++
-					continue
-				}
-				rendered = append(rendered, s)
-			}
-
-			totalChildren := len(rendered) + len(blk.pending)
-			if idleN > 0 {
-				totalChildren++
-			}
+			totalChildren := len(blk.sessions) + len(blk.pending)
 			childIdx := 0
-			for _, s := range rendered {
+			for _, s := range blk.sessions {
 				childIdx++
 				items = append(items, SidebarItem{
 					OriginKey: origin,
 					RepoPath:  blk.repo,
 					Session:   s,
 					IsLast:    childIdx == totalChildren,
-				})
-			}
-			if idleN > 0 {
-				childIdx++
-				items = append(items, SidebarItem{
-					IsRepoHeader: true,
-					IsIdleFold:   true,
-					RepoPath:     blk.repo,
-					OriginKey:    origin,
-					IdleCount:    idleN,
-					IsLast:       childIdx == totalChildren,
 				})
 			}
 			for _, pw := range blk.pending {
@@ -364,8 +334,6 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 			b.WriteString(renderOriginHeader(item, width, i == cursor))
 		case item.IsCheckoutHeader:
 			b.WriteString(renderCheckoutHeader(item, gitInfo[item.RepoPath], width, i == cursor))
-		case item.IsIdleFold:
-			b.WriteString(renderIdleFold(item, width, i == cursor))
 		case item.Pending != nil:
 			b.WriteString(renderPendingItem(item.Pending, width, i == cursor))
 		default:
@@ -672,15 +640,6 @@ func agentGlyph(t agent.Type) string {
 		return codexGlyph
 	}
 	return claudeGlyph
-}
-
-// renderIdleFold → "      + N idle"  (under a checkout, in dim)
-func renderIdleFold(item SidebarItem, width int, selected bool) string {
-	label := fmt.Sprintf("+ %d idle", item.IdleCount)
-	if selected {
-		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render("   "+label+" "))
-	}
-	return fmt.Sprintf("      %s", DimStyle.Render(label))
 }
 
 // renderPendingItem renders a "Creating…" phantom under its checkout.

@@ -31,7 +31,6 @@ func TestJumpSkipsCollapsedOrigin(t *testing.T) {
 	h := &Home{
 		sessions:     []*session.Session{aMain, aWait, bWait},
 		repoExpanded: map[string]bool{},
-		idleFolded:   map[string]bool{},
 		pinnedRepos:  map[string]bool{},
 	}
 	gi := map[string]*git.RepoInfo{
@@ -73,7 +72,6 @@ func TestJumpEntersCollapsedCheckout(t *testing.T) {
 	h := &Home{
 		sessions:     []*session.Session{main, wt},
 		repoExpanded: map[string]bool{},
-		idleFolded:   map[string]bool{},
 		pinnedRepos:  map[string]bool{},
 	}
 	gi := map[string]*git.RepoInfo{
@@ -116,7 +114,6 @@ func TestJumpFromHeaderAnchorsAfterIt(t *testing.T) {
 	h := &Home{
 		sessions:     []*session.Session{aWait, bWait},
 		repoExpanded: map[string]bool{},
-		idleFolded:   map[string]bool{},
 		pinnedRepos:  map[string]bool{},
 	}
 	gi := map[string]*git.RepoInfo{
@@ -158,7 +155,6 @@ func TestSlotJumpExpandsCollapsedOrigin(t *testing.T) {
 	h := &Home{
 		sessions:        []*session.Session{other, bound},
 		repoExpanded:    map[string]bool{},
-		idleFolded:      map[string]bool{},
 		pinnedRepos:     map[string]bool{},
 		slotBindings:    map[int]string{3: bound.ID},
 		lastSlotTapSlot: -1,

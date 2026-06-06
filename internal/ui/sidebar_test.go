@@ -33,7 +33,6 @@ func TestBuildFlatItems_OriginGrouping(t *testing.T) {
 		nil,
 		originOf,
 		nil,
-		nil,
 	)
 
 	// Expect: acme-origin header, two checkouts (with one session each),
@@ -70,73 +69,6 @@ func TestBuildFlatItems_OriginGrouping(t *testing.T) {
 	}
 	if !checkoutPaths["/tmp/repo-main"] || !checkoutPaths["/tmp/repo-worktree"] {
 		t.Errorf("expected both repo checkouts under acme origin, got %v", checkoutPaths)
-	}
-}
-
-func TestBuildFlatItems_IdleFold(t *testing.T) {
-	idle1 := session.NewSession("idle1", "/tmp/r")
-	idle1.SetStatus(session.StatusIdle)
-	idle2 := session.NewSession("idle2", "/tmp/r")
-	idle2.SetStatus(session.StatusIdle)
-	running := session.NewSession("run", "/tmp/r")
-	running.SetStatus(session.StatusRunning)
-
-	originOf := func(string) string { return "github.com/acme/r" }
-	idleFolded := map[string]bool{"/tmp/r": true}
-
-	items := BuildFlatItems(
-		[]*session.Session{idle1, idle2, running},
-		nil,
-		map[string]bool{},
-		"",
-		nil,
-		originOf,
-		nil,
-		idleFolded,
-	)
-
-	var foldItems int
-	var sessionItems int
-	for _, it := range items {
-		if it.IsIdleFold {
-			foldItems++
-			if it.IdleCount != 2 {
-				t.Errorf("IdleCount = %d, want 2", it.IdleCount)
-			}
-		}
-		if it.Session != nil {
-			sessionItems++
-		}
-	}
-	if foldItems != 1 {
-		t.Errorf("idle fold rows = %d, want 1", foldItems)
-	}
-	if sessionItems != 1 {
-		t.Errorf("session rows = %d, want 1 (running only)", sessionItems)
-	}
-
-	// With folding off, all three sessions should render.
-	items = BuildFlatItems(
-		[]*session.Session{idle1, idle2, running},
-		nil,
-		map[string]bool{},
-		"",
-		nil,
-		originOf,
-		nil,
-		nil,
-	)
-	sessionItems = 0
-	for _, it := range items {
-		if it.Session != nil {
-			sessionItems++
-		}
-		if it.IsIdleFold {
-			t.Errorf("unexpected idle-fold row when folding off")
-		}
-	}
-	if sessionItems != 3 {
-		t.Errorf("session rows = %d, want 3 (no fold)", sessionItems)
 	}
 }
 
