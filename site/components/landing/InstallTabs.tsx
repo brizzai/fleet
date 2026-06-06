@@ -38,7 +38,7 @@ export function InstallTabs() {
     <section
       style={{
         maxWidth: 760,
-        margin: "5rem auto 5rem",
+        margin: "clamp(3rem, 9vw, 5rem) auto clamp(3rem, 9vw, 5rem)",
         padding: "0 1.25rem",
         textAlign: "center",
       }}

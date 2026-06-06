@@ -25,12 +25,22 @@ import { nextScriptEvent, startingToRunningEvent } from "./script";
 const TICK_MS = 100;
 const SCRIPT_INTERVAL_MS = 1364;
 
+// On narrow/touch screens the side-by-side cockpit can't fit at full size, so
+// we render it at this fixed design width and CSS-scale the whole thing down to
+// the available width — a faithful, compact mini-cockpit instead of a clipped one.
+const DESIGN_WIDTH = 640;
+
 export function TuiDemo() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<DemoState>(state);
   stateRef.current = state;
+  // Mirrors `autoOnly` for the script ticker (which has a stable empty-deps
+  // closure and can't read the latest state value directly).
+  const autoOnlyRef = useRef(false);
 
   // Spinner ticker
   useEffect(() => {
@@ -51,7 +61,7 @@ export function TuiDemo() {
       if (cancelled) return;
       const now = Date.now();
       if (!isScriptPaused(stateRef.current, now)) {
-        const ev = nextScriptEvent(stateRef.current);
+        const ev = nextScriptEvent(stateRef.current, autoOnlyRef.current);
         if (ev) dispatch({ type: "script_event", event: ev });
       }
       // ±35% jitter around SCRIPT_INTERVAL_MS
@@ -88,6 +98,7 @@ export function TuiDemo() {
 
   // Detect touch / narrow viewport: auto-play only mode
   const [autoOnly, setAutoOnly] = useState(false);
+  autoOnlyRef.current = autoOnly;
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 720px), (pointer: coarse)");
     const apply = () => setAutoOnly(mq.matches);
@@ -95,6 +106,30 @@ export function TuiDemo() {
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
   }, []);
+
+  // Scale-to-fit: in auto-only mode, shrink the fixed-width cockpit so it always
+  // fits the available width (no horizontal clipping). Desktop renders untouched.
+  const [scale, setScale] = useState(1);
+  const [fitHeight, setFitHeight] = useState<number | null>(null);
+  useEffect(() => {
+    if (!autoOnly) {
+      setScale(1);
+      setFitHeight(null);
+      return;
+    }
+    const measure = () => {
+      const avail = wrapRef.current?.clientWidth ?? DESIGN_WIDTH;
+      const s = Math.min(1, avail / DESIGN_WIDTH);
+      const h = cardRef.current?.offsetHeight ?? 0;
+      setScale(s);
+      setFitHeight(h > 0 ? h * s : null);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (wrapRef.current) ro.observe(wrapRef.current);
+    if (cardRef.current) ro.observe(cardRef.current);
+    return () => ro.disconnect();
+  }, [autoOnly]);
 
   const handleFocus = useCallback(() => {
     if (autoOnly) return;
@@ -222,11 +257,12 @@ export function TuiDemo() {
 
   return (
     <div
+      ref={wrapRef}
       style={{
         position: "relative",
-        margin: "5rem auto 0",
+        margin: "clamp(2.5rem, 9vw, 5rem) auto 0",
         maxWidth: 1100,
-        overflow: "visible",
+        overflow: autoOnly ? "hidden" : "visible",
       }}
     >
       {/* Focus aura — large blurred pink+purple glow behind the demo */}
@@ -247,7 +283,17 @@ export function TuiDemo() {
         }}
       />
       {hint && <ComicHint hint={hint} onClick={handleFocus} dimmed={state.focused} />}
+      {/* Fit container: collapses the layout box to the scaled height on mobile so
+          the transformed (visually-smaller) cockpit leaves no empty space below. */}
       <div
+        style={
+          autoOnly
+            ? { height: fitHeight ?? undefined, overflow: "hidden" }
+            : undefined
+        }
+      >
+      <div
+        ref={cardRef}
         style={{
           position: "relative",
           zIndex: 1,
@@ -262,6 +308,14 @@ export function TuiDemo() {
             : "0 30px 80px -30px rgba(0,0,0,0.6), 0 0 60px -20px rgba(244,143,177,0.25)",
           transition:
             "box-shadow 0.45s ease, border-color 0.45s ease",
+          ...(autoOnly
+            ? {
+                width: DESIGN_WIDTH,
+                marginInline: "auto",
+                transform: scale < 1 ? `scale(${scale})` : undefined,
+                transformOrigin: "top left",
+              }
+            : {}),
         }}
       >
       {/* macOS-style chrome bar */}
@@ -332,6 +386,7 @@ export function TuiDemo() {
 
       <Footer focused={state.focused && !autoOnly} />
       </div>
+      </div>
 
       {!autoOnly && <CoachBanner step={state.coachStep} />}
 
@@ -400,41 +455,6 @@ function ComicHint({
       >
         {hint}
       </div>
-
-      {/* Curved arrow pointing down into the demo */}
-      <svg
-        width="86"
-        height="68"
-        viewBox="0 0 86 68"
-        fill="none"
-        style={{
-          filter: "drop-shadow(0 2px 6px rgba(244,143,177,0.45))",
-          marginRight: 26,
-          marginTop: -2,
-        }}
-      >
-        <defs>
-          <marker
-            id="fleet-arrow-head"
-            viewBox="0 0 12 12"
-            refX="9"
-            refY="6"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M 0 0 L 12 6 L 0 12 z" fill="#f48fb1" />
-          </marker>
-        </defs>
-        <path
-          d="M76 4 C 70 24, 44 30, 22 58"
-          fill="none"
-          stroke="#f48fb1"
-          strokeWidth="2.6"
-          strokeLinecap="round"
-          markerEnd="url(#fleet-arrow-head)"
-        />
-      </svg>
     </div>
   );
 }

@@ -74,14 +74,55 @@ const RECIPES: Array<{
   },
 ];
 
-export function nextScriptEvent(state: DemoState): ScriptEvent | null {
+/**
+ * Extra recipes used only in self-driving mode (touch / narrow screens, where
+ * there's no user to approve). Without these the base recipes drain every
+ * session into `waiting` and the demo stalls. These close the loop — auto-
+ * approving and reviving sessions — so the mobile demo keeps a lively mix of
+ * running / waiting / finished instead of flatlining on waiting.
+ */
+const SELF_DRIVE_RECIPES: typeof RECIPES = [
+  // waiting → running (auto-approve — the SPACE→ENTER a desktop user would do)
+  {
+    weight: 30,
+    make: (sessions, now) => {
+      const c = sessions.filter((s) => s.status === "waiting" && fresh(s, now));
+      if (!c.length) return null;
+      return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
+    },
+  },
+  // finished → running (a follow-up prompt lands)
+  {
+    weight: 12,
+    make: (sessions, now) => {
+      const c = sessions.filter((s) => s.status === "finished" && fresh(s, now));
+      if (!c.length) return null;
+      return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
+    },
+  },
+  // idle → running (kick off new work)
+  {
+    weight: 9,
+    make: (sessions, now) => {
+      const c = sessions.filter((s) => s.status === "idle" && fresh(s, now));
+      if (!c.length) return null;
+      return { kind: "flip_status", sessionId: rng(c).id, to: "running" };
+    },
+  },
+];
+
+export function nextScriptEvent(
+  state: DemoState,
+  selfDrive = false,
+): ScriptEvent | null {
   const sessions = state.repos.flatMap((r) => r.sessions);
   if (!sessions.length) return null;
   const now = Date.now();
 
   // Materialize only viable events (recipe + concrete event with a real target).
+  const recipes = selfDrive ? [...RECIPES, ...SELF_DRIVE_RECIPES] : RECIPES;
   const viable: Array<{ weight: number; event: ScriptEvent }> = [];
-  for (const recipe of RECIPES) {
+  for (const recipe of recipes) {
     const event = recipe.make(sessions, now);
     if (event) viable.push({ weight: recipe.weight, event });
   }
