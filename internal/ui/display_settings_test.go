@@ -126,7 +126,8 @@ func TestOnboardingDialog_ConfirmAndSkip(t *testing.T) {
 	}
 	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRight}) // advance theme
 	wantTheme := BuiltinPalettes[1].Name
-	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// Update mutates the shared cfg pointer; we assert on cfg, not the return.
+	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cfg.Theme != wantTheme {
 		t.Errorf("confirm set theme %q, want %q", cfg.Theme, wantTheme)
 	}
@@ -140,7 +141,7 @@ func TestOnboardingDialog_ConfirmAndSkip(t *testing.T) {
 	d2.SetSize(120, 40)
 	d2.Show()
 	d2, _ = d2.Update(tea.KeyMsg{Type: tea.KeyRight})
-	d2, _ = d2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	_, _ = d2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	if cfg2.Theme != "nord" {
 		t.Errorf("skip should revert theme to nord, got %q", cfg2.Theme)
 	}
