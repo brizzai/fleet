@@ -27,6 +27,7 @@ const (
 	EventPROpened     = "pr_opened"
 	EventUndoUsed     = "undo_used"
 	EventForkSession  = "fork_session"
+	EventCommandRun   = "command_run"
 
 	// Workspaces & repos.
 	EventWorkspaceCreated = "workspace_created"

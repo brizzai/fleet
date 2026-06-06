@@ -6,9 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -18,7 +20,9 @@ import (
 // (name, status, PR, path, last-used) now rides the panel border via
 // BuildPreviewTitle / BuildPreviewFooter, freeing 5+ rows of vertical space
 // previously eaten by a metadata header block.
-func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, width, height int, focused bool) string {
+//
+// cursor, when non-nil, renders a block cursor at the tmux pane's cursor position.
+func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, width, height int, focused bool, cursor *tmux.CursorPosition) string {
 	if s == nil {
 		return DimStyle.Render("  No session selected")
 	}
@@ -64,16 +68,42 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 	if start < 0 {
 		start = 0
 	}
+
+	if cursor != nil {
+		debuglog.Logger.Debug("cursor overlay",
+			"cursor_x", cursor.X, "cursor_y", cursor.Y,
+			"total_lines", len(lines), "start", start,
+			"content_height", contentHeight, "width", width,
+			"in_range", cursor.Y >= start && cursor.Y < len(lines),
+			"x_in_bounds", cursor.X < width-2)
+	}
+
+	cursorRendered := false
 	for i := start; i < len(lines); i++ {
 		line := lines[i]
 		if ansi.StringWidth(line) > width-2 {
 			line = ansi.Truncate(line, width-2, "")
 		}
+		// Overlay cursor on the matching line.
+		// Skip if cursor column is past the truncated visible width.
+		if cursor != nil && i == cursor.Y && cursor.X < width-2 {
+			line = overlayCursor(line, cursor.X)
+			cursorRendered = true
+		}
+		// Reset ANSI at end of each line to prevent background color bleed.
 		b.WriteString("  " + line + "\x1b[0m")
 		if i < len(lines)-1 {
 			b.WriteString("\n")
 		}
 	}
+
+	if cursor != nil && !cursorRendered {
+		debuglog.Logger.Debug("cursor NOT rendered",
+			"cursor_x", cursor.X, "cursor_y", cursor.Y,
+			"total_lines", len(lines), "start", start,
+			"content_height", contentHeight)
+	}
+
 	return b.String()
 }
 
@@ -251,6 +281,29 @@ func relativeTime(t time.Time) string {
 		}
 		return fmt.Sprintf("%dd ago", days)
 	}
+}
+
+// cursorOn and cursorOff are ANSI sequences for a visible block cursor.
+// Uses reverse video + bright white background for maximum visibility.
+const (
+	cursorOn  = "\x1b[7m"  // SGR reverse video
+	cursorOff = "\x1b[27m" // SGR reverse video off
+)
+
+// overlayCursor injects a reverse-video block cursor at column col in an ANSI-encoded line.
+func overlayCursor(line string, col int) string {
+	lineWidth := ansi.StringWidth(line)
+	if col >= lineWidth {
+		// Cursor is past end of visible text — pad to cursor position, then show block.
+		pad := col - lineWidth
+		return line + strings.Repeat(" ", pad) + cursorOn + " " + cursorOff
+	}
+	// Split line at cursor column using ANSI-aware cut.
+	before := ansi.Truncate(line, col, "")
+	// Extract the single character at cursor position.
+	charAtCursor := ansi.Cut(line, col, col+1)
+	after := ansi.TruncateLeft(line, col+1, "")
+	return before + cursorOn + charAtCursor + cursorOff + after
 }
 
 // stripOSC8 removes OSC-8 hyperlink sequences while preserving the visible link text.
