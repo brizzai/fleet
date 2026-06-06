@@ -683,3 +683,58 @@ func TestSlotBindings(t *testing.T) {
 		t.Errorf("slot 4 should be cleared by explicit delete, got %v", bindings)
 	}
 }
+
+func TestCollapsedGroups(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+
+	// Fresh DB: nothing collapsed.
+	keys, err := db.LoadCollapsedGroups()
+	if err != nil {
+		t.Fatalf("LoadCollapsedGroups: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("expected 0 collapsed groups on fresh DB, got %d", len(keys))
+	}
+
+	// Collapse a checkout and an origin (origin keys carry the "origin:" prefix).
+	if err := db.SetGroupCollapsed("/tmp/repo", true); err != nil {
+		t.Fatalf("SetGroupCollapsed checkout: %v", err)
+	}
+	if err := db.SetGroupCollapsed("origin:github.com/acme/repo", true); err != nil {
+		t.Fatalf("SetGroupCollapsed origin: %v", err)
+	}
+
+	keys, _ = db.LoadCollapsedGroups()
+	got := map[string]bool{}
+	for _, k := range keys {
+		got[k] = true
+	}
+	if !got["/tmp/repo"] || !got["origin:github.com/acme/repo"] {
+		t.Errorf("expected both keys collapsed, got %v", keys)
+	}
+
+	// Collapsing again is idempotent (no duplicate row).
+	if err := db.SetGroupCollapsed("/tmp/repo", true); err != nil {
+		t.Fatalf("re-collapse: %v", err)
+	}
+	keys, _ = db.LoadCollapsedGroups()
+	if len(keys) != 2 {
+		t.Errorf("expected 2 collapsed groups after idempotent re-collapse, got %d (%v)", len(keys), keys)
+	}
+
+	// Expanding removes the row.
+	if err := db.SetGroupCollapsed("/tmp/repo", false); err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	keys, _ = db.LoadCollapsedGroups()
+	if len(keys) != 1 || keys[0] != "origin:github.com/acme/repo" {
+		t.Errorf("expected only the origin to remain collapsed, got %v", keys)
+	}
+}

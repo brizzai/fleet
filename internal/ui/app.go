@@ -198,8 +198,7 @@ type Home struct {
 	finalizingDeletes []PendingDelete
 	pinnedRepos       map[string]bool // pinned repo paths (persist in SQLite)
 
-	repoExpanded     map[string]bool // checkout-path / "origin:<key>" -> expanded state (default expanded when missing)
-	idleFolded       map[string]bool // checkout path -> idle sessions folded ("z" key)
+	repoExpanded     map[string]bool // checkout-path / "origin:<key>" -> expanded state (default expanded when missing; persisted in SQLite)
 	previewCache     map[string]string
 	previewCacheTime map[string]time.Time
 	statusRRIndex    int       // round-robin index for status updates
@@ -320,7 +319,6 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		storage:               storage,
 		sessionByID:           make(map[string]*session.Session),
 		repoExpanded:          make(map[string]bool),
-		idleFolded:            make(map[string]bool),
 		lastTmuxStatusBar:     make(map[string]string),
 		slotBindings:          make(map[int]string),
 		lastSlotTapSlot:       -1,
@@ -1022,6 +1020,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.pinnedRepos[p] = true
 			}
 		}
+		// Restore persisted collapse state before defaulting — the default
+		// loops below only fill missing keys, so loaded collapses survive.
+		if collapsed, err := h.storage.LoadCollapsedGroups(); err == nil {
+			for _, key := range collapsed {
+				h.repoExpanded[key] = false
+			}
+		}
 		// Default all repos to expanded on first load.
 		groups := session.GroupByRepo(h.sessions)
 		for repo := range groups {
@@ -1663,9 +1668,6 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, h.confirmDeleteSelected()
 	case "u":
 		return h.undoDelete()
-	case "z":
-		h.toggleIdleFold()
-		return h, nil
 	case "r":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("restart session", s.Title, true)
@@ -2151,6 +2153,7 @@ func (h *Home) unpinRepoHeader(repoPath string) tea.Cmd {
 	if err := h.storage.UnpinRepo(repoPath); err != nil {
 		debuglog.Logger.Error("failed to unpin repo", "repo", repoPath, "err", err)
 	}
+	h.forgetCollapse(repoPath)
 	h.actionLog.Add("unpin repo", filepath.Base(repoPath), true)
 	h.rebuildFlatItems()
 	if h.cursor >= len(h.flatItems) {
@@ -2163,7 +2166,7 @@ func (h *Home) unpinRepoHeader(repoPath string) tea.Cmd {
 }
 
 // deferDeleteRepo deletes every session in a repo/worktree group, routing through
-// the per-session deferred-delete machinery so `z`-undo still works (LIFO). The last
+// the per-session deferred-delete machinery so `u`-undo still works (LIFO). The last
 // session carries the container-level side effects (unpin, optional worktree destroy).
 // An empty worktree (no sessions) is removed directly in the background.
 func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
@@ -2349,33 +2352,6 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	return tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 }
 
-// toggleIdleFold flips the idle-fold state for the checkout at cursor. Acts on
-// the checkout under the cursor — whether the cursor sits on the checkout
-// header itself, on a session inside it, or on the "+ N idle" placeholder.
-func (h *Home) toggleIdleFold() {
-	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
-		return
-	}
-	item := h.flatItems[h.cursor]
-	repo := ""
-	switch {
-	case item.IsCheckoutHeader || item.IsIdleFold:
-		repo = item.RepoPath
-	case item.Session != nil:
-		repo = session.GetRepoRoot(item.Session.ProjectPath)
-	case item.Pending != nil:
-		repo = item.Pending.RepoPath
-	default:
-		return
-	}
-	if repo == "" {
-		return
-	}
-	h.idleFolded[repo] = !h.idleFolded[repo]
-	h.rebuildFlatItems()
-	h.syncViewport()
-}
-
 // expandKeyFor returns the repoExpanded key for the header at cursor — the
 // origin key (prefixed) for origin headers, the repo path for checkouts.
 // Empty when the cursor isn't on a header.
@@ -2391,6 +2367,23 @@ func (h *Home) expandKeyFor(item SidebarItem) string {
 	return ""
 }
 
+// persistCollapse writes the current expand state for key through to storage so
+// it survives restarts. A row exists only while the group is collapsed.
+func (h *Home) persistCollapse(key string) {
+	if err := h.storage.SetGroupCollapsed(key, !IsExpanded(h.repoExpanded, key)); err != nil {
+		debuglog.Logger.Error("failed to persist collapse state", "key", key, "err", err)
+	}
+}
+
+// forgetCollapse drops any collapse state for a checkout being forgotten, so a
+// later re-add starts expanded rather than resurrecting a stale collapse.
+func (h *Home) forgetCollapse(repoPath string) {
+	delete(h.repoExpanded, repoPath)
+	if err := h.storage.SetGroupCollapsed(repoPath, false); err != nil {
+		debuglog.Logger.Error("failed to clear collapse state", "repo", repoPath, "err", err)
+	}
+}
+
 func (h *Home) toggleRepoGroup() {
 	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
 		return
@@ -2404,6 +2397,7 @@ func (h *Home) toggleRepoGroup() {
 		return
 	}
 	h.repoExpanded[key] = !IsExpanded(h.repoExpanded, key)
+	h.persistCollapse(key)
 	h.rebuildFlatItems()
 	// Keep cursor on the same header.
 	for i, it := range h.flatItems {
@@ -2425,6 +2419,7 @@ func (h *Home) expandRepoAtCursor() {
 		return
 	}
 	h.repoExpanded[key] = true
+	h.persistCollapse(key)
 	h.rebuildFlatItems()
 	h.syncViewport()
 }
@@ -2439,6 +2434,7 @@ func (h *Home) collapseRepoAtCursor() {
 		return
 	}
 	h.repoExpanded[key] = false
+	h.persistCollapse(key)
 	h.rebuildFlatItems()
 	// Move cursor to the matching header row.
 	for i, fi := range h.flatItems {
@@ -2538,7 +2534,7 @@ func (h *Home) buildJumpTree() []SidebarItem {
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
-	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
+	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, originOf, isWorktreeOf)
 }
 
 func (h *Home) renameSelected() tea.Cmd {
@@ -2786,12 +2782,13 @@ func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
 		if err := h.storage.UnpinRepo(msg.repoPath); err != nil {
 			debuglog.Logger.Error("failed to unpin repo", "repo", msg.repoPath, "err", err)
 		}
+		h.forgetCollapse(msg.repoPath)
 	}
 
 	// Clear any slot binding pointing at this session. FK cascade drops the
 	// DB row (triggered by the DeleteSession above), but the in-memory map
 	// needs explicit cleanup so the [N] badge disappears from the sidebar.
-	// Slot bindings do NOT survive undo: restoring the session via `z` leaves
+	// Slot bindings do NOT survive undo: restoring the session via `u` leaves
 	// it unbound, and the user can re-press Alt+<N> to rebind.
 	for slot, sid := range h.slotBindings {
 		if sid == msg.id {
@@ -4224,7 +4221,7 @@ func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 
 func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, originOf, isWorktreeOf, h.idleFolded)
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, originOf, isWorktreeOf)
 	h.sidebarDirty = true
 }
 

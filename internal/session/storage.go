@@ -198,6 +198,14 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	// Collapsed sidebar groups: presence of a row means that header (origin or
+	// checkout) is collapsed. Absence = expanded, preserving the default.
+	_, err = s.db.Exec(`CREATE TABLE IF NOT EXISTS collapsed_groups (group_key TEXT PRIMARY KEY)`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create collapsed_groups table", "error", err)
+		return err
+	}
+
 	// Per-repo PR cache: survives fleet restarts so we don't re-fire `gh` for
 	// every repo on launch. The worker carries pr_json forward (subject to a
 	// branch-match check) until the TTL gate decides to refresh.
@@ -475,6 +483,44 @@ func (s *StateDB) LoadPinnedRepos() ([]string, error) {
 		repos = append(repos, path)
 	}
 	return repos, rows.Err()
+}
+
+// SetGroupCollapsed records (or clears) the collapsed state for a sidebar group
+// key. The key is the same one the UI uses in repoExpanded: "origin:<key>" for
+// origin headers, the repo path for checkout headers. Collapsed inserts a row;
+// expanded deletes it (absence = expanded).
+func (s *StateDB) SetGroupCollapsed(groupKey string, collapsed bool) error {
+	var err error
+	if collapsed {
+		_, err = s.db.Exec("INSERT OR IGNORE INTO collapsed_groups (group_key) VALUES (?)", groupKey)
+	} else {
+		_, err = s.db.Exec("DELETE FROM collapsed_groups WHERE group_key = ?", groupKey)
+	}
+	if err != nil {
+		debuglog.Logger.Error("failed to set group collapsed", "key", groupKey, "collapsed", collapsed, "error", err)
+	}
+	return err
+}
+
+// LoadCollapsedGroups returns the keys of all collapsed sidebar groups.
+func (s *StateDB) LoadCollapsedGroups() ([]string, error) {
+	rows, err := s.db.Query("SELECT group_key FROM collapsed_groups")
+	if err != nil {
+		debuglog.Logger.Error("failed to load collapsed groups", "error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			debuglog.Logger.Error("failed to scan collapsed group row", "error", err)
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
 }
 
 // SavePRCacheRow upserts a single repo's PR-refresh state. Called per-repo

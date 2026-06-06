@@ -34,7 +34,6 @@ var allKeyBindings = []KeyBinding{
 	{Key: "F", Desc: "Fork to worktree", Section: "session"},
 	{Key: "d", BarKey: "d", BarDesc: "Del", Desc: "Delete session / repo / worktree", Section: "session"},
 	{Key: "u", Desc: "Undo delete", Section: "session"},
-	{Key: "z", BarKey: "z", BarDesc: "Fold", Desc: "Fold/unfold idle sessions in this checkout", Section: "session"},
 	{Key: "r", BarKey: "r", BarDesc: "Restart", Desc: "Restart session", Section: "session"},
 	{Key: "R", Desc: "Rename session", Section: "session"},
 	{Key: "e", Desc: "Open in editor", Section: "session"},
