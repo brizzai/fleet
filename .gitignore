@@ -12,3 +12,6 @@ var/
 
 # Claude Code local settings (may contain personal paths)
 .claude/settings.local.json
+
+# macOS
+.DS_Store
