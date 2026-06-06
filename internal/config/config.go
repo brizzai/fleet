@@ -22,10 +22,29 @@ type Config struct {
 	StatusIndicator    string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
 	Telemetry          *bool  `json:"telemetry,omitempty"`
 	DefaultAgent       string `json:"default_agent,omitempty"` // "claude" or "codex"
+
+	// Sidebar display toggles. All default to true (on) via the *bool nil
+	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
+	// surfaced in the Appearance category of the Settings dialog and drives a
+	// package-level render flag in the ui package (see ApplyDisplayConfig).
+	ShowAgentGlyphs    *bool  `json:"show_agent_glyphs,omitempty"`    // per-session ✻/◇ agent sigil
+	ShowStatusPills    *bool  `json:"show_status_pills,omitempty"`    // header "2● 1◐" status summary
+	ShowPRBadges       *bool  `json:"show_pr_badges,omitempty"`       // "#123 ✓" PR badge on checkout headers
+	ShowDirtyIndicator *bool  `json:"show_dirty_indicator,omitempty"` // "*" dirty-worktree marker
+	ShowSlotBadges     *bool  `json:"show_slot_badges,omitempty"`     // "[N]" hotkey slot badge
+	ShowHeaderCounts   *bool  `json:"show_header_counts,omitempty"`   // session count on origin/checkout headers
+	ChevronStyle       string `json:"chevron_style,omitempty"`        // "triangle" (default ▾▸) or "plusminus" (−+)
+	SidebarDensity     string `json:"sidebar_density,omitempty"`      // "normal" (default) or "compact" (no inter-group gap)
+
 	// AnalyticsConsentSeen is true once the user has been shown the
 	// first-launch consent prompt and answered it (either way). When false,
 	// the TUI shows the prompt before initializing analytics.
 	AnalyticsConsentSeen bool `json:"analytics_consent_seen,omitempty"`
+
+	// DisplayOnboardingSeen is true once the user has been shown the
+	// first-launch theme/onboarding screen (whether they picked a theme or
+	// skipped). When false, the TUI shows it after the consent prompt.
+	DisplayOnboardingSeen bool `json:"display_onboarding_seen,omitempty"`
 }
 
 // GetDefaultAgent returns the default coding agent for new sessions ("claude" or "codex").
@@ -147,6 +166,50 @@ func (c *Config) GetStatusIndicator() string {
 		return "bar"
 	}
 	return "icon"
+}
+
+// boolDefaultTrue resolves an optional bool flag, defaulting to true when unset.
+func boolDefaultTrue(p *bool) bool {
+	if p == nil {
+		return true
+	}
+	return *p
+}
+
+// IsShowAgentGlyphs reports whether the per-session ✻/◇ agent sigil is shown (default: true).
+func (c *Config) IsShowAgentGlyphs() bool { return boolDefaultTrue(c.ShowAgentGlyphs) }
+
+// IsShowStatusPills reports whether header status-summary pills are shown (default: true).
+func (c *Config) IsShowStatusPills() bool { return boolDefaultTrue(c.ShowStatusPills) }
+
+// IsShowPRBadges reports whether PR badges are shown on checkout headers (default: true).
+func (c *Config) IsShowPRBadges() bool { return boolDefaultTrue(c.ShowPRBadges) }
+
+// IsShowDirtyIndicator reports whether the dirty "*" marker is shown (default: true).
+func (c *Config) IsShowDirtyIndicator() bool { return boolDefaultTrue(c.ShowDirtyIndicator) }
+
+// IsShowSlotBadges reports whether "[N]" hotkey slot badges are shown (default: true).
+func (c *Config) IsShowSlotBadges() bool { return boolDefaultTrue(c.ShowSlotBadges) }
+
+// IsShowHeaderCounts reports whether session counts are shown on headers (default: true).
+func (c *Config) IsShowHeaderCounts() bool { return boolDefaultTrue(c.ShowHeaderCounts) }
+
+// GetChevronStyle returns the configured header chevron style — "triangle"
+// (default ▾▸) or "plusminus" (−+).
+func (c *Config) GetChevronStyle() string {
+	if c.ChevronStyle == "plusminus" {
+		return "plusminus"
+	}
+	return "triangle"
+}
+
+// GetSidebarDensity returns the configured sidebar density — "normal" (default,
+// a blank gap between origin groups) or "compact" (no gap).
+func (c *Config) GetSidebarDensity() string {
+	if c.SidebarDensity == "compact" {
+		return "compact"
+	}
+	return "normal"
 }
 
 // IsTelemetryEnabled returns whether telemetry is enabled (default: true).

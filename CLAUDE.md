@@ -57,7 +57,9 @@ internal/debuglog/           # slog-based debug logging to ~/.config/fleet/debug
 internal/diagnostics/diagnostics.go  # System diagnostics collector for bug reports
 internal/ui/                 # Bubble Tea TUI (app, sidebar, preview, dialogs, styles)
 internal/ui/palette.go       # Theme palette definitions (5 built-in themes)
-internal/ui/settings.go      # Settings dialog (S key)
+internal/ui/settings.go      # Settings dialog (S key) — master-detail: Appearance/Behavior categories + live preview
+internal/ui/sidebar_preview.go   # Synthetic sidebar fixtures + RenderSidebarPreview (drives Appearance preview + onboarding)
+internal/ui/onboarding.go    # First-run theme picker + annotated "how to read the sidebar" sample
 internal/ui/bugreport.go     # Bug report dialog (! key) with diagnostics, error history, action log
 internal/ui/actionlog.go     # Ring buffer tracking user actions (steps to reproduce)
 internal/ui/errors.go        # Ring buffer keeping error history (errors that flash and vanish)
@@ -114,7 +116,9 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Session resume: captures the agent's session_id from hooks, uses `claude --resume <id>` / `codex resume <id>` on restart
 - Editor: config.editor > $EDITOR > "code" (VS Code)
 - Themes: fleet-pink (default, flagship brand accent `#dc88c0`), tokyo-night, catppuccin-mocha, rose-pine, nord, gruvbox — configurable via settings (S key)
-- Settings dialog: S key opens settings overlay, live theme preview, auto-name toggle, copy .claude toggle, auto-saves on close
+- Settings dialog: S key opens a master-detail overlay — category rail (Appearance / Behavior) on the left, that category's settings on the right; `tab` switches panes, `j/k` move, `←→`/`h/l` cycle a value, auto-saves on `esc`. The **Appearance** category renders a live mock-sidebar preview (synthetic data via `RenderSidebarPreview` → the real `RenderSidebar`, so it can't drift) and holds: Theme, Status style (icon/bar), Agent icons, Slot badges, PR badges, Dirty marker, Status pills, Header counts, Chevron style (triangle/plusminus), Density (normal/compact). Behavior holds editor, tick, auto-name, auto-update, copy .claude, enter mode, telemetry, default agent.
+- Display toggles: each Appearance toggle is a `*bool`/string config field with a default-on getter (`config.go`) feeding a package global in `styles.go` (`ShowAgentGlyphs`, `ShowStatusPills`, `ShowPRBadges`, `ShowDirtyIndicator`, `ShowSlotBadges`, `ShowHeaderCounts`, `ChevronStyle`, `SidebarDensity`) — the same pattern as `StatusIndicatorMode`. Globals are synced from config via `ApplyDisplayConfig(cfg)` in `NewHome` (startup) and after each Appearance change; the sidebar `render*` funcs read them at render time.
+- First-run onboarding: on first launch, after the analytics consent prompt, a one-time theme picker (`internal/ui/onboarding.go`, gated by `display_onboarding_seen` config flag) shows the theme cycler beside an annotated sample sidebar that teaches how to read status dots, agent glyphs, branch, worktree, dirty `*`, and PR badge. `enter` keeps the previewed theme; `s`/`esc` reverts and skips. Either way it's marked seen.
 - Bug report: `!` key opens dialog showing error history, action log, system diagnostics; `g` opens GitHub issue with pre-filled markdown via `gh issue create --web`
 - Error history: ring buffer (max 50) of errors that flash for 5s — persists for bug reporting
 - Action log: ring buffer (max 100) of user actions (attach, delete, restart, editor, approve, etc.) for "steps to reproduce"
