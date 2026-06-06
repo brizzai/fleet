@@ -17,7 +17,7 @@ export function Hero() {
       className="fleet-hero"
       style={{
         position: "relative",
-        padding: "5rem 1.25rem 2rem",
+        padding: "clamp(3rem, 11vw, 5rem) 1.25rem 2rem",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",

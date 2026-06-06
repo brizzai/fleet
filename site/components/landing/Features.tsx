@@ -71,7 +71,7 @@ export function Features() {
     <section
       style={{
         maxWidth: 1100,
-        margin: "5rem auto 4rem",
+        margin: "clamp(3rem, 9vw, 5rem) auto clamp(2.5rem, 7vw, 4rem)",
         padding: "0 1.25rem",
       }}
     >
