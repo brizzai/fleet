@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -368,6 +369,51 @@ func RenderFocusedPanelTitle(title string, width int) string {
 var StatusIndicatorMode = "icon"
 
 const StatusBarChar = "┃"
+
+// Sidebar display flags. These mirror StatusIndicatorMode: package-level vars
+// read by the sidebar render funcs, synced from config by ApplyDisplayConfig
+// (called in NewHome at startup and after any Appearance settings change). They
+// default to the "everything on" rendering so an unconfigured fleet is unchanged.
+var (
+	ShowAgentGlyphs    = true       // per-session ✻/◇ agent sigil
+	ShowStatusPills    = true       // header "2● 1◐" status summary
+	ShowPRBadges       = true       // "#123 ✓" PR badge on checkout headers
+	ShowDirtyIndicator = true       // "*" dirty-worktree marker
+	ShowSlotBadges     = true       // "[N]" hotkey slot badge
+	ShowHeaderCounts   = true       // session count on origin/checkout headers
+	ChevronStyle       = "triangle" // "triangle" (▾▸) or "plusminus" (−+)
+	SidebarDensity     = "normal"   // "normal" (gap between groups) or "compact"
+)
+
+// ApplyDisplayConfig syncs all sidebar display flags from config. Must be called
+// on the main goroutine (Bubble Tea Update/View), like ApplyPalette.
+func ApplyDisplayConfig(cfg *config.Config) {
+	StatusIndicatorMode = cfg.GetStatusIndicator()
+	ShowAgentGlyphs = cfg.IsShowAgentGlyphs()
+	ShowStatusPills = cfg.IsShowStatusPills()
+	ShowPRBadges = cfg.IsShowPRBadges()
+	ShowDirtyIndicator = cfg.IsShowDirtyIndicator()
+	ShowSlotBadges = cfg.IsShowSlotBadges()
+	ShowHeaderCounts = cfg.IsShowHeaderCounts()
+	ChevronStyle = cfg.GetChevronStyle()
+	SidebarDensity = cfg.GetSidebarDensity()
+}
+
+// chevronGlyph returns the expand/collapse marker for a header, honoring the
+// configured ChevronStyle. Both glyphs in each style are width-1 so columns
+// stay aligned regardless of choice.
+func chevronGlyph(expanded bool) string {
+	if ChevronStyle == "plusminus" {
+		if expanded {
+			return "−" // U+2212 minus sign (width-1, aligns with "+")
+		}
+		return "+"
+	}
+	if expanded {
+		return "▾"
+	}
+	return "▸"
+}
 
 // StatusSymbol returns a styled status indicator.
 func StatusSymbol(status session.Status) string {

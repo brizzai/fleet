@@ -293,3 +293,28 @@ func TestConfigOmitEmptyFields(t *testing.T) {
 		}
 	}
 }
+
+func TestIsFirstRun(t *testing.T) {
+	// Isolate the config path to a fresh temp HOME so no real config leaks in.
+	t.Setenv("HOME", t.TempDir())
+
+	// No config file yet → first run.
+	cfg := Load()
+	if !cfg.IsFirstRun() {
+		t.Error("Load with no config file should report IsFirstRun() == true")
+	}
+
+	// After a Save, the file exists, so a subsequent Load is not a first run.
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if cfg2 := Load(); cfg2.IsFirstRun() {
+		t.Error("Load with an existing config file should report IsFirstRun() == false")
+	}
+
+	// loadedFromDisk is unexported, so a hand-built Config (e.g. in other
+	// tests) is treated as a first run — the safe default.
+	if !(&Config{}).IsFirstRun() {
+		t.Error("zero-value Config should report IsFirstRun() == true")
+	}
+}

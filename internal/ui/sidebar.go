@@ -213,8 +213,9 @@ func BuildFlatItems(
 
 		// Visual breathing space between origin groups — one blank row
 		// before every origin except the first. Marked IsSpacer so cursor
-		// nav skips it and it renders as a blank line.
-		if len(items) > 0 {
+		// nav skips it and it renders as a blank line. Suppressed in compact
+		// density, where groups sit flush.
+		if len(items) > 0 && SidebarDensity != "compact" {
 			items = append(items, SidebarItem{IsSpacer: true})
 		}
 
@@ -471,18 +472,23 @@ func renderStatusSummaryOpts(counts map[session.Status]int, alwaysShowCount bool
 // The blank row inserted before each non-first origin (see BuildFlatItems)
 // carries the section break on its own; no trailing rule needed.
 func renderOriginHeader(item SidebarItem, width int, selected bool) string {
-	chevron := "▸"
-	if item.Expanded {
-		chevron = "▾"
+	chevron := chevronGlyph(item.Expanded)
+	countStr := ""
+	if ShowHeaderCounts {
+		countStr = fmt.Sprintf("%d", item.SessionCount)
 	}
-	countStr := fmt.Sprintf("%d", item.SessionCount)
-	summary := renderStatusSummary(item.StatusCounts)
+	summary := ""
+	if ShowStatusPills {
+		summary = renderStatusSummary(item.StatusCounts)
+	}
 
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
 		name := SessionTitleSelStyle.Render(" " + item.OriginLabel + " ")
-		count := SessionStatusSelStyle.Render(countStr)
-		out := fmt.Sprintf("%s %s %s", icon, name, count)
+		out := fmt.Sprintf("%s %s", icon, name)
+		if countStr != "" {
+			out += " " + SessionStatusSelStyle.Render(countStr)
+		}
 		if summary != "" {
 			out += "  " + summary
 		}
@@ -490,8 +496,10 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 	}
 	icon := DimStyle.Render(chevron)
 	name := RepoHeaderStyle.Render(item.OriginLabel)
-	count := DimStyle.Render(countStr)
-	out := fmt.Sprintf("%s %s %s", icon, name, count)
+	out := fmt.Sprintf("%s %s", icon, name)
+	if countStr != "" {
+		out += " " + DimStyle.Render(countStr)
+	}
 	if summary != "" {
 		out += "  " + summary
 	}
@@ -518,14 +526,11 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	label := branch
 
 	dirty := ""
-	if repoInfo.IsDirty {
+	if ShowDirtyIndicator && repoInfo.IsDirty {
 		dirty = " *"
 	}
 
-	chevron := "▸"
-	if item.Expanded {
-		chevron = "▾"
-	}
+	chevron := chevronGlyph(item.Expanded)
 
 	// Worktree distinction: italicize the branch label instead of a `wt·`
 	// prefix. Zero extra width; eye picks out worktrees from main clones at
@@ -536,11 +541,14 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	}
 
 	prBadge := ""
-	if repoInfo.PR != nil {
+	if ShowPRBadges && repoInfo.PR != nil {
 		prBadge = " " + renderPRBadge(repoInfo.PR, selected)
 	}
 
-	summary := renderStatusSummary(item.StatusCounts)
+	summary := ""
+	if ShowStatusPills {
+		summary = renderStatusSummary(item.StatusCounts)
+	}
 	summarySuffix := ""
 	if summary != "" {
 		summarySuffix = "  " + summary
@@ -551,8 +559,10 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 		// Selection bg is one contiguous span over title + dirty + PR badge,
 		// so the highlighted row reads as a single pill instead of two boxes.
 		inner := " " + label + dirty
-		if prText := prBadgeText(repoInfo.PR); prText != "" {
-			inner += " " + prText
+		if ShowPRBadges {
+			if prText := prBadgeText(repoInfo.PR); prText != "" {
+				inner += " " + prText
+			}
 		}
 		inner += " "
 		return fmt.Sprintf("  %s %s", icon, SessionTitleSelStyle.Italic(repoInfo.IsWorktreeRepo).Render(inner)) + summarySuffix
@@ -570,10 +580,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 // a git repo — just the folder name in dim, no branch glyph or PR badge.
 func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 	name := filepath.Base(item.RepoPath)
-	chevron := "▸"
-	if item.Expanded {
-		chevron = "▾"
-	}
+	chevron := chevronGlyph(item.Expanded)
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
 		nameStyled := SessionTitleSelStyle.Render(" " + name + " ")
@@ -588,17 +595,26 @@ func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 func renderSessionItem(s *session.Session, width int, selected bool, slot int) string {
 	status := s.GetStatus()
 	symbolRaw := StatusSymbolRaw(status)
-	glyphRaw := agentGlyph(s.Agent)
 	title := s.Title
 
+	// Agent glyph (✻/◇) is optional — when shown it occupies a glyph + a space.
+	glyphRaw := ""
+	if ShowAgentGlyphs {
+		glyphRaw = agentGlyph(s.Agent)
+	}
+
 	slotRaw := ""
-	if slot >= 0 && slot <= 9 {
+	if ShowSlotBadges && slot >= 0 && slot <= 9 {
 		slotRaw = fmt.Sprintf(" [%d]", slot)
 	}
 
-	// Reserve: 2 leading spaces + "│ " guide + 1 selection prefix + symbol +
-	// space + agent glyph + space + slot.
-	maxTitleLen := width - 13 - len(slotRaw)
+	// Reserve: leading indent + status symbol + selection padding + slot, plus
+	// the agent glyph and its trailing space when it's shown (2 cells).
+	reserve := 13
+	if glyphRaw == "" {
+		reserve = 11
+	}
+	maxTitleLen := width - reserve - len(slotRaw)
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -607,23 +623,32 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	// actually truncates.
 	title = ansi.Truncate(title, maxTitleLen, "…")
 
+	// glyphSel is "<glyph> " (with trailing space) when shown, else "".
+	glyphSel := ""
+	if glyphRaw != "" {
+		glyphSel = glyphRaw + " "
+	}
+
 	// Selection: the inverted-background title carries the "you are here"
 	// signal on its own — no leading ▶ arrow (it collided with the chevron
 	// glyph used for collapsed headers). Bg fill spans symbol + agent glyph +
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
-		row := " " + symbolRaw + " " + glyphRaw + " " + title + slotRaw + " "
+		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
 		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render(row))
 	}
 
 	styledSymbol := StatusSymbol(status)
-	styledGlyph := AgentGlyphStyle.Render(glyphRaw)
 	styledTitle := TitleStyleForStatus(status).Render(title)
 	styledSlot := ""
 	if slotRaw != "" {
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
 	}
-	return fmt.Sprintf("    %s %s %s%s", styledSymbol, styledGlyph, styledTitle, styledSlot)
+	if glyphRaw != "" {
+		styledGlyph := AgentGlyphStyle.Render(glyphRaw)
+		return fmt.Sprintf("    %s %s %s%s", styledSymbol, styledGlyph, styledTitle, styledSlot)
+	}
+	return fmt.Sprintf("    %s %s%s", styledSymbol, styledTitle, styledSlot)
 }
 
 // Agent glyphs mark which coding agent a session runs — a quiet, dim,

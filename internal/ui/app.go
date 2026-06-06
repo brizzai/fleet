@@ -180,6 +180,7 @@ type Home struct {
 	commandPalette        *CommandPaletteDialog
 	sessionCreateDialog   *SessionCreateDialog
 	consentDialog         *ConsentDialog
+	onboardingDialog      *OnboardingDialog
 
 	// launchpad is the first-run experience shown when the fleet is empty:
 	// recent repos mined from Claude Code history, ready to resume.
@@ -313,7 +314,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// Apply theme — PaletteByName falls back to the flagship default when
 	// cfg.Theme is empty or unknown.
 	ApplyPalette(PaletteByName(cfg.Theme))
-	StatusIndicatorMode = cfg.GetStatusIndicator()
+	ApplyDisplayConfig(cfg)
 
 	h := &Home{
 		storage:               storage,
@@ -336,6 +337,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		commandPalette:        NewCommandPaletteDialog(),
 		sessionCreateDialog:   NewSessionCreateDialog(),
 		consentDialog:         NewConsentDialog(),
+		onboardingDialog:      NewOnboardingDialog(cfg),
 		launchpad:             NewLaunchpad(),
 		bugReport:             NewBugReportDialog(),
 		previewCache:          make(map[string]string),
@@ -464,6 +466,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.commandPalette.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
+		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
 		return h, nil
@@ -641,6 +644,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// flipped) Telemetry toggle — otherwise the change only takes
 		// effect on next launch.
 		analytics.SyncEnabled(h.cfg.IsTelemetryEnabled(), h.version, h.identity)
+		// Display toggles are live, but the density flag changes BuildFlatItems
+		// output (inter-group spacer rows), so rebuild the flattened list.
+		h.rebuildFlatItems()
+		return h, nil
+
+	case onboardingClosedMsg:
+		// Theme was applied live during the picker; nothing to re-read.
 		return h, nil
 
 	case consentResultMsg:
@@ -652,17 +662,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := h.cfg.Save(); err != nil {
 			debuglog.Logger.Error("config: save after consent", "err", err)
 		}
+		var cmd tea.Cmd
 		if enabled {
 			// Worker is already running by this point — guard the read.
 			h.workerMu.Lock()
 			repoCount := len(session.GroupByRepo(h.sessions))
 			h.workerMu.Unlock()
 			h.fireStartupAnalytics(repoCount)
-			return h, nil
+		} else {
+			// Declined: emit a single anonymous decline beacon (device hash
+			// only). Guarded against env opt-out inside TrackDeclined.
+			cmd = h.fireDeclineBeacon()
 		}
-		// Declined: emit a single anonymous decline beacon (device hash only).
-		// Guarded against env opt-out inside TrackDeclined.
-		return h, h.fireDeclineBeacon()
+		// First-run theme onboarding follows the consent prompt.
+		h.maybeShowOnboarding()
+		return h, cmd
 
 	case bugReportClosedMsg:
 		return h, nil
@@ -1100,6 +1114,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				h.consentDialog.Show()
 			}
+
+			// The theme onboarding is a brand-new-user experience. When the
+			// consent prompt is shown it follows that (see consentResultMsg).
+			// When no consent prompt is shown we decide here based on whether
+			// this is a genuinely fresh install: a brand-new user who skipped
+			// consent only because they're env-opted-out of telemetry still
+			// deserves onboarding; an existing/returning install must never be
+			// surprised by it (it could overwrite their theme), so mark it seen.
+			if !h.consentDialog.IsVisible() {
+				if h.cfg.IsFirstRun() {
+					h.maybeShowOnboarding()
+				} else {
+					h.markOnboardingSeen()
+				}
+			}
 		}
 
 		// Start listening for hook changes.
@@ -1148,6 +1177,9 @@ func (h *Home) renderBody() string {
 	// and must be the user's first interaction with the TUI.
 	if h.consentDialog.IsVisible() {
 		return h.consentDialog.View()
+	}
+	if h.onboardingDialog.IsVisible() {
+		return h.onboardingDialog.View()
 	}
 	if h.helpOverlay.IsVisible() {
 		return h.helpOverlay.View()
@@ -1362,6 +1394,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if h.consentDialog.IsVisible() {
 		dialog, cmd := h.consentDialog.Update(msg)
 		h.consentDialog = dialog
+		return h, cmd
+	}
+	if h.onboardingDialog.IsVisible() {
+		dialog, cmd := h.onboardingDialog.Update(msg)
+		h.onboardingDialog = dialog
 		return h, cmd
 	}
 	if h.bugReport.IsVisible() {
@@ -1882,6 +1919,28 @@ func (h *Home) launchpadActive() bool {
 		return false
 	}
 	return h.launchpad.HasItems()
+}
+
+// maybeShowOnboarding shows the one-time first-run theme/onboarding screen,
+// unless the user has already seen it. Called after the consent flow resolves
+// so the order is consent → theme onboarding → launchpad.
+func (h *Home) maybeShowOnboarding() {
+	if !h.cfg.DisplayOnboardingSeen {
+		h.onboardingDialog.Show()
+	}
+}
+
+// markOnboardingSeen records that onboarding need not appear, without showing
+// it — used for existing/returning installs so an upgrade never surprises them
+// with the first-run theme picker (which would overwrite their chosen theme).
+func (h *Home) markOnboardingSeen() {
+	if h.cfg.DisplayOnboardingSeen {
+		return
+	}
+	h.cfg.DisplayOnboardingSeen = true
+	if err := h.cfg.Save(); err != nil {
+		debuglog.Logger.Error("config: save onboarding-seen", "err", err)
+	}
 }
 
 func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
