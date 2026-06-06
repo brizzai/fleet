@@ -805,7 +805,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.pendingWorkspaces = append(h.pendingWorkspaces, pw)
 
 		// Expand the repo group and rebuild sidebar.
-		h.repoExpanded[msg.repoPath] = true
+		h.setExpanded(msg.repoPath, true)
 		h.rebuildFlatItems()
 
 		// Auto-select the phantom entry.
@@ -2033,7 +2033,7 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 
 	// Ensure the repo group is expanded for the new session and pin it.
 	repo := session.GetRepoRoot(s.ProjectPath)
-	h.repoExpanded[repo] = true
+	h.setExpanded(repo, true)
 	if !h.pinnedRepos[repo] {
 		h.pinnedRepos[repo] = true
 		if err := h.storage.PinRepo(repo); err != nil {
@@ -2367,21 +2367,70 @@ func (h *Home) expandKeyFor(item SidebarItem) string {
 	return ""
 }
 
-// persistCollapse writes the current expand state for key through to storage so
-// it survives restarts. A row exists only while the group is collapsed.
-func (h *Home) persistCollapse(key string) {
-	if err := h.storage.SetGroupCollapsed(key, !IsExpanded(h.repoExpanded, key)); err != nil {
-		debuglog.Logger.Error("failed to persist collapse state", "key", key, "err", err)
+// setExpanded updates the in-memory expand state for a sidebar group key and
+// persists it so the choice survives restarts. A storage row exists only while
+// the group is collapsed (absence = expanded). Every mutation that reflects a
+// user intent (toggle, expand/collapse all, revealing a freshly-created
+// session) routes through here so the persisted set never drifts from the map.
+// Purely transient reveals (jump navigation) deliberately write the map
+// directly so they don't overwrite a deliberate collapse on disk.
+func (h *Home) setExpanded(key string, expanded bool) {
+	if key == "" {
+		return
+	}
+	h.repoExpanded[key] = expanded
+	if err := h.storage.SetGroupCollapsed(key, !expanded); err != nil {
+		debuglog.Logger.Error("failed to persist collapse state", "key", key, "expanded", expanded, "err", err)
 	}
 }
 
-// forgetCollapse drops any collapse state for a checkout being forgotten, so a
-// later re-add starts expanded rather than resurrecting a stale collapse.
-func (h *Home) forgetCollapse(repoPath string) {
-	delete(h.repoExpanded, repoPath)
-	if err := h.storage.SetGroupCollapsed(repoPath, false); err != nil {
-		debuglog.Logger.Error("failed to clear collapse state", "repo", repoPath, "err", err)
+// clearCollapse drops a key's collapse state entirely — both the in-memory
+// entry (back to the expanded default) and any persisted row.
+func (h *Home) clearCollapse(key string) {
+	delete(h.repoExpanded, key)
+	if err := h.storage.SetGroupCollapsed(key, false); err != nil {
+		debuglog.Logger.Error("failed to clear collapse state", "key", key, "err", err)
 	}
+}
+
+// forgetCollapse drops collapse state for a checkout being forgotten, so a
+// later re-add starts expanded rather than resurrecting a stale collapse. If
+// the checkout was the last one under its origin, the origin's row is dropped
+// too — otherwise it would orphan with no checkout left to render beneath it.
+func (h *Home) forgetCollapse(repoPath string) {
+	h.clearCollapse(repoPath)
+	origin := h.originOf(repoPath)
+	if origin == "" || h.originHasCheckoutExcept(origin, repoPath) {
+		return
+	}
+	h.clearCollapse(OriginExpandKey(origin))
+}
+
+// originHasCheckoutExcept reports whether any currently-known checkout other
+// than `except` maps to `origin`, scanning the same sources the sidebar renders
+// from (sessions, pinned repos, pending workspaces). Sessions sharing `except`'s
+// repo root are excluded, so it answers correctly even mid-deferred-delete when
+// the forgotten checkout's sessions are still in the list.
+func (h *Home) originHasCheckoutExcept(origin, except string) bool {
+	match := func(repo string) bool {
+		return repo != "" && repo != except && h.originOf(repo) == origin
+	}
+	for _, s := range h.sessions {
+		if match(session.GetRepoRoot(s.ProjectPath)) {
+			return true
+		}
+	}
+	for repo := range h.pinnedRepos {
+		if match(repo) {
+			return true
+		}
+	}
+	for _, pw := range h.pendingWorkspaces {
+		if pw != nil && match(pw.RepoPath) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Home) toggleRepoGroup() {
@@ -2396,8 +2445,7 @@ func (h *Home) toggleRepoGroup() {
 	if key == "" {
 		return
 	}
-	h.repoExpanded[key] = !IsExpanded(h.repoExpanded, key)
-	h.persistCollapse(key)
+	h.setExpanded(key, !IsExpanded(h.repoExpanded, key))
 	h.rebuildFlatItems()
 	// Keep cursor on the same header.
 	for i, it := range h.flatItems {
@@ -2418,8 +2466,7 @@ func (h *Home) expandRepoAtCursor() {
 	if key == "" || IsExpanded(h.repoExpanded, key) {
 		return
 	}
-	h.repoExpanded[key] = true
-	h.persistCollapse(key)
+	h.setExpanded(key, true)
 	h.rebuildFlatItems()
 	h.syncViewport()
 }
@@ -2433,8 +2480,7 @@ func (h *Home) collapseRepoAtCursor() {
 	if key == "" || !IsExpanded(h.repoExpanded, key) {
 		return
 	}
-	h.repoExpanded[key] = false
-	h.persistCollapse(key)
+	h.setExpanded(key, false)
 	h.rebuildFlatItems()
 	// Move cursor to the matching header row.
 	for i, fi := range h.flatItems {
@@ -4679,7 +4725,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "expand_all":
 		for _, key := range h.allExpandKeys() {
-			h.repoExpanded[key] = true
+			h.setExpanded(key, true)
 		}
 		h.rebuildFlatItems()
 		h.syncViewport()
@@ -4695,7 +4741,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		// rely on iterating h.repoExpanded — IsExpanded defaults missing
 		// keys to true, so untouched groups would stay open.
 		for _, key := range h.allExpandKeys() {
-			h.repoExpanded[key] = false
+			h.setExpanded(key, false)
 		}
 		h.rebuildFlatItems()
 		h.cursor = 0
