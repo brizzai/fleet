@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-06-06
+
+### Added
+
+- Settings (`S`) is now a master-detail panel with an **Appearance** category that shows a live mock-sidebar preview as you change things. Pick a theme and toggle agent icons, PR badges, the dirty marker, status pills, slot badges, header counts, chevron style, and density — each updates the preview instantly. First launch also opens a one-time theme picker with an annotated sample sidebar that teaches how to read status dots, agent glyphs, branches, worktrees, and PR badges.
+
 ## [2.6.0] - 2026-06-04
 
 ### Added
@@ -215,7 +221,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/brizzai/fleet/releases/tag/v2.7.0
 [2.6.0]: https://github.com/brizzai/fleet/releases/tag/v2.6.0
 [2.5.0]: https://github.com/brizzai/fleet/releases/tag/v2.5.0
 [2.4.1]: https://github.com/brizzai/fleet/releases/tag/v2.4.1
