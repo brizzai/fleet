@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-06-07
+
+### Fixed
+
+- Ctrl+Q detach now works when the host tmux config enables `extended-keys` (common in oh-my-tmux / iTerm2 setups). Previously the terminal encoded Ctrl+Q as `CSI 113;5 u` or `CSI 27;5;113 ~` instead of byte 17, so the interceptor missed it and the keystroke was forwarded to the pane.
+- Sessions no longer get stuck showing "running" after Claude rotates its session id mid-conversation (compaction, /clear, or continue).
+- Removing a worktree now stops the leftover dev processes still holding it open (sparing your editor, language servers, and shells), so it no longer fails with "Directory not empty". The confirm dialog lists what will be terminated, and if removal still fails the worktree is kept and flagged to retry with `d`.
+
 ## [2.8.0] - 2026-06-06
 
 ### Improved
@@ -231,7 +239,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.8.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.8.1...HEAD
+[2.8.1]: https://github.com/brizzai/fleet/releases/tag/v2.8.1
 [2.8.0]: https://github.com/brizzai/fleet/releases/tag/v2.8.0
 [2.7.0]: https://github.com/brizzai/fleet/releases/tag/v2.7.0
 [2.6.0]: https://github.com/brizzai/fleet/releases/tag/v2.6.0
