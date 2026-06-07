@@ -456,6 +456,33 @@ func TestScenarioOwnerEndStillReported(t *testing.T) {
 	})
 }
 
+// TestScenarioStaleOverriddenWaitingSettlesFinished reproduces the stuck-running
+// bug a Claude session-id rotation triggers. The owner's last hook is a "waiting"
+// the pane overrides to finished (setting the override flag); the rotated
+// session's later Stop hook is dropped (see the ownership unit tests), so the
+// in-memory hook stays a stale overridden "waiting". When the agent then resumes
+// and finishes, the pane must drive the status BOTH ways — to running while it
+// works, and back to finished when the turn ends. Before the symmetric fast-path
+// it stuck on the last "running" it saw and never settled.
+func TestScenarioStaleOverriddenWaitingSettlesFinished(t *testing.T) {
+	runScenario(t, Scenario{
+		Name: "stale overridden-waiting hook settles to finished from the pane",
+		Events: []ScenarioEvent{
+			// Waiting hook; pane is the idle prompt → overridden to finished.
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", Pane: "@fixture:pane_finished_idle_prompt.txt"},
+			// Agent resumes — no hook fires (permission grant / dropped Stop).
+			{At: 2 * time.Second, Pane: "@fixture:pane_running_extended_thinking.txt"},
+			// Turn ends; pane returns to the idle prompt.
+			{At: 4 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},               // override to finished
+			{At: 2 * time.Second, Expected: StatusRunning},  // pane-driven resume
+			{At: 4 * time.Second, Expected: StatusFinished}, // must settle back — was stuck running
+		},
+	})
+}
+
 func TestScenarioNoHooksFallback(t *testing.T) {
 	runScenario(t, Scenario{
 		Name: "no hooks, pane-only detection",

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // claudeProjectDirReplacer mirrors Claude Code's per-cwd transcript dir naming.
@@ -203,4 +204,89 @@ func CopyClaudeForkTranscript(parentSessionID, parentProjectPath, destProjectPat
 		return fmt.Errorf("rename temp to dest: %w", err)
 	}
 	return nil
+}
+
+// rotationHandoffWindow bounds how far apart a rotated session's first transcript
+// entry and the previous (owner) session's last entry may be while still counting
+// as a continuation. Claude Code's session-id rotations (compaction, /clear,
+// continue) hand off within milliseconds; the window absorbs clock/flush skew but
+// stays far tighter than the gap a concurrent nested child shows.
+const rotationHandoffWindow = 10 * time.Second
+
+// isSessionRotation reports whether newSessionID is ownerSessionID's conversation
+// continued under a fresh id (a Claude session-id rotation) rather than a separate
+// nested child claude that merely inherited the same FLEET_INSTANCE_ID.
+//
+// The signal is transcript continuity: a rotation's new transcript begins right
+// where the owner's ends, so the new file's first entry and the owner file's last
+// entry land within rotationHandoffWindow of each other. A concurrent child starts
+// mid-way through the owner's life and the owner keeps appending past it, so the
+// two never line up.
+//
+// When either transcript can't be read we return false — the safe default, since
+// wrongly adopting a real nested child would clobber the owner's status and resume
+// id.
+func isSessionRotation(projectPath, ownerSessionID, newSessionID string) bool {
+	if projectPath == "" || ownerSessionID == "" || newSessionID == "" {
+		return false
+	}
+	newFirst := firstTranscriptTimestamp(ClaudeTranscriptPath(newSessionID, projectPath))
+	ownerLast := lastTranscriptTimestamp(ClaudeTranscriptPath(ownerSessionID, projectPath))
+	if newFirst.IsZero() || ownerLast.IsZero() {
+		return false
+	}
+	delta := newFirst.Sub(ownerLast)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= rotationHandoffWindow
+}
+
+// firstTranscriptTimestamp returns the timestamp of the earliest timestamped JSONL
+// entry in the transcript at path, or the zero time if it's missing/unreadable or
+// has no timestamped entries.
+func firstTranscriptTimestamp(path string) time.Time { return scanTranscriptTimestamp(path, false) }
+
+// lastTranscriptTimestamp returns the timestamp of the latest timestamped JSONL
+// entry in the transcript at path, or the zero time. It scans the whole file;
+// transcripts are small and this runs only on the rare session-id-change path.
+func lastTranscriptTimestamp(path string) time.Time { return scanTranscriptTimestamp(path, true) }
+
+// scanTranscriptTimestamp walks the JSONL transcript at path and returns the
+// first (last=false) or last (last=true) entry timestamp it can parse.
+func scanTranscriptTimestamp(path string, last bool) time.Time {
+	if path == "" {
+		return time.Time{}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+
+	var result time.Time
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, `"timestamp"`) {
+			continue
+		}
+		var entry struct {
+			Timestamp string `json:"timestamp"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, entry.Timestamp)
+		if err != nil {
+			continue
+		}
+		if !last {
+			return ts
+		}
+		result = ts
+	}
+	return result
 }
