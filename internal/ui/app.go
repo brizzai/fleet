@@ -493,7 +493,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// then hand sessions whose hook changed to the worker via the priority queue
 		// so they get a full UpdateStatus() within ~100ms instead of waiting for round-robin.
 		h.workerMu.Lock()
-		changed := h.syncHookStatuses(h.sessions)
+		changed := h.syncHookStatuses(h.sessions, false) // UI loop: no rotation I/O
 		h.workerMu.Unlock()
 		h.rebuildFlatItems()
 		h.enqueuePriorityUpdates(changed)
@@ -504,7 +504,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.isAttaching.Store(false)
 		// Immediate hook sync (data already in HookWatcher from hooks that fired during attach).
 		h.workerMu.Lock()
-		changed := h.syncHookStatuses(h.sessions)
+		changed := h.syncHookStatuses(h.sessions, false) // UI loop: no rotation I/O
 		h.workerMu.Unlock()
 		h.rebuildFlatItems()
 		h.enqueuePriorityUpdates(changed)
@@ -3439,7 +3439,12 @@ func (h *Home) statusWorker() {
 // them to the given sessions. Caller must ensure thread-safe access to sessions.
 // Returns the IDs of sessions whose hook meaningfully changed (new status or timestamp);
 // callers can forward these to priorityStatusUpdates for immediate UpdateStatus().
-func (h *Home) syncHookStatuses(sessions []*session.Session) []string {
+//
+// resolveRotation must be true ONLY on the worker goroutine: a foreign/rotated
+// session id triggers blocking transcript I/O (rotation detection), which must
+// never run on the Bubble Tea Update() loop. UI-path callers pass false; the
+// worker adopts a rotation within one fast cycle (~500ms).
+func (h *Home) syncHookStatuses(sessions []*session.Session, resolveRotation bool) []string {
 	if h.hookWatcher == nil {
 		return nil
 	}
@@ -3456,7 +3461,7 @@ func (h *Home) syncHookStatuses(sessions []*session.Session) []string {
 				UpdatedAt:   hs.UpdatedAt,
 				UserPrompt:  hs.UserPrompt,
 				PromptCount: hs.PromptCount,
-			}) {
+			}, resolveRotation) {
 				changed = append(changed, s.ID)
 			}
 			// Persist new Claude session ID if it changed.
@@ -3636,8 +3641,9 @@ func (h *Home) statusWorkerCycle() {
 	// prematurely.
 	tmux.RefreshSessionCache()
 
-	// 3. Sync hook status (fast: in-memory map lookups).
-	h.syncHookStatuses(sessions)
+	// 3. Sync hook status (fast: in-memory map lookups; worker may resolve a
+	// session-id rotation here — off the UI loop, so its transcript I/O is safe).
+	h.syncHookStatuses(sessions, true)
 
 	// 3b. Auto-name: generate title for ONE session per cycle (heavy cadence).
 	// Priority: manual (R key) > custom-title > ai-title > last prompt heuristic.
