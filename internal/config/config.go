@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime/debug"
+	"sort"
 	"strings"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -51,6 +54,13 @@ type Config struct {
 	// has no config.json, so this is the one signal that doesn't depend on the
 	// telemetry/consent path.
 	loadedFromDisk bool
+
+	// unknownKeys preserves any top-level JSON keys present on disk that this
+	// binary's struct doesn't recognize — e.g. a field a newer fleet wrote that
+	// an older binary would otherwise silently drop on the next Save. Captured
+	// in Load, re-merged in Save. Unexported, so the struct path never
+	// serializes it; it is re-injected manually by marshal.
+	unknownKeys map[string]json.RawMessage
 }
 
 // IsFirstRun reports whether this is a genuinely fresh install — no config file
@@ -125,6 +135,7 @@ func Load() *Config {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		debuglog.Logger.Error("failed to parse config file", "path", path, "error", err)
 	} else {
+		cfg.unknownKeys = extractUnknownKeys(data)
 		debuglog.Logger.Info("config loaded", "path", path)
 	}
 
@@ -143,7 +154,7 @@ func (c *Config) Save() error {
 		debuglog.Logger.Error("failed to create config directory", "path", path, "error", err)
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := c.marshal()
 	if err != nil {
 		debuglog.Logger.Error("failed to marshal config", "error", err)
 		return err
@@ -152,7 +163,117 @@ func (c *Config) Save() error {
 		debuglog.Logger.Error("failed to write config file", "path", path, "error", err)
 		return err
 	}
+	// Stamp every save with the build that wrote it (VCS revision, present even
+	// for `go run`/`make run`) and the exact keys persisted. If a stale binary
+	// ever drops a newer field, this line pins which build did it and when.
+	debuglog.Logger.Info("config saved", "path", path, "build", buildID(), "keys", topLevelKeys(data))
 	return nil
+}
+
+// marshal renders the config to indented JSON, re-merging any unknown keys
+// captured at load time so fields written by a newer fleet survive a save by
+// this binary. With no unknown keys (the common case) the output is byte-for-
+// byte the struct's own ordered marshal; the merge path alphabetizes keys.
+func (c *Config) marshal() ([]byte, error) {
+	if len(c.unknownKeys) == 0 {
+		return json.MarshalIndent(c, "", "  ")
+	}
+	base, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	merged := map[string]json.RawMessage{}
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for k, v := range c.unknownKeys {
+		if _, known := merged[k]; !known {
+			merged[k] = v
+		}
+	}
+	return json.MarshalIndent(merged, "", "  ")
+}
+
+// extractUnknownKeys returns the top-level keys in on-disk config JSON that this
+// binary's Config struct doesn't define. Preserving them across a Save round-
+// trip stops an older binary from silently dropping fields a newer one wrote.
+func extractUnknownKeys(data []byte) map[string]json.RawMessage {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	known := knownConfigKeys()
+	for k := range raw {
+		if known[k] {
+			delete(raw, k)
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	return raw
+}
+
+// knownConfigKeys is the set of JSON field names the Config struct defines,
+// derived from its json tags so it never drifts as fields are added/removed.
+func knownConfigKeys() map[string]bool {
+	t := reflect.TypeFor[Config]()
+	keys := make(map[string]bool, t.NumField())
+	for f := range t.Fields() {
+		tag := f.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if name, _, _ := strings.Cut(tag, ","); name != "" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
+// topLevelKeys returns the JSON object's top-level keys, sorted and comma-joined,
+// for the save-log. Empty string if data isn't a JSON object.
+func topLevelKeys(data []byte) string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return ""
+	}
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+// buildID returns a short identifier for the running binary: the embedded VCS
+// revision (Go embeds it for `go build`/`go run`, so it works under `make run`),
+// suffixed "-dirty" when the working tree had uncommitted changes at build time.
+// Falls back to "unknown" when no VCS info is embedded.
+func buildID() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	var rev, mod string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			mod = s.Value
+		}
+	}
+	if rev == "" {
+		return "unknown"
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if mod == "true" {
+		rev += "-dirty"
+	}
+	return rev
 }
 
 // IsCopyClaudeSettingsEnabled returns whether to copy .claude/settings.local.json to new worktrees (default: true).
