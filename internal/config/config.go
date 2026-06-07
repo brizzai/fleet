@@ -14,17 +14,18 @@ import (
 
 // Config holds user-configurable settings.
 type Config struct {
-	TickIntervalSec    int    `json:"tick_interval_sec,omitempty"`
-	DefaultProjectPath string `json:"default_project_path,omitempty"`
-	Editor             string `json:"editor,omitempty"`
-	Theme              string `json:"theme,omitempty"`
-	AutoNameSessions   *bool  `json:"auto_name_sessions,omitempty"`
-	AutoUpdate         *bool  `json:"auto_update,omitempty"`
-	CopyClaudeSettings *bool  `json:"copy_claude_settings,omitempty"`
-	EnterMode          string `json:"enter_mode,omitempty"`       // "attach" or "split"
-	StatusIndicator    string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
-	Telemetry          *bool  `json:"telemetry,omitempty"`
-	DefaultAgent       string `json:"default_agent,omitempty"` // "claude" or "codex"
+	TickIntervalSec      int    `json:"tick_interval_sec,omitempty"`
+	DefaultProjectPath   string `json:"default_project_path,omitempty"`
+	Editor               string `json:"editor,omitempty"`
+	Theme                string `json:"theme,omitempty"`
+	AutoNameSessions     *bool  `json:"auto_name_sessions,omitempty"`
+	AutoUpdate           *bool  `json:"auto_update,omitempty"`
+	CopyClaudeSettings   *bool  `json:"copy_claude_settings,omitempty"`
+	ConfirmBeforeRestart *bool  `json:"confirm_before_restart,omitempty"`
+	EnterMode            string `json:"enter_mode,omitempty"`       // "attach" or "split"
+	StatusIndicator      string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
+	Telemetry            *bool  `json:"telemetry,omitempty"`
+	DefaultAgent         string `json:"default_agent,omitempty"` // "claude" or "codex"
 
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
@@ -282,6 +283,14 @@ func (c *Config) IsCopyClaudeSettingsEnabled() bool {
 		return true
 	}
 	return *c.CopyClaudeSettings
+}
+
+// IsConfirmBeforeRestartEnabled returns whether to confirm before restarting a session (default: true).
+func (c *Config) IsConfirmBeforeRestartEnabled() bool {
+	if c.ConfirmBeforeRestart == nil {
+		return true
+	}
+	return *c.ConfirmBeforeRestart
 }
 
 // GetEnterMode returns the configured Enter key mode ("attach" or "split").

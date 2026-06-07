@@ -432,6 +432,18 @@ func (d *ConfirmDialog) ShowDanger(title, subject string, details []string, onYe
 	d.scanGen = 0 // 0 is unused (nextHolderScanGen yields ≥1); invalidates any in-flight scan
 }
 
+// ShowWarning shows a warning-style confirmation dialog (yellow border).
+func (d *ConfirmDialog) ShowWarning(title, subject string, details []string, onYes func() tea.Msg) {
+	d.visible = true
+	d.dialogType = "warning"
+	d.title = title
+	d.subject = subject
+	d.details = details
+	d.onYes = onYes
+	d.scanLine = ""
+	d.scanGen = 0
+}
+
 // StartScan records the generation for an in-flight async scan and shows a
 // placeholder line. A subsequent SetScan with the same gen replaces it.
 func (d *ConfirmDialog) StartScan(gen int, placeholder string) {
