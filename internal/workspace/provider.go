@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -35,6 +36,12 @@ type Provider interface {
 
 // GitWorktreeProvider uses git worktree commands for workspace management.
 type GitWorktreeProvider struct{}
+
+// worktreeRemoveMu serializes the remove/RemoveAll/prune region across Destroy
+// calls. Providers are created per-invocation (ResolveProvider doesn't cache),
+// so the guard must be package-level to stop concurrent deletes of different
+// worktrees on the same main repo from racing on .git/worktrees.
+var worktreeRemoveMu sync.Mutex
 
 func (g *GitWorktreeProvider) List(repoPath string) ([]WorkspaceInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -247,10 +254,36 @@ func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {
 		return fmt.Errorf("worktree %q not found", name)
 	}
 
+	worktreeRemoveMu.Lock()
+	defer worktreeRemoveMu.Unlock()
+
 	cmd = exec.CommandContext(ctx, "git", "-C", mainPath, "worktree", "remove", "--force", wtPath)
 	if rmOut, err := cmd.CombinedOutput(); err != nil {
-		debuglog.Logger.Error("git worktree destroy failed", "name", name, "path", wtPath, "err", strings.TrimSpace(string(rmOut)))
-		return fmt.Errorf("git worktree remove: %s", strings.TrimSpace(string(rmOut)))
+		rmErr := strings.TrimSpace(string(rmOut))
+		// `git worktree remove` deletes tracked files then rmdirs; it fails with
+		// "Directory not empty" when something re-created files under the path.
+		// Fall back to force-removing the directory ourselves, then prune the
+		// now-missing worktree from the main repo's admin metadata (prune only
+		// deregisters worktrees whose dir is already gone — hence RemoveAll first).
+		debuglog.Logger.Warn("git worktree remove failed; falling back to RemoveAll+prune", "name", name, "path", wtPath, "err", rmErr)
+		if rmAllErr := os.RemoveAll(wtPath); rmAllErr != nil {
+			debuglog.Logger.Error("git worktree destroy: RemoveAll failed", "name", name, "path", wtPath, "err", rmAllErr)
+			return fmt.Errorf("git worktree remove: %s", rmErr)
+		}
+		// Fresh context: the remove above may have failed *because* the shared
+		// ctx expired, which would make prune fail instantly and silently leave a
+		// dangling .git/worktrees entry while we report success.
+		pruneCtx, pruneCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer pruneCancel()
+		if pruneOut, pruneErr := exec.CommandContext(pruneCtx, "git", "-C", mainPath, "worktree", "prune").CombinedOutput(); pruneErr != nil {
+			debuglog.Logger.Warn("git worktree prune failed", "name", name, "err", strings.TrimSpace(string(pruneOut)))
+		}
+		if _, statErr := os.Stat(wtPath); statErr == nil {
+			// Directory still present after RemoveAll — genuinely couldn't remove.
+			return fmt.Errorf("git worktree remove: %s", rmErr)
+		}
+		debuglog.Logger.Info("git worktree destroyed via RemoveAll+prune", "name", name, "path", wtPath)
+		return nil
 	}
 	debuglog.Logger.Info("git worktree destroyed", "name", name, "path", wtPath)
 	return nil

@@ -406,6 +406,13 @@ type ConfirmDialog struct {
 	title      string
 	subject    string
 	details    []string
+
+	// scanLine is an extra bullet populated asynchronously (e.g. the result of
+	// a process scan that's too slow to run on the Update loop). scanGen guards
+	// against a stale scan writing onto a later prompt: SetScan only applies
+	// when its gen matches the gen recorded when the dialog was shown.
+	scanLine string
+	scanGen  int
 }
 
 // NewConfirmDialog creates a new confirmation dialog.
@@ -421,6 +428,24 @@ func (d *ConfirmDialog) ShowDanger(title, subject string, details []string, onYe
 	d.subject = subject
 	d.details = details
 	d.onYes = onYes
+	d.scanLine = ""
+	d.scanGen = 0 // 0 is unused (nextHolderScanGen yields ≥1); invalidates any in-flight scan
+}
+
+// StartScan records the generation for an in-flight async scan and shows a
+// placeholder line. A subsequent SetScan with the same gen replaces it.
+func (d *ConfirmDialog) StartScan(gen int, placeholder string) {
+	d.scanGen = gen
+	d.scanLine = placeholder
+}
+
+// SetScan replaces the async scan line, but only if the dialog is still showing
+// the prompt that started this scan (gen match) — so a stale result from a
+// dismissed dialog can't leak onto a later one.
+func (d *ConfirmDialog) SetScan(gen int, line string) {
+	if d.visible && gen == d.scanGen {
+		d.scanLine = line
+	}
 }
 
 // Show shows a basic info-style confirmation dialog (backward compatible).
@@ -431,6 +456,8 @@ func (d *ConfirmDialog) Show(message string, onYes func() tea.Msg) {
 	d.subject = ""
 	d.details = nil
 	d.onYes = onYes
+	d.scanLine = ""
+	d.scanGen = 0
 }
 
 func (d *ConfirmDialog) Hide()           { d.visible = false }
@@ -494,6 +521,16 @@ func (d *ConfirmDialog) View() string {
 			b.WriteString("\n")
 			b.WriteString(DimStyle.Render("  • " + detail))
 		}
+	}
+
+	// Async scan line (e.g. processes that will be terminated), filled in after
+	// the dialog is shown.
+	if d.scanLine != "" {
+		if len(d.details) == 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(DimStyle.Render("  • " + d.scanLine))
 	}
 
 	// Buttons.

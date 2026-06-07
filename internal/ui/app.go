@@ -25,6 +25,7 @@ import (
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/naming"
 	"github.com/brizzai/fleet/internal/perfwatch"
+	"github.com/brizzai/fleet/internal/proc"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -198,6 +199,17 @@ type Home struct {
 	finalizingDeletes []PendingDelete
 	pinnedRepos       map[string]bool // pinned repo paths (persist in SQLite)
 
+	// failedWorktreeRemovals holds worktree repo paths whose destroy failed
+	// (something is still holding the directory). Such repos are re-pinned and
+	// flagged in the sidebar so the user can press d to retry; cleared on a
+	// successful retry. In-memory only.
+	failedWorktreeRemovals map[string]bool
+
+	// holderScanGen monotonically tags each async process scan that backs the
+	// delete dialog's "will terminate …" warning, so a stale result can't write
+	// onto a later prompt.
+	holderScanGen int
+
 	repoExpanded     map[string]bool // checkout-path / "origin:<key>" -> expanded state (default expanded when missing; persisted in SQLite)
 	previewCache     map[string]string
 	previewCacheTime map[string]time.Time
@@ -316,42 +328,43 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	ApplyDisplayConfig(cfg)
 
 	h := &Home{
-		storage:               storage,
-		sessionByID:           make(map[string]*session.Session),
-		repoExpanded:          make(map[string]bool),
-		lastTmuxStatusBar:     make(map[string]string),
-		slotBindings:          make(map[int]string),
-		lastSlotTapSlot:       -1,
-		toasts:                NewToastStack(),
-		pinnedRepos:           make(map[string]bool),
-		newDialog:             NewNewSessionDialog(),
-		confirmDialog:         NewConfirmDialog(),
-		renameDialog:          NewRenameDialog(),
-		helpOverlay:           NewHelpOverlay(),
-		settingsDialog:        NewSettingsDialog(cfg),
-		worktreeDialog:        NewWorktreeDialog(),
-		createWorkspaceDialog: NewCreateWorkspaceDialog(),
-		branchDialog:          NewBranchCheckoutDialog(),
-		commandPalette:        NewCommandPaletteDialog(),
-		sessionCreateDialog:   NewSessionCreateDialog(),
-		consentDialog:         NewConsentDialog(),
-		onboardingDialog:      NewOnboardingDialog(cfg),
-		launchpad:             NewLaunchpad(),
-		bugReport:             NewBugReportDialog(),
-		previewCache:          make(map[string]string),
-		previewCacheTime:      make(map[string]time.Time),
-		repoLastHotAt:         make(map[string]time.Time),
-		filterInput:           fi,
-		cfg:                   cfg,
-		version:               version,
-		identity:              identity,
-		errorHistory:          NewErrorHistory(50),
-		actionLog:             NewActionLog(100),
-		statusTrigger:         make(chan struct{}, 1),
-		priorityStatusUpdates: make(chan string, 256),
-		ctx:                   ctx,
-		cancel:                cancel,
-		startTime:             time.Now(),
+		storage:                storage,
+		sessionByID:            make(map[string]*session.Session),
+		repoExpanded:           make(map[string]bool),
+		lastTmuxStatusBar:      make(map[string]string),
+		slotBindings:           make(map[int]string),
+		lastSlotTapSlot:        -1,
+		toasts:                 NewToastStack(),
+		pinnedRepos:            make(map[string]bool),
+		failedWorktreeRemovals: make(map[string]bool),
+		newDialog:              NewNewSessionDialog(),
+		confirmDialog:          NewConfirmDialog(),
+		renameDialog:           NewRenameDialog(),
+		helpOverlay:            NewHelpOverlay(),
+		settingsDialog:         NewSettingsDialog(cfg),
+		worktreeDialog:         NewWorktreeDialog(),
+		createWorkspaceDialog:  NewCreateWorkspaceDialog(),
+		branchDialog:           NewBranchCheckoutDialog(),
+		commandPalette:         NewCommandPaletteDialog(),
+		sessionCreateDialog:    NewSessionCreateDialog(),
+		consentDialog:          NewConsentDialog(),
+		onboardingDialog:       NewOnboardingDialog(cfg),
+		launchpad:              NewLaunchpad(),
+		bugReport:              NewBugReportDialog(),
+		previewCache:           make(map[string]string),
+		previewCacheTime:       make(map[string]time.Time),
+		repoLastHotAt:          make(map[string]time.Time),
+		filterInput:            fi,
+		cfg:                    cfg,
+		version:                version,
+		identity:               identity,
+		errorHistory:           NewErrorHistory(50),
+		actionLog:              NewActionLog(100),
+		statusTrigger:          make(chan struct{}, 1),
+		priorityStatusUpdates:  make(chan string, 256),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		startTime:              time.Now(),
 	}
 	emptyCache := make(map[string]*git.RepoInfo)
 	h.gitInfoCache.Store(&emptyCache)
@@ -888,9 +901,20 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		if msg.workspaceErr != nil {
+		if msg.destroyAttempted {
+			h.handleWorktreeDestroyResult(msg)
+		} else if msg.workspaceErr != nil {
 			h.setError(fmt.Errorf("workspace destroy: %w", msg.workspaceErr))
 		}
+		return h, nil
+
+	case worktreeHoldersScannedMsg:
+		names := uniqueCommands(msg.holders)
+		line := "No background processes to stop"
+		if len(names) > 0 {
+			line = fmt.Sprintf("Will terminate %d process(es): %s", len(msg.holders), strings.Join(names, ", "))
+		}
+		h.confirmDialog.SetScan(msg.gen, line)
 		return h, nil
 
 	case previewTickMsg:
@@ -2087,13 +2111,23 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 	return nil
 }
 
+// worktreeHoldersScannedMsg carries the result of the async process scan that
+// backs the delete dialog's "will terminate …" warning (part C).
+type worktreeHoldersScannedMsg struct {
+	gen     int
+	holders []proc.Holder
+}
+
 // confirmDeleteHeader handles `d` pressed on a repo/worktree header. Scope is the
 // container: a worktree header removes the worktree dir + its sessions; a real-repo
 // header "forgets" the repo from fleet (deletes its sessions + unpins, folder kept).
 func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	repoPath := item.RepoPath
 	count := h.countSessionsForRepo(repoPath)
-	isWorktree := h.repoIsWorktree(repoPath)
+	// A worktree whose removal previously failed leaves an orphaned dir that git
+	// may no longer classify as a worktree; treat it as one so the retry routes
+	// to destroy (not instant-unpin) and actually removes the leftover.
+	isWorktree := h.repoIsWorktree(repoPath) || h.failedWorktreeRemovals[repoPath]
 
 	// Empty plain repo: instant unpin, no dialog (unchanged behavior).
 	if count == 0 && !isWorktree {
@@ -2106,13 +2140,11 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	switch {
 	case isWorktree && count > 0:
 		title = "Remove Worktree?"
-		details = []string{
-			fmt.Sprintf("Deletes %d session(s) + the worktree directory", count),
-			"Press u to undo within 5s",
-		}
+		details = append([]string{fmt.Sprintf("Deletes %d session(s) + the worktree directory", count)}, h.worktreeDeleteWarnings(repoPath)...)
+		details = append(details, "Press u to undo within 5s")
 	case isWorktree: // empty worktree
 		title = "Remove Worktree?"
-		details = []string{"Removes the worktree directory"}
+		details = append([]string{"Removes the worktree directory"}, h.worktreeDeleteWarnings(repoPath)...)
 	default: // real repo with sessions
 		title = "Remove repo from fleet?"
 		details = []string{
@@ -2125,7 +2157,49 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	h.confirmDialog.ShowDanger(title, base, details, func() tea.Msg {
 		return repoDeleteMsg{repoPath: repoPath, destroyWorkspace: isWorktree}
 	})
+
+	// Removing a worktree kills the dev processes still holding it. The lsof
+	// scan is ~0.5s — too slow for the Update loop — so fill that warning in
+	// asynchronously; SetScan ignores the result if the prompt has moved on.
+	if isWorktree {
+		gen := h.nextHolderScanGen()
+		h.confirmDialog.StartScan(gen, "Checking for running processes…")
+		editor := h.cfg.GetEditor()
+		return func() tea.Msg {
+			holders, _ := proc.FindHolders(repoPath, []string{editor})
+			return worktreeHoldersScannedMsg{gen: gen, holders: holders}
+		}
+	}
 	return nil
+}
+
+func (h *Home) nextHolderScanGen() int {
+	h.holderScanGen++
+	return h.holderScanGen
+}
+
+// worktreeDeleteWarnings returns the instant (cache-backed) pre-flight warnings
+// for removing a worktree: uncommitted changes and still-running sessions. The
+// process-kill warning is filled in asynchronously (see confirmDeleteHeader).
+func (h *Home) worktreeDeleteWarnings(repoPath string) []string {
+	var w []string
+	if info := h.gitInfo()[repoPath]; info != nil && info.IsDirty {
+		w = append(w, "Uncommitted changes will be discarded")
+	}
+	active := 0
+	for _, s := range h.sessions {
+		if session.GetRepoRoot(s.ProjectPath) != repoPath {
+			continue
+		}
+		switch s.GetStatus() {
+		case session.StatusRunning, session.StatusWaiting, session.StatusStarting:
+			active++
+		}
+	}
+	if active > 0 {
+		w = append(w, fmt.Sprintf("%d session(s) here are still running", active))
+	}
+	return w
 }
 
 // repoIsWorktree reports whether a repo group is a git worktree, reading from
@@ -2184,13 +2258,17 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 		h.unpinRepoHeader(msg.repoPath)
 		if msg.destroyWorkspace {
 			repoPath := msg.repoPath
+			name := filepath.Base(repoPath)
+			editor := h.cfg.GetEditor()
 			cmds = append(cmds, func() tea.Msg {
-				p := workspace.ResolveProvider(repoPath)
-				var err error
-				if p != nil && p.CanDestroy() {
-					err = p.Destroy(repoPath, filepath.Base(repoPath))
+				remaining, err := destroyWorktree(repoPath, name, editor, 2*time.Second)
+				return deleteCleanupDoneMsg{
+					workspaceErr:     err,
+					repoPath:         repoPath,
+					workspaceName:    name,
+					remainingHolders: remaining,
+					destroyAttempted: true,
 				}
-				return deleteCleanupDoneMsg{workspaceErr: err}
 			})
 		}
 		return h, tea.Batch(cmds...)
@@ -2580,7 +2658,7 @@ func (h *Home) buildJumpTree() []SidebarItem {
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
-	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, originOf, isWorktreeOf)
+	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, originOf, isWorktreeOf)
 }
 
 func (h *Home) renameSelected() tea.Cmd {
@@ -2973,6 +3051,7 @@ func (h *Home) handlePendingDeleteExpire(msg pendingDeleteExpireMsg) (tea.Model,
 // duration of `tmux kill-session`. Always returns deleteCleanupDoneMsg so
 // the entry can be removed from finalizingDeletes.
 func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
+	editor := h.cfg.GetEditor() // capture on the Update loop; the goroutine must not touch h
 	return func() tea.Msg {
 		debuglog.Logger.Info("finalizing delete", "id", pd.Session.ID, "title", pd.Session.Title)
 
@@ -2987,13 +3066,122 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 		}
 
 		var workspaceErr error
-		if pd.DestroyWS && pd.WorkspaceName != "" {
-			provider := workspace.ResolveProvider(pd.RepoPath)
-			if provider != nil && provider.CanDestroy() {
-				workspaceErr = provider.Destroy(pd.RepoPath, pd.WorkspaceName)
-			}
+		var remaining []string
+		attempted := pd.DestroyWS && pd.WorkspaceName != ""
+		if attempted {
+			remaining, workspaceErr = destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, 2*time.Second)
 		}
-		return deleteCleanupDoneMsg{sessionID: pd.Session.ID, workspaceErr: workspaceErr}
+		return deleteCleanupDoneMsg{
+			sessionID:        pd.Session.ID,
+			workspaceErr:     workspaceErr,
+			repoPath:         pd.RepoPath,
+			workspaceName:    pd.WorkspaceName,
+			remainingHolders: remaining,
+			destroyAttempted: attempted,
+		}
+	}
+}
+
+// destroyWorktree terminates the dev-stack processes still holding a worktree
+// (they detached from the session's tmux pane, so killing the pane didn't stop
+// them) and then removes the worktree. Editors, language servers, and shells
+// are spared via the proc denylist plus the configured editor. On failure it
+// re-scans and returns the remaining holder names so the caller can surface
+// what's still blocking removal. Runs on a background goroutine — must not
+// touch Home.
+func destroyWorktree(repoPath, workspaceName, editor string, grace time.Duration) (remaining []string, err error) {
+	provider := workspace.ResolveProvider(repoPath)
+	if provider == nil || !provider.CanDestroy() {
+		return nil, nil
+	}
+
+	// killHolders terminates the dev daemons (process-compose, air, vite/node)
+	// still holding the worktree, sparing editors/shells via the proc denylist.
+	killHolders := func() {
+		holders, ferr := proc.FindHolders(repoPath, []string{editor})
+		if ferr != nil || len(holders) == 0 {
+			return
+		}
+		pids := make([]int, len(holders))
+		for i, hd := range holders {
+			pids[i] = hd.PID
+		}
+		debuglog.Logger.Info("killing worktree holders before destroy", "repo", repoPath, "procs", strings.Join(uniqueCommands(holders), ", "))
+		_ = proc.Kill(pids, grace)
+	}
+
+	// Kill holders before removal so nothing re-creates files mid-delete.
+	killHolders()
+
+	if err = provider.Destroy(repoPath, workspaceName); err == nil {
+		return nil, nil
+	}
+
+	// Destroy failed. If the worktree is now an orphan — git's linkage is gone
+	// (a failed `git worktree remove` deletes the admin entry before the rmdir
+	// that fails) but the directory persists — git can no longer remove it, so
+	// fall back to a direct RemoveAll. Guarded on IsWorktree==false so a healthy
+	// worktree (which keeps .git intact) can never be force-removed on a
+	// transient git error.
+	if _, statErr := os.Stat(repoPath); statErr == nil && !git.IsWorktree(repoPath) {
+		killHolders() // re-kill: a holder may have respawned during Destroy
+		if rmErr := os.RemoveAll(repoPath); rmErr != nil {
+			debuglog.Logger.Error("orphan worktree RemoveAll failed", "repo", repoPath, "err", rmErr)
+		}
+		if _, statErr := os.Stat(repoPath); statErr != nil {
+			return nil, nil // gone now — success
+		}
+	}
+
+	// Still failed — re-scan to report what's holding it (for part B's message).
+	if holders, ferr := proc.FindHolders(repoPath, []string{editor}); ferr == nil {
+		remaining = uniqueCommands(holders)
+	}
+	return remaining, err
+}
+
+// uniqueCommands returns the distinct command names from holders, order-stable.
+func uniqueCommands(holders []proc.Holder) []string {
+	seen := make(map[string]bool, len(holders))
+	var out []string
+	for _, hd := range holders {
+		if hd.Command == "" || seen[hd.Command] {
+			continue
+		}
+		seen[hd.Command] = true
+		out = append(out, hd.Command)
+	}
+	return out
+}
+
+// handleWorktreeDestroyResult applies part B. On a failed worktree destroy it
+// re-pins the worktree (so its header reappears as an empty checkout to retry
+// with d) and flags it for a persistent sidebar marker + error; on success it
+// clears any prior failure flag.
+func (h *Home) handleWorktreeDestroyResult(msg deleteCleanupDoneMsg) {
+	if msg.workspaceErr == nil {
+		if h.failedWorktreeRemovals[msg.repoPath] {
+			delete(h.failedWorktreeRemovals, msg.repoPath)
+			h.rebuildFlatItems()
+		}
+		return
+	}
+
+	// Re-pin so the worktree reappears in the sidebar as a retry target.
+	if !h.pinnedRepos[msg.repoPath] {
+		h.pinnedRepos[msg.repoPath] = true
+		if err := h.storage.PinRepo(msg.repoPath); err != nil {
+			debuglog.Logger.Error("failed to re-pin failed worktree", "repo", msg.repoPath, "err", err)
+		}
+	}
+	h.failedWorktreeRemovals[msg.repoPath] = true
+	h.rebuildFlatItems()
+
+	name := filepath.Base(msg.repoPath)
+	if len(msg.remainingHolders) > 0 {
+		h.setError(fmt.Errorf("couldn't remove worktree %q — still held by %s; d to retry", name, strings.Join(msg.remainingHolders, ", ")))
+	} else {
+		h.setError(fmt.Errorf("couldn't remove worktree %q: %w; d to retry", name, msg.workspaceErr))
 	}
 }
 
@@ -3006,6 +3194,7 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 // pendingDeletes — finalizingDeletes entries already have a goroutine
 // responsible for the destroy.
 func (h *Home) finalizeAllPendingDeletes() {
+	editor := h.cfg.GetEditor()
 	finalize := func(pd PendingDelete, destroyWorkspace bool) {
 		debuglog.Logger.Info("finalizing pending delete on quit", "id", pd.Session.ID, "title", pd.Session.Title)
 		if pd.Session.IsAlive() {
@@ -3017,11 +3206,10 @@ func (h *Home) finalizeAllPendingDeletes() {
 			debuglog.Logger.Error("failed to remove hook status file on quit", "id", pd.Session.ID, "err", err)
 		}
 		if destroyWorkspace && pd.DestroyWS && pd.WorkspaceName != "" {
-			provider := workspace.ResolveProvider(pd.RepoPath)
-			if provider != nil && provider.CanDestroy() {
-				if err := provider.Destroy(pd.RepoPath, pd.WorkspaceName); err != nil {
-					debuglog.Logger.Error("failed to destroy workspace on quit", "id", pd.Session.ID, "workspace", pd.WorkspaceName, "err", err)
-				}
+			// Route through destroyWorktree so leftover dev daemons are killed
+			// before removal — grace 0 (immediate SIGKILL) so quit isn't delayed.
+			if _, err := destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, 0); err != nil {
+				debuglog.Logger.Error("failed to destroy workspace on quit", "id", pd.Session.ID, "workspace", pd.WorkspaceName, "err", err)
 			}
 		}
 	}
@@ -4267,7 +4455,7 @@ func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 
 func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, originOf, isWorktreeOf)
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, originOf, isWorktreeOf)
 	h.sidebarDirty = true
 }
 
