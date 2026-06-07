@@ -206,32 +206,48 @@ func CopyClaudeForkTranscript(parentSessionID, parentProjectPath, destProjectPat
 	return nil
 }
 
-// rotationHandoffWindow bounds how far apart a rotated session's first transcript
-// entry and the previous (owner) session's last entry may be while still counting
-// as a continuation. Claude Code's session-id rotations (compaction, /clear,
-// continue) hand off within milliseconds; the window absorbs clock/flush skew but
-// stays far tighter than the gap a concurrent nested child shows.
+// rotationHandoffWindow bounds how far apart a /clear-rotated session's first
+// transcript entry and the previous (owner) session's last entry may be while
+// still counting as a continuation. A /clear hands off within milliseconds; the
+// window absorbs clock/flush skew but stays far tighter than the gap a concurrent
+// nested child shows. (Linked rotations — continue/resume/fork — use the
+// deterministic uuid signal below instead, which has no time dependence.)
 const rotationHandoffWindow = 10 * time.Second
 
 // isSessionRotation reports whether newSessionID is ownerSessionID's conversation
 // continued under a fresh id (a Claude session-id rotation) rather than a separate
 // nested child claude that merely inherited the same FLEET_INSTANCE_ID.
 //
-// The signal is transcript continuity: a rotation's new transcript begins right
-// where the owner's ends, so the new file's first entry and the owner file's last
-// entry land within rotationHandoffWindow of each other. A concurrent child starts
-// mid-way through the owner's life and the owner keeps appending past it, so the
-// two never line up.
+// Claude rotates a session id three ways, and they leave different traces:
+//   - continue / resume / fork: the new transcript opens with a
+//     `compact_boundary`/`summary` entry whose `logicalParentUuid` points at the
+//     prior session's tail uuid. Preserved history means the new file's first
+//     timestamp is OLD (minutes-to-days before the handoff), so we match the
+//     uuid against the owner transcript instead — deterministic, time-independent,
+//     and a nested child can't match (its link, if any, points at its own parent).
+//   - /clear: a fresh conversation (first user entry `parentUuid:null`, no link)
+//     that hands off instantly, so the new file's first entry lands within
+//     rotationHandoffWindow of the owner's last entry.
+//   - in-place compaction keeps the same session id, so it never reaches here.
 //
-// When either transcript can't be read we return false — the safe default, since
-// wrongly adopting a real nested child would clobber the owner's status and resume
-// id.
+// When transcripts can't be read we return false — the safe default, since
+// wrongly adopting a real nested child would clobber the owner's status and
+// resume id.
 func isSessionRotation(projectPath, ownerSessionID, newSessionID string) bool {
 	if projectPath == "" || ownerSessionID == "" || newSessionID == "" {
 		return false
 	}
-	newFirst := firstTranscriptTimestamp(ClaudeTranscriptPath(newSessionID, projectPath))
-	ownerLast := lastTranscriptTimestamp(ClaudeTranscriptPath(ownerSessionID, projectPath))
+	newPath := ClaudeTranscriptPath(newSessionID, projectPath)
+	ownerPath := ClaudeTranscriptPath(ownerSessionID, projectPath)
+
+	// Primary: deterministic parent link (continue/resume/fork).
+	if link := transcriptParentLink(newPath); link != "" && transcriptContainsUUID(ownerPath, link) {
+		return true
+	}
+
+	// Fallback: instant timestamp handoff (/clear).
+	newFirst := firstTranscriptTimestamp(newPath)
+	ownerLast := lastTranscriptTimestamp(ownerPath)
 	if newFirst.IsZero() || ownerLast.IsZero() {
 		return false
 	}
@@ -240,6 +256,74 @@ func isSessionRotation(projectPath, ownerSessionID, newSessionID string) bool {
 		delta = -delta
 	}
 	return delta <= rotationHandoffWindow
+}
+
+// transcriptParentLink returns the logicalParentUuid of the first
+// compact_boundary/summary entry in the transcript at path — the link a
+// continue/resume/fork rotation records to its parent session's tail uuid — or
+// "" if the transcript opens with no such entry (a /clear-fresh or brand-new
+// session). Only the first such entry matters: later compact_boundary entries in
+// the same file are in-place compactions that link within this file.
+func transcriptParentLink(path string) string {
+	if path == "" {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, "logicalParentUuid") {
+			continue
+		}
+		var entry struct {
+			Type              string `json:"type"`
+			Subtype           string `json:"subtype"`
+			LogicalParentUUID string `json:"logicalParentUuid"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.LogicalParentUUID != "" && (entry.Subtype == "compact_boundary" || entry.Type == "summary") {
+			return entry.LogicalParentUUID
+		}
+	}
+	return ""
+}
+
+// transcriptContainsUUID reports whether any entry in the transcript at path
+// carries the given uuid. Used to confirm a child's logicalParentUuid actually
+// belongs to the owner transcript (vs a nested child's own parent).
+func transcriptContainsUUID(path, uuid string) bool {
+	if path == "" || uuid == "" {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, uuid) {
+			continue
+		}
+		var entry struct {
+			UUID string `json:"uuid"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.UUID == uuid {
+			return true
+		}
+	}
+	return false
 }
 
 // firstTranscriptTimestamp returns the timestamp of the earliest timestamped JSONL

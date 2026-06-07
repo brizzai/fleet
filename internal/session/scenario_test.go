@@ -108,7 +108,7 @@ func runScenario(t *testing.T, sc Scenario) {
 					Status:    e.Hook,
 					SessionID: e.SessionID,
 					UpdatedAt: hookUpdatedAt,
-				})
+				}, true)
 			}
 
 			// Set pane content.

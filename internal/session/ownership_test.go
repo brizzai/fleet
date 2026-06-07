@@ -33,10 +33,10 @@ func writeTranscript(t *testing.T, projectPath, sessionID string, stamps ...time
 }
 
 // TestUpdateHookStatusAdoptsRotatedSession reproduces the stuck-running bug: when
-// Claude rotates its session id mid-life (compaction/clear/continue), the new
-// transcript continues the old one within milliseconds. The new id's hooks must
-// be adopted, not dropped as foreign — otherwise the in-memory hook freezes at
-// the old session's last event and the resume id goes stale.
+// Claude /clear starts a fresh conversation under a new id that hands off within
+// milliseconds (no parent link). The new id's hooks must be adopted via the
+// timestamp-proximity signal, not dropped as foreign — otherwise the in-memory
+// hook freezes at the old session's last event and the resume id goes stale.
 func TestUpdateHookStatusAdoptsRotatedSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	proj := t.TempDir()
@@ -51,13 +51,13 @@ func TestUpdateHookStatusAdoptsRotatedSession(t *testing.T) {
 	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
 
 	// Owner claims ownership.
-	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "owner-aaa", UpdatedAt: time.Now()})
+	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "owner-aaa", UpdatedAt: time.Now()}, true)
 	if got := s.GetHookStatus(); got != "waiting" {
 		t.Fatalf("owner hook not applied: hook=%q", got)
 	}
 
 	// Rotated session reports finished — must be adopted (continuation).
-	changed := s.UpdateHookStatus(&HookStatus{Status: "finished", SessionID: "rot-bbb", UpdatedAt: time.Now()})
+	changed := s.UpdateHookStatus(&HookStatus{Status: "finished", SessionID: "rot-bbb", UpdatedAt: time.Now()}, true)
 	if !changed {
 		t.Errorf("rotated hook should register as changed")
 	}
@@ -82,10 +82,10 @@ func TestUpdateHookStatusIgnoresNestedChild(t *testing.T) {
 	writeTranscript(t, proj, "child-bbb", base.Add(30*time.Minute), base.Add(31*time.Minute))
 
 	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
-	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-aaa", UpdatedAt: time.Now()})
+	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-aaa", UpdatedAt: time.Now()}, true)
 
 	// Child reports dead — must be ignored; owner state preserved.
-	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "child-bbb", UpdatedAt: time.Now()}); changed {
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "child-bbb", UpdatedAt: time.Now()}, true); changed {
 		t.Errorf("nested child hook should be ignored (changed=true)")
 	}
 	if got := s.GetHookStatus(); got != "running" {
@@ -93,5 +93,83 @@ func TestUpdateHookStatusIgnoresNestedChild(t *testing.T) {
 	}
 	if s.ClaudeSessionID != "owner-aaa" {
 		t.Errorf("resume id clobbered by nested child: %q, want owner-aaa", s.ClaudeSessionID)
+	}
+}
+
+// writeTranscriptRaw writes arbitrary JSONL lines for a session under the
+// HOME-rooted projects dir, for tests that need uuid / compact_boundary entries.
+func writeTranscriptRaw(t *testing.T, projectPath, sessionID string, lines ...string) {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".claude", "projects", ClaudeProjectDirName(projectPath))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateHookStatusAdoptsLinkedRotation covers continue/resume/fork: the new
+// transcript opens with a compact_boundary whose logicalParentUuid points at the
+// owner's tail uuid, and its first timestamp is OLD (preserved history) — so
+// proximity would miss it. The deterministic uuid link must adopt it anyway.
+func TestUpdateHookStatusAdoptsLinkedRotation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	old := time.Now().Add(-4 * time.Hour).UTC().Format(time.RFC3339Nano)
+	// Owner transcript: its tail entry carries uuid "PARENT-TAIL".
+	writeTranscriptRaw(t, proj, "owner-link",
+		`{"type":"user","timestamp":"`+old+`","uuid":"u1"}`,
+		`{"type":"assistant","timestamp":"`+old+`","uuid":"PARENT-TAIL"}`,
+	)
+	// Rotated transcript: opens with a compact_boundary linking to PARENT-TAIL,
+	// first timestamp far in the past (proximity-defeating).
+	writeTranscriptRaw(t, proj, "child-link",
+		`{"type":"system","subtype":"compact_boundary","timestamp":"`+old+`","logicalParentUuid":"PARENT-TAIL","uuid":"cb1"}`,
+		`{"type":"user","timestamp":"`+time.Now().UTC().Format(time.RFC3339Nano)+`","uuid":"u2"}`,
+	)
+
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
+	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "owner-link", UpdatedAt: time.Now()}, true)
+
+	changed := s.UpdateHookStatus(&HookStatus{Status: "finished", SessionID: "child-link", UpdatedAt: time.Now()}, true)
+	if !changed || s.GetHookStatus() != "finished" || s.ClaudeSessionID != "child-link" {
+		t.Errorf("linked rotation not adopted: changed=%v hook=%q resumeID=%q (want true/finished/child-link)",
+			changed, s.GetHookStatus(), s.ClaudeSessionID)
+	}
+}
+
+// TestUpdateHookStatusIgnoresNestedChildWithCompaction guards the uuid signal's
+// precision: a nested child that compacted has a compact_boundary, but its
+// logicalParentUuid points at ITS OWN parent, not the owner — so it must NOT be
+// adopted.
+func TestUpdateHookStatusIgnoresNestedChildWithCompaction(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	ownerTs := time.Now().Add(-4 * time.Hour).UTC().Format(time.RFC3339Nano)
+	childTs := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano) // >10s from owner → proximity also rejects
+	writeTranscriptRaw(t, proj, "owner-x",
+		`{"type":"user","timestamp":"`+ownerTs+`","uuid":"owner-only-uuid"}`,
+	)
+	// Child links to a uuid that does NOT exist in the owner transcript, and its
+	// first entry is far from the owner's last (so neither signal adopts it).
+	writeTranscriptRaw(t, proj, "child-x",
+		`{"type":"system","subtype":"compact_boundary","timestamp":"`+childTs+`","logicalParentUuid":"some-other-parent","uuid":"cb1"}`,
+	)
+
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
+	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-x", UpdatedAt: time.Now()}, true)
+
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "child-x", UpdatedAt: time.Now()}, true); changed {
+		t.Errorf("nested child with foreign compaction link should be ignored")
+	}
+	if s.GetHookStatus() != "running" || s.ClaudeSessionID != "owner-x" {
+		t.Errorf("owner clobbered: hook=%q resumeID=%q", s.GetHookStatus(), s.ClaudeSessionID)
 	}
 }

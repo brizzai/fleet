@@ -63,6 +63,13 @@ type Session struct {
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
 	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
 
+	// Negative cache for the rotation check: the last (owner, foreign) pair that
+	// isSessionRotation rejected. A persistent foreign id (a nested-child eval
+	// harness) would otherwise rescan transcripts every worker cycle; once
+	// rejected we short-circuit until the owner or the foreign id changes.
+	rotRejectOwner   string
+	rotRejectForeign string
+
 	lastContentHash     string
 	lastContentChangeAt time.Time
 
@@ -233,7 +240,13 @@ type HookStatus struct {
 // UpdateHookStatus updates the session's hook-based status.
 // Returns true if the hook meaningfully changed (new status or new timestamp),
 // so callers can prioritize an immediate status recomputation.
-func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
+//
+// resolveRotation gates the transcript I/O in isSessionRotation. The worker
+// passes true (it runs off the Bubble Tea Update() loop); the UI paths
+// (hookChangedMsg/statusUpdateMsg) pass false so a foreign id can't block the
+// render loop on disk reads — they simply defer it to the next worker cycle
+// (~500ms), which adopts it.
+func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	if hs == nil {
 		return false
 	}
@@ -243,28 +256,43 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	// Rare path: only fires when an id we don't already own reports.
 	//
 	// A different Claude session_id means one of two things:
-	//   - Claude rotated its session id mid-life (compaction, /clear, or a
-	//     resume/continue). A legitimate handoff: we MUST adopt the new id, or
-	//     the in-memory hook freezes at the old session's last event (e.g. a
-	//     stale "waiting") and the resume id / auto-name go stale.
+	//   - Claude rotated its session id (/clear, continue, resume, fork). A
+	//     legitimate handoff: we MUST adopt the new id, or the in-memory hook
+	//     freezes at the old session's last event (e.g. a stale "waiting") and
+	//     the resume id / auto-name go stale.
 	//   - A nested child `claude` (an eval harness spawning sub-Claudes)
 	//     inherited FLEET_INSTANCE_ID. Adopting it would clobber our status and
 	//     resume id, so it must be ignored.
-	// isSessionRotation distinguishes them via transcript continuity.
+	// isSessionRotation distinguishes them; a persistent rejection is cached so
+	// a nested child doesn't rescan transcripts every cycle.
 	var owner string
 	if hs.SessionID != "" {
 		s.mu.RLock()
 		owner = s.ownerSessionID
 		projectPath := s.ProjectPath
+		negCached := owner != "" && s.rotRejectOwner == owner && s.rotRejectForeign == hs.SessionID
 		s.mu.RUnlock()
 		if owner != "" && hs.SessionID != owner {
-			if isSessionRotation(projectPath, owner, hs.SessionID) {
+			switch {
+			case negCached:
+				return false // already rejected this (owner, foreign) pair
+			case resolveRotation && isSessionRotation(projectPath, owner, hs.SessionID):
 				debuglog.Logger.Info("adopting rotated claude session",
 					"id", s.ID, "old", owner, "new", hs.SessionID)
-			} else {
-				debuglog.Logger.Debug("ignoring foreign claude session",
-					"id", s.ID, "owner", owner, "foreign", hs.SessionID)
-				return false // foreign (nested) Claude — ignore entirely
+			default:
+				// Foreign (nested child), or deferred from the UI path. Cache the
+				// rejection only when we actually evaluated it (worker path), so a
+				// persistent foreign id doesn't rescan transcripts every cycle; the
+				// UI path leaves the verdict to the worker.
+				if resolveRotation {
+					s.mu.Lock()
+					s.rotRejectOwner = owner
+					s.rotRejectForeign = hs.SessionID
+					s.mu.Unlock()
+					debuglog.Logger.Debug("ignoring foreign claude session",
+						"id", s.ID, "owner", owner, "foreign", hs.SessionID)
+				}
+				return false
 			}
 		}
 	}
@@ -273,12 +301,11 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	defer s.mu.Unlock()
 
 	// Claim ownership (first hook after launch), adopt a verified rotation, or
-	// no-op for the current owner. Re-validate under the write lock: if ownership
-	// changed to a different non-empty id since the snapshot above, drop rather
-	// than clobber it — the next worker cycle re-reads the hook file and
-	// re-evaluates. Unreachable while all UpdateHookStatus callers are serialized
-	// by workerMu (the only concurrent writer, clearHookState, just sets ""), but
-	// keeps this self-defending if a future caller isn't.
+	// no-op for the current owner. Re-validate under the write lock: the worker
+	// runs syncHookStatuses WITHOUT workerMu (app.go), so it races the UI path —
+	// ownership may have changed since the snapshot above. If it changed to a
+	// different non-empty id, drop rather than clobber it; the next cycle
+	// re-evaluates. (This re-check is load-bearing, not just defensive.)
 	if hs.SessionID != "" {
 		if cur := s.ownerSessionID; cur != "" && cur != owner && cur != hs.SessionID {
 			debuglog.Logger.Debug("owner changed under lock; dropping hook",
@@ -406,6 +433,8 @@ func (s *Session) clearHookState() {
 	s.hookUpdatedAt = time.Time{}
 	s.hookOverriddenAt = time.Time{}
 	s.ownerSessionID = ""
+	s.rotRejectOwner = ""
+	s.rotRejectForeign = ""
 	s.mu.Unlock()
 	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
 	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
@@ -673,6 +702,10 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 			} else {
 				s.Status = StatusFinished
 			}
+			// Match the non-overridden settle below: reset content tracking so a
+			// later waiting hook measures change from a clean baseline.
+			s.lastContentHash = ""
+			s.lastContentChangeAt = time.Time{}
 			log.Info("overridden waiting hook but pane shows idle prompt, settling to finished")
 		}
 		return
