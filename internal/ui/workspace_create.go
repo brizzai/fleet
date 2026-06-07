@@ -46,12 +46,15 @@ type (
 	// workspaceErr surfaces destroy failures to the user. On failure, repoPath
 	// + remainingHolders let the handler re-pin the worktree and name what's
 	// still holding it (part B); on success they let it clear a prior failure.
+	// destroyAttempted is true only when a worktree destroy actually ran, so the
+	// handler can ignore the (always-set) repoPath on plain session deletes.
 	deleteCleanupDoneMsg struct {
 		sessionID        string
 		workspaceErr     error
 		repoPath         string
 		workspaceName    string
 		remainingHolders []string
+		destroyAttempted bool
 	}
 )
 

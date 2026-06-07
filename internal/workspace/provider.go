@@ -270,7 +270,12 @@ func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {
 			debuglog.Logger.Error("git worktree destroy: RemoveAll failed", "name", name, "path", wtPath, "err", rmAllErr)
 			return fmt.Errorf("git worktree remove: %s", rmErr)
 		}
-		if pruneOut, pruneErr := exec.CommandContext(ctx, "git", "-C", mainPath, "worktree", "prune").CombinedOutput(); pruneErr != nil {
+		// Fresh context: the remove above may have failed *because* the shared
+		// ctx expired, which would make prune fail instantly and silently leave a
+		// dangling .git/worktrees entry while we report success.
+		pruneCtx, pruneCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer pruneCancel()
+		if pruneOut, pruneErr := exec.CommandContext(pruneCtx, "git", "-C", mainPath, "worktree", "prune").CombinedOutput(); pruneErr != nil {
 			debuglog.Logger.Warn("git worktree prune failed", "name", name, "err", strings.TrimSpace(string(pruneOut)))
 		}
 		if _, statErr := os.Stat(wtPath); statErr == nil {

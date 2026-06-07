@@ -901,7 +901,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		if msg.repoPath != "" {
+		if msg.destroyAttempted {
 			h.handleWorktreeDestroyResult(msg)
 		} else if msg.workspaceErr != nil {
 			h.setError(fmt.Errorf("workspace destroy: %w", msg.workspaceErr))
@@ -2124,7 +2124,10 @@ type worktreeHoldersScannedMsg struct {
 func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	repoPath := item.RepoPath
 	count := h.countSessionsForRepo(repoPath)
-	isWorktree := h.repoIsWorktree(repoPath)
+	// A worktree whose removal previously failed leaves an orphaned dir that git
+	// may no longer classify as a worktree; treat it as one so the retry routes
+	// to destroy (not instant-unpin) and actually removes the leftover.
+	isWorktree := h.repoIsWorktree(repoPath) || h.failedWorktreeRemovals[repoPath]
 
 	// Empty plain repo: instant unpin, no dialog (unchanged behavior).
 	if count == 0 && !isWorktree {
@@ -2258,12 +2261,13 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 			name := filepath.Base(repoPath)
 			editor := h.cfg.GetEditor()
 			cmds = append(cmds, func() tea.Msg {
-				remaining, err := destroyWorktree(repoPath, name, editor)
+				remaining, err := destroyWorktree(repoPath, name, editor, 2*time.Second)
 				return deleteCleanupDoneMsg{
 					workspaceErr:     err,
 					repoPath:         repoPath,
 					workspaceName:    name,
 					remainingHolders: remaining,
+					destroyAttempted: true,
 				}
 			})
 		}
@@ -3063,8 +3067,9 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 
 		var workspaceErr error
 		var remaining []string
-		if pd.DestroyWS && pd.WorkspaceName != "" {
-			remaining, workspaceErr = destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor)
+		attempted := pd.DestroyWS && pd.WorkspaceName != ""
+		if attempted {
+			remaining, workspaceErr = destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, 2*time.Second)
 		}
 		return deleteCleanupDoneMsg{
 			sessionID:        pd.Session.ID,
@@ -3072,6 +3077,7 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 			repoPath:         pd.RepoPath,
 			workspaceName:    pd.WorkspaceName,
 			remainingHolders: remaining,
+			destroyAttempted: attempted,
 		}
 	}
 }
@@ -3083,26 +3089,48 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 // re-scans and returns the remaining holder names so the caller can surface
 // what's still blocking removal. Runs on a background goroutine — must not
 // touch Home.
-func destroyWorktree(repoPath, workspaceName, editor string) (remaining []string, err error) {
+func destroyWorktree(repoPath, workspaceName, editor string, grace time.Duration) (remaining []string, err error) {
 	provider := workspace.ResolveProvider(repoPath)
 	if provider == nil || !provider.CanDestroy() {
 		return nil, nil
 	}
 
-	// Kill holders before removal so nothing re-creates files mid-delete.
-	if holders, ferr := proc.FindHolders(repoPath, []string{editor}); ferr == nil && len(holders) > 0 {
+	// killHolders terminates the dev daemons (process-compose, air, vite/node)
+	// still holding the worktree, sparing editors/shells via the proc denylist.
+	killHolders := func() {
+		holders, ferr := proc.FindHolders(repoPath, []string{editor})
+		if ferr != nil || len(holders) == 0 {
+			return
+		}
 		pids := make([]int, len(holders))
-		names := make([]string, len(holders))
 		for i, hd := range holders {
 			pids[i] = hd.PID
-			names[i] = hd.Command
 		}
-		debuglog.Logger.Info("killing worktree holders before destroy", "repo", repoPath, "procs", strings.Join(names, ", "))
-		_ = proc.Kill(pids, 2*time.Second)
+		debuglog.Logger.Info("killing worktree holders before destroy", "repo", repoPath, "procs", strings.Join(uniqueCommands(holders), ", "))
+		_ = proc.Kill(pids, grace)
 	}
+
+	// Kill holders before removal so nothing re-creates files mid-delete.
+	killHolders()
 
 	if err = provider.Destroy(repoPath, workspaceName); err == nil {
 		return nil, nil
+	}
+
+	// Destroy failed. If the worktree is now an orphan — git's linkage is gone
+	// (a failed `git worktree remove` deletes the admin entry before the rmdir
+	// that fails) but the directory persists — git can no longer remove it, so
+	// fall back to a direct RemoveAll. Guarded on IsWorktree==false so a healthy
+	// worktree (which keeps .git intact) can never be force-removed on a
+	// transient git error.
+	if _, statErr := os.Stat(repoPath); statErr == nil && !git.IsWorktree(repoPath) {
+		killHolders() // re-kill: a holder may have respawned during Destroy
+		if rmErr := os.RemoveAll(repoPath); rmErr != nil {
+			debuglog.Logger.Error("orphan worktree RemoveAll failed", "repo", repoPath, "err", rmErr)
+		}
+		if _, statErr := os.Stat(repoPath); statErr != nil {
+			return nil, nil // gone now — success
+		}
 	}
 
 	// Still failed — re-scan to report what's holding it (for part B's message).
@@ -3166,6 +3194,7 @@ func (h *Home) handleWorktreeDestroyResult(msg deleteCleanupDoneMsg) {
 // pendingDeletes — finalizingDeletes entries already have a goroutine
 // responsible for the destroy.
 func (h *Home) finalizeAllPendingDeletes() {
+	editor := h.cfg.GetEditor()
 	finalize := func(pd PendingDelete, destroyWorkspace bool) {
 		debuglog.Logger.Info("finalizing pending delete on quit", "id", pd.Session.ID, "title", pd.Session.Title)
 		if pd.Session.IsAlive() {
@@ -3177,11 +3206,10 @@ func (h *Home) finalizeAllPendingDeletes() {
 			debuglog.Logger.Error("failed to remove hook status file on quit", "id", pd.Session.ID, "err", err)
 		}
 		if destroyWorkspace && pd.DestroyWS && pd.WorkspaceName != "" {
-			provider := workspace.ResolveProvider(pd.RepoPath)
-			if provider != nil && provider.CanDestroy() {
-				if err := provider.Destroy(pd.RepoPath, pd.WorkspaceName); err != nil {
-					debuglog.Logger.Error("failed to destroy workspace on quit", "id", pd.Session.ID, "workspace", pd.WorkspaceName, "err", err)
-				}
+			// Route through destroyWorktree so leftover dev daemons are killed
+			// before removal — grace 0 (immediate SIGKILL) so quit isn't delayed.
+			if _, err := destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, 0); err != nil {
+				debuglog.Logger.Error("failed to destroy workspace on quit", "id", pd.Session.ID, "workspace", pd.WorkspaceName, "err", err)
 			}
 		}
 	}

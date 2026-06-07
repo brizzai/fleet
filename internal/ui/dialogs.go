@@ -429,6 +429,7 @@ func (d *ConfirmDialog) ShowDanger(title, subject string, details []string, onYe
 	d.details = details
 	d.onYes = onYes
 	d.scanLine = ""
+	d.scanGen = 0 // 0 is unused (nextHolderScanGen yields ≥1); invalidates any in-flight scan
 }
 
 // StartScan records the generation for an in-flight async scan and shows a
@@ -456,6 +457,7 @@ func (d *ConfirmDialog) Show(message string, onYes func() tea.Msg) {
 	d.details = nil
 	d.onYes = onYes
 	d.scanLine = ""
+	d.scanGen = 0
 }
 
 func (d *ConfirmDialog) Hide()           { d.visible = false }
