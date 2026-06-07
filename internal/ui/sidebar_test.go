@@ -31,6 +31,7 @@ func TestBuildFlatItems_OriginGrouping(t *testing.T) {
 		expanded,
 		"",
 		nil,
+		nil,
 		originOf,
 		nil,
 	)

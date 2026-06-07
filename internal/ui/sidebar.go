@@ -30,12 +30,13 @@ type SidebarItem struct {
 	OriginLabel string // human-readable origin label
 	RepoPath    string // checkout (repo root) — also set on session/pending
 
-	Expanded     bool
-	SessionCount int                    // origin header: checkouts (repos+worktrees) in group. checkout header: sessions in checkout.
-	StatusCounts map[session.Status]int // header: per-status breakdown for the group (origin or checkout)
-	Session      *session.Session
-	IsLast       bool // retained for layout decisions
-	Pending      *PendingWorkspace
+	Expanded      bool
+	SessionCount  int                    // origin header: checkouts (repos+worktrees) in group. checkout header: sessions in checkout.
+	StatusCounts  map[session.Status]int // header: per-status breakdown for the group (origin or checkout)
+	Session       *session.Session
+	IsLast        bool // retained for layout decisions
+	Pending       *PendingWorkspace
+	RemovalFailed bool // checkout header: worktree whose destroy failed (press d to retry)
 }
 
 // RepoGroupInfo holds status counts for a checkout (used by other call sites).
@@ -97,6 +98,7 @@ func BuildFlatItems(
 	expanded map[string]bool,
 	filter string,
 	pinnedRepos map[string]bool,
+	failedRemovals map[string]bool,
 	originOf OriginOf,
 	isWorktreeOf IsWorktreeOf,
 ) []SidebarItem {
@@ -240,6 +242,7 @@ func BuildFlatItems(
 				Expanded:         checkoutExpanded,
 				SessionCount:     len(blk.sessions),
 				StatusCounts:     blk.statusCounts,
+				RemovalFailed:    failedRemovals[blk.repo],
 			})
 
 			if !checkoutExpanded {
@@ -521,6 +524,11 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	if summary != "" {
 		summarySuffix = "  " + summary
 	}
+	// Persistent marker for a worktree whose destroy failed (part B). Appended
+	// to summarySuffix so it shows on both the selected and unselected rows.
+	if item.RemovalFailed {
+		summarySuffix += "  " + ErrorStyle.Render("✕ removal failed — d to retry")
+	}
 
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
@@ -549,14 +557,18 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 	name := filepath.Base(item.RepoPath)
 	chevron := chevronGlyph(item.Expanded)
+	failMark := ""
+	if item.RemovalFailed {
+		failMark = "  " + ErrorStyle.Render("✕ removal failed — d to retry")
+	}
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
 		nameStyled := SessionTitleSelStyle.Render(" " + name + " ")
-		return fmt.Sprintf("  %s %s", icon, nameStyled)
+		return fmt.Sprintf("  %s %s", icon, nameStyled) + failMark
 	}
 	icon := DimStyle.Render(chevron)
 	nameStyled := DimStyle.Render(name)
-	return fmt.Sprintf("  %s %s", icon, nameStyled)
+	return fmt.Sprintf("  %s %s", icon, nameStyled) + failMark
 }
 
 // renderSessionItem → "  │ <status> <agent> title [slot]"  (under a checkout)

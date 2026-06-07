@@ -43,10 +43,15 @@ type (
 	// deleteCleanupDoneMsg fires when finalizeDelete's background cleanup
 	// (tmux kill, hook removal, optional workspace destroy) completes. The
 	// Update handler uses sessionID to drop the entry from finalizingDeletes;
-	// workspaceErr surfaces destroy failures to the user.
+	// workspaceErr surfaces destroy failures to the user. On failure, repoPath
+	// + remainingHolders let the handler re-pin the worktree and name what's
+	// still holding it (part B); on success they let it clear a prior failure.
 	deleteCleanupDoneMsg struct {
-		sessionID    string
-		workspaceErr error
+		sessionID        string
+		workspaceErr     error
+		repoPath         string
+		workspaceName    string
+		remainingHolders []string
 	}
 )
 
