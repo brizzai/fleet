@@ -49,6 +49,11 @@ type Config struct {
 	// skipped). When false, the TUI shows it after the consent prompt.
 	DisplayOnboardingSeen bool `json:"display_onboarding_seen,omitempty"`
 
+	// SeenTips records IDs of one-time (tipOnce) contextual tips the user has
+	// dismissed or that have timed out, so they never reappear. Recurring,
+	// condition-driven tips are not stored here — they reset in-memory.
+	SeenTips []string `json:"seen_tips,omitempty"`
+
 	// loadedFromDisk records whether Load read an existing config file. It is
 	// unexported (never serialized) and powers IsFirstRun: a brand-new install
 	// has no config.json, so this is the one signal that doesn't depend on the
@@ -78,6 +83,16 @@ func (c *Config) GetDefaultAgent() string {
 	default:
 		return "claude"
 	}
+}
+
+// IsTipSeen reports whether a one-time tip has been dismissed or has timed out.
+func (c *Config) IsTipSeen(id string) bool {
+	for _, s := range c.SeenTips {
+		if s == id {
+			return true
+		}
+	}
+	return false
 }
 
 // IsAutoNameEnabled returns whether auto-naming is enabled (default: true).
