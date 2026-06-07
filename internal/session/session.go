@@ -251,9 +251,10 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	//     inherited FLEET_INSTANCE_ID. Adopting it would clobber our status and
 	//     resume id, so it must be ignored.
 	// isSessionRotation distinguishes them via transcript continuity.
+	var owner string
 	if hs.SessionID != "" {
 		s.mu.RLock()
-		owner := s.ownerSessionID
+		owner = s.ownerSessionID
 		projectPath := s.ProjectPath
 		s.mu.RUnlock()
 		if owner != "" && hs.SessionID != owner {
@@ -272,8 +273,18 @@ func (s *Session) UpdateHookStatus(hs *HookStatus) bool {
 	defer s.mu.Unlock()
 
 	// Claim ownership (first hook after launch), adopt a verified rotation, or
-	// no-op for the current owner.
+	// no-op for the current owner. Re-validate under the write lock: if ownership
+	// changed to a different non-empty id since the snapshot above, drop rather
+	// than clobber it — the next worker cycle re-reads the hook file and
+	// re-evaluates. Unreachable while all UpdateHookStatus callers are serialized
+	// by workerMu (the only concurrent writer, clearHookState, just sets ""), but
+	// keeps this self-defending if a future caller isn't.
 	if hs.SessionID != "" {
+		if cur := s.ownerSessionID; cur != "" && cur != owner && cur != hs.SessionID {
+			debuglog.Logger.Debug("owner changed under lock; dropping hook",
+				"id", s.ID, "snapshot", owner, "current", cur, "hook", hs.SessionID)
+			return false
+		}
 		s.ownerSessionID = hs.SessionID
 	}
 

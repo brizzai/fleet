@@ -279,7 +279,9 @@ func scanTranscriptTimestamp(path string, last bool) time.Time {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339, entry.Timestamp)
+		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
+		// "...:04.226Z"). The layout also parses entries with no fractional part.
+		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
 		if err != nil {
 			continue
 		}
