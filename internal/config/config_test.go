@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -316,5 +317,76 @@ func TestIsFirstRun(t *testing.T) {
 	// tests) is treated as a first run — the safe default.
 	if !(&Config{}).IsFirstRun() {
 		t.Error("zero-value Config should report IsFirstRun() == true")
+	}
+}
+
+func TestSavePreservesUnknownKeys(t *testing.T) {
+	// Regression: an older binary whose struct lacks a field a newer fleet wrote
+	// must not silently drop it on save (the theme-reset / consent-prompt-
+	// reappears bug). Load captures unknown keys; Save re-merges them.
+	t.Setenv("HOME", t.TempDir())
+
+	// Simulate a config written by a newer fleet: a key this struct knows
+	// (theme) plus one it doesn't (future_feature).
+	onDisk := `{"theme":"nord","future_feature":{"nested":true},"future_flag":42}`
+	if err := os.MkdirAll(filepath.Dir(DefaultConfigPath()), 0700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(DefaultConfigPath(), []byte(onDisk), 0600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	cfg := Load()
+	if cfg.Theme != "nord" {
+		t.Errorf("Theme: got %q, want %q", cfg.Theme, "nord")
+	}
+
+	// A normal mutation + save (as the settings dialog would do).
+	cfg.Editor = "vim"
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	data, err := os.ReadFile(DefaultConfigPath())
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal saved: %v", err)
+	}
+	for _, k := range []string{"future_feature", "future_flag"} {
+		if _, ok := raw[k]; !ok {
+			t.Errorf("unknown key %q was dropped on save; got %s", k, data)
+		}
+	}
+	if string(raw["theme"]) != `"nord"` {
+		t.Errorf("theme not preserved: got %s", raw["theme"])
+	}
+	if string(raw["editor"]) != `"vim"` {
+		t.Errorf("mutation not persisted: got %s", raw["editor"])
+	}
+}
+
+func TestSaveNoUnknownKeysIsByteIdenticalToStructMarshal(t *testing.T) {
+	// The common case (no unknown keys on disk) must stay exactly the struct's
+	// own ordered marshal — the merge path only engages when there's something
+	// to preserve.
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := &Config{Theme: "nord", Editor: "vim"}
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := os.ReadFile(DefaultConfigPath())
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	want, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("output diverged from struct marshal:\n got: %s\nwant: %s", got, want)
 	}
 }
