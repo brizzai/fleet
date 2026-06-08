@@ -257,6 +257,12 @@ type Home struct {
 	// Floating toast overlay (bottom-right).
 	toasts *ToastStack
 
+	// Contextual tips (bottom-right hint box). See tips.go.
+	tipEpisodeDismissed map[string]bool          // recurring tips dismissed this episode (in-memory)
+	tipVisibleFor       map[string]time.Duration // tipOnce: cumulative time actually on screen
+	lastTipTickAt       time.Time                // wall clock of the previous refreshTips, for the delta
+	activeTipID         string                   // tip currently rendered (set by refreshTips)
+
 	// Recently picked palette item IDs (most recent first). In-memory only.
 	recentPaletteIDs []string
 
@@ -335,6 +341,8 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		slotBindings:           make(map[int]string),
 		lastSlotTapSlot:        -1,
 		toasts:                 NewToastStack(),
+		tipEpisodeDismissed:    make(map[string]bool),
+		tipVisibleFor:          make(map[string]time.Duration),
 		pinnedRepos:            make(map[string]bool),
 		failedWorktreeRemovals: make(map[string]bool),
 		newDialog:              NewNewSessionDialog(),
@@ -1192,13 +1200,47 @@ func (h *Home) View() string {
 		base = dimBackdrop(base)
 		base = overlay.Composite(h.commandPalette.View(), base, overlay.Center, overlay.Center, 0, 0)
 	}
+	// Contextual tip box — suppressed while a modal owns the screen so a sticky
+	// tip never paints over a dialog.
+	tip := ""
+	if !h.modalOpen() {
+		tip = h.tipView()
+	}
 	toast := h.toasts.View(h.width)
-	if toast == "" {
+	if tip == "" && toast == "" {
 		return base
 	}
-	// Bottom-right, with a 1-cell right margin and a 1-row lift so the toast
-	// clears the help-bar baseline.
-	return overlay.Composite(toast, base, overlay.Right, overlay.Bottom, -1, -1)
+	// Stack toast(s) above the tip, then anchor the block bottom-right with a
+	// 1-cell right margin and a 1-row lift so it clears the help-bar baseline.
+	stack := toast
+	if tip != "" {
+		if stack != "" {
+			stack = lipgloss.JoinVertical(lipgloss.Right, toast, tip)
+		} else {
+			stack = tip
+		}
+	}
+	return overlay.Composite(stack, base, overlay.Right, overlay.Bottom, -1, -1)
+}
+
+// modalOpen reports whether any full-screen view currently owns the screen.
+// Mirrors the early-returns in renderBody (plus the command-palette overlay) so
+// a sticky bottom-right tip is never composited on top of a dialog.
+func (h *Home) modalOpen() bool {
+	return h.consentDialog.IsVisible() ||
+		h.onboardingDialog.IsVisible() ||
+		h.helpOverlay.IsVisible() ||
+		h.bugReport.IsVisible() ||
+		h.settingsDialog.IsVisible() ||
+		h.createWorkspaceDialog.IsVisible() ||
+		h.worktreeDialog.IsVisible() ||
+		h.branchDialog.IsVisible() ||
+		h.sessionCreateDialog.IsVisible() ||
+		h.newDialog.IsVisible() ||
+		h.confirmDialog.IsVisible() ||
+		h.renameDialog.IsVisible() ||
+		h.commandPalette.IsVisible() ||
+		h.launchpadActive()
 }
 
 func (h *Home) renderBody() string {
@@ -1790,6 +1832,9 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "S":
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
+		return h, nil
+	case "X":
+		h.dismissActiveTip()
 		return h, nil
 	case "!":
 		h.actionLog.Add("open bug report", "", true)
@@ -3289,6 +3334,7 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	}
 
 	h.rebuildFlatItems()
+	h.refreshTips(!h.modalOpen())
 
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	return h, h.tick()
