@@ -98,39 +98,47 @@ func (ts *ToastStack) Empty() bool { return len(ts.toasts) == 0 }
 
 func renderToast(t Toast, width int) string {
 	color, icon := toastStyle(t.Level)
+	return renderHintBox(icon, color, t.Message, "", width)
+}
 
-	// innerWidth is the content area (inside border + padding).
-	// Reserve 2 cells for the "icon " prefix (line 0) or "  " indent (line 1+).
+// renderHintBox draws the shared bottom-right box used by both toasts and tips:
+// an accent sigil on the first wrapped line, a 2-space hanging indent on the
+// rest, an optional dim footer line, all inside a rounded border in `accent`.
+// `width` is the final outer width (already clamped by the caller). Toasts pass
+// no footer; tips pass the dismiss hint. Keeping both on this one path is what
+// guarantees the stacked boxes stay the same width and shape.
+func renderHintBox(sigil string, accent lipgloss.TerminalColor, body, footer string, width int) string {
+	// innerWidth is the content area (inside border + padding); reserve 2 cells
+	// for the sigil prefix (line 0) or hanging indent (line 1+).
 	innerWidth := width - toastBorderCols - 2*toastInnerHPad
 	if innerWidth < 6 {
 		innerWidth = 6
 	}
 	bodyWidth := innerWidth - 2
 
-	msg := strings.ReplaceAll(t.Message, "\n", " ")
-	lines := wrapToastLine(msg, bodyWidth)
-
-	iconStyle := lipgloss.NewStyle().Foreground(color).Bold(true)
+	sigilStyle := lipgloss.NewStyle().Foreground(accent).Bold(true)
 	msgStyle := lipgloss.NewStyle().Foreground(ColorText)
 
-	var body strings.Builder
+	lines := wrapToastLine(strings.ReplaceAll(body, "\n", " "), bodyWidth)
+
+	var b strings.Builder
 	for i, line := range lines {
-		if i > 0 {
-			body.WriteByte('\n')
-		}
 		if i == 0 {
-			body.WriteString(iconStyle.Render(icon) + " " + msgStyle.Render(line))
+			b.WriteString(sigilStyle.Render(sigil) + " " + msgStyle.Render(line))
 		} else {
-			body.WriteString("  " + msgStyle.Render(line))
+			b.WriteString("\n  " + msgStyle.Render(line))
 		}
+	}
+	if footer != "" {
+		b.WriteString("\n  " + lipgloss.NewStyle().Foreground(ColorTextDim).Render(footer))
 	}
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(color).
+		BorderForeground(accent).
 		Padding(0, toastInnerHPad).
 		Width(width - toastBorderCols).
-		Render(body.String())
+		Render(b.String())
 }
 
 func toastStyle(level ToastLevel) (lipgloss.TerminalColor, string) {

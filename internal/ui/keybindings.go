@@ -49,6 +49,7 @@ var allKeyBindings = []KeyBinding{
 	// Global.
 	{Key: "Ctrl+K", BarKey: "⌃K", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
 	{Key: "S", BarKey: "S", BarDesc: "Set", Desc: "Open settings", Section: "global"},
+	{Key: "X", Desc: "Dismiss on-screen tip", Section: "global"},
 	{Key: "!", BarKey: "!", BarDesc: "Bug", Desc: "Bug report / diagnostics", Section: "global"},
 	{Key: "?", BarKey: "?", BarDesc: "Help", Desc: "Toggle help", Section: "global"},
 	{Key: "q", BarKey: "q", BarDesc: "Quit", Desc: "Quit", Section: "global"},
