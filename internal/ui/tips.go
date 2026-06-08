@@ -2,12 +2,10 @@ package ui
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/session"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // tipPolicy controls how a tip is dismissed and whether it can return.
@@ -96,40 +94,70 @@ func (h *Home) countSessionsByStatus(st session.Status) int {
 // refreshTips recomputes which tip (if any) should display, applying each tip's
 // dismissal policy. Called on the ~2s tick and after a dismissal — never from
 // the render path, so View stays side-effect free.
-func (h *Home) refreshTips() {
+//
+// tipVisible reports whether the tip area is actually on screen right now
+// (false while a modal covers it), so a tipOnce's display budget only ages while
+// the tip is genuinely visible — never off-screen behind a higher-priority tip
+// or a dialog.
+func (h *Home) refreshTips(tipVisible bool) {
 	now := time.Now()
+	var elapsed time.Duration
+	if !h.lastTipTickAt.IsZero() {
+		elapsed = now.Sub(h.lastTipTickAt)
+	}
+	h.lastTipTickAt = now
+
+	// Phase 1: pick the highest-priority eligible tip, with no timer side effects.
 	chosen := ""
 	bestPri := -1
 	for i := range tipRegistry {
 		t := &tipRegistry[i]
-		act := t.active(h)
+		if !t.active(h) {
+			// Condition cleared — reset per-tip state so the tip starts fresh the
+			// next time it becomes relevant (recurrence for tipRecurring; a clean
+			// display budget for tipOnce).
+			delete(h.tipEpisodeDismissed, t.ID)
+			delete(h.tipVisibleFor, t.ID)
+			continue
+		}
 		switch t.Policy {
 		case tipRecurring:
-			if !act {
-				// Episode ended — clear dismissal so the tip can recur.
-				delete(h.tipEpisodeDismissed, t.ID)
-				continue
-			}
 			if h.tipEpisodeDismissed[t.ID] {
 				continue
 			}
 		case tipOnce:
-			if !act || h.cfg.IsTipSeen(t.ID) {
-				continue
-			}
-			// Start the visibility timer on first display, then retire the tip
-			// once it has had its time on screen.
-			if _, ok := h.tipShownSince[t.ID]; !ok {
-				h.tipShownSince[t.ID] = now
-			}
-			if now.Sub(h.tipShownSince[t.ID]) >= tipOnceBudget {
-				h.markTipSeen(t.ID)
+			if h.cfg.IsTipSeen(t.ID) {
 				continue
 			}
 		}
 		if t.Priority > bestPri {
 			bestPri = t.Priority
 			chosen = t.ID
+		}
+	}
+
+	// Phase 2: age the display budget only for the chosen tipOnce tip, and only
+	// while it's actually visible. Every other tipOnce's timer resets, so a tip
+	// that never wins the priority pick (or sits behind a modal) can't be retired
+	// off-screen. elapsed is added only once the tip has already been showing for
+	// a full tick, so pre-display time never counts.
+	for i := range tipRegistry {
+		t := &tipRegistry[i]
+		if t.Policy != tipOnce {
+			continue
+		}
+		if t.ID != chosen {
+			delete(h.tipVisibleFor, t.ID)
+			continue
+		}
+		if tipVisible {
+			if h.activeTipID == t.ID {
+				h.tipVisibleFor[t.ID] += elapsed
+			}
+			if h.tipVisibleFor[t.ID] >= tipOnceBudget {
+				h.markTipSeen(t.ID)
+				chosen = "" // retired this tick; the next tick surfaces any successor
+			}
 		}
 	}
 	h.activeTipID = chosen
@@ -151,7 +179,9 @@ func (h *Home) dismissActiveTip() {
 		}
 	}
 	h.activeTipID = ""
-	h.refreshTips()
+	// Dismiss only fires from a keypress in normal (non-modal) context, so the
+	// successor tip, if any, is visible.
+	h.refreshTips(true)
 }
 
 // markTipSeen records a tipOnce tip as permanently dismissed and persists it.
@@ -177,48 +207,17 @@ func (h *Home) tipView() string {
 	return renderTip(t.text(h), h.width)
 }
 
-// tipMaxWidth bounds the tip column; matches the toast column for visual
-// consistency when both stack in the bottom-right.
-const tipMaxWidth = 44
-
-// renderTip draws the bottom-right hint box: accent rounded border, a width-1
-// accent sigil prefix, the body, and a dim "shift+X to dismiss" footer line.
-// Mirrors renderToast (toast.go) so the two stack cleanly.
+// renderTip draws the bottom-right hint box for the active tip: a width-1 accent
+// sigil, the message, and a dim "shift+X to dismiss" footer. Shares renderHintBox
+// and toastMaxWidth with the toast stack so the two boxes always align when
+// stacked bottom-right.
 func renderTip(body string, maxWidth int) string {
-	width := tipMaxWidth
+	width := toastMaxWidth
 	if maxWidth > 0 && maxWidth < width+2 {
 		width = maxWidth - 2
 	}
 	if width < 12 {
 		return ""
 	}
-
-	innerWidth := width - toastBorderCols - 2*toastInnerHPad
-	if innerWidth < 6 {
-		innerWidth = 6
-	}
-	bodyWidth := innerWidth - 2 // reserve 2 cells for the sigil/indent prefix
-
-	sigilStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	msgStyle := lipgloss.NewStyle().Foreground(ColorText)
-	hintStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
-
-	lines := wrapToastLine(strings.ReplaceAll(body, "\n", " "), bodyWidth)
-
-	var b strings.Builder
-	for i, line := range lines {
-		if i == 0 {
-			b.WriteString(sigilStyle.Render("✦") + " " + msgStyle.Render(line))
-		} else {
-			b.WriteString("\n  " + msgStyle.Render(line))
-		}
-	}
-	b.WriteString("\n  " + hintStyle.Render("shift+X to dismiss"))
-
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorAccent).
-		Padding(0, toastInnerHPad).
-		Width(width - toastBorderCols).
-		Render(b.String())
+	return renderHintBox("✦", ColorAccent, body, "shift+X to dismiss", width)
 }

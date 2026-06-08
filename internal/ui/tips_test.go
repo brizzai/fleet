@@ -16,7 +16,7 @@ func newTipHome(cfg *config.Config, statuses ...session.Status) *Home {
 	h := &Home{
 		cfg:                 cfg,
 		tipEpisodeDismissed: map[string]bool{},
-		tipShownSince:       map[string]time.Time{},
+		tipVisibleFor:       map[string]time.Duration{},
 	}
 	for i, st := range statuses {
 		s := session.NewSession(fmt.Sprintf("s%d", i), "/tmp/repo")
@@ -40,14 +40,14 @@ func TestRecurringTip_ThresholdAndEpisodeReset(t *testing.T) {
 	seenCmd := func() *config.Config { return &config.Config{SeenTips: []string{tipCmdPaletteID}} }
 
 	h := newTipHome(seenCmd(), errStatuses(reloadFailedThreshold-1)...)
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != "" {
 		t.Fatalf("below threshold: want no tip, got %q", h.activeTipID)
 	}
 
 	// Hit the threshold — the failed-sessions tip should show.
 	h = newTipHome(seenCmd(), errStatuses(reloadFailedThreshold)...)
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != tipReloadFailedID {
 		t.Fatalf("at threshold: want %q, got %q", tipReloadFailedID, h.activeTipID)
 	}
@@ -60,7 +60,7 @@ func TestRecurringTip_ThresholdAndEpisodeReset(t *testing.T) {
 	if h.cfg.IsTipSeen(tipReloadFailedID) {
 		t.Fatalf("recurring dismiss must not persist the tip id; SeenTips=%v", h.cfg.SeenTips)
 	}
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != "" {
 		t.Fatalf("still-failing after dismiss: tip should stay hidden, got %q", h.activeTipID)
 	}
@@ -69,11 +69,11 @@ func TestRecurringTip_ThresholdAndEpisodeReset(t *testing.T) {
 	for _, s := range h.sessions {
 		s.SetStatus(session.StatusRunning)
 	}
-	h.refreshTips() // episode ends, dismissal flag reset
+	h.refreshTips(true) // episode ends, dismissal flag reset
 	for _, s := range h.sessions {
 		s.SetStatus(session.StatusError)
 	}
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != tipReloadFailedID {
 		t.Fatalf("after recurrence: want %q, got %q", tipReloadFailedID, h.activeTipID)
 	}
@@ -87,7 +87,7 @@ func TestOnceTip_RespectsSeenAndPersistsOnDismiss(t *testing.T) {
 	// Already seen → never shows.
 	seen := &config.Config{SeenTips: []string{tipCmdPaletteID}}
 	h := newTipHome(seen, session.StatusRunning, session.StatusRunning, session.StatusRunning)
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != "" {
 		t.Fatalf("seen tipOnce should stay hidden, got %q", h.activeTipID)
 	}
@@ -95,7 +95,7 @@ func TestOnceTip_RespectsSeenAndPersistsOnDismiss(t *testing.T) {
 	// Fresh config, enough sessions → shows, then dismiss persists it.
 	cfg := &config.Config{}
 	h = newTipHome(cfg, session.StatusRunning, session.StatusRunning, session.StatusRunning)
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != tipCmdPaletteID {
 		t.Fatalf("want %q, got %q", tipCmdPaletteID, h.activeTipID)
 	}
@@ -103,7 +103,7 @@ func TestOnceTip_RespectsSeenAndPersistsOnDismiss(t *testing.T) {
 	if !cfg.IsTipSeen(tipCmdPaletteID) {
 		t.Fatalf("dismiss must record tipOnce in SeenTips; got %v", cfg.SeenTips)
 	}
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != "" {
 		t.Fatalf("dismissed tipOnce should stay hidden, got %q", h.activeTipID)
 	}
@@ -112,7 +112,7 @@ func TestOnceTip_RespectsSeenAndPersistsOnDismiss(t *testing.T) {
 func TestTipPriority_FailedBeatsCmdPalette(t *testing.T) {
 	// Both conditions hold: 4 error sessions (>= cmdPaletteMinSessions too).
 	h := newTipHome(&config.Config{}, errStatuses(reloadFailedThreshold)...)
-	h.refreshTips()
+	h.refreshTips(true)
 	if h.activeTipID != tipReloadFailedID {
 		t.Fatalf("higher-priority tip should win, got %q", h.activeTipID)
 	}

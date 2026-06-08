@@ -258,9 +258,10 @@ type Home struct {
 	toasts *ToastStack
 
 	// Contextual tips (bottom-right hint box). See tips.go.
-	tipEpisodeDismissed map[string]bool      // recurring tips dismissed this episode (in-memory)
-	tipShownSince       map[string]time.Time // tipOnce: when the current visible streak started
-	activeTipID         string               // tip currently rendered (set by refreshTips)
+	tipEpisodeDismissed map[string]bool          // recurring tips dismissed this episode (in-memory)
+	tipVisibleFor       map[string]time.Duration // tipOnce: cumulative time actually on screen
+	lastTipTickAt       time.Time                // wall clock of the previous refreshTips, for the delta
+	activeTipID         string                   // tip currently rendered (set by refreshTips)
 
 	// Recently picked palette item IDs (most recent first). In-memory only.
 	recentPaletteIDs []string
@@ -341,7 +342,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		lastSlotTapSlot:        -1,
 		toasts:                 NewToastStack(),
 		tipEpisodeDismissed:    make(map[string]bool),
-		tipShownSince:          make(map[string]time.Time),
+		tipVisibleFor:          make(map[string]time.Duration),
 		pinnedRepos:            make(map[string]bool),
 		failedWorktreeRemovals: make(map[string]bool),
 		newDialog:              NewNewSessionDialog(),
@@ -3333,7 +3334,7 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	}
 
 	h.rebuildFlatItems()
-	h.refreshTips()
+	h.refreshTips(!h.modalOpen())
 
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	return h, h.tick()
