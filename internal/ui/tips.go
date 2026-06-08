@@ -204,6 +204,13 @@ func (h *Home) tipView() string {
 	if t == nil {
 		return ""
 	}
+	// Suppress immediately if the trigger no longer holds. activeTipID is only
+	// recomputed on the ~2s tick, so without this re-check the box (and its live
+	// count, e.g. "0 sessions stopped") would linger up to a full tick after the
+	// condition cleared. Pure read — keeps View side-effect free.
+	if !t.active(h) {
+		return ""
+	}
 	return renderTip(t.text(h), h.width)
 }
 

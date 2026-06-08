@@ -94,7 +94,8 @@ type (
 		id  string
 		err error
 	}
-	sessionCreateResultMsg struct {
+	sessionRestartConfirmedMsg struct{ id string }
+	sessionCreateResultMsg     struct {
 		session *session.Session
 		err     error
 	}
@@ -610,6 +611,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.rebuildFlatItems()
+
+	case sessionRestartConfirmedMsg:
+		if s, ok := h.sessionByID[msg.id]; ok {
+			return h, h.restartSession(s)
+		}
+		return h, nil
 
 	case commandPaletteMsg:
 		return h.dispatchPaletteSelection(msg)
@@ -1735,11 +1742,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "u":
 		return h.undoDelete()
 	case "r":
-		if s := h.selectedSession(); s != nil {
-			h.actionLog.Add("restart session", s.Title, true)
-			analytics.Track(analytics.EventSessionRestarted, nil)
-		}
-		return h, h.restartSelected()
+		return h, h.confirmRestartSelected()
 	case "R":
 		return h, h.renameSelected()
 	case "e":
@@ -2340,15 +2343,29 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 	return h, tea.Batch(cmds...)
 }
 
-func (h *Home) restartSelected() tea.Cmd {
-	if h.cursor < 0 || h.cursor >= len(h.flatItems) || h.flatItems[h.cursor].IsRepoHeader {
-		return nil
-	}
-	s := h.flatItems[h.cursor].Session
+// confirmRestartSelected gates restart behind a y/n confirm (default), or
+// restarts immediately when confirm_before_restart is disabled.
+func (h *Home) confirmRestartSelected() tea.Cmd {
+	s := h.selectedSession()
 	if s == nil {
 		return nil
 	}
+	if !h.cfg.IsConfirmBeforeRestartEnabled() {
+		return h.restartSession(s)
+	}
+	id := s.ID
+	h.confirmDialog.ShowWarning("Restart Session?", s.Title,
+		[]string{"Kills the running process and starts it fresh"},
+		func() tea.Msg { return sessionRestartConfirmedMsg{id: id} })
+	return nil
+}
 
+// restartSession respawns (or full-restarts) the given session. Action-log and
+// analytics fire here so they reflect an actual restart — not a cancelled
+// confirm — regardless of entry point (key, palette, confirmed dialog).
+func (h *Home) restartSession(s *session.Session) tea.Cmd {
+	h.actionLog.Add("restart session", s.Title, true)
+	analytics.Track(analytics.EventSessionRestarted, nil)
 	h.markSessionAccessed(s)
 	id := s.ID
 	title := s.Title
@@ -4909,11 +4926,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		}
 		return h, h.confirmDeleteSelected()
 	case "restart":
-		if s := h.selectedSession(); s != nil {
-			h.actionLog.Add("restart session", s.Title, true)
-			analytics.Track(analytics.EventSessionRestarted, nil)
-		}
-		return h, h.restartSelected()
+		return h, h.confirmRestartSelected()
 	case "rename":
 		return h, h.renameSelected()
 	case "editor":

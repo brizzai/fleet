@@ -118,6 +118,26 @@ func TestTipPriority_FailedBeatsCmdPalette(t *testing.T) {
 	}
 }
 
+// TestTipView_SuppressesWhenConditionClears guards the fix for a stale-tip
+// glitch: activeTipID is only recomputed on the ~2s tick, so if a tip's trigger
+// clears between ticks, tipView must re-check active() and render nothing rather
+// than show a now-wrong live count (e.g. "0 sessions stopped").
+func TestTipView_SuppressesWhenConditionClears(t *testing.T) {
+	h := newTipHome(&config.Config{SeenTips: []string{tipCmdPaletteID}}, errStatuses(reloadFailedThreshold)...)
+	h.refreshTips(true)
+	if h.activeTipID != tipReloadFailedID {
+		t.Fatalf("setup: want %q active, got %q", tipReloadFailedID, h.activeTipID)
+	}
+	// Errors resolve (e.g. Reload All) but the next tick hasn't run yet, so
+	// activeTipID is still set. tipView must suppress the box anyway.
+	for _, s := range h.sessions {
+		s.SetStatus(session.StatusRunning)
+	}
+	if got := h.tipView(); got != "" {
+		t.Fatalf("tipView should be empty once the trigger clears, got %q", got)
+	}
+}
+
 func TestConfigIsTipSeen(t *testing.T) {
 	c := &config.Config{SeenTips: []string{"a", "b"}}
 	if !c.IsTipSeen("a") || !c.IsTipSeen("b") {
