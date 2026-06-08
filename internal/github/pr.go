@@ -104,6 +104,13 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
+		// A timeout must be distinguishable from "no PR" — on the deadline
+		// cmd.Output() errors with empty stderr, which would otherwise fall
+		// through to (nil, nil) and let RefreshPRInfo clear a real PR's badge.
+		if ctx.Err() == context.DeadlineExceeded {
+			debuglog.Logger.Debug("PR fetch: timed out", "path", repoPath, "branch", branch)
+			return nil, fmt.Errorf("gh pr view timed out: %w", ctx.Err())
+		}
 		stderrStr := strings.TrimSpace(stderr.String())
 		if rlErr := classifyGHError(stderrStr); rlErr != nil {
 			debuglog.Logger.Debug("PR fetch: rate-limited", "path", repoPath, "branch", branch, "stderr", stderrStr)

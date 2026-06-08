@@ -3823,10 +3823,13 @@ drainPriority:
 
 // workerStallThreshold is how long the status worker may go without completing a
 // cycle before the dev-only watchdog treats it as wedged and dumps goroutine
-// stacks. Set well above the worst-case bounded cycle (git/gh now time out at
-// 8s/15s, fanned out 4-wide), so it fires only when a call ignores its deadline
-// or a real deadlock occurs — not on a merely slow cycle.
-const workerStallThreshold = 30 * time.Second
+// stacks. It must clear the worst-case *bounded* cycle so a merely-slow run
+// doesn't false-fire: a single repo's git refresh is serial (~40s of 8s
+// timeouts) and GetPRForBranch chains two gh calls — `gh pr view` (15s) plus
+// the `gh api graphql` thread-count query (15s) ≈ 30s — so one repo can
+// legitimately take ~70s even fanned out 4-wide. 90s sits above that, firing
+// only when a call ignores its deadline or a real deadlock occurs.
+const workerStallThreshold = 90 * time.Second
 
 // workerWatchdog auto-captures a goroutine dump when the status worker stops
 // completing cycles — the failure mode where every session's status freezes
@@ -3836,7 +3839,7 @@ func (h *Home) workerWatchdog() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	var dumpedForCycle int64 // lastWorkerCycleNano value we already dumped for
+	var dumpedForCycle int64 // episode stamp we already dumped for
 	for {
 		select {
 		case <-h.ctx.Done():
@@ -3845,24 +3848,35 @@ func (h *Home) workerWatchdog() {
 		}
 
 		last := h.lastWorkerCycleNano.Load()
-		if last == 0 {
-			continue // worker hasn't completed its first cycle yet
+		start := h.workerCycleStartNano.Load()
+		// Normally measure the stall from the last completed cycle. Before the
+		// first cycle ever completes (last==0), fall back to the in-flight
+		// cycle's start so a wedge on the very first cycle is still caught.
+		episode := last
+		var stalledFor time.Duration
+		switch {
+		case last != 0:
+			stalledFor = time.Since(time.Unix(0, last))
+		case start != 0:
+			episode = start
+			stalledFor = time.Since(time.Unix(0, start))
+		default:
+			continue // worker hasn't started a cycle yet
 		}
-		stalledFor := time.Since(time.Unix(0, last))
 		if stalledFor < workerStallThreshold {
 			continue
 		}
-		// One dump per stall episode: lastWorkerCycleNano is frozen while wedged,
+		// One dump per stall episode: the episode stamp is frozen while wedged,
 		// so dump once and wait for it to advance (worker recovered) before arming
 		// again.
-		if last == dumpedForCycle {
+		if episode == dumpedForCycle {
 			continue
 		}
-		dumpedForCycle = last
+		dumpedForCycle = episode
 
 		var cycleStart time.Time
-		if s := h.workerCycleStartNano.Load(); s != 0 {
-			cycleStart = time.Unix(0, s)
+		if start != 0 {
+			cycleStart = time.Unix(0, start)
 		}
 		dir := writeWorkerStallDump(stalledFor, cycleStart)
 		debuglog.Logger.Warn("status worker stalled — goroutine dump written",

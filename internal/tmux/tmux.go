@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -58,10 +57,6 @@ func IsTmuxAvailable() error {
 	return nil
 }
 
-// copyCommandDone records that copy-command has been resolved (set by us, or
-// left alone because the user configured their own) so we stop re-checking.
-var copyCommandDone atomic.Bool
-
 // EnsureCopyCommand points tmux's copy-command at pbcopy so a copy-mode
 // selection (mouse drag, double/triple-click, keyboard copy) reaches the macOS
 // clipboard. tmux's default copy bindings run `copy-pipe-and-cancel` with no
@@ -71,12 +66,18 @@ var copyCommandDone atomic.Bool
 // works on every terminal regardless of OSC 52.
 //
 // copy-command is a server option (global to the tmux server fleet shares, as
-// it runs no dedicated socket), so we set it once and only when unset, leaving
-// a user's own copy-command untouched. Best-effort; it needs a running server,
-// so a no-server attempt (fresh install, no sessions yet) is retried on the
-// next call rather than marked done. fleet is macOS-only, so pbcopy is present.
+// it runs no dedicated socket); we set it only when unset, leaving a user's own
+// copy-command untouched. Set FLEET_NO_COPY_COMMAND to opt out entirely — e.g.
+// when you deliberately rely on OSC 52 (a remote tmux copying to a local
+// clipboard over SSH).
+//
+// Re-checks the live server on every call rather than caching: cheap (one
+// show-options), and a tmux server created fresh after a restart still gets
+// pbcopy. Called from Start (server guaranteed up) + the startup bootstrap.
+// Best-effort; a no-server attempt just returns. fleet is macOS-only, so pbcopy
+// is present.
 func EnsureCopyCommand() {
-	if copyCommandDone.Load() {
+	if envIsTruthy("FLEET_NO_COPY_COMMAND") {
 		return
 	}
 	out, err := exec.Command("tmux", "show-options", "-sv", "copy-command").Output()
@@ -86,7 +87,16 @@ func EnsureCopyCommand() {
 	if strings.TrimSpace(string(out)) == "" {
 		_ = exec.Command("tmux", "set-option", "-s", "copy-command", "pbcopy").Run()
 	}
-	copyCommandDone.Store(true) // Either we set it, or the user has their own.
+}
+
+// envIsTruthy reports whether the named env var is set to a common truthy value.
+func envIsTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // NewSession creates a new Session with a unique tmux name.
@@ -311,8 +321,14 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 // isWarpTerminal reports whether fleet is running inside Warp. Warp has a
 // long-standing bug where it doesn't hand mouse drag-selection to terminal
 // apps, so drag-to-copy can't work in an attached session there and no
-// tmux-side fix exists (see the warning surfaced in the status bar). Detected
-// from the fleet process's own env — the outer terminal it was launched from.
+// tmux-side fix exists (see the warning surfaced in the status bar).
+//
+// Detected from the fleet process's own env — the terminal fleet was launched
+// from. fleet attaches via a PTY inside this same process, so the launch
+// terminal IS the attach terminal for the normal flow, and the warning is
+// accurate. The one case it can't see is a manual `tmux attach` from a
+// different terminal (out of fleet's control); detecting the attach terminal
+// from the status bar isn't feasible, so we accept that edge.
 func isWarpTerminal() bool {
 	return os.Getenv("TERM_PROGRAM") == "WarpTerminal"
 }

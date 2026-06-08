@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -46,6 +47,12 @@ func RefreshPRInfo(info *RepoInfo, repoPath string, ignorePatterns []string) {
 	if errors.Is(err, github.ErrRateLimited) {
 		info.PRRateLimitedAt = time.Now()
 		debuglog.Logger.Warn("PR fetch rate-limited; backing off", "path", repoPath, "branch", info.Branch)
+		return
+	}
+	// A gh timeout is a transient blip, not "no PR" — preserve the cached PR so
+	// a real badge doesn't flicker off mid-refresh (same intent as rate-limit).
+	if errors.Is(err, context.DeadlineExceeded) {
+		debuglog.Logger.Debug("PR fetch timed out; preserving cached PR", "path", repoPath, "branch", info.Branch)
 		return
 	}
 	if err != nil {

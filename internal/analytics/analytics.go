@@ -158,10 +158,15 @@ func Init(telemetryEnabled bool, version string, identity Identity) {
 // Either string may be empty if git isn't installed or the value isn't set.
 // Errors are intentionally swallowed — analytics never blocks startup.
 func readGitIdentity() (name, email string) {
-	if out, err := exec.Command("git", "config", "--global", "user.name").Output(); err == nil {
+	// Bounded: this runs synchronously on the startup path (DiscoverIdentity →
+	// before the TUI renders), so a hung `git config` (dead/NFS $HOME, held
+	// global-config lock, wedged credential helper) must not freeze launch.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "git", "config", "--global", "user.name").Output(); err == nil {
 		name = strings.TrimSpace(string(out))
 	}
-	if out, err := exec.Command("git", "config", "--global", "user.email").Output(); err == nil {
+	if out, err := exec.CommandContext(ctx, "git", "config", "--global", "user.email").Output(); err == nil {
 		email = strings.TrimSpace(string(out))
 	}
 	return name, email
