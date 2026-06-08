@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
@@ -1581,7 +1582,9 @@ func GetRepoRoot(projectPath string) string {
 	}
 	repoRootCacheMu.RUnlock()
 
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--show-toplevel")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", projectPath, "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	root := projectPath
 	if err == nil {

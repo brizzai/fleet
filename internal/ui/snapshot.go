@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -22,7 +23,14 @@ type statusSnapshotMsg struct {
 	err  error
 }
 
-func captureStatusSnapshot(s *session.Session, sessionID string) statusSnapshotMsg {
+// workerHeartbeat carries the status worker's liveness stamps into a snapshot so
+// "is the worker wedged?" is answerable at a glance, without log archaeology.
+type workerHeartbeat struct {
+	LastCycleAt  time.Time // last completed statusWorkerCycle (zero if none yet)
+	CycleStartAt time.Time // in-flight cycle start (zero when idle)
+}
+
+func captureStatusSnapshot(s *session.Session, sessionID string, hb workerHeartbeat) statusSnapshotMsg {
 	ts := s.GetTmuxSession()
 	if ts == nil {
 		return statusSnapshotMsg{err: fmt.Errorf("no tmux session")}
@@ -71,8 +79,11 @@ func captureStatusSnapshot(s *session.Session, sessionID string) statusSnapshotM
 	_ = os.WriteFile(filepath.Join(snapshotDir, "pane_raw.txt"), []byte(rawPane), 0644)
 	_ = os.WriteFile(filepath.Join(snapshotDir, "pane_clean.txt"), []byte(session.StripANSI(rawPane)), 0644)
 	_ = os.WriteFile(filepath.Join(snapshotDir, "debug_tail.txt"), []byte(debugTail), 0644)
+	// All goroutine stacks — pins exactly what the status worker is blocked on
+	// when its heartbeat (worker block in snapshot.json) shows it stalled.
+	writeGoroutineDump(filepath.Join(snapshotDir, "goroutines.txt"))
 
-	meta := buildSnapshotJSON(snap, hookFileContent, hookFileInfo, now, claudeLog)
+	meta := buildSnapshotJSON(snap, hookFileContent, hookFileInfo, now, claudeLog, hb)
 	jsonData, _ := json.MarshalIndent(meta, "", "  ")
 	_ = os.WriteFile(filepath.Join(snapshotDir, "snapshot.json"), jsonData, 0644)
 
@@ -81,7 +92,7 @@ func captureStatusSnapshot(s *session.Session, sessionID string) statusSnapshotM
 	return statusSnapshotMsg{path: snapshotDir}
 }
 
-func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFileInfo os.FileInfo, now time.Time, claudeLog map[string]any) map[string]any {
+func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFileInfo os.FileInfo, now time.Time, claudeLog map[string]any, hb workerHeartbeat) map[string]any {
 	m := map[string]any{
 		"captured_at": now.Format(time.RFC3339Nano),
 		"session": map[string]any{
@@ -97,6 +108,22 @@ func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFile
 	if claudeLog != nil {
 		m["claude_log"] = claudeLog
 	}
+
+	// Worker liveness. `stalled: true` (or a large last_cycle_ago) means the
+	// status worker wedged — the on-screen status is frozen, not mis-detected.
+	// goroutines.txt then shows exactly where it's blocked.
+	worker := map[string]any{}
+	if hb.LastCycleAt.IsZero() {
+		worker["last_cycle_at"] = nil
+	} else {
+		worker["last_cycle_at"] = hb.LastCycleAt.Format(time.RFC3339Nano)
+		worker["last_cycle_ago"] = fmtSnapshotAge(hb.LastCycleAt, now)
+		worker["stalled"] = now.Sub(hb.LastCycleAt) > workerStallThreshold
+	}
+	if !hb.CycleStartAt.IsZero() {
+		worker["cycle_in_flight_for"] = fmtSnapshotAge(hb.CycleStartAt, now)
+	}
+	m["worker"] = worker
 
 	hookMap := map[string]any{
 		"status":        snap.HookStatus,
@@ -130,6 +157,53 @@ func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFile
 	}
 
 	return m
+}
+
+// writeGoroutineDump writes every goroutine's stack to path. Used by the D-key
+// snapshot and the worker-stall watchdog to pin a wedged status worker.
+func writeGoroutineDump(path string) {
+	buf := make([]byte, 1<<20) // 1 MiB; grow until the full dump fits
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	// 0600: goroutine stacks are user-private (may embed paths/args).
+	_ = os.WriteFile(path, buf, 0600)
+}
+
+// writeWorkerStallDump is the dev-only watchdog's output: a goroutine dump plus
+// a small stall.json, written under the snapshots dir so the debug-status /
+// debug-perf skills discover it alongside manual snapshots. Returns the dir, or
+// "" on failure.
+func writeWorkerStallDump(stalledFor time.Duration, cycleStart time.Time) string {
+	now := time.Now()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(home, ".config", "fleet", "snapshots",
+		now.Format("2006-01-02T15-04-05")+"_worker-stall")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return ""
+	}
+
+	writeGoroutineDump(filepath.Join(dir, "goroutines.txt"))
+
+	meta := map[string]any{
+		"captured_at": now.Format(time.RFC3339Nano),
+		"reason":      "status worker stall",
+		"stalled_for": stalledFor.Round(time.Millisecond).String(),
+	}
+	if !cycleStart.IsZero() {
+		meta["cycle_in_flight_for"] = now.Sub(cycleStart).Round(time.Millisecond).String()
+	}
+	data, _ := json.MarshalIndent(meta, "", "  ")
+	_ = os.WriteFile(filepath.Join(dir, "stall.json"), data, 0644)
+	return dir
 }
 
 func fmtSnapshotAge(t time.Time, now time.Time) string {
