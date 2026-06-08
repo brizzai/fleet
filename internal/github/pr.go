@@ -2,15 +2,24 @@ package github
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
+
+// ghTimeout bounds every gh subprocess. gh makes network calls to GitHub, so a
+// hung request (network stall, API hang, blocked auth refresh) must not freeze
+// the caller. The status worker waits synchronously on these during its
+// per-cycle PR fan-out, so one indefinite gh call would stall every session's
+// status update until the OS finally tore the connection down.
+const ghTimeout = 15 * time.Second
 
 // ErrRateLimited is returned when gh reports a GitHub API rate-limit error.
 // Callers use this to back off subsequent PR refreshes instead of hammering
@@ -45,8 +54,9 @@ type PR struct {
 
 // IsGHAvailable checks if the gh CLI is installed and accessible.
 func IsGHAvailable() bool {
-	cmd := exec.Command("gh", "--version")
-	return cmd.Run() == nil
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "gh", "--version").Run() == nil
 }
 
 // ghPRResponse matches the JSON output of gh pr view.
@@ -84,7 +94,9 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 
 	debuglog.Logger.Debug("PR fetch: start", "path", repoPath, "branch", branch)
 
-	cmd := exec.Command("gh", "pr", "view", branch,
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch,
 		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable,isDraft",
 	)
 	cmd.Dir = repoPath
@@ -92,6 +104,13 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
+		// A timeout must be distinguishable from "no PR" — on the deadline
+		// cmd.Output() errors with empty stderr, which would otherwise fall
+		// through to (nil, nil) and let RefreshPRInfo clear a real PR's badge.
+		if ctx.Err() == context.DeadlineExceeded {
+			debuglog.Logger.Debug("PR fetch: timed out", "path", repoPath, "branch", branch)
+			return nil, fmt.Errorf("gh pr view timed out: %w", ctx.Err())
+		}
 		stderrStr := strings.TrimSpace(stderr.String())
 		if rlErr := classifyGHError(stderrStr); rlErr != nil {
 			debuglog.Logger.Debug("PR fetch: rate-limited", "path", repoPath, "branch", branch, "stderr", stderrStr)
@@ -147,7 +166,9 @@ func getUnresolvedThreadCount(repoPath string, prNumber int, prURL string) int {
 		}
 	}`, owner, repo, prNumber)
 
-	cmd := exec.Command("gh", "api", "graphql", "-f", "query="+query)
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "api", "graphql", "-f", "query="+query)
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {

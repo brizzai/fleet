@@ -217,6 +217,15 @@ type Home struct {
 	statusRRIndex    int       // round-robin index for status updates
 	lastHeavyCycleAt time.Time // wall-clock gate: heavy worker work runs at most every tickInterval
 
+	// Status-worker liveness stamps (unix-nano), written by statusWorkerCycle and
+	// read lock-free by the snapshot + the dev-only watchdog. lastWorkerCycleNano
+	// is the last COMPLETED cycle; workerCycleStartNano is the in-flight cycle's
+	// start (0 when idle). A stale lastWorkerCycleNano means the worker wedged —
+	// the failure mode where every session's status freezes while the UI stays
+	// responsive (it waits synchronously on the per-cycle git+PR fan-out).
+	lastWorkerCycleNano  atomic.Int64
+	workerCycleStartNano atomic.Int64
+
 	// lastTmuxStatusBar tracks the most recent (status, theme) tuple applied
 	// to each session's tmux status bar so the worker can skip no-op
 	// re-applies. Map is only read/written from the worker goroutine — no
@@ -1850,8 +1859,9 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		h.actionLog.Add("status snapshot", s.Title, true)
+		hb := h.workerHeartbeat()
 		return h, func() tea.Msg {
-			return captureStatusSnapshot(s, s.ID)
+			return captureStatusSnapshot(s, s.ID, hb)
 		}
 	case "?":
 		h.helpOverlay.Show()
@@ -3483,6 +3493,13 @@ func (h *Home) splashTick() tea.Cmd {
 // statusWorker runs in its own goroutine, performing all blocking I/O
 // (tmux, git, gh) outside the Bubble Tea Update() loop.
 func (h *Home) statusWorker() {
+	// Dev-only watchdog: auto-dumps goroutine stacks if this worker ever stops
+	// completing cycles. Gated to `make run` (version=="dev") builds — it's a
+	// debugging aid, not something to run on user machines.
+	if h.version == "dev" {
+		go h.workerWatchdog()
+	}
+
 	ticker := time.NewTicker(activeStatusInterval)
 	defer ticker.Stop()
 
@@ -3666,6 +3683,16 @@ func (h *Home) seedActiveCaptures(active []*session.Session) {
 }
 
 func (h *Home) statusWorkerCycle() {
+	// Liveness stamps for the snapshot + watchdog. Registered first so it runs
+	// LAST (after the recover below), recording completion even if the body
+	// panics. A healthy worker refreshes lastWorkerCycleNano every ~500ms; a
+	// stale value is the wedge signal.
+	h.workerCycleStartNano.Store(time.Now().UnixNano())
+	defer func() {
+		h.lastWorkerCycleNano.Store(time.Now().UnixNano())
+		h.workerCycleStartNano.Store(0)
+	}()
+
 	// Recover from panics to keep the worker alive.
 	defer func() {
 		if r := recover(); r != nil {
@@ -3855,6 +3882,82 @@ drainPriority:
 	// value are skipped — a single tmux set-option round-trip is fast but
 	// running it for 100 idle sessions every 2s is wasteful.
 	h.refreshTmuxStatusBars(sessions)
+}
+
+// workerStallThreshold is how long the status worker may go without completing a
+// cycle before the dev-only watchdog treats it as wedged and dumps goroutine
+// stacks. It must clear the worst-case *bounded* cycle so a merely-slow run
+// doesn't false-fire: a single repo's git refresh is serial (~40s of 8s
+// timeouts) and GetPRForBranch chains two gh calls — `gh pr view` (15s) plus
+// the `gh api graphql` thread-count query (15s) ≈ 30s — so one repo can
+// legitimately take ~70s even fanned out 4-wide. 90s sits above that, firing
+// only when a call ignores its deadline or a real deadlock occurs.
+const workerStallThreshold = 90 * time.Second
+
+// workerWatchdog auto-captures a goroutine dump when the status worker stops
+// completing cycles — the failure mode where every session's status freezes
+// while the UI stays responsive (the worker waits synchronously on its
+// per-cycle git+PR fan-out). Launched only on dev (`make run`) builds.
+func (h *Home) workerWatchdog() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	var dumpedForCycle int64 // episode stamp we already dumped for
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		last := h.lastWorkerCycleNano.Load()
+		start := h.workerCycleStartNano.Load()
+		// Normally measure the stall from the last completed cycle. Before the
+		// first cycle ever completes (last==0), fall back to the in-flight
+		// cycle's start so a wedge on the very first cycle is still caught.
+		episode := last
+		var stalledFor time.Duration
+		switch {
+		case last != 0:
+			stalledFor = time.Since(time.Unix(0, last))
+		case start != 0:
+			episode = start
+			stalledFor = time.Since(time.Unix(0, start))
+		default:
+			continue // worker hasn't started a cycle yet
+		}
+		if stalledFor < workerStallThreshold {
+			continue
+		}
+		// One dump per stall episode: the episode stamp is frozen while wedged,
+		// so dump once and wait for it to advance (worker recovered) before arming
+		// again.
+		if episode == dumpedForCycle {
+			continue
+		}
+		dumpedForCycle = episode
+
+		var cycleStart time.Time
+		if start != 0 {
+			cycleStart = time.Unix(0, start)
+		}
+		dir := writeWorkerStallDump(stalledFor, cycleStart)
+		debuglog.Logger.Warn("status worker stalled — goroutine dump written",
+			"stalled_for", stalledFor.Round(time.Millisecond), "dir", dir)
+	}
+}
+
+// workerHeartbeat snapshots the status worker's liveness stamps for a status
+// snapshot. Reads lock-free atomics, safe from any goroutine.
+func (h *Home) workerHeartbeat() workerHeartbeat {
+	var hb workerHeartbeat
+	if n := h.lastWorkerCycleNano.Load(); n != 0 {
+		hb.LastCycleAt = time.Unix(0, n)
+	}
+	if n := h.workerCycleStartNano.Load(); n != 0 {
+		hb.CycleStartAt = time.Unix(0, n)
+	}
+	return hb
 }
 
 // refreshTmuxStatusBars re-applies the theme + state pill on every session's
@@ -4684,6 +4787,11 @@ func (h *Home) loadSessions() tea.Msg {
 	if _, err := exec.LookPath("codex"); err == nil {
 		hooks.InjectCodexHooks(hooks.GetCodexConfigDir())
 	}
+	// Route tmux copy-mode selections to the macOS clipboard via pbcopy, so
+	// drag/click-to-copy works on terminals that block OSC 52 (iTerm2 default)
+	// or don't support it (Apple Terminal). Runs here for users with existing
+	// sessions; Start covers fresh installs once a server exists.
+	tmux.EnsureCopyCommand()
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()
 

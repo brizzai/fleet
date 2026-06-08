@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -56,6 +57,48 @@ func IsTmuxAvailable() error {
 	return nil
 }
 
+// EnsureCopyCommand points tmux's copy-command at pbcopy so a copy-mode
+// selection (mouse drag, double/triple-click, keyboard copy) reaches the macOS
+// clipboard. tmux's default copy bindings run `copy-pipe-and-cancel` with no
+// argument, which pipes to copy-command; when that's unset they fall back to
+// OSC 52 — which iTerm2 blocks by default and Apple Terminal doesn't support —
+// so the selection never reaches the clipboard. pbcopy is a local pipe, so it
+// works on every terminal regardless of OSC 52.
+//
+// copy-command is a server option (global to the tmux server fleet shares, as
+// it runs no dedicated socket); we set it only when unset, leaving a user's own
+// copy-command untouched. Set FLEET_NO_COPY_COMMAND to opt out entirely — e.g.
+// when you deliberately rely on OSC 52 (a remote tmux copying to a local
+// clipboard over SSH).
+//
+// Re-checks the live server on every call rather than caching: cheap (one
+// show-options), and a tmux server created fresh after a restart still gets
+// pbcopy. Called from Start (server guaranteed up) + the startup bootstrap.
+// Best-effort; a no-server attempt just returns. fleet is macOS-only, so pbcopy
+// is present.
+func EnsureCopyCommand() {
+	if envIsTruthy("FLEET_NO_COPY_COMMAND") {
+		return
+	}
+	out, err := exec.Command("tmux", "show-options", "-sv", "copy-command").Output()
+	if err != nil {
+		return // No server yet (or tmux error) — retry on a later call.
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		_ = exec.Command("tmux", "set-option", "-s", "copy-command", "pbcopy").Run()
+	}
+}
+
+// envIsTruthy reports whether the named env var is set to a common truthy value.
+func envIsTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // NewSession creates a new Session with a unique tmux name.
 func NewSession(displayName, workDir string) *Session {
 	sanitized := sanitizeName(displayName)
@@ -91,6 +134,9 @@ func (s *Session) Start(command string, env ...string) error {
 		return fmt.Errorf("tmux new-session failed: %s: %w", string(output), err)
 	}
 	debuglog.Logger.Info("tmux session started", "session", s.Name, "workdir", s.WorkDir)
+
+	// Route copy-mode selections to the macOS clipboard (server exists now).
+	EnsureCopyCommand()
 
 	// Batch set options.
 	// remain-on-exit keeps the dead pane around so the crash dump can read
@@ -237,6 +283,15 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 	bottomLeft := fmt.Sprintf(" #[fg=%s,bold]%s #[fg=%s,nobold]%s",
 		o.AccentColor, escapeTmuxFormat(key), o.StripFg, escapeTmuxFormat(desc))
 
+	// On Warp, warn (bottom-right) that drag-to-copy can't work — Warp doesn't
+	// deliver mouse drag-selection to terminal apps, so it's unfixable from our
+	// side. Amber so it stands out against any theme.
+	bottomRight, bottomRightLen := "", "0"
+	if isWarpTerminal() {
+		bottomRight = "#[fg=#e0af68,bold]⚠ #[nobold]Warp doesn't support drag-to-copy (Warp bug) "
+		bottomRightLen = "48"
+	}
+
 	// Bounded shell-out — a stalled tmux server can't hang session startup
 	// or the periodic refresh path. Matches the pattern used by IsPaneDead /
 	// PaneDeadInfo elsewhere in this file.
@@ -248,8 +303,8 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 		"set-option", "-t", s.Name, "status-justify", "left", ";",
 		"set-option", "-t", s.Name, "status-left", bottomLeft, ";",
 		"set-option", "-t", s.Name, "status-left-length", "40", ";",
-		"set-option", "-t", s.Name, "status-right", "", ";",
-		"set-option", "-t", s.Name, "status-right-length", "0", ";",
+		"set-option", "-t", s.Name, "status-right", bottomRight, ";",
+		"set-option", "-t", s.Name, "status-right-length", bottomRightLen, ";",
 		"set-option", "-t", s.Name, "window-status-current-format", "", ";",
 		"set-option", "-t", s.Name, "window-status-format", "", ";",
 		// Top horizontal rule with all the orientation info.
@@ -261,6 +316,21 @@ func (s *Session) ApplyStatusBar(o StatusBarOpts) {
 	if err := cmd.Run(); err != nil {
 		debuglog.Logger.Error("tmux apply status bar failed", "session", s.Name, "err", err)
 	}
+}
+
+// isWarpTerminal reports whether fleet is running inside Warp. Warp has a
+// long-standing bug where it doesn't hand mouse drag-selection to terminal
+// apps, so drag-to-copy can't work in an attached session there and no
+// tmux-side fix exists (see the warning surfaced in the status bar).
+//
+// Detected from the fleet process's own env — the terminal fleet was launched
+// from. fleet attaches via a PTY inside this same process, so the launch
+// terminal IS the attach terminal for the normal flow, and the warning is
+// accurate. The one case it can't see is a manual `tmux attach` from a
+// different terminal (out of fleet's control); detecting the attach terminal
+// from the status bar isn't feasible, so we accept that edge.
+func isWarpTerminal() bool {
+	return os.Getenv("TERM_PROGRAM") == "WarpTerminal"
 }
 
 // escapeTmuxFormat doubles literal `#` so user-derived strings embedded in

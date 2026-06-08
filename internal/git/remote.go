@@ -1,7 +1,6 @@
 package git
 
 import (
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -12,8 +11,7 @@ import (
 // "<host>/<path>". Repos with no remote — or any parse failure — fall back to
 // "local:<basename>" so they remain distinct groups keyed off the folder name.
 func GetOriginKey(repoPath string) string {
-	cmd := exec.Command("git", "-C", repoPath, "config", "--get", "remote.origin.url")
-	out, err := cmd.Output()
+	out, err := gitOutput("-C", repoPath, "config", "--get", "remote.origin.url")
 	if err != nil {
 		return "local:" + filepath.Base(repoPath)
 	}

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -11,11 +12,31 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
+// gitTimeout bounds every git subprocess. git is normally local and fast, but a
+// hung call (a held .git/index.lock, a dead NFS mount, a wedged filesystem)
+// must not freeze the caller. The status worker waits synchronously on these
+// during its per-cycle git+PR fan-out, so a single indefinite git call would
+// stall every session's status update.
+const gitTimeout = 8 * time.Second
+
+// gitOutput runs `git <args>` under gitTimeout and returns its stdout.
+func gitOutput(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "git", args...).Output()
+}
+
+// gitRun runs `git <args>` under gitTimeout, discarding output.
+func gitRun(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "git", args...).Run()
+}
+
 // GetBranchName returns the current branch name for the given repo path.
 // Returns empty string if not a git repo or on error.
 func GetBranchName(repoPath string) string {
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD")
-	output, err := cmd.Output()
+	output, err := gitOutput("-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return ""
 	}
@@ -24,8 +45,7 @@ func GetBranchName(repoPath string) string {
 
 // HasUncommittedChanges returns true if the working tree has uncommitted changes.
 func HasUncommittedChanges(repoPath string) bool {
-	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain")
-	output, err := cmd.Output()
+	output, err := gitOutput("-C", repoPath, "status", "--porcelain")
 	if err != nil {
 		return false
 	}
@@ -44,11 +64,10 @@ type BranchInfo struct {
 // ListBranches returns all branches sorted by most recently committed first.
 // Includes both local and remote branches, with deduplication.
 func ListBranches(repoPath string) ([]BranchInfo, error) {
-	cmd := exec.Command("git", "-C", repoPath, "for-each-ref",
+	output, err := gitOutput("-C", repoPath, "for-each-ref",
 		"--sort=-committerdate",
 		"--format=%(refname:short)\t%(committerdate:unix)\t%(authoremail)",
 		"refs/heads/", "refs/remotes/origin/")
-	output, err := cmd.Output()
 	if err != nil {
 		debuglog.Logger.Debug("ListBranches failed", "path", repoPath, "error", err)
 		return nil, fmt.Errorf("git for-each-ref: %w", err)
@@ -117,8 +136,7 @@ func ListBranches(repoPath string) ([]BranchInfo, error) {
 
 // GetUserEmail returns the git user.email for the given repo.
 func GetUserEmail(repoPath string) string {
-	cmd := exec.Command("git", "-C", repoPath, "config", "user.email")
-	output, err := cmd.Output()
+	output, err := gitOutput("-C", repoPath, "config", "user.email")
 	if err != nil {
 		return ""
 	}
@@ -128,7 +146,9 @@ func GetUserEmail(repoPath string) string {
 // CheckoutBranch checks out the given branch in the repo.
 // For remote-only branches, git auto-creates a local tracking branch.
 func CheckoutBranch(repoPath, branch string) error {
-	cmd := exec.Command("git", "-C", repoPath, "checkout", branch)
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "checkout", branch)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		debuglog.Logger.Debug("CheckoutBranch failed", "path", repoPath, "branch", branch, "error", strings.TrimSpace(string(output)))
@@ -143,8 +163,7 @@ func CheckoutBranch(repoPath, branch string) error {
 // remote tip rather than the local branch. Falls back to local "main"/"master".
 func GetDefaultBranch(repoPath string) string {
 	// Try origin HEAD reference first.
-	cmd := exec.Command("git", "-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD")
-	if output, err := cmd.Output(); err == nil {
+	if output, err := gitOutput("-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
 		ref := strings.TrimSpace(string(output))
 		return "origin/" + strings.TrimPrefix(ref, "refs/remotes/origin/")
 	} else {
@@ -152,8 +171,7 @@ func GetDefaultBranch(repoPath string) string {
 	}
 	// Fallback: check if "main" or "master" exists.
 	for _, name := range []string{"main", "master"} {
-		cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/heads/"+name)
-		if cmd.Run() == nil {
+		if gitRun("-C", repoPath, "rev-parse", "--verify", "refs/heads/"+name) == nil {
 			return name
 		}
 	}
@@ -163,14 +181,12 @@ func GetDefaultBranch(repoPath string) string {
 
 // IsWorktree returns true if the given path is a git worktree (not the main repo).
 func IsWorktree(repoPath string) bool {
-	gitDir := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir")
-	gitDirOut, err := gitDir.Output()
+	gitDirOut, err := gitOutput("-C", repoPath, "rev-parse", "--git-dir")
 	if err != nil {
 		return false
 	}
 
-	commonDir := exec.Command("git", "-C", repoPath, "rev-parse", "--git-common-dir")
-	commonDirOut, err := commonDir.Output()
+	commonDirOut, err := gitOutput("-C", repoPath, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return false
 	}
