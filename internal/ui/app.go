@@ -4710,6 +4710,11 @@ func (h *Home) loadSessions() tea.Msg {
 	if _, err := exec.LookPath("codex"); err == nil {
 		hooks.InjectCodexHooks(hooks.GetCodexConfigDir())
 	}
+	// Route tmux copy-mode selections to the macOS clipboard via pbcopy, so
+	// drag/click-to-copy works on terminals that block OSC 52 (iTerm2 default)
+	// or don't support it (Apple Terminal). Runs here for users with existing
+	// sessions; Start covers fresh installs once a server exists.
+	tmux.EnsureCopyCommand()
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()
 
