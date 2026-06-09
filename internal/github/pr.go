@@ -104,6 +104,15 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
+		// A deadline-exceeded error means gh hung and we killed it — a transient
+		// failure, NOT "no PR for this branch". gh also leaves stderr empty on the
+		// kill, so without this it would fall through to (nil, nil) below and let
+		// RefreshPRInfo clear a real PR's badge. Return an error so the caller
+		// keeps the cached badge.
+		if ctx.Err() == context.DeadlineExceeded {
+			debuglog.Logger.Debug("PR fetch: timed out", "path", repoPath, "branch", branch)
+			return nil, fmt.Errorf("gh pr view timed out: %w", ctx.Err())
+		}
 		stderrStr := strings.TrimSpace(stderr.String())
 		if rlErr := classifyGHError(stderrStr); rlErr != nil {
 			debuglog.Logger.Debug("PR fetch: rate-limited", "path", repoPath, "branch", branch, "stderr", stderrStr)

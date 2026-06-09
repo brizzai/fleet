@@ -49,7 +49,13 @@ func RefreshPRInfo(info *RepoInfo, repoPath string, ignorePatterns []string) {
 		return
 	}
 	if err != nil {
-		debuglog.Logger.Debug("RefreshPRInfo failed", "path", repoPath, "branch", info.Branch, "error", err)
+		// Transient failure (e.g. gh timed out). Keep the cached PR badge —
+		// info.PR was carried forward by the caller — instead of overwriting it
+		// with nil. Still stamp LastPRRefresh so the TTL gate applies and we
+		// don't re-fire gh every cycle while it's slow.
+		debuglog.Logger.Debug("RefreshPRInfo failed; keeping cached PR", "path", repoPath, "branch", info.Branch, "error", err)
+		info.LastPRRefresh = time.Now()
+		return
 	}
 	info.PR = pr
 	info.LastPRRefresh = time.Now()
