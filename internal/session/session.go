@@ -63,6 +63,7 @@ type Session struct {
 	hookUpdatedAt    time.Time
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
 	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
+	forkParentID     string    // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
 
 	// Negative cache for the rotation check: the last (owner, foreign) pair that
 	// isSessionRotation rejected. A persistent foreign id (a nested-child eval
@@ -151,6 +152,12 @@ func (s *Session) Start() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
+	// Remember the fork parent: a `claude --resume <parent> --fork-session` reports
+	// the PARENT's id at SessionStart and only switches to its own id once it
+	// diverges (first prompt). Keeping the parent id lets UpdateHookStatus adopt the
+	// fork's own id deterministically when it appears, instead of relying on the
+	// transcript heuristic (which can't see a fork). Cleared on divergence.
+	s.forkParentID = s.ForkFromID
 	s.ForkFromID = "" // Clear after first start so restarts use session's own ClaudeSessionID.
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
@@ -300,11 +307,26 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	if hs.SessionID != "" {
 		s.mu.RLock()
 		owner = s.ownerSessionID
+		forkParent := s.forkParentID
 		projectPath := s.ProjectPath
 		negCached := owner != "" && s.rotRejectOwner == owner && s.rotRejectForeign == hs.SessionID
 		s.mu.RUnlock()
 		if owner != "" && hs.SessionID != owner {
 			switch {
+			case forkParent != "" && owner == forkParent:
+				// This session was forked (`claude --resume <parent> --fork-session`).
+				// Its SessionStart hook reports the PARENT's id; the fork's own id only
+				// appears once it diverges (first prompt). That first id different from
+				// the parent IS this fork's own session, so adopt it directly. We can't
+				// use isSessionRotation here: fork transcripts carry no logicalParentUuid,
+				// and they copy the parent's history verbatim (with the parent's original
+				// timestamps), so the timestamp-handoff check measures the parent's whole
+				// conversation length, not a handoff gap, and misses for any parent older
+				// than ~10s — leaving the fork pinned to the parent id (so forking it
+				// re-forks the parent). The window where we own the parent id is before
+				// the fork's first turn, so no nested child can race this.
+				debuglog.Logger.Info("adopting forked claude session",
+					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
 				return false // already rejected this (owner, foreign) pair
 			case resolveRotation && isSessionRotation(projectPath, owner, hs.SessionID):
@@ -344,6 +366,11 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 			return false
 		}
 		s.ownerSessionID = hs.SessionID
+		// Once we own an id other than the fork parent, the fork has diverged to its
+		// own session — drop the parent link so it can't influence later hooks.
+		if s.forkParentID != "" && hs.SessionID != s.forkParentID {
+			s.forkParentID = ""
+		}
 	}
 
 	changed := s.hookStatus != hs.Status || s.hookUpdatedAt != hs.UpdatedAt
