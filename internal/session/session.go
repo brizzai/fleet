@@ -628,14 +628,28 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		paneStatus = detectStatus(paneContent, log)
 	}
 
-	// Out-of-pane tiebreaker for the waiting path: a between-bursts frame (the agent
-	// resumed after a granted permission prompt, but the activity line is momentarily
-	// gone) is indistinguishable from a finished idle prompt, so consult the
-	// transcript. Read here, before the lock — conversationActivePastHook does disk
-	// I/O and must not run under s.mu. Gated to the only frame it matters on.
+	// Out-of-pane tiebreaker: a between-bursts frame (the agent is working but its
+	// activity line is momentarily gone, so the persistent ❯ box reads as a finished
+	// idle prompt) can't be told from a real finish by pane content alone. Consult
+	// the transcript. Read here, before the lock — conversationActivePastHook does
+	// disk I/O and must not run under s.mu. Gated tightly so it's a rare read.
 	convActive := false
-	if hookStatus == "waiting" && paneStatus == StatusFinished {
-		convActive = s.conversationActivePastHook()
+	switch hookStatus {
+	case "waiting":
+		// Stale waiting hook (granted permission fires no resume hook) + idle pane.
+		if paneStatus == StatusFinished {
+			convActive = s.conversationActivePastHook()
+		}
+	case "finished":
+		// Stale finished hook (e.g. a SessionStart/resume that kicked off one long
+		// turn, no Stop since) about to demote a still-running session on an idle/
+		// ambiguous frame. Gate on oldStatus==running so a genuinely-finished session
+		// (already settled) never reads the transcript every round-robin cycle; the
+		// gate is self-sustaining — keeping it running across between-bursts frames
+		// keeps oldStatus running, so a live turn can't be demoted by one bad frame.
+		if oldStatus == StatusRunning && paneStatus != StatusRunning && paneStatus != StatusWaiting {
+			convActive = s.conversationActivePastHook()
+		}
 	}
 
 	hookSaysDead := false
@@ -649,7 +663,7 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		case "waiting":
 			s.applyHookWaiting(paneContent, paneStatus, convActive, log)
 		case "finished":
-			s.applyHookFinished(paneStatus, log)
+			s.applyHookFinished(paneStatus, convActive, log)
 		case "dead":
 			s.lastContentHash = ""
 			s.lastContentChangeAt = time.Time{}
@@ -932,8 +946,10 @@ const conversationActiveWindow = 120 * time.Second
 const conversationActiveSkew = 2 * time.Second
 
 // applyHookFinished handles hook status "finished" with pane override for active spinners.
+// convActive is the pre-computed transcript tiebreaker (see conversationActivePastHook);
+// it is only meaningful when paneStatus is not running/waiting.
 // Must be called with s.mu held.
-func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
+func (s *Session) applyHookFinished(paneStatus Status, convActive bool, log *slog.Logger) {
 	s.lastContentHash = ""
 	s.lastContentChangeAt = time.Time{}
 	if paneStatus == StatusRunning {
@@ -977,6 +993,16 @@ func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
 				"hookAge", time.Since(s.hookUpdatedAt).Round(time.Millisecond))
 			return
 		}
+	}
+	// Stale finished hook, idle-looking pane — but the transcript shows the lead turn
+	// still appending past the hook (a SessionStart/resume that began one long turn,
+	// caught on a between-bursts frame where the activity line wasn't rendered). The
+	// agent is working; don't demote it to finished.
+	if convActive {
+		s.Status = StatusRunning
+		s.Acknowledged = false
+		log.Info("hook=finished, pane idle, but transcript active past hook — staying running")
+		return
 	}
 	if s.Acknowledged {
 		s.Status = StatusIdle

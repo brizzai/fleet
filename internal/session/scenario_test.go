@@ -536,6 +536,44 @@ func TestScenarioStaleWaitingConversationIdleSettlesFinished(t *testing.T) {
 	})
 }
 
+func TestScenarioStaleFinishedConversationActiveStaysRunning(t *testing.T) {
+	// Sibling of the waiting-path bug on the finished path: a stale SessionStart/
+	// finished hook (a resume that kicked off one long turn, no Stop since). The pane
+	// usually shows the working spinner (overrides finished→running), but a single
+	// between-bursts frame (spinner gone, only the persistent ❯ box) reads as finished
+	// and used to demote the live turn. The transcript tiebreaker (ConvActive) keeps
+	// it running. HookAge backdates the hook so it's clearly stale.
+	runScenario(t, Scenario{
+		Name: "stale finished hook + active transcript: between-bursts idle frame stays running",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", SessionID: "owner-aaa", HookAge: 11 * time.Minute, Pane: "@fixture:pane_running_extended_thinking.txt"},
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(true)},
+			{At: 4 * time.Second, Pane: "@fixture:pane_running_extended_thinking.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},               // pane spinner overrides finished hook
+			{At: 2 * time.Second, Expected: StatusRunning}, // between-bursts idle frame must NOT demote to finished
+			{At: 4 * time.Second, Expected: StatusRunning},
+		},
+	})
+}
+
+func TestScenarioStaleFinishedConversationIdleSettlesFinished(t *testing.T) {
+	// Guard: when the transcript is NOT active past the finished hook (the turn really
+	// ended), an idle pane must still settle to finished — no regression.
+	runScenario(t, Scenario{
+		Name: "stale finished hook + idle transcript: settles to finished",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", SessionID: "owner-aaa", HookAge: 11 * time.Minute, Pane: "@fixture:pane_running_extended_thinking.txt"},
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(false)},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 2 * time.Second, Expected: StatusFinished},
+		},
+	})
+}
+
 func TestScenarioNoHooksFallback(t *testing.T) {
 	runScenario(t, Scenario{
 		Name: "no hooks, pane-only detection",
