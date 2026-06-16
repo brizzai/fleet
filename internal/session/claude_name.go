@@ -329,16 +329,31 @@ func transcriptContainsUUID(path, uuid string) bool {
 // firstTranscriptTimestamp returns the timestamp of the earliest timestamped JSONL
 // entry in the transcript at path, or the zero time if it's missing/unreadable or
 // has no timestamped entries.
-func firstTranscriptTimestamp(path string) time.Time { return scanTranscriptTimestamp(path, false) }
+func firstTranscriptTimestamp(path string) time.Time {
+	return scanTranscriptTimestamp(path, false, false)
+}
 
 // lastTranscriptTimestamp returns the timestamp of the latest timestamped JSONL
 // entry in the transcript at path, or the zero time. It scans the whole file;
 // transcripts are small and this runs only on the rare session-id-change path.
-func lastTranscriptTimestamp(path string) time.Time { return scanTranscriptTimestamp(path, true) }
+func lastTranscriptTimestamp(path string) time.Time {
+	return scanTranscriptTimestamp(path, true, false)
+}
 
-// scanTranscriptTimestamp walks the JSONL transcript at path and returns the
-// first (last=false) or last (last=true) entry timestamp it can parse.
-func scanTranscriptTimestamp(path string, last bool) time.Time {
+// lastLeadTranscriptTimestamp returns the timestamp of the last lead-conversation
+// (non-sidechain) entry in the transcript at path, or the zero time if it's
+// missing/unreadable or has no such entries. Sub-agent (sidechain) entries are
+// skipped so a still-running sub-agent can't mask a finished lead turn. Used as the
+// out-of-pane tiebreaker for the between-bursts frame where the pane is
+// indistinguishable from finished (see conversationActivePastHook).
+func lastLeadTranscriptTimestamp(path string) time.Time {
+	return scanTranscriptTimestamp(path, true, true)
+}
+
+// scanTranscriptTimestamp walks the JSONL transcript at path and returns the first
+// (last=false) or last (last=true) entry timestamp it can parse. When excludeSidechain
+// is set, sub-agent (isSidechain:true) entries are skipped.
+func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time.Time {
 	if path == "" {
 		return time.Time{}
 	}
@@ -358,9 +373,13 @@ func scanTranscriptTimestamp(path string, last bool) time.Time {
 			continue
 		}
 		var entry struct {
-			Timestamp string `json:"timestamp"`
+			Timestamp   string `json:"timestamp"`
+			IsSidechain bool   `json:"isSidechain"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
+			continue
+		}
+		if excludeSidechain && entry.IsSidechain {
 			continue
 		}
 		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.

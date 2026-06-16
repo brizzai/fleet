@@ -37,6 +37,7 @@ type ScenarioEvent struct {
 	Acknowledge bool          // simulate user acknowledging the session
 	ActivityAge time.Duration // simulate tmux window_activity this long ago (0 = no activity data)
 	HookAge     time.Duration // backdate the hook's UpdatedAt by this much (0 = now); simulates a stale hook
+	ConvActive  *bool         // inject conversationActivePastHook result; nil = leave unchanged
 }
 
 // ScenarioCheck asserts the session status at a point in time.
@@ -67,12 +68,16 @@ func runScenario(t *testing.T, sc Scenario) {
 	debuglog.Init()
 
 	mock := &mockPane{alive: true}
+	// Transcript tiebreaker stub: events flip this via ConvActive; the closure is
+	// read on the single test goroutine, so no synchronization is needed.
+	convActive := false
 	s := &Session{
 		ID:           "test-scenario",
 		Title:        sc.Name,
 		Status:       StatusStarting,
 		Agent:        sc.Agent,
 		paneCapturer: mock,
+		convActiveFn: func() bool { return convActive },
 	}
 
 	// Build sorted timeline.
@@ -130,6 +135,11 @@ func runScenario(t *testing.T, sc Scenario) {
 				s.mu.Lock()
 				s.Acknowledged = true
 				s.mu.Unlock()
+			}
+
+			// Inject the transcript tiebreaker result.
+			if e.ConvActive != nil {
+				convActive = *e.ConvActive
 			}
 
 			// Adjust content timing for stability checks.
@@ -479,6 +489,133 @@ func TestScenarioStaleOverriddenWaitingSettlesFinished(t *testing.T) {
 			{At: 0, Expected: StatusFinished},               // override to finished
 			{At: 2 * time.Second, Expected: StatusRunning},  // pane-driven resume
 			{At: 4 * time.Second, Expected: StatusFinished}, // must settle back — was stuck running
+		},
+	})
+}
+
+func TestScenarioStaleWaitingConversationActiveStaysRunning(t *testing.T) {
+	// The reported bug: a permission prompt was granted (no hook fires), the agent
+	// resumed, but the hook is still "waiting". Modern Claude keeps the ❯ box on
+	// screen while working, so a between-bursts frame (activity line momentarily gone)
+	// reads as a finished idle prompt and used to flip the session to finished. The
+	// transcript tiebreaker (ConvActive) proves the lead turn is still appending past
+	// the hook → stay running. HookAge backdates the hook so trustPane engages (the
+	// real bug had a >1m stale hook).
+	runScenario(t, Scenario{
+		Name: "stale waiting hook + active transcript: between-bursts idle frames stay running",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", HookAge: 90 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(true)},
+			// Another between-bursts idle frame — transcript still active.
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt"},
+			// Activity line back on screen; pane reads running.
+			{At: 4 * time.Second, Pane: "@fixture:pane_running_extended_thinking.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},               // override suppressed by tiebreaker
+			{At: 2 * time.Second, Expected: StatusRunning}, // stays running; hookOverriddenAt never set
+			{At: 4 * time.Second, Expected: StatusRunning}, // running frame still reports running
+		},
+	})
+}
+
+func TestScenarioStaleWaitingConversationIdleSettlesFinished(t *testing.T) {
+	// Guard for the fix above: when the transcript is NOT active past the hook (the
+	// turn genuinely ended, e.g. a dropped Stop hook), the idle-prompt pane must still
+	// override the stale waiting hook to finished — no regression to
+	// TestScenarioStaleOverriddenWaitingSettlesFinished.
+	runScenario(t, Scenario{
+		Name: "stale waiting hook + idle transcript: still settles to finished",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(false)},
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},
+			{At: 2 * time.Second, Expected: StatusFinished},
+		},
+	})
+}
+
+func TestScenarioStaleFinishedConversationActiveStaysRunning(t *testing.T) {
+	// Sibling of the waiting-path bug on the finished path: a stale SessionStart/
+	// finished hook (a resume that kicked off one long turn, no Stop since). The pane
+	// usually shows the working spinner (overrides finished→running), but a single
+	// between-bursts frame (spinner gone, only the persistent ❯ box) reads as finished
+	// and used to demote the live turn. The transcript tiebreaker (ConvActive) keeps
+	// it running. HookAge backdates the hook so it's clearly stale.
+	runScenario(t, Scenario{
+		Name: "stale finished hook + active transcript: between-bursts idle frame stays running",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", SessionID: "owner-aaa", HookAge: 11 * time.Minute, Pane: "@fixture:pane_running_extended_thinking.txt"},
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(true)},
+			{At: 4 * time.Second, Pane: "@fixture:pane_running_extended_thinking.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},               // pane spinner overrides finished hook
+			{At: 2 * time.Second, Expected: StatusRunning}, // between-bursts idle frame must NOT demote to finished
+			{At: 4 * time.Second, Expected: StatusRunning},
+		},
+	})
+}
+
+func TestScenarioStaleFinishedConversationIdleSettlesFinished(t *testing.T) {
+	// Guard: when the transcript is NOT active past the finished hook (the turn really
+	// ended), an idle pane must still settle to finished — no regression.
+	runScenario(t, Scenario{
+		Name: "stale finished hook + idle transcript: settles to finished",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", SessionID: "owner-aaa", HookAge: 11 * time.Minute, Pane: "@fixture:pane_running_extended_thinking.txt"},
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(false)},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 2 * time.Second, Expected: StatusFinished},
+		},
+	})
+}
+
+func TestScenarioOverriddenWaitingTranscriptUnlatchesRunning(t *testing.T) {
+	// Review issue #3: the override latches. On the first finished frame the transcript
+	// tiebreaker was momentarily false (resumed lead entry not yet flushed, or within the
+	// skew), so applyHookWaiting settled finished and set hookOverriddenAt. A granted
+	// permission fires no new hook, so every later tick then took the overridden branch —
+	// which didn't consult convActive — and kept settling finished for the rest of the
+	// turn. The fix re-checks the tiebreaker at the top of the overridden branch: once the
+	// lead entry flushes past the hook, the session recovers to running.
+	runScenario(t, Scenario{
+		Name: "overridden waiting hook recovers to running when the transcript goes active",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(false)},
+			// Same hook (a grant fires no new event); transcript now shows the lead resumed.
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(true)},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},              // latched finished on the momentarily-false frame
+			{At: 2 * time.Second, Expected: StatusRunning}, // overridden branch re-checks tiebreaker → recovers
+		},
+	})
+}
+
+func TestScenarioStaleWaitingTranscriptResumesRunning(t *testing.T) {
+	// The original stuck-on-waiting bug: an auto-approved permission fires no resume
+	// hook, the agent resumes a long turn, but the pane never reads running (the
+	// activity line is pushed out of the detection window by queued messages / long
+	// output) AND the normalized content hash is stable (spinner stripped) — so neither
+	// the content-drift nor the pane-running flip fires and the session is pinned at
+	// waiting. The same ambiguous pane is used at both ticks (identical hash → no
+	// drift) and the cooldown has expired, so only the transcript tiebreaker can flip
+	// it. detectStatus returns "" for this content (no spinner/menu/❯).
+	ambiguous := "running the build...\ncompiling module foo\ncompiling module bar\n"
+	runScenario(t, Scenario{
+		Name: "stale waiting hook, ambiguous stable pane, transcript resumed → running",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", Pane: ambiguous},
+			// 20s later (past the 15s cooldown): same content, transcript now active.
+			{At: 20 * time.Second, Pane: ambiguous, ConvActive: new(true)},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},                // trust the hook; pane gives no signal
+			{At: 20 * time.Second, Expected: StatusRunning}, // was stuck at waiting; transcript flips it
 		},
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClaudeProjectDirName(t *testing.T) {
@@ -395,4 +396,49 @@ func TestDeslugify(t *testing.T) {
 			t.Errorf("deslugify(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+func TestLastLeadTranscriptTimestamp(t *testing.T) {
+	t.Run("returns last lead entry, skipping sidechain", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.jsonl")
+		content := strings.Join([]string{
+			`{"type":"user","timestamp":"2026-06-16T11:25:00.000Z"}`,
+			`{"type":"assistant","timestamp":"2026-06-16T11:26:00.000Z"}`,
+			// A sub-agent (sidechain) entry AFTER the last lead entry must be ignored.
+			`{"type":"assistant","isSidechain":true,"timestamp":"2026-06-16T11:30:00.000Z"}`,
+		}, "\n") + "\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := lastLeadTranscriptTimestamp(path)
+		want, _ := time.Parse(time.RFC3339Nano, "2026-06-16T11:26:00.000Z")
+		if !got.Equal(want) {
+			t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (sidechain entry should be skipped)", got, want)
+		}
+	})
+
+	t.Run("missing file returns zero", func(t *testing.T) {
+		if got := lastLeadTranscriptTimestamp(filepath.Join(t.TempDir(), "nope.jsonl")); !got.IsZero() {
+			t.Errorf("expected zero time for missing file, got %v", got)
+		}
+	})
+
+	t.Run("empty path returns zero", func(t *testing.T) {
+		if got := lastLeadTranscriptTimestamp(""); !got.IsZero() {
+			t.Errorf("expected zero time for empty path, got %v", got)
+		}
+	})
+
+	t.Run("only sidechain entries returns zero", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.jsonl")
+		content := `{"type":"assistant","isSidechain":true,"timestamp":"2026-06-16T11:30:00.000Z"}` + "\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := lastLeadTranscriptTimestamp(path); !got.IsZero() {
+			t.Errorf("expected zero time when all entries are sidechain, got %v", got)
+		}
+	})
 }

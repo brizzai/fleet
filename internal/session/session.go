@@ -63,6 +63,7 @@ type Session struct {
 	hookUpdatedAt    time.Time
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
 	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
+	forkParentID     string    // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
 
 	// Negative cache for the rotation check: the last (owner, foreign) pair that
 	// isSessionRotation rejected. A persistent foreign id (a nested-child eval
@@ -83,8 +84,18 @@ type Session struct {
 
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 
+	// Transcript tiebreaker cache. conversationActivePastHook runs on the ~500ms fast
+	// pass for a session held running through a long turn, and lastLeadTranscriptTimestamp
+	// is a full JSONL scan of a growing file. Skip the scan when the transcript is
+	// unchanged since the last read (path+size+mtime match). Guarded by s.mu.
+	convTranscriptPath  string
+	convTranscriptSize  int64
+	convTranscriptMtime time.Time
+	convLeadTimestamp   time.Time
+
 	tmuxSession  *tmux.Session
 	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
+	convActiveFn func() bool  // optional override for testing; if nil, reads the real transcript
 	mu           sync.RWMutex
 }
 
@@ -150,6 +161,12 @@ func (s *Session) Start() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
+	// Remember the fork parent: a `claude --resume <parent> --fork-session` reports
+	// the PARENT's id at SessionStart and only switches to its own id once it
+	// diverges (first prompt). Keeping the parent id lets UpdateHookStatus adopt the
+	// fork's own id deterministically when it appears, instead of relying on the
+	// transcript heuristic (which can't see a fork). Cleared on divergence.
+	s.forkParentID = s.ForkFromID
 	s.ForkFromID = "" // Clear after first start so restarts use session's own ClaudeSessionID.
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
@@ -196,6 +213,59 @@ func (s *Session) getCapturer() PaneCapturer {
 		return s.paneCapturer
 	}
 	return s.tmuxSession
+}
+
+// conversationActivePastHook reports whether the Claude conversation transcript
+// shows lead-turn activity that resumed after the current waiting hook — the
+// out-of-pane tiebreaker for the between-bursts frame where the pane is
+// indistinguishable from a finished idle prompt. Claude only; Codex has no Claude
+// transcript. MUST NOT be called while holding s.mu — it does disk I/O.
+func (s *Session) conversationActivePastHook() bool {
+	if s.convActiveFn != nil {
+		return s.convActiveFn()
+	}
+	s.mu.RLock()
+	agentType := s.Agent
+	claudeID := s.ClaudeSessionID
+	projectPath := s.ProjectPath
+	hookUpdatedAt := s.hookUpdatedAt
+	cachePath := s.convTranscriptPath
+	cacheSize := s.convTranscriptSize
+	cacheMtime := s.convTranscriptMtime
+	cacheTS := s.convLeadTimestamp
+	s.mu.RUnlock()
+
+	if agentType == agent.Codex || claudeID == "" {
+		return false
+	}
+
+	path := ClaudeTranscriptPath(claudeID, projectPath)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	// Skip the full JSONL scan when the transcript is unchanged since the last read.
+	// os.Stat is a cheap syscall; the scan only runs when the file actually grew.
+	var last time.Time
+	if path == cachePath && fi.Size() == cacheSize && fi.ModTime().Equal(cacheMtime) {
+		last = cacheTS
+	} else {
+		last = lastLeadTranscriptTimestamp(path)
+		s.mu.Lock()
+		s.convTranscriptPath = path
+		s.convTranscriptSize = fi.Size()
+		s.convTranscriptMtime = fi.ModTime()
+		s.convLeadTimestamp = last
+		s.mu.Unlock()
+	}
+	if last.IsZero() {
+		return false
+	}
+	// Advanced past the hook (the agent did something after the prompt fired) AND
+	// still fresh (recently appending → mid-turn, not a finished-with-dropped-Stop).
+	return last.After(hookUpdatedAt.Add(conversationActiveSkew)) &&
+		time.Since(last) < conversationActiveWindow
 }
 
 // IsAlive checks if the tmux session exists.
@@ -270,11 +340,29 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	if hs.SessionID != "" {
 		s.mu.RLock()
 		owner = s.ownerSessionID
+		forkParent := s.forkParentID
 		projectPath := s.ProjectPath
 		negCached := owner != "" && s.rotRejectOwner == owner && s.rotRejectForeign == hs.SessionID
 		s.mu.RUnlock()
 		if owner != "" && hs.SessionID != owner {
 			switch {
+			case forkParent != "" && owner == forkParent:
+				// This session was forked (`claude --resume <parent> --fork-session`).
+				// Its SessionStart hook reports the PARENT's id; the fork's own id only
+				// appears once it diverges (first prompt). That first id different from
+				// the parent IS this fork's own session, so adopt it directly. We can't
+				// use isSessionRotation here: fork transcripts carry no logicalParentUuid,
+				// and they copy the parent's history verbatim (with the parent's original
+				// timestamps), so the timestamp-handoff check measures the parent's whole
+				// conversation length, not a handoff gap, and misses for any parent older
+				// than ~10s — leaving the fork pinned to the parent id (so forking it
+				// re-forks the parent). The window where we own the parent id is before
+				// the fork's first turn; clearHookState() clears forkParentID so a restart
+				// can't re-open it. The residual gap — a nested child `claude` that fires a
+				// hook inside that sub-second pre-divergence window — is narrow enough that
+				// we don't pay transcript I/O here to verify descent.
+				debuglog.Logger.Info("adopting forked claude session",
+					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
 				return false // already rejected this (owner, foreign) pair
 			case resolveRotation && isSessionRotation(projectPath, owner, hs.SessionID):
@@ -314,6 +402,11 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 			return false
 		}
 		s.ownerSessionID = hs.SessionID
+		// Once we own an id other than the fork parent, the fork has diverged to its
+		// own session — drop the parent link so it can't influence later hooks.
+		if s.forkParentID != "" && hs.SessionID != s.forkParentID {
+			s.forkParentID = ""
+		}
 	}
 
 	changed := s.hookStatus != hs.Status || s.hookUpdatedAt != hs.UpdatedAt
@@ -436,6 +529,12 @@ func (s *Session) clearHookState() {
 	s.ownerSessionID = ""
 	s.rotRejectOwner = ""
 	s.rotRejectForeign = ""
+	// Clear the fork parent link too. Restart()/RespawnClaude() call this without
+	// going through Start() (the only place forkParentID is set), so without this an
+	// un-diverged fork that resumes the parent id would re-claim owner==forkParent on
+	// its next SessionStart and re-arm the unconditional fork-adoption branch — the
+	// next foreign hook (incl. a nested child) would then be force-adopted.
+	s.forkParentID = ""
 	s.mu.Unlock()
 	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
 	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
@@ -571,6 +670,35 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		paneStatus = detectStatus(paneContent, log)
 	}
 
+	// Out-of-pane tiebreaker: a between-bursts frame (the agent is working but its
+	// activity line is momentarily gone, so the persistent ❯ box reads as a finished
+	// idle prompt) can't be told from a real finish by pane content alone. Consult
+	// the transcript. Read here, before the lock — conversationActivePastHook does
+	// disk I/O and must not run under s.mu. Gated tightly so it's a rare read.
+	convActive := false
+	switch hookStatus {
+	case "waiting":
+		// Stale waiting hook (a granted permission / answered question fires no resume
+		// hook) where the pane doesn't structurally confirm a prompt — either an idle ❯
+		// box (StatusFinished) or nothing matched ("") because the activity line was
+		// pushed out of the detection window. The transcript decides whether the turn
+		// resumed. Exclude paneStatus==waiting (a real prompt on screen) and ==running
+		// (the pane already flips it) so genuine prompts never read the transcript.
+		if paneStatus != StatusRunning && paneStatus != StatusWaiting {
+			convActive = s.conversationActivePastHook()
+		}
+	case "finished":
+		// Stale finished hook (e.g. a SessionStart/resume that kicked off one long
+		// turn, no Stop since) about to demote a still-running session on an idle/
+		// ambiguous frame. Gate on oldStatus==running so a genuinely-finished session
+		// (already settled) never reads the transcript every round-robin cycle; the
+		// gate is self-sustaining — keeping it running across between-bursts frames
+		// keeps oldStatus running, so a live turn can't be demoted by one bad frame.
+		if oldStatus == StatusRunning && paneStatus != StatusRunning && paneStatus != StatusWaiting {
+			convActive = s.conversationActivePastHook()
+		}
+	}
+
 	hookSaysDead := false
 	func() {
 		s.mu.Lock()
@@ -580,9 +708,9 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		case "running":
 			s.applyHookRunning(oldStatus, paneContent, paneStatus, log)
 		case "waiting":
-			s.applyHookWaiting(paneContent, paneStatus, log)
+			s.applyHookWaiting(paneContent, paneStatus, convActive, log)
 		case "finished":
-			s.applyHookFinished(paneStatus, log)
+			s.applyHookFinished(paneStatus, convActive, log)
 		case "dead":
 			s.lastContentHash = ""
 			s.lastContentChangeAt = time.Time{}
@@ -644,6 +772,10 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 	}
 
 	// Content change detection: if content is stable >10s, Claude likely stopped.
+	// Unlike the waiting path, this override is NOT given the transcript tiebreaker
+	// (conversationActivePastHook): it already requires 10s of hash-stable content
+	// AND defers to a fresh tmux window_activity below, so a single between-bursts
+	// frame with the activity line missing can't trip a false finished here.
 	hash := hashContent(normalizeForHash(paneContent))
 	if hash != s.lastContentHash {
 		s.lastContentHash = hash
@@ -682,8 +814,10 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 }
 
 // applyHookWaiting handles hook status "waiting" with content change detection.
+// convActive is the pre-computed transcript tiebreaker (see conversationActivePastHook);
+// it is only meaningful when paneStatus == StatusFinished.
 // Must be called with s.mu held.
-func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *slog.Logger) {
+func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, convActive bool, log *slog.Logger) {
 	// If this hook was already overridden by pane detection (stale hook),
 	// skip re-evaluation. A new hook (different timestamp) resets the flag.
 	// The pane stays authoritative for this stale hook: a running spinner means
@@ -692,6 +826,19 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 	// stale overridden-waiting hook from staying pinned to the last "running" it
 	// saw — e.g. when the real Stop hook was dropped after a session-id rotation.
 	if !s.hookOverriddenAt.IsZero() && s.hookOverriddenAt.Equal(s.hookUpdatedAt) {
+		// The override latches: once hookOverriddenAt is set on a finished frame, no new
+		// hook fires on a permission grant, so without this we'd keep settling finished
+		// for the rest of the turn — even if convActive was only momentarily false on the
+		// frame that latched it (resumed lead entry not yet flushed, or within the skew).
+		// Re-check the transcript tiebreaker first: if the lead turn has since advanced
+		// past the hook, the turn resumed and we recover to running (convActive is
+		// recomputed every tick).
+		if convActive {
+			s.Status = StatusRunning
+			s.Acknowledged = false
+			log.Info("overridden waiting hook but transcript active past hook — resuming")
+			return
+		}
 		switch paneStatus {
 		case StatusRunning:
 			s.Status = StatusRunning
@@ -723,6 +870,17 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 	// - If user interrupts/escapes, no hook fires — pane override catches this
 	// - Content change detection below handles the gap if hooks are delayed
 	if paneStatus == StatusFinished {
+		if convActive {
+			// Pane reads as a finished idle prompt, but the transcript shows the lead
+			// turn still appending past this waiting hook — modern Claude keeps the ❯
+			// input box on screen while working, and this is a between-bursts frame
+			// where the activity line is momentarily gone. Stay running; do NOT set
+			// hookOverriddenAt so each tick re-evaluates until the turn truly ends.
+			s.Status = StatusRunning
+			s.Acknowledged = false
+			log.Info("hook=waiting, pane idle, but transcript active past hook — staying running")
+			return
+		}
 		// Pane shows idle prompt — user is no longer being prompted.
 		// Preserve idle if already acknowledged to prevent finished↔idle oscillation.
 		if s.Acknowledged {
@@ -744,6 +902,21 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 
 	s.Status = StatusWaiting
 	s.Acknowledged = false
+
+	// Out-of-pane resume signal. The pane shows no running spinner (the activity line
+	// was pushed out of the detection window by queued messages / long output) AND the
+	// normalized content hash is stable (the spinner is stripped), so neither flip
+	// below can fire — yet the transcript's LEAD turn has advanced past this waiting
+	// hook and is still fresh. The user approved/answered and the lead resumed (no
+	// resume hook fires on a permission grant). Flip to running. Unlike window_activity
+	// (deliberately unused here — a sub-agent keeps it fresh during a genuine prompt),
+	// the LEAD-only transcript stays static while the lead is truly blocked. Don't set
+	// hookOverriddenAt: re-evaluate each tick until a real hook lands or it goes stale.
+	if convActive {
+		s.Status = StatusRunning
+		log.Info("hook=waiting but transcript advanced past hook — assuming running")
+		return
+	}
 
 	if paneContent == "" {
 		return
@@ -835,9 +1008,23 @@ const finishedHoldMaxAge = 5 * time.Second
 // status prematurely.
 const waitingHookRenderBackstop = 5 * time.Second
 
+// conversationActiveWindow bounds how recent the last lead-conversation transcript
+// entry must be for conversationActivePastHook to count the agent as actively
+// working. Sized above the longest observed gap between lead entries during silent
+// thinking/tool stretches (~80s) so a live agent is never read as finished, while a
+// genuinely dropped Stop hook settles to finished once the transcript ages past it.
+const conversationActiveWindow = 120 * time.Second
+
+// conversationActiveSkew is how far past the waiting hook's timestamp the last lead
+// entry must advance to prove the agent resumed after the hook (not the entry that
+// triggered the hook itself). Matches the snapshot's advanced_past_hook >2s rule.
+const conversationActiveSkew = 2 * time.Second
+
 // applyHookFinished handles hook status "finished" with pane override for active spinners.
+// convActive is the pre-computed transcript tiebreaker (see conversationActivePastHook);
+// it is only meaningful when paneStatus is not running/waiting.
 // Must be called with s.mu held.
-func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
+func (s *Session) applyHookFinished(paneStatus Status, convActive bool, log *slog.Logger) {
 	s.lastContentHash = ""
 	s.lastContentChangeAt = time.Time{}
 	if paneStatus == StatusRunning {
@@ -881,6 +1068,16 @@ func (s *Session) applyHookFinished(paneStatus Status, log *slog.Logger) {
 				"hookAge", time.Since(s.hookUpdatedAt).Round(time.Millisecond))
 			return
 		}
+	}
+	// Stale finished hook, idle-looking pane — but the transcript shows the lead turn
+	// still appending past the hook (a SessionStart/resume that began one long turn,
+	// caught on a between-bursts frame where the activity line wasn't rendered). The
+	// agent is working; don't demote it to finished.
+	if convActive {
+		s.Status = StatusRunning
+		s.Acknowledged = false
+		log.Info("hook=finished, pane idle, but transcript active past hook — staying running")
+		return
 	}
 	if s.Acknowledged {
 		s.Status = StatusIdle

@@ -96,6 +96,95 @@ func TestUpdateHookStatusIgnoresNestedChild(t *testing.T) {
 	}
 }
 
+// TestUpdateHookStatusAdoptsForkDivergence reproduces the fork-of-a-fork bug: a
+// `claude --resume <parent> --fork-session` reports the PARENT's id at SessionStart
+// and only switches to its own id on the first prompt. The fork transcript copies
+// the parent's history verbatim (same OLD first timestamp) and carries no
+// logicalParentUuid, so BOTH isSessionRotation signals miss — leaving the fork
+// pinned to the parent id, so forking it re-forks the parent. With forkParentID
+// known, the fork's own id must be adopted deterministically.
+func TestUpdateHookStatusAdoptsForkDivergence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	// Parent A: a >10s conversation (so the proximity fallback can't bridge it).
+	base := time.Now().Add(-time.Hour).UTC()
+	writeTranscript(t, proj, "parent-aaa", base, base.Add(30*time.Minute))
+	// Fork B: copies the parent's history verbatim — same OLD first timestamp, no
+	// logicalParentUuid — exactly what --fork-session writes. Both rotation signals miss.
+	writeTranscript(t, proj, "fork-bbb", base, base.Add(31*time.Minute))
+
+	// Session launched as a fork of parent-aaa (forkParentID is set by Start()).
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning, forkParentID: "parent-aaa"}
+
+	// SessionStart reports the PARENT's id (the fork hasn't diverged yet).
+	s.UpdateHookStatus(&HookStatus{Status: "finished", SessionID: "parent-aaa", UpdatedAt: time.Now()}, true)
+	if s.ClaudeSessionID != "parent-aaa" {
+		t.Fatalf("pre-divergence: ClaudeSessionID=%q, want parent-aaa", s.ClaudeSessionID)
+	}
+
+	// First prompt: the fork diverges to its OWN id. Must be adopted (forking this
+	// session should now use fork-bbb, not re-fork parent-aaa).
+	changed := s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "fork-bbb", UpdatedAt: time.Now()}, true)
+	if !changed {
+		t.Errorf("fork divergence hook should register as changed")
+	}
+	if s.ClaudeSessionID != "fork-bbb" {
+		t.Errorf("fork id not adopted: ClaudeSessionID=%q, want fork-bbb (forking it would re-fork the parent)", s.ClaudeSessionID)
+	}
+	if s.forkParentID != "" {
+		t.Errorf("forkParentID should be cleared after divergence, got %q", s.forkParentID)
+	}
+
+	// After divergence the fork link is gone, so a genuine nested child is ignored again.
+	writeTranscript(t, proj, "nested-ccc", base.Add(40*time.Minute), base.Add(41*time.Minute))
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "nested-ccc", UpdatedAt: time.Now()}, true); changed {
+		t.Errorf("post-divergence nested child should be ignored")
+	}
+	if s.ClaudeSessionID != "fork-bbb" {
+		t.Errorf("nested child clobbered fork id: %q, want fork-bbb", s.ClaudeSessionID)
+	}
+}
+
+// Review issue #2a: clearHookState() must clear forkParentID. Restart()/RespawnClaude()
+// call clearHookState() without going through Start() (the only place forkParentID is
+// set), so an un-diverged fork that survives a restart and resumes the parent id would
+// otherwise re-claim owner==forkParent and re-arm the unconditional fork-adoption branch —
+// the next foreign hook (incl. a nested child) would then be force-adopted.
+func TestClearHookStateClearsForkParent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	// Un-diverged fork: launched as a fork of parent-aaa, claimed the parent's id at
+	// SessionStart, never diverged (no first prompt yet).
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning, forkParentID: "parent-aaa", ownerSessionID: "parent-aaa"}
+
+	s.clearHookState()
+	if s.forkParentID != "" {
+		t.Fatalf("clearHookState should clear forkParentID, got %q", s.forkParentID)
+	}
+
+	// After a restart the session re-claims the parent id on its next SessionStart
+	// (owner was cleared). A nested child firing inside the old pre-divergence window
+	// must NOT be force-adopted now that the fork link is gone.
+	base := time.Now().Add(-time.Hour).UTC()
+	writeTranscript(t, proj, "parent-aaa", base, base.Add(30*time.Minute))
+	s.UpdateHookStatus(&HookStatus{Status: "finished", SessionID: "parent-aaa", UpdatedAt: time.Now()}, true)
+	if s.ClaudeSessionID != "parent-aaa" {
+		t.Fatalf("re-claim parent: ClaudeSessionID=%q, want parent-aaa", s.ClaudeSessionID)
+	}
+
+	// Nested child: fresh transcript, no descent from the parent (10min gap, no parent
+	// link) → both rotation signals miss → must be rejected, not adopted.
+	writeTranscript(t, proj, "nested-ccc", base.Add(40*time.Minute), base.Add(41*time.Minute))
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "nested-ccc", UpdatedAt: time.Now()}, true); changed {
+		t.Errorf("nested child after restart should be ignored, not adopted")
+	}
+	if s.ClaudeSessionID != "parent-aaa" {
+		t.Errorf("nested child clobbered id after restart: %q, want parent-aaa", s.ClaudeSessionID)
+	}
+}
+
 // writeTranscriptRaw writes arbitrary JSONL lines for a session under the
 // HOME-rooted projects dir, for tests that need uuid / compact_boundary entries.
 func writeTranscriptRaw(t *testing.T, projectPath, sessionID string, lines ...string) {
