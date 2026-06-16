@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-06-16
+
+### Added
+
+- Restarting a session with `r` now asks for confirmation first, so an accidental keypress no longer kills in-progress work. Disable it in Settings → Behavior ("Confirm before restart").
+- Contextual tips now appear in the bottom-right when relevant — e.g. when several sessions have stopped (after a reboot), a hint points you to Ctrl+K → "Reload All Sessions". Dismiss any tip with Shift+X.
+
+### Fixed
+
+- Selecting text in an attached session (drag, double-click, keyboard) now reliably copies to the system clipboard, including in iTerm2 and Apple Terminal where it previously didn't. Warp can't drag-copy (a Warp bug) and now shows a hint saying so.
+- Forking a session that was itself forked now correctly forks that session, not its original ancestor — a forked session reliably adopts its own conversation id once it diverges.
+- Sessions no longer show a stale "waiting" or "finished" state while the agent is actively working — after a granted permission prompt, an answered question, or during a long resumed turn. fleet now consults the conversation transcript to confirm whether the turn actually resumed or ended.
+- Session statuses no longer freeze across the app when a background status check gets stuck.
+
 ## [2.8.2] - 2026-06-07
 
 ### Fixed
@@ -245,7 +259,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.8.2...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.9.0...HEAD
+[2.9.0]: https://github.com/brizzai/fleet/releases/tag/v2.9.0
 [2.8.2]: https://github.com/brizzai/fleet/releases/tag/v2.8.2
 [2.8.1]: https://github.com/brizzai/fleet/releases/tag/v2.8.1
 [2.8.0]: https://github.com/brizzai/fleet/releases/tag/v2.8.0
