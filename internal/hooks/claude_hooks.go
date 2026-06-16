@@ -68,18 +68,24 @@ func GetClaudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-// GetHookCommand returns the full hook command string using the current binary path.
-func GetHookCommand() string {
+// fleetBinaryPath returns the absolute, symlink-resolved path to the running
+// fleet binary, falling back to "fleet" if it can't be resolved. Shared by the
+// Claude/Codex hook command and the OpenCode status plugin so both invoke the
+// same binary regardless of how fleet was launched.
+func fleetBinaryPath() string {
 	exe, err := os.Executable()
 	if err != nil {
-		return "fleet hook-handler " + fleetHookArg
+		return "fleet"
 	}
-	// Resolve symlinks for stable path.
-	resolved, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		return exe + " hook-handler " + fleetHookArg
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved
 	}
-	return resolved + " hook-handler " + fleetHookArg
+	return exe
+}
+
+// GetHookCommand returns the full hook command string using the current binary path.
+func GetHookCommand() string {
+	return fleetBinaryPath() + " hook-handler " + fleetHookArg
 }
 
 // fleetHook returns a hook entry with the current binary path.

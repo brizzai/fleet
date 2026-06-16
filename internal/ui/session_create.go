@@ -49,8 +49,10 @@ func (d *SessionCreateDialog) Update(msg tea.Msg) (*SessionCreateDialog, tea.Cmd
 	switch keyMsg.String() {
 	case "esc", "q":
 		d.Hide()
-	case "left", "right", "h", "l", "tab":
-		d.toggleAgent()
+	case "left", "h":
+		d.cycleAgent(-1)
+	case "right", "l", "tab":
+		d.cycleAgent(1)
 	case "enter":
 		path, title, ag := d.repoPath, d.title, d.agent
 		d.Hide()
@@ -61,12 +63,21 @@ func (d *SessionCreateDialog) Update(msg tea.Msg) (*SessionCreateDialog, tea.Cmd
 	return d, nil
 }
 
-func (d *SessionCreateDialog) toggleAgent() {
-	if d.agent == agent.Codex {
-		d.agent = agent.Claude
-	} else {
-		d.agent = agent.Codex
+// agentCycle is the order the picker steps through (left/right). New agents are
+// appended; the create path validates the binary is installed and errors if not.
+var agentCycle = []agent.Type{agent.Claude, agent.Codex, agent.OpenCode}
+
+// cycleAgent advances the selected agent by delta (+1 next, -1 prev), wrapping.
+func (d *SessionCreateDialog) cycleAgent(delta int) {
+	idx := 0
+	for i, a := range agentCycle {
+		if a == d.agent {
+			idx = i
+			break
+		}
 	}
+	n := len(agentCycle)
+	d.agent = agentCycle[((idx+delta)%n+n)%n]
 }
 
 // View renders the dialog.
