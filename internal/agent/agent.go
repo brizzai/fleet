@@ -1,6 +1,7 @@
 // Package agent describes the coding agents fleet can launch in a session
-// (Claude Code and OpenAI Codex) and owns the per-agent divergence: the binary
-// name, display name, and the launch command (including resume/fork forms).
+// (Claude Code, OpenAI Codex, and OpenCode) and owns the per-agent divergence:
+// the binary name, display name, and the launch command (including resume/fork
+// forms).
 package agent
 
 import "fmt"
@@ -9,8 +10,9 @@ import "fmt"
 type Type string
 
 const (
-	Claude Type = "claude"
-	Codex  Type = "codex"
+	Claude   Type = "claude"
+	Codex    Type = "codex"
+	OpenCode Type = "opencode"
 
 	// Default is the agent assumed when none is recorded (legacy sessions, empty config).
 	Default = Claude
@@ -24,6 +26,8 @@ func Parse(s string) Type {
 		return Claude
 	case Codex:
 		return Codex
+	case OpenCode:
+		return OpenCode
 	default:
 		return Default
 	}
@@ -31,18 +35,26 @@ func Parse(s string) Type {
 
 // Binary returns the executable name to look up on PATH and launch.
 func (t Type) Binary() string {
-	if t == Codex {
+	switch t {
+	case Codex:
 		return "codex"
+	case OpenCode:
+		return "opencode"
+	default:
+		return "claude"
 	}
-	return "claude"
 }
 
 // DisplayName returns the human-facing label for the agent.
 func (t Type) DisplayName() string {
-	if t == Codex {
+	switch t {
+	case Codex:
 		return "Codex"
+	case OpenCode:
+		return "OpenCode"
+	default:
+		return "Claude"
 	}
-	return "Claude"
 }
 
 // String implements fmt.Stringer.
@@ -69,6 +81,13 @@ type LaunchOpts struct {
 //	codex
 //	codex resume <id>
 //	codex fork <id>                        (fork)
+//
+// OpenCode (status plugin is installed out-of-band; --fork is a modifier on
+// --session, not a subcommand):
+//
+//	opencode
+//	opencode --session <id>
+//	opencode --session <id> --fork         (fork)
 func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	if t == Codex {
 		switch {
@@ -78,6 +97,17 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 			return fmt.Sprintf("codex resume %s", o.ResumeID)
 		default:
 			return "codex"
+		}
+	}
+
+	if t == OpenCode {
+		switch {
+		case o.ForkID != "":
+			return fmt.Sprintf("opencode --session %s --fork", o.ForkID)
+		case o.ResumeID != "":
+			return fmt.Sprintf("opencode --session %s", o.ResumeID)
+		default:
+			return "opencode"
 		}
 	}
 

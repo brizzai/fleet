@@ -20,7 +20,7 @@ var (
 	chevronStyleSet = []string{"triangle", "plusminus"}
 	densitySet      = []string{"normal", "compact"}
 	enterModeSet    = []string{"attach", "split"}
-	defaultAgentSet = []string{"claude", "codex"}
+	defaultAgentSet = []string{"claude", "codex", "opencode"}
 )
 
 // settingsFocus tracks which pane (category rail or detail list) has the cursor.
@@ -497,10 +497,14 @@ func buildSettingsCategories() []settingsCategory {
 			{
 				label: "Default agent",
 				value: func(c *config.Config) string {
-					if c.GetDefaultAgent() == "codex" {
+					switch c.GetDefaultAgent() {
+					case "codex":
 						return "Codex"
+					case "opencode":
+						return "OpenCode"
+					default:
+						return "Claude"
 					}
-					return "Claude"
 				},
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.DefaultAgent = cycleString(d.cfg.GetDefaultAgent(), defaultAgentSet, dir)

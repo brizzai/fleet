@@ -126,10 +126,10 @@ func (s *Session) buildAgentCmd() string {
 }
 
 // initialRunStatus is the status to show right after launching the agent.
-// Codex fires no hook until its first turn and has no pane fallback, so it
-// starts idle (sitting at its prompt) rather than flashing running.
+// Codex and OpenCode fire no event until their first turn, so they start idle
+// (sitting at their prompt) rather than flashing running.
 func (s *Session) initialRunStatus() Status {
-	if s.Agent == agent.Codex {
+	if s.Agent == agent.Codex || s.Agent == agent.OpenCode {
 		return StatusIdle
 	}
 	return StatusRunning
@@ -577,6 +577,24 @@ func (s *Session) UpdateStatus() {
 	// or a wait prompt (paneWaiting) overrides the hook; only an at-rest pane
 	// lets the hook decide running/finished/idle. With no hook at all, an at-rest
 	// pane settles to idle.
+	//
+	// OpenCode is purely plugin-driven: its status plugin reports running/waiting/
+	// finished authoritatively for the root session (sub-agents are filtered out),
+	// including the waiting→running transition after a permission reply, so the
+	// hook is always trusted and no pane scraping is needed. Before the first
+	// event there is no hook — the session sits idle at its prompt.
+	if s.Agent == agent.OpenCode {
+		if !hasHook {
+			if oldStatus != StatusIdle {
+				s.SetStatus(StatusIdle)
+				log.Info("status changed (opencode no-hook)", "old", oldStatus, "new", StatusIdle)
+			}
+			return
+		}
+		s.applyHookStatus(oldStatus, hookStatus, log)
+		return
+	}
+
 	if s.Agent == agent.Codex {
 		paneWaiting, paneRunning := false, false
 		captured := false
@@ -607,7 +625,7 @@ func (s *Session) UpdateStatus() {
 		case hasHook:
 			// Pane at rest — it can't tell running from finished from idle at the
 			// prompt, so the hook decides.
-			s.applyCodexHookAtRest(oldStatus, hookStatus, log)
+			s.applyHookStatus(oldStatus, hookStatus, log)
 		case oldStatus != StatusIdle:
 			// At its prompt with no active turn and no hook — settle to idle.
 			s.SetStatus(StatusIdle)
@@ -624,11 +642,12 @@ func (s *Session) UpdateStatus() {
 	s.updateStatusFromPane(oldStatus, log)
 }
 
-// applyCodexHookAtRest applies hook status for a Codex session whose pane is at
-// rest (no working footer, no wait prompt). The pane can't tell running from
-// finished from idle at the prompt, so the hook decides. Reached only from the
-// Codex branch of UpdateStatus, after the pane-authoritative checks.
-func (s *Session) applyCodexHookAtRest(oldStatus Status, hookStatus string, log *slog.Logger) {
+// applyHookStatus maps an authoritative hook/plugin status string
+// (running/waiting/finished/dead) onto the session, honoring the acknowledged
+// flag (finished→idle once acknowledged) and triggering a crash dump on dead.
+// Used by Codex (when its pane is at rest, the hook decides) and OpenCode (which
+// is purely plugin-driven with no pane fallback).
+func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog.Logger) {
 	hookSaysDead := false
 	func() {
 		s.mu.Lock()
@@ -651,7 +670,7 @@ func (s *Session) applyCodexHookAtRest(oldStatus Status, hookStatus string, log 
 			hookSaysDead = true
 		}
 		if s.Status != oldStatus {
-			log.Info("status changed (codex hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus)
+			log.Info("status changed (agent hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus)
 		}
 	}()
 

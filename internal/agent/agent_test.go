@@ -4,10 +4,11 @@ import "testing"
 
 func TestParse(t *testing.T) {
 	cases := map[string]Type{
-		"claude":  Claude,
-		"codex":   Codex,
-		"":        Claude, // empty → default
-		"unknown": Claude, // unrecognized → default
+		"claude":   Claude,
+		"codex":    Codex,
+		"opencode": OpenCode,
+		"":         Claude, // empty → default
+		"unknown":  Claude, // unrecognized → default
 	}
 	for in, want := range cases {
 		if got := Parse(in); got != want {
@@ -31,6 +32,10 @@ func TestBuildLaunchCmd(t *testing.T) {
 		{"codex resume", Codex, LaunchOpts{ResumeID: "abc"}, "codex resume abc"},
 		{"codex fork", Codex, LaunchOpts{ForkID: "abc"}, "codex fork abc"},
 		{"codex fork wins over resume", Codex, LaunchOpts{ResumeID: "r", ForkID: "f"}, "codex fork f"},
+		{"opencode new", OpenCode, LaunchOpts{}, "opencode"},
+		{"opencode resume", OpenCode, LaunchOpts{ResumeID: "abc"}, "opencode --session abc"},
+		{"opencode fork", OpenCode, LaunchOpts{ForkID: "abc"}, "opencode --session abc --fork"},
+		{"opencode fork wins over resume", OpenCode, LaunchOpts{ResumeID: "r", ForkID: "f"}, "opencode --session f --fork"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -42,10 +47,10 @@ func TestBuildLaunchCmd(t *testing.T) {
 }
 
 func TestBinaryAndDisplayName(t *testing.T) {
-	if Claude.Binary() != "claude" || Codex.Binary() != "codex" {
-		t.Errorf("unexpected Binary(): claude=%q codex=%q", Claude.Binary(), Codex.Binary())
+	if Claude.Binary() != "claude" || Codex.Binary() != "codex" || OpenCode.Binary() != "opencode" {
+		t.Errorf("unexpected Binary(): claude=%q codex=%q opencode=%q", Claude.Binary(), Codex.Binary(), OpenCode.Binary())
 	}
-	if Claude.DisplayName() != "Claude" || Codex.DisplayName() != "Codex" {
-		t.Errorf("unexpected DisplayName(): claude=%q codex=%q", Claude.DisplayName(), Codex.DisplayName())
+	if Claude.DisplayName() != "Claude" || Codex.DisplayName() != "Codex" || OpenCode.DisplayName() != "OpenCode" {
+		t.Errorf("unexpected DisplayName(): claude=%q codex=%q opencode=%q", Claude.DisplayName(), Codex.DisplayName(), OpenCode.DisplayName())
 	}
 }

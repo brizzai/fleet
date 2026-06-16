@@ -638,20 +638,26 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 const (
 	// Both glyphs are width-1 and live in well-covered Unicode blocks so they
 	// render cleanly in base monospace fonts (Menlo/SF Mono) and stay aligned:
-	// ✻ is Dingbats; ◇ is Geometric Shapes — the same block as the status dots
-	// (●○◐). A hexagon (U+2B21) was tried first but falls back to a wider glyph
-	// in those fonts, shifting the title.
-	claudeGlyph = "✻"
-	codexGlyph  = "◇"
+	// ✻ is Dingbats; ◇ and △ are Geometric Shapes — the same block as the status
+	// dots (●○◐). A hexagon (U+2B21) was tried first but falls back to a wider
+	// glyph in those fonts, shifting the title. △ is a clean third shape, distinct
+	// from the star and the diamond.
+	claudeGlyph   = "✻"
+	codexGlyph    = "◇"
+	opencodeGlyph = "△"
 )
 
 // agentGlyph returns the sigil for a session's agent. An empty or unrecognized
 // agent falls back to Claude (the default), so legacy sessions render ✻.
 func agentGlyph(t agent.Type) string {
-	if agent.Parse(string(t)) == agent.Codex {
+	switch agent.Parse(string(t)) {
+	case agent.Codex:
 		return codexGlyph
+	case agent.OpenCode:
+		return opencodeGlyph
+	default:
+		return claudeGlyph
 	}
-	return claudeGlyph
 }
 
 // renderPendingItem renders a "Creating…" phantom under its checkout.

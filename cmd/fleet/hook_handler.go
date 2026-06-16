@@ -23,7 +23,10 @@ type hookPayload struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// mapEventToStatus maps a Claude Code hook event to a fleet status string.
+// mapEventToStatus maps a hook event to a fleet status string. Claude and Codex
+// send Claude-style event names; the OpenCode status plugin sends OpenCode-native
+// names (session.busy/session.idle/permission.asked) — these are additive, the
+// other agents never emit them, so the handler stays agent-neutral.
 func mapEventToStatus(event string) string {
 	switch event {
 	case "UserPromptSubmit":
@@ -38,6 +41,13 @@ func mapEventToStatus(event string) string {
 		return "finished"
 	case "SessionEnd":
 		return "dead"
+	// OpenCode-native events (from the status plugin):
+	case "session.busy":
+		return "running"
+	case "session.idle":
+		return "finished"
+	case "permission.asked":
+		return "waiting"
 	default:
 		return ""
 	}
