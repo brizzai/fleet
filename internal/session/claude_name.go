@@ -329,52 +329,15 @@ func transcriptContainsUUID(path, uuid string) bool {
 // firstTranscriptTimestamp returns the timestamp of the earliest timestamped JSONL
 // entry in the transcript at path, or the zero time if it's missing/unreadable or
 // has no timestamped entries.
-func firstTranscriptTimestamp(path string) time.Time { return scanTranscriptTimestamp(path, false) }
+func firstTranscriptTimestamp(path string) time.Time {
+	return scanTranscriptTimestamp(path, false, false)
+}
 
 // lastTranscriptTimestamp returns the timestamp of the latest timestamped JSONL
 // entry in the transcript at path, or the zero time. It scans the whole file;
 // transcripts are small and this runs only on the rare session-id-change path.
-func lastTranscriptTimestamp(path string) time.Time { return scanTranscriptTimestamp(path, true) }
-
-// scanTranscriptTimestamp walks the JSONL transcript at path and returns the
-// first (last=false) or last (last=true) entry timestamp it can parse.
-func scanTranscriptTimestamp(path string, last bool) time.Time {
-	if path == "" {
-		return time.Time{}
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return time.Time{}
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
-
-	var result time.Time
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.Contains(line, `"timestamp"`) {
-			continue
-		}
-		var entry struct {
-			Timestamp string `json:"timestamp"`
-		}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
-			continue
-		}
-		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
-		// "...:04.226Z"). The layout also parses entries with no fractional part.
-		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
-		if err != nil {
-			continue
-		}
-		if !last {
-			return ts
-		}
-		result = ts
-	}
-	return result
+func lastTranscriptTimestamp(path string) time.Time {
+	return scanTranscriptTimestamp(path, true, false)
 }
 
 // lastLeadTranscriptTimestamp returns the timestamp of the last lead-conversation
@@ -384,6 +347,13 @@ func scanTranscriptTimestamp(path string, last bool) time.Time {
 // out-of-pane tiebreaker for the between-bursts frame where the pane is
 // indistinguishable from finished (see conversationActivePastHook).
 func lastLeadTranscriptTimestamp(path string) time.Time {
+	return scanTranscriptTimestamp(path, true, true)
+}
+
+// scanTranscriptTimestamp walks the JSONL transcript at path and returns the first
+// (last=false) or last (last=true) entry timestamp it can parse. When excludeSidechain
+// is set, sub-agent (isSidechain:true) entries are skipped.
+func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time.Time {
 	if path == "" {
 		return time.Time{}
 	}
@@ -409,12 +379,17 @@ func lastLeadTranscriptTimestamp(path string) time.Time {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
 			continue
 		}
-		if entry.IsSidechain {
+		if excludeSidechain && entry.IsSidechain {
 			continue
 		}
+		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
+		// "...:04.226Z"). The layout also parses entries with no fractional part.
 		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
 		if err != nil {
 			continue
+		}
+		if !last {
+			return ts
 		}
 		result = ts
 	}

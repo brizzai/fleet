@@ -146,6 +146,45 @@ func TestUpdateHookStatusAdoptsForkDivergence(t *testing.T) {
 	}
 }
 
+// Review issue #2a: clearHookState() must clear forkParentID. Restart()/RespawnClaude()
+// call clearHookState() without going through Start() (the only place forkParentID is
+// set), so an un-diverged fork that survives a restart and resumes the parent id would
+// otherwise re-claim owner==forkParent and re-arm the unconditional fork-adoption branch —
+// the next foreign hook (incl. a nested child) would then be force-adopted.
+func TestClearHookStateClearsForkParent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	// Un-diverged fork: launched as a fork of parent-aaa, claimed the parent's id at
+	// SessionStart, never diverged (no first prompt yet).
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning, forkParentID: "parent-aaa", ownerSessionID: "parent-aaa"}
+
+	s.clearHookState()
+	if s.forkParentID != "" {
+		t.Fatalf("clearHookState should clear forkParentID, got %q", s.forkParentID)
+	}
+
+	// After a restart the session re-claims the parent id on its next SessionStart
+	// (owner was cleared). A nested child firing inside the old pre-divergence window
+	// must NOT be force-adopted now that the fork link is gone.
+	base := time.Now().Add(-time.Hour).UTC()
+	writeTranscript(t, proj, "parent-aaa", base, base.Add(30*time.Minute))
+	s.UpdateHookStatus(&HookStatus{Status: "finished", SessionID: "parent-aaa", UpdatedAt: time.Now()}, true)
+	if s.ClaudeSessionID != "parent-aaa" {
+		t.Fatalf("re-claim parent: ClaudeSessionID=%q, want parent-aaa", s.ClaudeSessionID)
+	}
+
+	// Nested child: fresh transcript, no descent from the parent (10min gap, no parent
+	// link) → both rotation signals miss → must be rejected, not adopted.
+	writeTranscript(t, proj, "nested-ccc", base.Add(40*time.Minute), base.Add(41*time.Minute))
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "nested-ccc", UpdatedAt: time.Now()}, true); changed {
+		t.Errorf("nested child after restart should be ignored, not adopted")
+	}
+	if s.ClaudeSessionID != "parent-aaa" {
+		t.Errorf("nested child clobbered id after restart: %q, want parent-aaa", s.ClaudeSessionID)
+	}
+}
+
 // writeTranscriptRaw writes arbitrary JSONL lines for a session under the
 // HOME-rooted projects dir, for tests that need uuid / compact_boundary entries.
 func writeTranscriptRaw(t *testing.T, projectPath, sessionID string, lines ...string) {

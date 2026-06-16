@@ -84,6 +84,15 @@ type Session struct {
 
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 
+	// Transcript tiebreaker cache. conversationActivePastHook runs on the ~500ms fast
+	// pass for a session held running through a long turn, and lastLeadTranscriptTimestamp
+	// is a full JSONL scan of a growing file. Skip the scan when the transcript is
+	// unchanged since the last read (path+size+mtime match). Guarded by s.mu.
+	convTranscriptPath  string
+	convTranscriptSize  int64
+	convTranscriptMtime time.Time
+	convLeadTimestamp   time.Time
+
 	tmuxSession  *tmux.Session
 	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
 	convActiveFn func() bool  // optional override for testing; if nil, reads the real transcript
@@ -220,12 +229,36 @@ func (s *Session) conversationActivePastHook() bool {
 	claudeID := s.ClaudeSessionID
 	projectPath := s.ProjectPath
 	hookUpdatedAt := s.hookUpdatedAt
+	cachePath := s.convTranscriptPath
+	cacheSize := s.convTranscriptSize
+	cacheMtime := s.convTranscriptMtime
+	cacheTS := s.convLeadTimestamp
 	s.mu.RUnlock()
 
 	if agentType == agent.Codex || claudeID == "" {
 		return false
 	}
-	last := lastLeadTranscriptTimestamp(ClaudeTranscriptPath(claudeID, projectPath))
+
+	path := ClaudeTranscriptPath(claudeID, projectPath)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	// Skip the full JSONL scan when the transcript is unchanged since the last read.
+	// os.Stat is a cheap syscall; the scan only runs when the file actually grew.
+	var last time.Time
+	if path == cachePath && fi.Size() == cacheSize && fi.ModTime().Equal(cacheMtime) {
+		last = cacheTS
+	} else {
+		last = lastLeadTranscriptTimestamp(path)
+		s.mu.Lock()
+		s.convTranscriptPath = path
+		s.convTranscriptSize = fi.Size()
+		s.convTranscriptMtime = fi.ModTime()
+		s.convLeadTimestamp = last
+		s.mu.Unlock()
+	}
 	if last.IsZero() {
 		return false
 	}
@@ -324,7 +357,10 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				// conversation length, not a handoff gap, and misses for any parent older
 				// than ~10s — leaving the fork pinned to the parent id (so forking it
 				// re-forks the parent). The window where we own the parent id is before
-				// the fork's first turn, so no nested child can race this.
+				// the fork's first turn; clearHookState() clears forkParentID so a restart
+				// can't re-open it. The residual gap — a nested child `claude` that fires a
+				// hook inside that sub-second pre-divergence window — is narrow enough that
+				// we don't pay transcript I/O here to verify descent.
 				debuglog.Logger.Info("adopting forked claude session",
 					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
@@ -493,6 +529,12 @@ func (s *Session) clearHookState() {
 	s.ownerSessionID = ""
 	s.rotRejectOwner = ""
 	s.rotRejectForeign = ""
+	// Clear the fork parent link too. Restart()/RespawnClaude() call this without
+	// going through Start() (the only place forkParentID is set), so without this an
+	// un-diverged fork that resumes the parent id would re-claim owner==forkParent on
+	// its next SessionStart and re-arm the unconditional fork-adoption branch — the
+	// next foreign hook (incl. a nested child) would then be force-adopted.
+	s.forkParentID = ""
 	s.mu.Unlock()
 	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
 	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
@@ -784,6 +826,19 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, convAc
 	// stale overridden-waiting hook from staying pinned to the last "running" it
 	// saw — e.g. when the real Stop hook was dropped after a session-id rotation.
 	if !s.hookOverriddenAt.IsZero() && s.hookOverriddenAt.Equal(s.hookUpdatedAt) {
+		// The override latches: once hookOverriddenAt is set on a finished frame, no new
+		// hook fires on a permission grant, so without this we'd keep settling finished
+		// for the rest of the turn — even if convActive was only momentarily false on the
+		// frame that latched it (resumed lead entry not yet flushed, or within the skew).
+		// Re-check the transcript tiebreaker first: if the lead turn has since advanced
+		// past the hook, the turn resumed and we recover to running (convActive is
+		// recomputed every tick).
+		if convActive {
+			s.Status = StatusRunning
+			s.Acknowledged = false
+			log.Info("overridden waiting hook but transcript active past hook — resuming")
+			return
+		}
 		switch paneStatus {
 		case StatusRunning:
 			s.Status = StatusRunning

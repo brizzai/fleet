@@ -574,6 +574,28 @@ func TestScenarioStaleFinishedConversationIdleSettlesFinished(t *testing.T) {
 	})
 }
 
+func TestScenarioOverriddenWaitingTranscriptUnlatchesRunning(t *testing.T) {
+	// Review issue #3: the override latches. On the first finished frame the transcript
+	// tiebreaker was momentarily false (resumed lead entry not yet flushed, or within the
+	// skew), so applyHookWaiting settled finished and set hookOverriddenAt. A granted
+	// permission fires no new hook, so every later tick then took the overridden branch —
+	// which didn't consult convActive — and kept settling finished for the rest of the
+	// turn. The fix re-checks the tiebreaker at the top of the overridden branch: once the
+	// lead entry flushes past the hook, the session recovers to running.
+	runScenario(t, Scenario{
+		Name: "overridden waiting hook recovers to running when the transcript goes active",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(false)},
+			// Same hook (a grant fires no new event); transcript now shows the lead resumed.
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(true)},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},              // latched finished on the momentarily-false frame
+			{At: 2 * time.Second, Expected: StatusRunning}, // overridden branch re-checks tiebreaker → recovers
+		},
+	})
+}
+
 func TestScenarioStaleWaitingTranscriptResumesRunning(t *testing.T) {
 	// The original stuck-on-waiting bug: an auto-approved permission fires no resume
 	// hook, the agent resumes a long turn, but the pane never reads running (the
@@ -592,8 +614,8 @@ func TestScenarioStaleWaitingTranscriptResumesRunning(t *testing.T) {
 			{At: 20 * time.Second, Pane: ambiguous, ConvActive: new(true)},
 		},
 		Checks: []ScenarioCheck{
-			{At: 0, Expected: StatusWaiting},                 // trust the hook; pane gives no signal
-			{At: 20 * time.Second, Expected: StatusRunning},  // was stuck at waiting; transcript flips it
+			{At: 0, Expected: StatusWaiting},                // trust the hook; pane gives no signal
+			{At: 20 * time.Second, Expected: StatusRunning}, // was stuck at waiting; transcript flips it
 		},
 	})
 }
