@@ -574,6 +574,30 @@ func TestScenarioStaleFinishedConversationIdleSettlesFinished(t *testing.T) {
 	})
 }
 
+func TestScenarioStaleWaitingTranscriptResumesRunning(t *testing.T) {
+	// The original stuck-on-waiting bug: an auto-approved permission fires no resume
+	// hook, the agent resumes a long turn, but the pane never reads running (the
+	// activity line is pushed out of the detection window by queued messages / long
+	// output) AND the normalized content hash is stable (spinner stripped) — so neither
+	// the content-drift nor the pane-running flip fires and the session is pinned at
+	// waiting. The same ambiguous pane is used at both ticks (identical hash → no
+	// drift) and the cooldown has expired, so only the transcript tiebreaker can flip
+	// it. detectStatus returns "" for this content (no spinner/menu/❯).
+	ambiguous := "running the build...\ncompiling module foo\ncompiling module bar\n"
+	runScenario(t, Scenario{
+		Name: "stale waiting hook, ambiguous stable pane, transcript resumed → running",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", Pane: ambiguous},
+			// 20s later (past the 15s cooldown): same content, transcript now active.
+			{At: 20 * time.Second, Pane: ambiguous, ConvActive: new(true)},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},                 // trust the hook; pane gives no signal
+			{At: 20 * time.Second, Expected: StatusRunning},  // was stuck at waiting; transcript flips it
+		},
+	})
+}
+
 func TestScenarioNoHooksFallback(t *testing.T) {
 	runScenario(t, Scenario{
 		Name: "no hooks, pane-only detection",

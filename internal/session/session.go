@@ -636,8 +636,13 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 	convActive := false
 	switch hookStatus {
 	case "waiting":
-		// Stale waiting hook (granted permission fires no resume hook) + idle pane.
-		if paneStatus == StatusFinished {
+		// Stale waiting hook (a granted permission / answered question fires no resume
+		// hook) where the pane doesn't structurally confirm a prompt — either an idle ❯
+		// box (StatusFinished) or nothing matched ("") because the activity line was
+		// pushed out of the detection window. The transcript decides whether the turn
+		// resumed. Exclude paneStatus==waiting (a real prompt on screen) and ==running
+		// (the pane already flips it) so genuine prompts never read the transcript.
+		if paneStatus != StatusRunning && paneStatus != StatusWaiting {
 			convActive = s.conversationActivePastHook()
 		}
 	case "finished":
@@ -842,6 +847,21 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, convAc
 
 	s.Status = StatusWaiting
 	s.Acknowledged = false
+
+	// Out-of-pane resume signal. The pane shows no running spinner (the activity line
+	// was pushed out of the detection window by queued messages / long output) AND the
+	// normalized content hash is stable (the spinner is stripped), so neither flip
+	// below can fire — yet the transcript's LEAD turn has advanced past this waiting
+	// hook and is still fresh. The user approved/answered and the lead resumed (no
+	// resume hook fires on a permission grant). Flip to running. Unlike window_activity
+	// (deliberately unused here — a sub-agent keeps it fresh during a genuine prompt),
+	// the LEAD-only transcript stays static while the lead is truly blocked. Don't set
+	// hookOverriddenAt: re-evaluate each tick until a real hook lands or it goes stale.
+	if convActive {
+		s.Status = StatusRunning
+		log.Info("hook=waiting but transcript advanced past hook — assuming running")
+		return
+	}
 
 	if paneContent == "" {
 		return
