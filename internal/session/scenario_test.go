@@ -37,6 +37,7 @@ type ScenarioEvent struct {
 	Acknowledge bool          // simulate user acknowledging the session
 	ActivityAge time.Duration // simulate tmux window_activity this long ago (0 = no activity data)
 	HookAge     time.Duration // backdate the hook's UpdatedAt by this much (0 = now); simulates a stale hook
+	ConvActive  *bool         // inject conversationActivePastHook result; nil = leave unchanged
 }
 
 // ScenarioCheck asserts the session status at a point in time.
@@ -67,12 +68,16 @@ func runScenario(t *testing.T, sc Scenario) {
 	debuglog.Init()
 
 	mock := &mockPane{alive: true}
+	// Transcript tiebreaker stub: events flip this via ConvActive; the closure is
+	// read on the single test goroutine, so no synchronization is needed.
+	convActive := false
 	s := &Session{
 		ID:           "test-scenario",
 		Title:        sc.Name,
 		Status:       StatusStarting,
 		Agent:        sc.Agent,
 		paneCapturer: mock,
+		convActiveFn: func() bool { return convActive },
 	}
 
 	// Build sorted timeline.
@@ -130,6 +135,11 @@ func runScenario(t *testing.T, sc Scenario) {
 				s.mu.Lock()
 				s.Acknowledged = true
 				s.mu.Unlock()
+			}
+
+			// Inject the transcript tiebreaker result.
+			if e.ConvActive != nil {
+				convActive = *e.ConvActive
 			}
 
 			// Adjust content timing for stability checks.
@@ -479,6 +489,49 @@ func TestScenarioStaleOverriddenWaitingSettlesFinished(t *testing.T) {
 			{At: 0, Expected: StatusFinished},               // override to finished
 			{At: 2 * time.Second, Expected: StatusRunning},  // pane-driven resume
 			{At: 4 * time.Second, Expected: StatusFinished}, // must settle back — was stuck running
+		},
+	})
+}
+
+func TestScenarioStaleWaitingConversationActiveStaysRunning(t *testing.T) {
+	// The reported bug: a permission prompt was granted (no hook fires), the agent
+	// resumed, but the hook is still "waiting". Modern Claude keeps the ❯ box on
+	// screen while working, so a between-bursts frame (activity line momentarily gone)
+	// reads as a finished idle prompt and used to flip the session to finished. The
+	// transcript tiebreaker (ConvActive) proves the lead turn is still appending past
+	// the hook → stay running. HookAge backdates the hook so trustPane engages (the
+	// real bug had a >1m stale hook).
+	runScenario(t, Scenario{
+		Name: "stale waiting hook + active transcript: between-bursts idle frames stay running",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", HookAge: 90 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(true)},
+			// Another between-bursts idle frame — transcript still active.
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt"},
+			// Activity line back on screen; pane reads running.
+			{At: 4 * time.Second, Pane: "@fixture:pane_running_extended_thinking.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},               // override suppressed by tiebreaker
+			{At: 2 * time.Second, Expected: StatusRunning}, // stays running; hookOverriddenAt never set
+			{At: 4 * time.Second, Expected: StatusRunning}, // running frame still reports running
+		},
+	})
+}
+
+func TestScenarioStaleWaitingConversationIdleSettlesFinished(t *testing.T) {
+	// Guard for the fix above: when the transcript is NOT active past the hook (the
+	// turn genuinely ended, e.g. a dropped Stop hook), the idle-prompt pane must still
+	// override the stale waiting hook to finished — no regression to
+	// TestScenarioStaleOverriddenWaitingSettlesFinished.
+	runScenario(t, Scenario{
+		Name: "stale waiting hook + idle transcript: still settles to finished",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", SessionID: "owner-aaa", Pane: "@fixture:pane_finished_idle_prompt.txt", ConvActive: new(false)},
+			{At: 2 * time.Second, Pane: "@fixture:pane_finished_idle_prompt.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},
+			{At: 2 * time.Second, Expected: StatusFinished},
 		},
 	})
 }

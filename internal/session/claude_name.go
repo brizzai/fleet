@@ -376,3 +376,47 @@ func scanTranscriptTimestamp(path string, last bool) time.Time {
 	}
 	return result
 }
+
+// lastLeadTranscriptTimestamp returns the timestamp of the last lead-conversation
+// (non-sidechain) entry in the transcript at path, or the zero time if it's
+// missing/unreadable or has no such entries. Sub-agent (sidechain) entries are
+// skipped so a still-running sub-agent can't mask a finished lead turn. Used as the
+// out-of-pane tiebreaker for the between-bursts frame where the pane is
+// indistinguishable from finished (see conversationActivePastHook).
+func lastLeadTranscriptTimestamp(path string) time.Time {
+	if path == "" {
+		return time.Time{}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+
+	var result time.Time
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, `"timestamp"`) {
+			continue
+		}
+		var entry struct {
+			Timestamp   string `json:"timestamp"`
+			IsSidechain bool   `json:"isSidechain"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
+			continue
+		}
+		if entry.IsSidechain {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
+		if err != nil {
+			continue
+		}
+		result = ts
+	}
+	return result
+}

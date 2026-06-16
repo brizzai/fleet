@@ -85,6 +85,7 @@ type Session struct {
 
 	tmuxSession  *tmux.Session
 	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
+	convActiveFn func() bool  // optional override for testing; if nil, reads the real transcript
 	mu           sync.RWMutex
 }
 
@@ -196,6 +197,35 @@ func (s *Session) getCapturer() PaneCapturer {
 		return s.paneCapturer
 	}
 	return s.tmuxSession
+}
+
+// conversationActivePastHook reports whether the Claude conversation transcript
+// shows lead-turn activity that resumed after the current waiting hook — the
+// out-of-pane tiebreaker for the between-bursts frame where the pane is
+// indistinguishable from a finished idle prompt. Claude only; Codex has no Claude
+// transcript. MUST NOT be called while holding s.mu — it does disk I/O.
+func (s *Session) conversationActivePastHook() bool {
+	if s.convActiveFn != nil {
+		return s.convActiveFn()
+	}
+	s.mu.RLock()
+	agentType := s.Agent
+	claudeID := s.ClaudeSessionID
+	projectPath := s.ProjectPath
+	hookUpdatedAt := s.hookUpdatedAt
+	s.mu.RUnlock()
+
+	if agentType == agent.Codex || claudeID == "" {
+		return false
+	}
+	last := lastLeadTranscriptTimestamp(ClaudeTranscriptPath(claudeID, projectPath))
+	if last.IsZero() {
+		return false
+	}
+	// Advanced past the hook (the agent did something after the prompt fired) AND
+	// still fresh (recently appending → mid-turn, not a finished-with-dropped-Stop).
+	return last.After(hookUpdatedAt.Add(conversationActiveSkew)) &&
+		time.Since(last) < conversationActiveWindow
 }
 
 // IsAlive checks if the tmux session exists.
@@ -571,6 +601,16 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		paneStatus = detectStatus(paneContent, log)
 	}
 
+	// Out-of-pane tiebreaker for the waiting path: a between-bursts frame (the agent
+	// resumed after a granted permission prompt, but the activity line is momentarily
+	// gone) is indistinguishable from a finished idle prompt, so consult the
+	// transcript. Read here, before the lock — conversationActivePastHook does disk
+	// I/O and must not run under s.mu. Gated to the only frame it matters on.
+	convActive := false
+	if hookStatus == "waiting" && paneStatus == StatusFinished {
+		convActive = s.conversationActivePastHook()
+	}
+
 	hookSaysDead := false
 	func() {
 		s.mu.Lock()
@@ -580,7 +620,7 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 		case "running":
 			s.applyHookRunning(oldStatus, paneContent, paneStatus, log)
 		case "waiting":
-			s.applyHookWaiting(paneContent, paneStatus, log)
+			s.applyHookWaiting(paneContent, paneStatus, convActive, log)
 		case "finished":
 			s.applyHookFinished(paneStatus, log)
 		case "dead":
@@ -644,6 +684,10 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 	}
 
 	// Content change detection: if content is stable >10s, Claude likely stopped.
+	// Unlike the waiting path, this override is NOT given the transcript tiebreaker
+	// (conversationActivePastHook): it already requires 10s of hash-stable content
+	// AND defers to a fresh tmux window_activity below, so a single between-bursts
+	// frame with the activity line missing can't trip a false finished here.
 	hash := hashContent(normalizeForHash(paneContent))
 	if hash != s.lastContentHash {
 		s.lastContentHash = hash
@@ -682,8 +726,10 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 }
 
 // applyHookWaiting handles hook status "waiting" with content change detection.
+// convActive is the pre-computed transcript tiebreaker (see conversationActivePastHook);
+// it is only meaningful when paneStatus == StatusFinished.
 // Must be called with s.mu held.
-func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *slog.Logger) {
+func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, convActive bool, log *slog.Logger) {
 	// If this hook was already overridden by pane detection (stale hook),
 	// skip re-evaluation. A new hook (different timestamp) resets the flag.
 	// The pane stays authoritative for this stale hook: a running spinner means
@@ -723,6 +769,17 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, log *s
 	// - If user interrupts/escapes, no hook fires — pane override catches this
 	// - Content change detection below handles the gap if hooks are delayed
 	if paneStatus == StatusFinished {
+		if convActive {
+			// Pane reads as a finished idle prompt, but the transcript shows the lead
+			// turn still appending past this waiting hook — modern Claude keeps the ❯
+			// input box on screen while working, and this is a between-bursts frame
+			// where the activity line is momentarily gone. Stay running; do NOT set
+			// hookOverriddenAt so each tick re-evaluates until the turn truly ends.
+			s.Status = StatusRunning
+			s.Acknowledged = false
+			log.Info("hook=waiting, pane idle, but transcript active past hook — staying running")
+			return
+		}
 		// Pane shows idle prompt — user is no longer being prompted.
 		// Preserve idle if already acknowledged to prevent finished↔idle oscillation.
 		if s.Acknowledged {
@@ -834,6 +891,18 @@ const finishedHoldMaxAge = 5 * time.Second
 // leaving render speed and the hook ts's whole-second granularity unable to flip the
 // status prematurely.
 const waitingHookRenderBackstop = 5 * time.Second
+
+// conversationActiveWindow bounds how recent the last lead-conversation transcript
+// entry must be for conversationActivePastHook to count the agent as actively
+// working. Sized above the longest observed gap between lead entries during silent
+// thinking/tool stretches (~80s) so a live agent is never read as finished, while a
+// genuinely dropped Stop hook settles to finished once the transcript ages past it.
+const conversationActiveWindow = 120 * time.Second
+
+// conversationActiveSkew is how far past the waiting hook's timestamp the last lead
+// entry must advance to prove the agent resumed after the hook (not the entry that
+// triggered the hook itself). Matches the snapshot's advanced_past_hook >2s rule.
+const conversationActiveSkew = 2 * time.Second
 
 // applyHookFinished handles hook status "finished" with pane override for active spinners.
 // Must be called with s.mu held.
