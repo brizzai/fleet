@@ -27,7 +27,8 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 	content := string(data)
 
 	// The plugin must export a hook, forward via the (synchronous) hook-handler,
-	// map the OpenCode-native events fleet understands, and filter sub-agents.
+	// map the OpenCode-native events fleet understands, skip non-fleet sessions,
+	// and latch the root session so sub-agents don't drive status.
 	for _, want := range []string{
 		"export const FleetStatus",
 		"spawnSync",
@@ -35,8 +36,11 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 		"--fleet-hook",
 		"session.busy",
 		"session.idle",
+		"session.error",
 		"permission.asked",
-		"parentID", // sub-agent filtering
+		"permission.replied",
+		"FLEET_INSTANCE_ID", // non-fleet sessions skip the spawn
+		"rootId",            // root-session latch (sub-agents filtered out)
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("plugin missing %q:\n%s", want, content)

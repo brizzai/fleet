@@ -46,8 +46,15 @@ func mapEventToStatus(event string) string {
 		return "running"
 	case "session.idle":
 		return "finished"
+	case "session.error":
+		return "error"
 	case "permission.asked":
 		return "waiting"
+	case "permission.replied":
+		// A reply (approve/reject) resumes the turn; settle to finished/idle on
+		// the next session.idle. Without this, waiting can stick if OpenCode
+		// doesn't re-emit session.status{busy} after an in-flight approval.
+		return "running"
 	default:
 		return ""
 	}

@@ -665,6 +665,11 @@ func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog
 			} else {
 				s.Status = StatusFinished
 			}
+		case "error":
+			// A recoverable in-session error (OpenCode session.error) that didn't
+			// kill the pane. Self-corrects on the next running/finished hook.
+			s.Status = StatusError
+			s.Acknowledged = false
 		case "dead":
 			s.Status = StatusError
 			hookSaysDead = true

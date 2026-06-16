@@ -2478,10 +2478,11 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	}
 	// Fork-to-worktree stages the parent's Claude transcript into the new cwd so
 	// `claude --resume --fork-session` finds it — a Claude-only mechanism. Codex
-	// resumes from its own store and has no such staging, so reject it here
-	// rather than dropping the agent and launching a broken Claude fork.
-	if s.Agent == agent.Codex {
-		h.setError(fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this Codex session in place"))
+	// and OpenCode resume from their own stores and have no such staging, so
+	// reject any non-Claude agent here rather than dropping the agent and
+	// launching a broken Claude fork. Plain 'f' (in-place fork) handles them.
+	if s.Agent != agent.Claude {
+		h.setError(fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this session in place"))
 		return nil
 	}
 	if s.ClaudeSessionID == "" {
