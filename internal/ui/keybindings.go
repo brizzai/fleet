@@ -52,7 +52,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "X", Desc: "Dismiss on-screen tip", Section: "global"},
 	{Key: "!", BarKey: "!", BarDesc: "Bug", Desc: "Bug report / diagnostics", Section: "global"},
 	{Key: "?", BarKey: "?", BarDesc: "Help", Desc: "Toggle help", Section: "global"},
-	{Key: "q", BarKey: "q", BarDesc: "Quit", Desc: "Quit", Section: "global"},
+	{Key: "Ctrl+C", BarKey: "⌃C", BarDesc: "Quit", Desc: "Quit", Section: "global"},
 
 	// Focus mode (shown in overlay only, separated by blank line).
 	{Key: "Esc", Desc: "Unfocus preview", Section: "focus"},
@@ -126,7 +126,7 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 		}
 	}
 	global = []struct{ Key, Desc string }{
-		{"⌃K", "Cmd"}, {"/", "Filter"}, {"?", "Help"}, {"q", "Quit"},
+		{"⌃K", "Cmd"}, {"/", "Filter"}, {"?", "Help"}, {"⌃C", "Quit"},
 	}
 	return
 }
