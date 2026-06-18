@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-06-18
+
+### Changed
+
+- Quit is now Ctrl+C instead of q.
+
+### Fixed
+
+- Plan-approval prompts ("Claude has written up a plan… proceed?") now show **waiting** immediately instead of briefly flashing as running for ~15s.
+
 ## [2.10.0] - 2026-06-16
 
 ### Added
@@ -265,7 +275,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.10.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.11.0...HEAD
+[2.11.0]: https://github.com/brizzai/fleet/releases/tag/v2.11.0
 [2.10.0]: https://github.com/brizzai/fleet/releases/tag/v2.10.0
 [2.9.0]: https://github.com/brizzai/fleet/releases/tag/v2.9.0
 [2.8.2]: https://github.com/brizzai/fleet/releases/tag/v2.8.2
