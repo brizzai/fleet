@@ -1486,13 +1486,15 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 
 	// Structural check: numbered permission menu.
 	// Requires three cues: a cursor-on-numbered-option line ("❯ N."), at least
-	// one other numbered option line, AND "Esc to cancel" nearby. The cursor
+	// one other numbered option line, AND a menu footer nearby. The cursor
 	// may sit on any option (1, 2, 3…) depending on what the user has highlighted.
-	// Esc to cancel only appears in Claude's interactive prompts, preventing
-	// false-positives from user input numbered lists.
+	// The footer ("Esc to cancel" for a standard permission menu, or "approve
+	// with this feedback" for the ExitPlanMode plan-approval menu — which has no
+	// "Esc to cancel") only appears in Claude's interactive prompts, preventing
+	// false-positives from user-typed numbered lists.
 	hasCursorOnOption := false
 	hasOtherOption := false
-	hasEscCancel := false
+	hasMenuFooter := false
 	for i := 0; i < bottomN; i++ {
 		trimmed := strings.TrimSpace(recentLines[i])
 		if strings.HasPrefix(trimmed, "❯ ") && isNumberedMenuOption(strings.TrimPrefix(trimmed, "❯ ")) {
@@ -1500,11 +1502,12 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 		} else if isNumberedMenuOption(trimmed) {
 			hasOtherOption = true
 		}
-		if strings.Contains(strings.ToLower(trimmed), "esc to cancel") {
-			hasEscCancel = true
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "esc to cancel") || strings.Contains(lower, "approve with this feedback") {
+			hasMenuFooter = true
 		}
 	}
-	if hasCursorOnOption && hasOtherOption && hasEscCancel {
+	if hasCursorOnOption && hasOtherOption && hasMenuFooter {
 		log.Debug("detectStatus: matched permission menu structure")
 		return StatusWaiting
 	}
