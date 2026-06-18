@@ -1866,7 +1866,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		h.helpOverlay.Show()
 		return h, nil
-	case "q", "ctrl+c":
+	case "ctrl+c":
 		debuglog.Logger.Info("quit requested", "key", msg.String())
 		h.cancel() // stops background worker
 		if h.hookWatcher != nil {
@@ -4872,7 +4872,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
 		{Kind: PaletteKindCommand, ID: "expand_all", Name: "Expand All Repos"},
 		{Kind: PaletteKindCommand, ID: "collapse_all", Name: "Collapse All Repos"},
-		{Kind: PaletteKindCommand, ID: "quit", Name: "Quit", Shortcut: "q"},
+		{Kind: PaletteKindCommand, ID: "quit", Name: "Quit", Shortcut: "⌃C"},
 	}
 	for i := range commands {
 		commands[i].Haystack = commands[i].Name
