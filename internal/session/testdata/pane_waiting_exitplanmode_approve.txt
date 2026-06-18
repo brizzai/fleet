@@ -1,0 +1,37 @@
+ ---
+ type: changed
+ ---
+ Quit is now Ctrl+C instead of q.
+
+ [1mOut[0m [1mof[0m [1mscope[0m [1m(left[0m [1munchanged)[0m
+
+ - The settings dialog ([38;5;153minternal/ui/settings.go:132[39m) and new-session dialog
+ ([38;5;153minternal/ui/session_create.go:50[39m) close on [38;5;153mcase[39m [38;5;153m"esc",[39m [38;5;153m"q":[39m. These are dialog-local
+ "close this dialog" handlers, not the global quit — unrelated to this change, so left as-is.
+ (Result: [38;5;153mq[39m no longer quits the app but still closes those two dialogs, same as [38;5;153mesc[39m.)
+
+ [1mVerification[0m
+
+ - [38;5;153mmake[39m [38;5;153mbuild[39m — confirms it compiles.
+ - [38;5;153mmake[39m [38;5;153mtest[39m — keybinding/help rendering tests, if any, still pass.
+ - Manual ([38;5;153mmake[39m [38;5;153mrun[39m):
+   - In the sidebar, press [38;5;153mq[39m → app stays open (no longer quits).
+   - Press [38;5;153mCtrl+C[39m → app quits cleanly.
+   - Press [38;5;153m?[39m → help overlay shows [38;5;153mCtrl+C[39m  [38;5;153mQuit[39m in the Global section.
+   - Footer bottom-right shows [38;5;153m⌃C[39m [38;5;153mQuit[39m.
+   - [38;5;153mCtrl+K[39m command palette → "Quit" entry shows the [38;5;153m⌃C[39m shortcut and quits when chosen.
+   - Attach to a session, press [38;5;153mCtrl+C[39m → interrupts the agent (does not quit fleet);
+ [38;5;153mCtrl+Q[39m detaches.
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+[38;5;73m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [38;5;246mClaude[39m [38;5;246mhas[39m [38;5;246mwritten[39m [38;5;246mup[39m [38;5;246ma[39m [38;5;246mplan[39m [38;5;246mand[39m [38;5;246mis[39m [38;5;246mready[39m [38;5;246mto[39m [38;5;246mexecute.[39m [38;5;246mWould[39m [38;5;246myou[39m [38;5;246mlike[39m [38;5;246mto[39m [38;5;246mproceed?[39m
+
+ [38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mYes,[39m [38;5;153mand[39m [38;5;153muse[39m [38;5;153mauto[39m [38;5;153mmode[39m
+   [38;5;246m2.[39m Yes, manually approve edits
+   [38;5;246m3.[39m No, refine with Ultraplan on Claude Code on the web
+   [38;5;246m4.[39m [38;5;246mTell[39m [38;5;246mClaude[39m [38;5;246mwhat[39m [38;5;246mto[39m [38;5;246mchange[39m
+      [38;5;246mshift+tab[39m [38;5;246mto[39m [38;5;246mapprove[39m [38;5;246mwith[39m [38;5;246mthis[39m [38;5;246mfeedback[39m
+
+ [38;5;246mctrl+g[39m [38;5;246mto[39m [38;5;246medit[39m [38;5;246min[39m  [1m[38;5;246mVS[0m [1m[38;5;246mCode[0m [38;5;246m ·[39m [38;5;246m~/.claude/plans/change-the-quit-from-reactive-hamster.md[39m
+
