@@ -15,6 +15,7 @@ import (
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/termkeys"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/ui"
 	"github.com/brizzai/fleet/internal/update"
@@ -150,6 +151,15 @@ func runTUI() {
 	// Wire the program back into the model so worker goroutines can push
 	// state updates to the Update loop via h.send. Must happen before Run.
 	model.SetProgram(p)
+
+	// Force legacy key encoding so Ctrl+K (and other modified combos) reach the
+	// TUI as control bytes rather than CSI-u sequences Bubble Tea v1 can't parse.
+	// Terminals/tmux configs (e.g. gpakosz/.tmux) that enable modifyOtherKeys
+	// otherwise break the Ctrl+K command palette. Restore on exit.
+	if err := termkeys.Disable(os.Stdout); err != nil {
+		debuglog.Logger.Warn("failed to disable modifyOtherKeys", "err", err)
+	}
+	defer func() { _ = termkeys.Restore(os.Stdout) }()
 
 	if _, err := p.Run(); err != nil {
 		// A Bubble Tea loop/cmd panic surfaces here as ErrProgramKilled rather
