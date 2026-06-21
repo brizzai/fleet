@@ -231,6 +231,43 @@ func TestUpdateHookStatusDefersUndecidedRotation(t *testing.T) {
 	}
 }
 
+// TestUpdateHookStatusCapsUndecidedRotation guards the retry cap on rotationUnknown: a
+// pair that can never decide (here a permanently missing owner transcript, so
+// sessionRotationVerdict's ownerLast is always zero) must not defer forever and rescan
+// transcripts on every worker pass. After rotationUndecidedRetryCap consecutive
+// undecided cycles it falls back to the neg-cache.
+func TestUpdateHookStatusCapsUndecidedRotation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	// Owner claims ownership, but its transcript is never written — so the proximity
+	// check can't read ownerLast and the (owner, foreign) pair stays undecidable.
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
+	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "owner-aaa", UpdatedAt: time.Now()}, true)
+
+	// Foreign session has a real transcript, but with no readable owner transcript the
+	// verdict is rotationUnknown every cycle.
+	base := time.Now().Add(-time.Hour).UTC()
+	writeTranscript(t, proj, "foreign-bbb", base, base.Add(time.Minute))
+
+	// The first rotationUndecidedRetryCap cycles defer without neg-caching.
+	for i := 0; i < rotationUndecidedRetryCap; i++ {
+		s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "foreign-bbb", UpdatedAt: time.Now()}, true)
+		if s.rotRejectForeign == "foreign-bbb" {
+			t.Fatalf("neg-cached too early at cycle %d (cap=%d)", i+1, rotationUndecidedRetryCap)
+		}
+	}
+	// One more undecided cycle exceeds the cap → neg-cache.
+	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "foreign-bbb", UpdatedAt: time.Now()}, true)
+	if s.rotRejectForeign != "foreign-bbb" {
+		t.Errorf("undecided pair past the retry cap should be neg-cached, got rotRejectForeign=%q", s.rotRejectForeign)
+	}
+	// The owner id is never clobbered by the undecidable foreign session.
+	if s.ClaudeSessionID != "owner-aaa" {
+		t.Errorf("owner clobbered by undecided foreign: %q, want owner-aaa", s.ClaudeSessionID)
+	}
+}
+
 // writeTranscriptRaw writes arbitrary JSONL lines for a session under the
 // HOME-rooted projects dir, for tests that need uuid / compact_boundary entries.
 func writeTranscriptRaw(t *testing.T, projectPath, sessionID string, lines ...string) {

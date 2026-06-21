@@ -72,6 +72,16 @@ type Session struct {
 	rotRejectOwner   string
 	rotRejectForeign string
 
+	// Bounded retry tracking for an undecidable (owner, foreign) pair — one
+	// sessionRotationVerdict can't yet classify because a transcript hasn't flushed a
+	// timestamp. The transient /clear-flush race clears in a cycle or two, but a
+	// permanently unreadable/missing owner transcript would stay undecidable forever
+	// and rescan transcripts every worker pass. After rotationUndecidedRetryCap
+	// consecutive undecided cycles we fall back to the neg-cache.
+	rotUndecidedOwner   string
+	rotUndecidedForeign string
+	rotUndecidedCount   int
+
 	lastContentHash     string
 	lastContentChangeAt time.Time
 
@@ -371,29 +381,33 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				// re-evaluates with resolveRotation=true.
 				return false
 			default:
-				switch sessionRotationVerdict(projectPath, owner, hs.SessionID) {
-				case rotationYes:
-					debuglog.Logger.Info("adopting rotated claude session",
-						"id", s.ID, "old", owner, "new", hs.SessionID)
-					// fall through to the adoption block below
-				case rotationUnknown:
-					// The rotated transcript hasn't flushed a timestamped entry yet (its
-					// SessionStart hook beat the first user turn to disk). Reject WITHOUT
-					// neg-caching so the next cycle re-evaluates once it flushes — neg-caching
-					// here would freeze the hook on the dead owner session forever (issue #23).
-					debuglog.Logger.Debug("deferring undecided claude session",
-						"id", s.ID, "owner", owner, "foreign", hs.SessionID)
-					return false
-				default: // rotationNo — a genuine nested child (eval harness). Neg-cache so a
-					// persistent foreign id doesn't rescan transcripts every cycle.
-					s.mu.Lock()
-					s.rotRejectOwner = owner
-					s.rotRejectForeign = hs.SessionID
-					s.mu.Unlock()
+				// Only a confirmed rotation (rotationYes) may proceed to the adoption
+				// block below — every other verdict returns here. Keep this an explicit
+				// guard, not a fall-through-by-not-returning: a stray statement after this
+				// block or a reordered case must not be able to silently route an adopted
+				// rotation to a no-op (the hook would stay frozen on the dead owner id).
+				if v := sessionRotationVerdict(projectPath, owner, hs.SessionID); v != rotationYes {
+					if v == rotationUnknown && s.bumpUndecidedRotation(owner, hs.SessionID) {
+						// The rotated transcript hasn't flushed a timestamped entry yet (its
+						// SessionStart hook beat the first user turn to disk). Reject WITHOUT
+						// neg-caching so the next cycle re-evaluates once it flushes — neg-caching
+						// here would freeze the hook on the dead owner session forever (issue #23).
+						debuglog.Logger.Debug("deferring undecided claude session",
+							"id", s.ID, "owner", owner, "foreign", hs.SessionID)
+						return false
+					}
+					// rotationNo (a genuine nested-child eval harness), or a pair that has
+					// stayed undecidable past the retry cap (e.g. a permanently unreadable
+					// owner transcript). Neg-cache so a persistent foreign id doesn't rescan
+					// transcripts every cycle.
+					s.negCacheRotation(owner, hs.SessionID)
 					debuglog.Logger.Debug("ignoring foreign claude session",
 						"id", s.ID, "owner", owner, "foreign", hs.SessionID)
 					return false
 				}
+				debuglog.Logger.Info("adopting rotated claude session",
+					"id", s.ID, "old", owner, "new", hs.SessionID)
+				// proceed to the adoption block below
 			}
 		}
 	}
@@ -456,6 +470,43 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		s.FirstPrompt = hs.UserPrompt
 	}
 	return changed
+}
+
+// rotationUndecidedRetryCap bounds how many consecutive worker cycles a single
+// (owner, foreign) pair may stay undecidable in sessionRotationVerdict before we give
+// up and neg-cache it. The transient /clear-flush race clears in a cycle or two, so the
+// happy path never approaches the cap; it only catches a pair that can never decide
+// (e.g. a permanently unreadable owner transcript) and would otherwise rescan
+// transcripts on every pass forever.
+const rotationUndecidedRetryCap = 10
+
+// bumpUndecidedRotation records that the (owner, foreign) pair was undecidable this
+// cycle and reports whether to keep deferring. It returns false once the pair has been
+// undecidable for rotationUndecidedRetryCap consecutive cycles, signalling the caller to
+// neg-cache instead. A change of pair resets the counter.
+func (s *Session) bumpUndecidedRotation(owner, foreign string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rotUndecidedOwner != owner || s.rotUndecidedForeign != foreign {
+		s.rotUndecidedOwner = owner
+		s.rotUndecidedForeign = foreign
+		s.rotUndecidedCount = 0
+	}
+	s.rotUndecidedCount++
+	return s.rotUndecidedCount <= rotationUndecidedRetryCap
+}
+
+// negCacheRotation records the (owner, foreign) pair as a confirmed non-rotation so
+// future hooks for it short-circuit without rescanning transcripts, and clears any
+// undecided-retry tracking for it.
+func (s *Session) negCacheRotation(owner, foreign string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rotRejectOwner = owner
+	s.rotRejectForeign = foreign
+	s.rotUndecidedOwner = ""
+	s.rotUndecidedForeign = ""
+	s.rotUndecidedCount = 0
 }
 
 // Restart kills and recreates the tmux session with the same config.
