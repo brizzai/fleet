@@ -23,16 +23,22 @@ const (
 	disableModifyOtherKeys = "\x1b[>4;0m"
 	// resetModifyOtherKeys (Pm omitted) restores the terminal's initial value.
 	resetModifyOtherKeys = "\x1b[>4m"
-	// disableKittyKeyboard pops one entry off the Kitty keyboard protocol stack,
-	// disabling the progressive enhancements (CSI-u reporting) that tmux's
-	// extended-keys and iTerm's "Report modifiers using CSI u" push. Terminals
-	// without the stack treated this as a no-op.
-	disableKittyKeyboard = "\x1b[<u"
+	// pushKittyLegacy pushes flags=0 (no progressive enhancements) onto the Kitty
+	// keyboard protocol stack, forcing legacy CSI-u-free key reporting while
+	// preserving whatever state the shell/tmux had. popKittyKeyboard removes that
+	// entry on exit, restoring the prior state symmetrically. Terminals without
+	// the protocol ignore both sequences.
+	pushKittyLegacy  = "\x1b[>0u"
+	popKittyKeyboard = "\x1b[<u"
 )
 
 // disablePreamble forces legacy key reporting across the two enhancement
 // mechanisms a Ctrl+K could be intercepted by.
-const disablePreamble = disableModifyOtherKeys + disableKittyKeyboard
+const disablePreamble = disableModifyOtherKeys + pushKittyLegacy
+
+// restorePreamble undoes disablePreamble in reverse: pop our Kitty entry, then
+// reset modifyOtherKeys to the terminal's initial value.
+const restorePreamble = popKittyKeyboard + resetModifyOtherKeys
 
 // Disable asks the terminal for legacy key reporting so modified keys (Ctrl+K
 // in particular) arrive in their legacy encoding instead of as CSI-u sequences
@@ -43,9 +49,10 @@ func Disable(w io.Writer) error {
 	return err
 }
 
-// Restore returns modifyOtherKeys reporting to the terminal's initial value.
-// Call on exit to leave the terminal as we found it.
+// Restore undoes Disable: it pops the Kitty keyboard entry we pushed and resets
+// modifyOtherKeys to the terminal's initial value. Call on exit to leave the
+// terminal's key-reporting state as we found it.
 func Restore(w io.Writer) error {
-	_, err := io.WriteString(w, resetModifyOtherKeys)
+	_, err := io.WriteString(w, restorePreamble)
 	return err
 }

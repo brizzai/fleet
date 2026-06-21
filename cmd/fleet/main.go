@@ -157,9 +157,13 @@ func runTUI() {
 	// Terminals/tmux configs (e.g. gpakosz/.tmux) that enable modifyOtherKeys
 	// otherwise break the Ctrl+K command palette. Restore on exit.
 	if err := termkeys.Disable(os.Stdout); err != nil {
-		debuglog.Logger.Warn("failed to disable modifyOtherKeys", "err", err)
+		debuglog.Logger.Warn("failed to set legacy key reporting", "err", err)
 	}
-	defer func() { _ = termkeys.Restore(os.Stdout) }()
+	defer func() {
+		if err := termkeys.Restore(os.Stdout); err != nil {
+			debuglog.Logger.Warn("failed to restore key reporting", "err", err)
+		}
+	}()
 
 	if _, err := p.Run(); err != nil {
 		// A Bubble Tea loop/cmd panic surfaces here as ErrProgramKilled rather
