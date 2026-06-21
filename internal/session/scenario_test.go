@@ -1050,3 +1050,31 @@ func TestScenarioFreshWaitingHookRenderSpinnerStaysWaiting(t *testing.T) {
 		},
 	})
 }
+
+// TestScenarioStaleWaitingLatchRecoversToWaiting reproduces issue #23's stuck-running
+// symptom in isolation. A stale waiting hook gets latched (overridden to finished on an
+// idle frame, then to running on a working frame, all without a new hook timestamp), and
+// then a REAL permission prompt appears on the pane. Before the fix, the latched-override
+// switch in applyHookWaiting had no StatusWaiting case, so the genuine prompt was ignored
+// and the session stayed pinned to running. In the field this latch never resets because
+// a missed session-id rotation froze the hook (no fresh hook ever lands), so recovery has
+// to come from the pane.
+func TestScenarioStaleWaitingLatchRecoversToWaiting(t *testing.T) {
+	const waitingPrompt = "Would you like to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n"
+	runScenario(t, Scenario{
+		Name: "stale waiting latch recovers to waiting on real prompt",
+		Events: []ScenarioEvent{
+			// Stale waiting hook + idle prompt → override to finished and latch.
+			{At: 0, Hook: "waiting", HookAge: 11 * time.Minute, Pane: "@fixture:pane_finished_idle_prompt.txt"},
+			// Same (stale) hook, pane now shows work → latched branch flips to running.
+			{At: 2 * time.Second, Pane: "@fixture:pane_running_extended_thinking.txt"},
+			// Same hook, a genuine permission prompt is now structurally on screen.
+			{At: 4 * time.Second, Pane: waitingPrompt},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},
+			{At: 2 * time.Second, Expected: StatusRunning},
+			{At: 4 * time.Second, Expected: StatusWaiting}, // was stuck at StatusRunning before the fix
+		},
+	})
+}

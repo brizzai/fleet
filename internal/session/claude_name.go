@@ -214,7 +214,18 @@ func CopyClaudeForkTranscript(parentSessionID, parentProjectPath, destProjectPat
 // deterministic uuid signal below instead, which has no time dependence.)
 const rotationHandoffWindow = 10 * time.Second
 
-// isSessionRotation reports whether newSessionID is ownerSessionID's conversation
+// rotationVerdict is the result of sessionRotationVerdict: whether a foreign Claude
+// session_id continues the owner session (adopt), is a separate nested child (reject
+// and neg-cache), or can't be decided yet because the transcript hasn't flushed (retry).
+type rotationVerdict int
+
+const (
+	rotationNo      rotationVerdict = iota // a separate nested child — reject and neg-cache
+	rotationYes                            // a confirmed rotation — adopt the new id
+	rotationUnknown                        // undecidable this cycle (transcript not flushed) — retry
+)
+
+// sessionRotationVerdict reports whether newSessionID is ownerSessionID's conversation
 // continued under a fresh id (a Claude session-id rotation) rather than a separate
 // nested child claude that merely inherited the same FLEET_INSTANCE_ID.
 //
@@ -230,32 +241,39 @@ const rotationHandoffWindow = 10 * time.Second
 //     rotationHandoffWindow of the owner's last entry.
 //   - in-place compaction keeps the same session id, so it never reaches here.
 //
-// When transcripts can't be read we return false — the safe default, since
-// wrongly adopting a real nested child would clobber the owner's status and
-// resume id.
-func isSessionRotation(projectPath, ownerSessionID, newSessionID string) bool {
+// When the proximity fallback can't read a timestamp from either transcript it returns
+// rotationUnknown rather than rotationNo: a /clear rotation fires its SessionStart hook
+// before the new transcript flushes its first timestamped entry (the file opens with
+// timestamp-less mode/permission-mode/file-history-snapshot header entries), so a
+// premature rotationNo would get neg-cached and freeze the in-memory hook on the dead
+// owner session forever (issue #23). Unknown makes the caller retry next cycle.
+func sessionRotationVerdict(projectPath, ownerSessionID, newSessionID string) rotationVerdict {
 	if projectPath == "" || ownerSessionID == "" || newSessionID == "" {
-		return false
+		return rotationNo
 	}
 	newPath := ClaudeTranscriptPath(newSessionID, projectPath)
 	ownerPath := ClaudeTranscriptPath(ownerSessionID, projectPath)
 
 	// Primary: deterministic parent link (continue/resume/fork).
 	if link := transcriptParentLink(newPath); link != "" && transcriptContainsUUID(ownerPath, link) {
-		return true
+		return rotationYes
 	}
 
-	// Fallback: instant timestamp handoff (/clear).
+	// Fallback: instant timestamp handoff (/clear). Undecidable until both transcripts
+	// have a readable timestamp — see the note above on the SessionStart-vs-flush race.
 	newFirst := firstTranscriptTimestamp(newPath)
 	ownerLast := lastTranscriptTimestamp(ownerPath)
 	if newFirst.IsZero() || ownerLast.IsZero() {
-		return false
+		return rotationUnknown
 	}
 	delta := newFirst.Sub(ownerLast)
 	if delta < 0 {
 		delta = -delta
 	}
-	return delta <= rotationHandoffWindow
+	if delta <= rotationHandoffWindow {
+		return rotationYes
+	}
+	return rotationNo
 }
 
 // transcriptParentLink returns the logicalParentUuid of the first

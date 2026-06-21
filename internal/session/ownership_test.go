@@ -100,7 +100,7 @@ func TestUpdateHookStatusIgnoresNestedChild(t *testing.T) {
 // `claude --resume <parent> --fork-session` reports the PARENT's id at SessionStart
 // and only switches to its own id on the first prompt. The fork transcript copies
 // the parent's history verbatim (same OLD first timestamp) and carries no
-// logicalParentUuid, so BOTH isSessionRotation signals miss — leaving the fork
+// logicalParentUuid, so BOTH sessionRotationVerdict signals miss — leaving the fork
 // pinned to the parent id, so forking it re-forks the parent. With forkParentID
 // known, the fork's own id must be adopted deterministically.
 func TestUpdateHookStatusAdoptsForkDivergence(t *testing.T) {
@@ -182,6 +182,52 @@ func TestClearHookStateClearsForkParent(t *testing.T) {
 	}
 	if s.ClaudeSessionID != "parent-aaa" {
 		t.Errorf("nested child clobbered id after restart: %q, want parent-aaa", s.ClaudeSessionID)
+	}
+}
+
+// TestUpdateHookStatusDefersUndecidedRotation reproduces issue #23: a /clear-style
+// rotation fires its SessionStart hook before the new transcript flushes a timestamped
+// entry — the file opens with timestamp-less mode/permission-mode/file-history-snapshot
+// header entries — so the proximity check is undecidable on that first hook. It must be
+// DEFERRED (rejected without neg-caching), so once the transcript flushes its first real
+// entry a later hook still adopts it. Before the fix the first attempt neg-cached the
+// pair permanently, freezing the in-memory hook on the dead owner session.
+func TestUpdateHookStatusDefersUndecidedRotation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	base := time.Now().Add(-time.Hour).UTC()
+	ownerEnd := base.Add(30 * time.Minute)
+	writeTranscript(t, proj, "owner-aaa", base, ownerEnd)
+	// Rotated transcript exists but is header-only — no timestamped entry yet.
+	writeTranscriptRaw(t, proj, "rot-bbb",
+		`{"type":"mode"}`,
+		`{"type":"permission-mode"}`,
+		`{"type":"file-history-snapshot"}`,
+	)
+
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
+	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "owner-aaa", UpdatedAt: time.Now()}, true)
+
+	// First rotated hook lands before the transcript flushes a timestamp → undecided.
+	// Must be deferred: not adopted, and crucially not neg-cached.
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "rot-bbb", UpdatedAt: time.Now()}, true); changed {
+		t.Errorf("undecided rotation should be deferred, not adopted yet")
+	}
+	if s.ClaudeSessionID != "owner-aaa" {
+		t.Errorf("undecided rotation prematurely adopted: %q, want owner-aaa", s.ClaudeSessionID)
+	}
+
+	// The transcript now flushes its first real (timestamped) entry, handing off within
+	// the proximity window. The deferred id must now be adopted — proving the first,
+	// undecidable attempt did NOT permanently neg-cache it.
+	writeTranscript(t, proj, "rot-bbb", ownerEnd.Add(-2*time.Millisecond), ownerEnd.Add(10*time.Minute))
+	changed := s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "rot-bbb", UpdatedAt: time.Now()}, true)
+	if !changed {
+		t.Errorf("rotation should be adopted once the transcript flushes a timestamp")
+	}
+	if s.ClaudeSessionID != "rot-bbb" {
+		t.Errorf("rotation not adopted after flush: %q, want rot-bbb", s.ClaudeSessionID)
 	}
 }
 
