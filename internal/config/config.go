@@ -26,6 +26,7 @@ type Config struct {
 	StatusIndicator      string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
 	Telemetry            *bool  `json:"telemetry,omitempty"`
 	DefaultAgent         string `json:"default_agent,omitempty"` // "claude" or "codex"
+	DrawerHeight         int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
 
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
@@ -326,6 +327,15 @@ func (c *Config) GetStatusIndicator() string {
 		return "bar"
 	}
 	return "icon"
+}
+
+// GetDrawerHeight returns the terminal-drawer body height in rows (default 12
+// when unset). The UI clamps this so the panels above always keep a few rows.
+func (c *Config) GetDrawerHeight() int {
+	if c.DrawerHeight <= 0 {
+		return 12
+	}
+	return c.DrawerHeight
 }
 
 // boolDefaultTrue resolves an optional bool flag, defaulting to true when unset.

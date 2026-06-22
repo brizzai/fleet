@@ -43,8 +43,9 @@ type Session struct {
 // served from memory instead of one shell-out each.
 var (
 	sessionCacheMu   sync.RWMutex
-	sessionCacheData map[string]int64 // session_name -> window_activity timestamp
-	sessionDeadData  map[string]bool  // session_name -> pane_dead
+	sessionCacheData map[string]int64  // session_name -> window_activity timestamp
+	sessionDeadData  map[string]bool   // session_name -> pane_dead
+	sessionCmdData   map[string]string // session_name -> pane_current_command (foreground proc)
 	sessionCacheTime time.Time
 )
 
@@ -101,10 +102,17 @@ func envIsTruthy(name string) bool {
 
 // NewSession creates a new Session with a unique tmux name.
 func NewSession(displayName, workDir string) *Session {
+	return NewSessionWithPrefix(SessionPrefix, displayName, workDir)
+}
+
+// NewSessionWithPrefix is like NewSession but lets callers pick the tmux name
+// prefix. Used by the shells feature (prefix "fleetsh_") so shell sessions are
+// distinguishable from agent sessions ("fleet_") in `list-panes -a`.
+func NewSessionWithPrefix(prefix, displayName, workDir string) *Session {
 	sanitized := sanitizeName(displayName)
 	shortID := generateShortID()
 	return &Session{
-		Name:        SessionPrefix + sanitized + "_" + shortID,
+		Name:        prefix + sanitized + "_" + shortID,
 		DisplayName: displayName,
 		WorkDir:     workDir,
 	}
@@ -174,8 +182,12 @@ func (s *Session) Start(command string, env ...string) error {
 	if sessionDeadData == nil {
 		sessionDeadData = make(map[string]bool)
 	}
+	if sessionCmdData == nil {
+		sessionCmdData = make(map[string]string)
+	}
 	sessionCacheData[s.Name] = time.Now().Unix()
 	sessionDeadData[s.Name] = false
+	sessionCmdData[s.Name] = "" // unknown until first refresh; "" reads as idle
 	sessionCacheMu.Unlock()
 
 	return nil
@@ -453,6 +465,33 @@ func (s *Session) SendLiteralKeys(text string) error {
 	return nil
 }
 
+// CaptureWithCursor captures the pane AND the cursor position in a single tmux
+// invocation (no caching). Used by the terminal drawer to draw a block cursor
+// at the real cursor cell rather than at end-of-line — so it lands correctly
+// even when a shell autosuggestion trails the cursor. cursorX/cursorY are -1
+// when tmux didn't report them.
+func (s *Session) CaptureWithCursor() (content string, cursorX, cursorY int, err error) {
+	sentinel := captureSentinel()
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux",
+		"capture-pane", "-p", "-e", "-t", s.Name,
+		";", "display-message", "-p", "-t", s.Name, sentinel+"\t#{cursor_x}\t#{cursor_y}",
+	).Output()
+	if err != nil {
+		return "", -1, -1, err
+	}
+	full := string(out)
+	idx := strings.LastIndex(full, sentinel+"\t")
+	if idx < 0 {
+		return full, -1, -1, nil
+	}
+	content = full[:idx]
+	cursorX, cursorY = -1, -1
+	fmt.Sscanf(full[idx+len(sentinel):], "\t%d\t%d", &cursorX, &cursorY)
+	return content, cursorX, cursorY, nil
+}
+
 // CapturePaneFresh invalidates the cache before capturing, ensuring fresh output.
 func (s *Session) CapturePaneFresh() (string, error) {
 	s.cacheMu.Lock()
@@ -475,6 +514,7 @@ func (s *Session) Kill() error {
 	sessionCacheMu.Lock()
 	delete(sessionCacheData, s.Name)
 	delete(sessionDeadData, s.Name)
+	delete(sessionCmdData, s.Name)
 	sessionCacheMu.Unlock()
 
 	return nil
@@ -621,7 +661,7 @@ func captureSentinel() string {
 // call feeds Exists, GetActivity and IsPaneDead for every session, so the
 // status worker never shells out per-session for these.
 func RefreshSessionCache() {
-	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{session_name}\t#{window_activity}\t#{pane_dead}")
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{session_name}\t#{window_activity}\t#{pane_dead}\t#{pane_current_command}")
 	output, err := cmd.Output()
 	if err != nil {
 		return // tmux server may not be running.
@@ -629,12 +669,13 @@ func RefreshSessionCache() {
 
 	activityCache := make(map[string]int64)
 	deadCache := make(map[string]bool)
+	cmdCache := make(map[string]string)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 3 {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 {
 			continue
 		}
 		name := parts[0]
@@ -642,13 +683,29 @@ func RefreshSessionCache() {
 		fmt.Sscanf(parts[1], "%d", &activity)
 		activityCache[name] = activity
 		deadCache[name] = parts[2] == "1"
+		cmdCache[name] = parts[3]
 	}
 
 	sessionCacheMu.Lock()
 	sessionCacheData = activityCache
 	sessionDeadData = deadCache
+	sessionCmdData = cmdCache
 	sessionCacheTime = time.Now()
 	sessionCacheMu.Unlock()
+}
+
+// PaneCurrentCommand returns the cached foreground command for a session's pane
+// (e.g. "zsh", "node", "vite"), or "" when unknown (not in the last refresh).
+// Cache-only — no shell-out; RefreshSessionCache populates it once per tick.
+// Used by the shells feature to tell idle (shell prompt) from running (a
+// process executing in the pane).
+func PaneCurrentCommand(name string) string {
+	sessionCacheMu.RLock()
+	defer sessionCacheMu.RUnlock()
+	if sessionCmdData == nil {
+		return ""
+	}
+	return sessionCmdData[name]
 }
 
 // ListSessions returns all fleet managed tmux session names.

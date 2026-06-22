@@ -82,5 +82,5 @@ func previewIsWorktreeOf(repo string) bool { return repo == mockRepoFeat }
 func RenderSidebarPreview(width, height int) string {
 	previewFixtureOnce.Do(buildPreviewFixture)
 	items := BuildFlatItems(previewSess, nil, nil, "", nil, nil, previewOriginOf, previewIsWorktreeOf)
-	return RenderSidebar(items, previewSess, previewGit, previewSlotMap, -1, 0, width, height)
+	return RenderSidebar(items, previewSess, previewGit, previewSlotMap, -1, 0, width, height, true)
 }

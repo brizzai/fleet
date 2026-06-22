@@ -36,6 +36,7 @@ type Tip struct {
 const (
 	tipReloadFailedID = "reload_failed_sessions"
 	tipCmdPaletteID   = "command_palette"
+	tipDrawerID       = "terminal_drawer"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -65,6 +66,15 @@ var tipRegistry = []Tip{
 		active:   func(h *Home) bool { return len(h.sessions) >= cmdPaletteMinSessions },
 		text: func(h *Home) string {
 			return "Tip: press Ctrl+K to open the command palette — jump to any session, repo, or command."
+		},
+	},
+	{
+		ID:       tipDrawerID,
+		Policy:   tipOnce,
+		Priority: 8, // below the command-palette tip so it doesn't fight on first launch
+		active:   func(h *Home) bool { return len(h.sessions) >= 1 && len(h.shells) == 0 && h.drawerMode == drawerHidden },
+		text: func(h *Home) string {
+			return "Tip: press ` to open a terminal drawer — dev servers, logs, and scratch shells for the selected repo."
 		},
 	},
 }

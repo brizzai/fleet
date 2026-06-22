@@ -286,7 +286,10 @@ func CollectGroupInfo(sessions []*session.Session, repoPath string) RepoGroupInf
 }
 
 // RenderSidebar renders the clean origin → checkout → session tree.
-func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map[string]*git.RepoInfo, slotBindings map[int]string, cursor, viewOffset, width, height int) string {
+func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map[string]*git.RepoInfo, slotBindings map[int]string, cursor, viewOffset, width, height int, sidebarFocused bool) string {
+	// Mute the selected-row pill when the sidebar doesn't own the keyboard
+	// (e.g. the terminal drawer is focused). Render-thread only.
+	selectionDimmed = !sidebarFocused
 	if len(items) == 0 {
 		return renderEmptyState(width, height)
 	}
@@ -455,10 +458,10 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
-		name := SessionTitleSelStyle.Render(" " + item.OriginLabel + " ")
+		name := selTitle().Render(" " + item.OriginLabel + " ")
 		out := fmt.Sprintf("%s %s", icon, name)
 		if countStr != "" {
-			out += " " + SessionStatusSelStyle.Render(countStr)
+			out += " " + selStatus().Render(countStr)
 		}
 		if summary != "" {
 			out += "  " + summary
@@ -541,7 +544,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 			}
 		}
 		inner += " "
-		return fmt.Sprintf("  %s %s", icon, SessionTitleSelStyle.Italic(repoInfo.IsWorktreeRepo).Render(inner)) + summarySuffix
+		return fmt.Sprintf("  %s %s", icon, selTitle().Italic(repoInfo.IsWorktreeRepo).Render(inner)) + summarySuffix
 	}
 	icon := DimStyle.Render(chevron)
 	branchStyled := branchFG.Render(label)
@@ -563,7 +566,7 @@ func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 	}
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
-		nameStyled := SessionTitleSelStyle.Render(" " + name + " ")
+		nameStyled := selTitle().Render(" " + name + " ")
 		return fmt.Sprintf("  %s %s", icon, nameStyled) + failMark
 	}
 	icon := DimStyle.Render(chevron)
@@ -615,7 +618,7 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
 		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
-		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render(row))
+		return fmt.Sprintf("   %s", selTitle().Render(row))
 	}
 
 	styledSymbol := StatusSymbol(status)
@@ -673,7 +676,7 @@ func renderPendingItem(pw *PendingWorkspace, width int, selected bool) string {
 
 	if selected {
 		row := " " + spinner + " " + title + " "
-		return fmt.Sprintf("   %s", SessionTitleSelStyle.Render(row))
+		return fmt.Sprintf("   %s", selTitle().Render(row))
 	}
 	styledSpinner := lipgloss.NewStyle().Foreground(ColorAccent).Render(spinner)
 	styledTitle := DimStyle.Render(title)
@@ -747,7 +750,7 @@ func renderPRBadge(pr *github.PR, selected bool) string {
 		return ""
 	}
 	if selected {
-		return SessionStatusSelStyle.Render(text)
+		return selStatus().Render(text)
 	}
 	return prBadgeStyle(pr).Render(text)
 }

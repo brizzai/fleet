@@ -35,9 +35,11 @@ func errStatuses(n int) []session.Status {
 }
 
 func TestRecurringTip_ThresholdAndEpisodeReset(t *testing.T) {
-	// Pre-mark the command-palette (tipOnce) tip seen so it doesn't interfere —
-	// it triggers at >= cmdPaletteMinSessions, which overlaps these counts.
-	seenCmd := func() *config.Config { return &config.Config{SeenTips: []string{tipCmdPaletteID}} }
+	// Pre-mark the other tipOnce tips seen so they don't interfere — they trigger
+	// on session presence, which overlaps these counts.
+	seenCmd := func() *config.Config {
+		return &config.Config{SeenTips: []string{tipCmdPaletteID, tipDrawerID}}
+	}
 
 	h := newTipHome(seenCmd(), errStatuses(reloadFailedThreshold-1)...)
 	h.refreshTips(true)
@@ -84,16 +86,18 @@ func TestOnceTip_RespectsSeenAndPersistsOnDismiss(t *testing.T) {
 	// real ~/.config/fleet/config.json.
 	t.Setenv("HOME", t.TempDir())
 
-	// Already seen → never shows.
-	seen := &config.Config{SeenTips: []string{tipCmdPaletteID}}
+	// Already seen → never shows. (Isolate the drawer tipOnce too — it also
+	// triggers on session presence.)
+	seen := &config.Config{SeenTips: []string{tipCmdPaletteID, tipDrawerID}}
 	h := newTipHome(seen, session.StatusRunning, session.StatusRunning, session.StatusRunning)
 	h.refreshTips(true)
 	if h.activeTipID != "" {
 		t.Fatalf("seen tipOnce should stay hidden, got %q", h.activeTipID)
 	}
 
-	// Fresh config, enough sessions → shows, then dismiss persists it.
-	cfg := &config.Config{}
+	// Fresh config (drawer tip isolated), enough sessions → cmd-palette shows,
+	// then dismiss persists it.
+	cfg := &config.Config{SeenTips: []string{tipDrawerID}}
 	h = newTipHome(cfg, session.StatusRunning, session.StatusRunning, session.StatusRunning)
 	h.refreshTips(true)
 	if h.activeTipID != tipCmdPaletteID {

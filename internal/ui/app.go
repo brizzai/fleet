@@ -27,6 +27,7 @@ import (
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/proc"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/workspace"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -105,6 +106,7 @@ type (
 	}
 	loadSessionsMsg struct {
 		sessions     []*session.Session
+		shells       []*shell.Shell
 		slotBindings map[int]string
 		ghAvailable  bool
 		warning      string
@@ -257,6 +259,24 @@ type Home struct {
 	filterActive bool
 	filterText   string
 
+	// Terminal drawer (shells). Shells are non-agent terminals scoped to a
+	// repo/worktree, shown in the drawer (never the sidebar). The drawer is
+	// either hidden or focused (always-typing: keystrokes go to the active
+	// shell, a few Ctrl chords drive the chrome). See drawer.go.
+	shells           []*shell.Shell // all live shells, all repos (mirror of the shells table)
+	drawerMode       drawerMode     // drawerHidden / drawerTyping
+	drawerProgress   float64        // animated slide 0 (closed) → 1 (open)
+	drawerTarget     float64        // where the slide is heading
+	drawerActiveTab  int            // index into shellsForActiveRepo()
+	drawerHeight     int            // max body rows when open (from config; clamped at render)
+	drawerCloseArmed bool           // ⌃W pressed once on a running shell; confirm close with ⌃W again
+	drawerRepo       string         // repo the drawer is scoped to (frozen at open)
+	drawerBody       string         // last off-thread capture of the active shell pane
+	drawerBodyShell  string         // shell ID drawerBody belongs to
+	drawerCursorX    int            // tmux cursor column on the active shell pane (-1 = unknown)
+	drawerHotUntil   time.Time      // while now < this, TYPING captures at ~30fps; otherwise it idles at ~2fps
+	drawerLastCapAt  time.Time      // last drawer-body capture time (drives the idle cadence)
+
 	// Slot hotkeys (RTS-style quick access: digit=jump, double-digit=attach, alt+digit or =<digit>=bind).
 	slotBindings      map[int]string // slot (0-9) -> session ID
 	lastSlotTapSlot   int            // -1 when no pending tap
@@ -384,6 +404,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		cancel:                 cancel,
 		startTime:              time.Now(),
 	}
+	h.drawerHeight = cfg.GetDrawerHeight()
 	emptyCache := make(map[string]*git.RepoInfo)
 	h.gitInfoCache.Store(&emptyCache)
 	return h
@@ -502,6 +523,70 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return h.handleKey(msg)
+
+	case drawerAnimTickMsg: // drive the terminal-drawer slide
+		if h.drawerStep() {
+			return h, h.drawerAnimTick()
+		}
+		return h, nil
+
+	case drawerTypeTickMsg: // refresh the drawer body while in TYPING mode
+		if h.drawerMode != drawerTyping {
+			return h, nil // mode changed → stop the fast loop
+		}
+		now := time.Now()
+		// Capture at ~30fps while "hot" (just typed or output flowing), else fall
+		// back to ~2fps so a quiet shell doesn't spin capture-pane needlessly.
+		due := now.Before(h.drawerHotUntil) || now.Sub(h.drawerLastCapAt) >= 500*time.Millisecond
+		var cmd tea.Cmd
+		if due {
+			if sh := h.activeShell(); sh != nil {
+				h.drawerLastCapAt = now
+				cmd = h.fetchDrawerBody(sh)
+			}
+		}
+		return h, tea.Batch(cmd, h.drawerTypeTick())
+
+	case drawerBodyMsg:
+		// A fresh authoritative capture: stay "hot" while output keeps changing
+		// so a streaming process refreshes at ~30fps.
+		if msg.shellID == h.drawerBodyShell && msg.content != h.drawerBody {
+			h.drawerHotUntil = time.Now().Add(750 * time.Millisecond)
+		}
+		h.drawerBody = msg.content
+		h.drawerBodyShell = msg.shellID
+		h.drawerCursorX = msg.cursorX
+		return h, nil
+
+	case shellCreateResultMsg:
+		if msg.err != nil {
+			h.setError(msg.err)
+			return h, nil
+		}
+		h.workerMu.Lock()
+		h.shells = append(h.shells, msg.sh)
+		h.workerMu.Unlock()
+		if err := h.storage.SaveShell(msg.sh.ToRow()); err != nil {
+			debuglog.Logger.Error("storage: SaveShell", "id", msg.sh.ID, "err", err)
+		}
+		// Focus the new tab if it's in the drawer's current scope.
+		shells := h.shellsForActiveRepo()
+		for i, s := range shells {
+			if s.ID == msg.sh.ID {
+				h.drawerActiveTab = i
+			}
+		}
+		return h, h.fetchDrawerBody(msg.sh)
+
+	case shellRestartMsg:
+		if msg.err != nil {
+			h.setError(msg.err)
+			return h, nil
+		}
+		if err := h.storage.UpdateShellTmuxName(msg.id, msg.tmuxName); err != nil {
+			debuglog.Logger.Error("storage: UpdateShellTmuxName", "id", msg.id, "err", err)
+		}
+		return h, nil
 
 	case tickMsg:
 		return h.handleTick()
@@ -946,14 +1031,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.focusMode {
 			return h, h.previewTick() // focus mode has its own faster tick
 		}
-		var previewCmd tea.Cmd
+		cmds := []tea.Cmd{h.previewTick()}
 		if sel := h.selectedSession(); sel != nil && sel.IsAlive() {
-			previewCmd = h.fetchPreview(sel)
+			cmds = append(cmds, h.fetchPreview(sel))
 		}
-		if previewCmd != nil {
-			return h, tea.Batch(previewCmd, h.previewTick())
+		// Keep the terminal drawer body live while it's open (TYPING has its own
+		// faster tick, so skip here to avoid double-fetching).
+		if h.drawerVisible() && h.drawerMode != drawerTyping {
+			if sh := h.activeShell(); sh != nil {
+				cmds = append(cmds, h.fetchDrawerBody(sh))
+			}
 		}
-		return h, h.previewTick()
+		return h, tea.Batch(cmds...)
 
 	case focusTickMsg:
 		if !h.focusMode {
@@ -1048,6 +1137,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setError(fmt.Errorf("%s", msg.warning))
 		}
 		h.sessions = msg.sessions
+		h.shells = msg.shells
 		h.rebuildSessionMap()
 		// Keep only bindings whose session is present in the loaded view. Do
 		// NOT delete absent bindings from storage here: FLEET_DEMO_PREFIX and
@@ -1325,17 +1415,33 @@ func (h *Home) renderBody() string {
 		contentHeight = 1
 	}
 
+	mode := h.layoutMode()
+
+	// Terminal drawer placement depends on the layout. In dual it splits the
+	// right column (rendered inside that branch, so it doesn't steal global
+	// content height). In single/stacked there is no right column, so it falls
+	// back to a full-width band at the bottom — contentHeight shrinks to make
+	// room and the panels above appear pushed up.
+	bottomDrawer := ""
+	if h.drawerVisible() && mode != "dual" {
+		bottomDrawer = h.renderDrawer(h.width, h.height-1-footerH-3)
+		contentHeight -= lipgloss.Height(bottomDrawer)
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+	}
+
 	// Status counts ride the Sessions panel's top-right border (inset into
 	// the title border, after the "Sessions" label). The top app bar no
 	// longer renders them.
 	statusTitle := h.statusCountsLine("")
 
-	switch h.layoutMode() {
+	switch mode {
 	case "single":
 		// Inner content area = total - 2 for the border on each side.
 		innerW := h.width - 2
 		innerH := contentHeight - 2
-		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH)
+		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH, !h.drawerHasFocus())
 		sidebar = ensureExactHeight(sidebar, innerH)
 		sidebar = ensureExactWidth(sidebar, innerW)
 		b.WriteString(RenderBorderedPanelTopRight(sidebar, "Sessions", statusTitle, h.width, contentHeight, h.focusMode))
@@ -1347,7 +1453,7 @@ func (h *Home) renderBody() string {
 		previewHeight := contentHeight - sidebarHeight - 1 // 1 for gap row
 		innerW := h.width - 2
 
-		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2)
+		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2, !h.drawerHasFocus())
 		sidebarInner = ensureExactHeight(sidebarInner, sidebarHeight-2)
 		sidebarInner = ensureExactWidth(sidebarInner, innerW)
 		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, "Sessions", statusTitle, h.width, sidebarHeight, h.focusMode))
@@ -1387,7 +1493,7 @@ func (h *Home) renderBody() string {
 		if h.focusMode && !h.sidebarDirty && h.cachedSidebar != "" {
 			leftPanel = h.cachedSidebar
 		} else {
-			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH)
+			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH, !h.drawerHasFocus())
 			inner = ensureExactHeight(inner, innerH)
 			inner = ensureExactWidth(inner, sidebarInnerW)
 			leftPanel = RenderBorderedPanelTopRight(inner, "Sessions", statusTitle, sidebarWidth, contentHeight, h.focusMode)
@@ -1395,14 +1501,33 @@ func (h *Home) renderBody() string {
 			h.sidebarDirty = false
 		}
 
+		// Right column: preview on top; the terminal drawer (when open) splits
+		// the bottom of the same column, leaving the session list untouched.
+		previewPanelH := contentHeight
+		rightDrawer := ""
+		if h.drawerVisible() {
+			rightDrawer = h.renderDrawer(previewWidth, contentHeight-drawerMinPreviewRows)
+			previewPanelH = contentHeight - lipgloss.Height(rightDrawer)
+			if previewPanelH < drawerMinPreviewRows {
+				previewPanelH = drawerMinPreviewRows
+			}
+		}
+		previewInnerH := previewPanelH - 2
+		if previewInnerH < 1 {
+			previewInnerH = 1
+		}
+
 		s, content := h.selectedPreview()
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
-		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, innerH, h.focusMode)
-		previewInner = ensureExactHeight(previewInner, innerH)
+		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
+		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, previewWidth-6)
-		rightPanel := RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, previewWidth, contentHeight, h.focusMode)
+		rightPanel := RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, previewWidth, previewPanelH, h.focusMode)
+		if rightDrawer != "" {
+			rightPanel = lipgloss.JoinVertical(lipgloss.Left, rightPanel, rightDrawer)
+		}
 
 		// Build the single-column gap as transparent spaces.
 		gapLines := make([]string, contentHeight)
@@ -1412,6 +1537,13 @@ func (h *Home) renderBody() string {
 		gapCol := strings.Join(gapLines, "\n")
 
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, gapCol, rightPanel))
+	}
+
+	// Terminal drawer band, below the panels (single/stacked only; dual renders
+	// the drawer inside its right column above).
+	if bottomDrawer != "" {
+		b.WriteString("\n")
+		b.WriteString(bottomDrawer)
 	}
 
 	// Pad to fill content area.
@@ -1624,6 +1756,13 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// While the terminal drawer is focused it captures keys (tab nav, type-mode,
+	// lifecycle) so they don't also drive the session list. Sits after the focus
+	// (split) route above so split focus mode wins if somehow both are set.
+	if h.drawerHasFocus() {
+		return h.handleTypingKey(msg)
+	}
+
 	// Snapshot and clear the double-tap window: only a consecutive digit press
 	// should attach, so any other key falling through this switch invalidates
 	// the window for free. The digit case restores the snapshot before jumping.
@@ -1632,6 +1771,8 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	h.lastSlotTapSlot = -1
 
 	switch msg.String() {
+	case "`": // open the terminal drawer + move focus into it
+		return h, h.openDrawerTyping()
 	case "j", "down":
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
 		h.syncViewport()
@@ -2257,7 +2398,47 @@ func (h *Home) worktreeDeleteWarnings(repoPath string) []string {
 	if active > 0 {
 		w = append(w, fmt.Sprintf("%d session(s) here are still running", active))
 	}
+	if n := h.countShellsForRepo(repoPath); n > 0 {
+		w = append(w, fmt.Sprintf("%d terminal(s) here will be closed", n))
+	}
 	return w
+}
+
+// countShellsForRepo returns how many shells are scoped to repoPath.
+func (h *Home) countShellsForRepo(repoPath string) int {
+	n := 0
+	for _, sh := range h.shells {
+		if sh.RepoPath == repoPath {
+			n++
+		}
+	}
+	return n
+}
+
+// killShellsForRepo closes (kills tmux + forgets) every shell scoped to
+// repoPath. Done synchronously so the worktree dir is freed before
+// `git worktree remove` runs — a shell's dev server holds the dir open exactly
+// like a session's detached daemon, and proc.FindHolders won't kill the shell
+// process itself (shells are on its denylist). No undo (shells carry no state).
+func (h *Home) killShellsForRepo(repoPath string) {
+	var doomed []*shell.Shell
+	h.workerMu.Lock()
+	kept := make([]*shell.Shell, 0, len(h.shells))
+	for _, sh := range h.shells {
+		if sh.RepoPath == repoPath {
+			doomed = append(doomed, sh)
+		} else {
+			kept = append(kept, sh)
+		}
+	}
+	h.shells = kept
+	h.workerMu.Unlock()
+	for _, sh := range doomed {
+		if err := h.storage.DeleteShell(sh.ID); err != nil {
+			debuglog.Logger.Error("storage: DeleteShell", "id", sh.ID, "err", err)
+		}
+		_ = sh.Kill()
+	}
 }
 
 // repoIsWorktree reports whether a repo group is a git worktree, reading from
@@ -2307,6 +2488,14 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 		if session.GetRepoRoot(s.ProjectPath) == msg.repoPath {
 			sess = append(sess, s)
 		}
+	}
+
+	// Remove the worktree's shells up front so their tmux sessions (and the dev
+	// servers they host) don't pin the dir against `git worktree remove`. Only
+	// when the directory is actually being destroyed — a plain "forget repo"
+	// leaves the folder (and its shells) alone.
+	if msg.destroyWorkspace {
+		h.killShellsForRepo(msg.repoPath)
 	}
 
 	var cmds []tea.Cmd
@@ -3712,13 +3901,15 @@ func (h *Home) statusWorkerCycle() {
 		h.lastHeavyCycleAt = time.Now()
 	}
 
-	// Take a snapshot of sessions under lock.
+	// Take a snapshot of sessions + shells under lock.
 	h.workerMu.Lock()
 	sessions := make([]*session.Session, len(h.sessions))
 	copy(sessions, h.sessions)
+	shells := make([]*shell.Shell, len(h.shells))
+	copy(shells, h.shells)
 	h.workerMu.Unlock()
 
-	if len(sessions) == 0 {
+	if len(sessions) == 0 && len(shells) == 0 {
 		return
 	}
 
@@ -3731,6 +3922,13 @@ func (h *Home) statusWorkerCycle() {
 	// stale, shrinking the 3s hold to ~1s and flipping busy sessions to finished
 	// prematurely.
 	tmux.RefreshSessionCache()
+
+	// Refresh shell statuses from the just-updated cache (cache-only reads,
+	// plus one bounded PaneDeadInfo on an exited pane). Shells aren't in
+	// h.sessions, so they get their own pass.
+	for _, sh := range shells {
+		sh.RefreshStatus()
+	}
 
 	// 3. Sync hook status (fast: in-memory map lookups; worker may resolve a
 	// session-id rotation here — off the UI loop, so its transcript I/O is safe).
@@ -4260,6 +4458,32 @@ func (h *Home) resolveCurrentRepo() string {
 	return ""
 }
 
+// drawerScopeRepo returns the repo the terminal drawer is scoped to: frozen to
+// drawerRepo while open (set when the drawer was opened), else the repo under
+// the cursor (used by createShell before the drawer opens).
+func (h *Home) drawerScopeRepo() string {
+	if h.drawerMode != drawerHidden && h.drawerRepo != "" {
+		return h.drawerRepo
+	}
+	return h.resolveCurrentRepo()
+}
+
+// shellsForActiveRepo returns the drawer's shells for its current scope repo,
+// in creation order. The drawer only ever shows one repo's shells at a time.
+func (h *Home) shellsForActiveRepo() []*shell.Shell {
+	repo := h.drawerScopeRepo()
+	if repo == "" {
+		return nil
+	}
+	out := make([]*shell.Shell, 0, len(h.shells))
+	for _, sh := range h.shells {
+		if sh.RepoPath == repo {
+			out = append(out, sh)
+		}
+	}
+	return out
+}
+
 func (h *Home) fetchBranchList(repoPath string) tea.Cmd {
 	return func() tea.Msg {
 		branches, err := git.ListBranches(repoPath)
@@ -4433,6 +4657,10 @@ func (h *Home) statusCountsLine(bg lipgloss.Color) string {
 }
 
 func (h *Home) renderHelpBar() string {
+	// When the terminal drawer owns the keyboard, the help bar shows its keys.
+	if h.drawerHasFocus() {
+		return h.renderDrawerHelpBar()
+	}
 	contextKeys, globalKeys := HelpBarBindingsFor(h.cursorBarContext(), h.cfg.GetEnterMode())
 
 	var parts []string
@@ -4452,6 +4680,19 @@ func (h *Home) renderHelpBar() string {
 	// next line. Without it the keys would be appended to the bottom border
 	// of the Sessions panel.
 	return "\n " + left + sep + right
+}
+
+// renderDrawerHelpBar shows the drawer's Ctrl-chord key hints in the footer.
+func (h *Home) renderDrawerHelpBar() string {
+	pairs := [][2]string{
+		{"keys", "→ shell"}, {"⌃T", "new"}, {"⌃W", "close"},
+		{"⌃PgUp/Dn", "tab"}, {"⌃G", "full"}, {"`", "close drawer"},
+	}
+	var parts []string
+	for _, p := range pairs {
+		parts = append(parts, HelpKeyStyle.Render(p[0])+" "+HelpDescStyle.Render(p[1]))
+	}
+	return "\n " + strings.Join(parts, "  ")
 }
 
 func (h *Home) layoutMode() string {
@@ -4780,6 +5021,17 @@ func (h *Home) loadSessions() tea.Msg {
 		slotBindings = map[int]string{}
 	}
 
+	// Load + reconnect shells (drawer terminals). No liveness check — the
+	// worker derives status from tmux; a dead shell renders as exited.
+	shellRows, err := h.storage.LoadShells()
+	if err != nil {
+		debuglog.Logger.Error("failed to load shells", "err", err)
+	}
+	shells := make([]*shell.Shell, 0, len(shellRows))
+	for _, row := range shellRows {
+		shells = append(shells, shell.FromRow(row))
+	}
+
 	// These block but run in the tea.Cmd goroutine, not Update().
 	configDir := hooks.GetClaudeConfigDir()
 	hooks.InjectClaudeHooks(configDir)
@@ -4819,6 +5071,7 @@ func (h *Home) loadSessions() tea.Msg {
 
 	return loadSessionsMsg{
 		sessions:     sessions,
+		shells:       shells,
 		slotBindings: slotBindings,
 		ghAvailable:  ghAvailable,
 		warning:      warning,
