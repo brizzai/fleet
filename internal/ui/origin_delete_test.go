@@ -135,3 +135,22 @@ func TestCheckoutsForOrigin(t *testing.T) {
 		t.Error("checkoutsForOrigin leaked a checkout from a different origin")
 	}
 }
+
+// checkoutPathLines lists every checkout up to the cap, then collapses the rest
+// into a single "+N more" line so a group-forget dialog can't grow unbounded.
+func TestCheckoutPathLines(t *testing.T) {
+	// Under the cap: every path is listed, none collapsed.
+	got := checkoutPathLines([]string{"/a", "/b", "/c"})
+	if len(got) != 3 {
+		t.Fatalf("under cap: got %d lines (%v), want 3", len(got), got)
+	}
+
+	// Over the cap (4): first 4 listed, remainder folded into "…and N more".
+	got = checkoutPathLines([]string{"/a", "/b", "/c", "/d", "/e", "/f"})
+	if len(got) != 5 {
+		t.Fatalf("over cap: got %d lines (%v), want 5", len(got), got)
+	}
+	if last := got[len(got)-1]; last != "…and 2 more" {
+		t.Errorf("over cap: last line = %q, want %q", last, "…and 2 more")
+	}
+}

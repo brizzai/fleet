@@ -88,12 +88,18 @@ type (
 		destroyWorkspace bool
 	}
 	// originDeleteMsg forgets a whole origin group: every checkout under it
-	// (the main repo plus any worktrees) and all their sessions. removeWorktrees
-	// mirrors the config toggle — when true, worktree checkouts are also removed
-	// from disk; the main repo's folder is always kept.
+	// (the main repo plus any worktrees) and all their sessions. Each target
+	// carries its own destroy decision, snapshotted at show-time so the ~2s
+	// gitInfo refresh can't flip a worktree classification between the user
+	// ticking the checkbox and execution.
 	originDeleteMsg struct {
-		repoPaths       []string
-		removeWorktrees bool
+		targets []originDeleteTarget
+	}
+	// originDeleteTarget is one checkout in an origin-forget, with the resolved
+	// decision of whether its worktree directory is removed from disk.
+	originDeleteTarget struct {
+		repoPath string
+		destroy  bool
 	}
 	pendingDeleteExpireMsg struct {
 		nonce string
@@ -2293,28 +2299,79 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 		return nil
 	}
 	removeWorktrees := h.cfg.GetOriginDeleteRemovesWorktrees()
-
-	sessionCount := 0
-	var worktrees []string
+	inScope := make(map[string]bool, len(checkouts))
 	for _, repo := range checkouts {
-		sessionCount += h.countSessionsForRepo(repo)
-		if h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo] {
-			worktrees = append(worktrees, repo)
+		inScope[repo] = true
+	}
+
+	// Snapshot each checkout's destroy decision now, at show-time, so the ~2s
+	// gitInfo refresh can't flip a worktree classification between the user
+	// ticking the box and execution. destroyDirs (the dirs actually removed) and
+	// the dirty count are derived from the same snapshot the user approves.
+	var targets []originDeleteTarget
+	var destroyDirs []string
+	dirtyWorktrees := 0
+	hasImmediateDestroy := false
+	for _, repo := range checkouts {
+		isWorktree := h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo]
+		destroy := removeWorktrees && isWorktree
+		targets = append(targets, originDeleteTarget{repoPath: repo, destroy: destroy})
+		if destroy {
+			destroyDirs = append(destroyDirs, repo)
+			if info := h.gitInfo()[repo]; info != nil && info.IsDirty {
+				dirtyWorktrees++
+			}
+			// An empty worktree is removed immediately (deferDeleteRepo's
+			// len(sess)==0 branch) — that removal is not undoable.
+			if h.countSessionsForRepo(repo) == 0 {
+				hasImmediateDestroy = true
+			}
+		}
+	}
+
+	// Session totals across the whole group in one pass (mirrors the per-repo
+	// warnings worktreeDeleteWarnings surfaces for a single checkout).
+	sessionCount, runningCount := 0, 0
+	for _, s := range h.sessions {
+		if !inScope[session.GetRepoRoot(s.ProjectPath)] {
+			continue
+		}
+		sessionCount++
+		switch s.GetStatus() {
+		case session.StatusRunning, session.StatusWaiting, session.StatusStarting:
+			runningCount++
 		}
 	}
 
 	details := []string{
 		fmt.Sprintf("Forgets %d checkout(s) · %d session(s)", len(checkouts), sessionCount),
 	}
-	if removeWorktrees && len(worktrees) > 0 {
-		details = append(details,
-			fmt.Sprintf("Removes %d worktree director(ies) from disk", len(worktrees)),
-			"Main repo folder kept",
-		)
+	if len(destroyDirs) > 0 {
+		details = append(details, fmt.Sprintf("Removes %d worktree director(ies) from disk", len(destroyDirs)))
+		// Only reassure about a main folder when a non-worktree checkout is
+		// actually in scope (not when every checkout is a worktree).
+		if len(checkouts) > len(destroyDirs) {
+			details = append(details, "Main repo folder kept")
+		}
 	} else {
 		details = append(details, "No directories removed — checkouts just un-tracked")
 	}
-	details = append(details, "Press u to undo within 5s")
+	// Surface the same safety warnings the single-checkout path shows, aggregated.
+	if dirtyWorktrees > 0 {
+		details = append(details, fmt.Sprintf("%d worktree(s) have uncommitted changes", dirtyWorktrees))
+	}
+	if runningCount > 0 {
+		details = append(details, fmt.Sprintf("%d session(s) here are still running", runningCount))
+	}
+	// List the checkouts so a local:<basename> collision (two unrelated repos
+	// sharing a folder name → one origin) is visible before the box is ticked.
+	details = append(details, checkoutPathLines(checkouts)...)
+	// Undo only restores deferred session deletes; an empty worktree is removed
+	// immediately and an all-empty group is just unpinned — neither is undoable.
+	// Match confirmDeleteHeader: promise undo only when something undoable is in scope.
+	if sessionCount > 0 && !hasImmediateDestroy {
+		details = append(details, "Press u to undo within 5s")
+	}
 
 	label := item.OriginLabel
 	if label == "" {
@@ -2322,23 +2379,31 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 	}
 	h.actionLog.Add("delete origin", label, true)
 	h.confirmDialog.ShowDanger("Forget entire origin?", label, details, func() tea.Msg {
-		return originDeleteMsg{repoPaths: checkouts, removeWorktrees: removeWorktrees}
+		return originDeleteMsg{targets: targets}
 	})
 	h.confirmDialog.RequireCheckbox("Yes, forget the whole origin group")
 
 	// Best-effort: list the dev processes that removing the worktrees will
 	// force-stop. Aggregate across every worktree under the origin into the one
-	// async scan line (reuses the worktreeHoldersScannedMsg handler).
-	if removeWorktrees && len(worktrees) > 0 {
+	// async scan line, deduping by PID so a daemon holding two sibling worktrees
+	// isn't double-counted (reuses the worktreeHoldersScannedMsg handler).
+	if len(destroyDirs) > 0 {
 		gen := h.nextHolderScanGen()
 		h.confirmDialog.StartScan(gen, "Checking for running processes…")
 		editor := h.cfg.GetEditor()
-		dirs := worktrees
+		dirs := destroyDirs
 		return func() tea.Msg {
+			seen := make(map[int]bool)
 			var holders []proc.Holder
 			for _, dir := range dirs {
 				hs, _ := proc.FindHolders(dir, []string{editor})
-				holders = append(holders, hs...)
+				for _, hd := range hs {
+					if seen[hd.PID] {
+						continue
+					}
+					seen[hd.PID] = true
+					holders = append(holders, hd)
+				}
 			}
 			return worktreeHoldersScannedMsg{gen: gen, holders: holders}
 		}
@@ -2346,15 +2411,31 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 	return nil
 }
 
-// deferDeleteOrigin forgets a whole origin group by fanning out to deferDeleteRepo
-// per checkout — so each checkout follows its own rule (sessions → undoable
-// deferred delete, worktree → optional `git worktree remove`, empty main repo →
-// unpin) and `u`-undo keeps working per session (LIFO).
+// checkoutPathLines renders up to 4 home-shortened checkout paths as bullet
+// detail lines, collapsing the remainder into a "+N more" line. Lets the user
+// eyeball which checkouts a group-forget actually covers.
+func checkoutPathLines(checkouts []string) []string {
+	const max = 4
+	var lines []string
+	for i, repo := range checkouts {
+		if i == max {
+			lines = append(lines, fmt.Sprintf("…and %d more", len(checkouts)-max))
+			break
+		}
+		lines = append(lines, shortenPath(repo))
+	}
+	return lines
+}
+
+// deferDeleteOrigin forgets a whole origin group by replaying the show-time
+// snapshot through deferDeleteRepo per checkout — so each checkout follows its
+// own rule (sessions → undoable deferred delete, worktree → optional
+// `git worktree remove`, empty main repo → unpin) and `u`-undo keeps working per
+// session (LIFO), against exactly the destroy decisions the user approved.
 func (h *Home) deferDeleteOrigin(msg originDeleteMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
-	for _, repo := range msg.repoPaths {
-		destroyWorkspace := msg.removeWorktrees && (h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo])
-		_, cmd := h.deferDeleteRepo(repoDeleteMsg{repoPath: repo, destroyWorkspace: destroyWorkspace})
+	for _, t := range msg.targets {
+		_, cmd := h.deferDeleteRepo(repoDeleteMsg{repoPath: t.repoPath, destroyWorkspace: t.destroy})
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
