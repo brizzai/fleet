@@ -66,11 +66,21 @@ type Session struct {
 	forkParentID     string    // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
 
 	// Negative cache for the rotation check: the last (owner, foreign) pair that
-	// isSessionRotation rejected. A persistent foreign id (a nested-child eval
+	// sessionRotationVerdict rejected. A persistent foreign id (a nested-child eval
 	// harness) would otherwise rescan transcripts every worker cycle; once
 	// rejected we short-circuit until the owner or the foreign id changes.
 	rotRejectOwner   string
 	rotRejectForeign string
+
+	// Bounded retry tracking for an undecidable (owner, foreign) pair — one
+	// sessionRotationVerdict can't yet classify because a transcript hasn't flushed a
+	// timestamp. The transient /clear-flush race clears in a cycle or two, but a
+	// permanently unreadable/missing owner transcript would stay undecidable forever
+	// and rescan transcripts every worker pass. After rotationUndecidedRetryCap
+	// consecutive undecided cycles we fall back to the neg-cache.
+	rotUndecidedOwner   string
+	rotUndecidedForeign string
+	rotUndecidedCount   int
 
 	lastContentHash     string
 	lastContentChangeAt time.Time
@@ -312,7 +322,7 @@ type HookStatus struct {
 // Returns true if the hook meaningfully changed (new status or new timestamp),
 // so callers can prioritize an immediate status recomputation.
 //
-// resolveRotation gates the transcript I/O in isSessionRotation. The worker
+// resolveRotation gates the transcript I/O in sessionRotationVerdict. The worker
 // passes true (it runs off the Bubble Tea Update() loop); the UI paths
 // (hookChangedMsg/statusUpdateMsg) pass false so a foreign id can't block the
 // render loop on disk reads — they simply defer it to the next worker cycle
@@ -334,7 +344,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	//   - A nested child `claude` (an eval harness spawning sub-Claudes)
 	//     inherited FLEET_INSTANCE_ID. Adopting it would clobber our status and
 	//     resume id, so it must be ignored.
-	// isSessionRotation distinguishes them; a persistent rejection is cached so
+	// sessionRotationVerdict distinguishes them; a persistent rejection is cached so
 	// a nested child doesn't rescan transcripts every cycle.
 	var owner string
 	if hs.SessionID != "" {
@@ -351,7 +361,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				// Its SessionStart hook reports the PARENT's id; the fork's own id only
 				// appears once it diverges (first prompt). That first id different from
 				// the parent IS this fork's own session, so adopt it directly. We can't
-				// use isSessionRotation here: fork transcripts carry no logicalParentUuid,
+				// use sessionRotationVerdict here: fork transcripts carry no logicalParentUuid,
 				// and they copy the parent's history verbatim (with the parent's original
 				// timestamps), so the timestamp-handoff check measures the parent's whole
 				// conversation length, not a handoff gap, and misses for any parent older
@@ -365,23 +375,39 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
 				return false // already rejected this (owner, foreign) pair
-			case resolveRotation && isSessionRotation(projectPath, owner, hs.SessionID):
-				debuglog.Logger.Info("adopting rotated claude session",
-					"id", s.ID, "old", owner, "new", hs.SessionID)
+			case !resolveRotation:
+				// UI path: the rotation check reads transcripts off disk, which must not
+				// block the render loop. Defer to the next worker cycle (~500ms), which
+				// re-evaluates with resolveRotation=true.
+				return false
 			default:
-				// Foreign (nested child), or deferred from the UI path. Cache the
-				// rejection only when we actually evaluated it (worker path), so a
-				// persistent foreign id doesn't rescan transcripts every cycle; the
-				// UI path leaves the verdict to the worker.
-				if resolveRotation {
-					s.mu.Lock()
-					s.rotRejectOwner = owner
-					s.rotRejectForeign = hs.SessionID
-					s.mu.Unlock()
+				// Only a confirmed rotation (rotationYes) may proceed to the adoption
+				// block below — every other verdict returns here. Keep this an explicit
+				// guard, not a fall-through-by-not-returning: a stray statement after this
+				// block or a reordered case must not be able to silently route an adopted
+				// rotation to a no-op (the hook would stay frozen on the dead owner id).
+				if v := sessionRotationVerdict(projectPath, owner, hs.SessionID); v != rotationYes {
+					if v == rotationUnknown && s.bumpUndecidedRotation(owner, hs.SessionID) {
+						// The rotated transcript hasn't flushed a timestamped entry yet (its
+						// SessionStart hook beat the first user turn to disk). Reject WITHOUT
+						// neg-caching so the next cycle re-evaluates once it flushes — neg-caching
+						// here would freeze the hook on the dead owner session forever (issue #23).
+						debuglog.Logger.Debug("deferring undecided claude session",
+							"id", s.ID, "owner", owner, "foreign", hs.SessionID)
+						return false
+					}
+					// rotationNo (a genuine nested-child eval harness), or a pair that has
+					// stayed undecidable past the retry cap (e.g. a permanently unreadable
+					// owner transcript). Neg-cache so a persistent foreign id doesn't rescan
+					// transcripts every cycle.
+					s.negCacheRotation(owner, hs.SessionID)
 					debuglog.Logger.Debug("ignoring foreign claude session",
 						"id", s.ID, "owner", owner, "foreign", hs.SessionID)
+					return false
 				}
-				return false
+				debuglog.Logger.Info("adopting rotated claude session",
+					"id", s.ID, "old", owner, "new", hs.SessionID)
+				// proceed to the adoption block below
 			}
 		}
 	}
@@ -444,6 +470,43 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		s.FirstPrompt = hs.UserPrompt
 	}
 	return changed
+}
+
+// rotationUndecidedRetryCap bounds how many consecutive worker cycles a single
+// (owner, foreign) pair may stay undecidable in sessionRotationVerdict before we give
+// up and neg-cache it. The transient /clear-flush race clears in a cycle or two, so the
+// happy path never approaches the cap; it only catches a pair that can never decide
+// (e.g. a permanently unreadable owner transcript) and would otherwise rescan
+// transcripts on every pass forever.
+const rotationUndecidedRetryCap = 10
+
+// bumpUndecidedRotation records that the (owner, foreign) pair was undecidable this
+// cycle and reports whether to keep deferring. It returns false once the pair has been
+// undecidable for rotationUndecidedRetryCap consecutive cycles, signalling the caller to
+// neg-cache instead. A change of pair resets the counter.
+func (s *Session) bumpUndecidedRotation(owner, foreign string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rotUndecidedOwner != owner || s.rotUndecidedForeign != foreign {
+		s.rotUndecidedOwner = owner
+		s.rotUndecidedForeign = foreign
+		s.rotUndecidedCount = 0
+	}
+	s.rotUndecidedCount++
+	return s.rotUndecidedCount <= rotationUndecidedRetryCap
+}
+
+// negCacheRotation records the (owner, foreign) pair as a confirmed non-rotation so
+// future hooks for it short-circuit without rescanning transcripts, and clears any
+// undecided-retry tracking for it.
+func (s *Session) negCacheRotation(owner, foreign string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rotRejectOwner = owner
+	s.rotRejectForeign = foreign
+	s.rotUndecidedOwner = ""
+	s.rotUndecidedForeign = ""
+	s.rotUndecidedCount = 0
 }
 
 // Restart kills and recreates the tmux session with the same config.
@@ -868,6 +931,17 @@ func (s *Session) applyHookWaiting(paneContent string, paneStatus Status, convAc
 			s.Status = StatusRunning
 			s.Acknowledged = false
 			log.Info("overridden waiting hook but pane shows running, resuming")
+		case StatusWaiting:
+			// A real permission prompt is structurally on screen now. The latch was set
+			// on an earlier finished/running frame of this same stale hook, but the agent
+			// is genuinely blocked — the pane stays authoritative for a stale waiting hook
+			// (see above), so recover to waiting instead of staying pinned to the last
+			// running we saw. Without this case the switch matched nothing and returned,
+			// leaving a genuine prompt stuck showing running when a missed session-id
+			// rotation froze the hook so no fresh hook ever reset the latch (issue #23).
+			s.Status = StatusWaiting
+			s.Acknowledged = false
+			log.Info("overridden waiting hook but pane shows waiting prompt, recovering to waiting")
 		case StatusFinished:
 			if s.Acknowledged {
 				s.Status = StatusIdle
