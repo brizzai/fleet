@@ -21,10 +21,16 @@ func NewHelpOverlay() *HelpOverlay {
 	return &HelpOverlay{}
 }
 
-func (h *HelpOverlay) Show()             { h.visible = true; h.scroll = 0 }
-func (h *HelpOverlay) Hide()             { h.visible = false }
-func (h *HelpOverlay) IsVisible() bool   { return h.visible }
-func (h *HelpOverlay) SetSize(w, ht int) { h.width = w; h.height = ht }
+func (h *HelpOverlay) Show()           { h.visible = true; h.scroll = 0 }
+func (h *HelpOverlay) Hide()           { h.visible = false }
+func (h *HelpOverlay) IsVisible() bool { return h.visible }
+
+// SetSize records the terminal size and re-clamps the scroll offset, so it
+// owns the scroll invariant on resize and View() can stay read-only.
+func (h *HelpOverlay) SetSize(w, ht int) {
+	h.width, h.height = w, ht
+	h.scroll = clampInt(h.scroll, 0, h.layout().maxScroll)
+}
 
 // Update scrolls when the sheet overflows; any non-scroll key closes it.
 func (h *HelpOverlay) Update(msg tea.Msg) (*HelpOverlay, tea.Cmd) {
@@ -88,24 +94,29 @@ func (h *HelpOverlay) layout() helpLayout {
 	n := len(entries)
 
 	const (
-		keyCap  = 14 // widest key label is "= = then digit"
-		gutter  = 2  // space between columns
-		chromeV = 8  // border(2) + padding(2) + title+blank(2) + blank+hint(2)
-		chromeH = 6  // border(2) + padding(4)
-		marginH = 2  // breathing room from the screen edges
-		indRows = 2  // ⋮ above / ⋮ below lines reserved when scrolling
+		gutter  = 2 // space between columns
+		marginH = 2 // breathing room from the screen edges
+		indRows = 2 // ⋮ above / ⋮ below lines reserved when scrolling
+		// Non-grid lines View() always emits: title+blank and blank+hint.
+		titleLines = 2
+		hintLines  = 2
 	)
+	// Frame overhead (border + padding) is read from DialogStyle, so the scroll
+	// math follows automatically if the dialog is ever restyled.
+	frameV := DialogStyle.GetVerticalFrameSize()
+	frameH := DialogStyle.GetHorizontalFrameSize()
 
+	// keyW is the true widest key (not capped), so colW always accounts for it —
+	// lipgloss .Width is a minimum, so a capped value could be overflowed.
 	keyW, descW := 0, 0
 	for _, e := range entries {
 		keyW = max(keyW, lipgloss.Width(e.Key))
 		descW = max(descW, lipgloss.Width(e.Desc))
 	}
-	keyW = min(keyW, keyCap)
 	colW := keyW + 2 + descW
 
-	availH := max(1, h.height-chromeV)
-	availW := max(colW, h.width-chromeH-marginH)
+	availH := max(1, h.height-frameV-titleLines-hintLines)
+	availW := max(colW, h.width-frameH-marginH)
 
 	colsByWidth := max(1, (availW+gutter)/(colW+gutter))
 	colsByHeight := ceilDiv(n, availH)
@@ -155,7 +166,6 @@ func (lay helpLayout) row(r int) string {
 // View renders the keybinding cheat sheet.
 func (h *HelpOverlay) View() string {
 	lay := h.layout()
-	h.scroll = clampInt(h.scroll, 0, lay.maxScroll)
 
 	var lines []string
 	lines = append(lines, TitleStyle.Render("Keybindings"), "")
@@ -191,6 +201,10 @@ func (h *HelpOverlay) View() string {
 	// an explicit Width would make lipgloss count the horizontal padding against
 	// the content area and wrap the longest binding.
 	box := DialogStyle.Render(strings.Join(lines, "\n"))
+	// Safety net so the box never bleeds past the screen. Below ~9 rows the
+	// frame + title + one binding + hint can't all fit and MaxHeight drops the
+	// hint — but that's sub-usable territory (the main sidebar/preview UI can't
+	// render at that height either).
 	box = lipgloss.NewStyle().MaxWidth(h.width).MaxHeight(h.height).Render(box)
 	return lipgloss.Place(h.width, h.height, lipgloss.Center, lipgloss.Center, box)
 }
