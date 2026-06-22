@@ -32,7 +32,7 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 		if idx := strings.IndexByte(prompt, '\n'); idx != -1 {
 			prompt = prompt[:idx] + "…"
 		}
-		full := "  > " + prompt
+		full := "  > " + neutralizeUnsafeWidth(prompt)
 		if lipgloss.Width(full) > width {
 			full = ansi.Truncate(full, width, "…")
 		}
@@ -300,11 +300,23 @@ func clusterHasUnsafeWidthRune(cluster string) bool {
 	return strings.ContainsFunc(cluster, isUnsafeWidthRune)
 }
 
-// isUnsafeWidthRune flags codepoints that drive emoji presentation and so have
-// font-dependent display widths the wcwidth tables can't be trusted on: the
-// emoji planes (incl. regional-indicator flags), variation selectors, and ZWJ.
-// Deliberately narrow — BMP symbols/dingbats default to text presentation and
-// measure correctly, so they stay out to avoid mangling glyphs like ✓ or →.
+// isUnsafeWidthRune flags codepoints whose terminal display width can disagree
+// with the wcwidth tables fleet measures with: the emoji planes (incl.
+// regional-indicator flags), variation selectors, and ZWJ — multi-codepoint
+// and font-ligated sequences the tables are most likely to undercount.
+//
+// Deliberately narrow. BMP default-emoji points (⌚U+231A, ⏰U+23F0, ✅U+2705,
+// ❌U+274C, ✨U+2728, …) are intentionally left OUT not because they render as
+// text — they don't, they're Emoji_Presentation=Yes — but because the width
+// table already reports them width-2, matching how the terminal draws them, so
+// there's no disagreement to close. Listing them would only turn correctly
+// rendered emoji into dots. Text-default dingbats (✓, ✗) and arrows (→) measure
+// width-1 and render width-1, so they also stay out.
+//
+// Residual gap: a cluster the table undercounts that contains none of the
+// flagged runes — e.g. a codepoint newer than the bundled Unicode tables that
+// the table calls width-1 while the font draws width-2 — still slips through.
+// Extend the ranges below if such a case is reported.
 func isUnsafeWidthRune(r rune) bool {
 	switch {
 	case r == 0x200D: // ZERO WIDTH JOINER (emoji sequences)
