@@ -207,3 +207,41 @@ func IsWorktree(repoPath string) bool {
 
 	return gitDirPath != commonDirPath
 }
+
+// revParseLayout fetches the branch name and worktree status in a single git
+// subprocess instead of the three (`rev-parse --abbrev-ref HEAD`, `--git-dir`,
+// `--git-common-dir`) it used to take. RefreshGitInfo runs this for every repo
+// on every worker cycle, so collapsing the spawn count keeps the process-global
+// fork/exec lock from serializing the status worker's fan-out against the UI's
+// own subprocess spawns (e.g. the preview's tmux capture) — the source of the
+// periodic ~0.5s update stalls.
+//
+// rev-parse emits one line per resolved item in argument order. Output is read
+// even on a non-zero exit: a repo with an unborn HEAD fails only on the trailing
+// --abbrev-ref HEAD, after the git-dir/common-dir lines are already printed, so
+// worktree detection survives. The branch is taken only when the call exits
+// cleanly, matching GetBranchName's "" on error.
+func revParseLayout(repoPath string) (branch string, isWorktree bool) {
+	out, err := gitOutput("-C", repoPath, "rev-parse",
+		"--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD")
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return "", false
+	}
+	gitDir := resolveGitDir(repoPath, lines[0])
+	commonDir := resolveGitDir(repoPath, lines[1])
+	if err == nil && len(lines) > 2 {
+		branch = strings.TrimSpace(lines[2])
+	}
+	return branch, gitDir != commonDir
+}
+
+// resolveGitDir turns a (possibly repo-relative) git-dir path from rev-parse
+// into a cleaned absolute path for comparison.
+func resolveGitDir(repoPath, p string) string {
+	p = strings.TrimSpace(p)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(repoPath, p)
+	}
+	return filepath.Clean(p)
+}
