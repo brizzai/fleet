@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-06-22
+
+### Fixed
+
+- Sessions no longer get stuck showing "running" while genuinely waiting for a permission prompt after a `/clear`-style session rotation.
+
 ## [2.11.0] - 2026-06-18
 
 ### Changed
@@ -275,7 +281,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.11.1...HEAD
+[2.11.1]: https://github.com/brizzai/fleet/releases/tag/v2.11.1
 [2.11.0]: https://github.com/brizzai/fleet/releases/tag/v2.11.0
 [2.10.0]: https://github.com/brizzai/fleet/releases/tag/v2.10.0
 [2.9.0]: https://github.com/brizzai/fleet/releases/tag/v2.9.0
