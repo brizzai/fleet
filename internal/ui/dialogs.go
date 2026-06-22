@@ -413,6 +413,14 @@ type ConfirmDialog struct {
 	// when its gen matches the gen recorded when the dialog was shown.
 	scanLine string
 	scanGen  int
+
+	// requireConfirm gates y/Enter behind an explicit checkbox the user must
+	// tick first — a safety brake for the heaviest deletes (e.g. forgetting a
+	// whole origin group). confirmChecked tracks the tick; confirmLabel is the
+	// caption. Reset on every Show* so the gate never leaks across prompts.
+	requireConfirm bool
+	confirmChecked bool
+	confirmLabel   string
 }
 
 // NewConfirmDialog creates a new confirmation dialog.
@@ -430,6 +438,7 @@ func (d *ConfirmDialog) ShowDanger(title, subject string, details []string, onYe
 	d.onYes = onYes
 	d.scanLine = ""
 	d.scanGen = 0 // 0 is unused (nextHolderScanGen yields ≥1); invalidates any in-flight scan
+	d.resetCheckbox()
 }
 
 // ShowWarning shows a warning-style confirmation dialog (yellow border).
@@ -442,6 +451,23 @@ func (d *ConfirmDialog) ShowWarning(title, subject string, details []string, onY
 	d.onYes = onYes
 	d.scanLine = ""
 	d.scanGen = 0
+	d.resetCheckbox()
+}
+
+// resetCheckbox clears the safety-checkbox gate. Called from every Show* so a
+// prior prompt's checkbox state never carries into the next one.
+func (d *ConfirmDialog) resetCheckbox() {
+	d.requireConfirm = false
+	d.confirmChecked = false
+	d.confirmLabel = ""
+}
+
+// RequireCheckbox gates this prompt behind an explicit checkbox the user must
+// tick (space) before y/Enter acts. Chain it after a Show* call, like StartScan.
+func (d *ConfirmDialog) RequireCheckbox(label string) {
+	d.requireConfirm = true
+	d.confirmChecked = false
+	d.confirmLabel = label
 }
 
 // StartScan records the generation for an in-flight async scan and shows a
@@ -470,6 +496,7 @@ func (d *ConfirmDialog) Show(message string, onYes func() tea.Msg) {
 	d.onYes = onYes
 	d.scanLine = ""
 	d.scanGen = 0
+	d.resetCheckbox()
 }
 
 func (d *ConfirmDialog) Hide()           { d.visible = false }
@@ -482,7 +509,15 @@ func (d *ConfirmDialog) SetSize(w, h int) {
 func (d *ConfirmDialog) Update(msg tea.Msg) (*ConfirmDialog, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch keyMsg.String() {
+		case " ":
+			if d.requireConfirm {
+				d.confirmChecked = !d.confirmChecked
+			}
+			return d, nil
 		case "y", "enter":
+			if d.requireConfirm && !d.confirmChecked {
+				return d, nil // gated: tick the checkbox (space) first
+			}
 			d.Hide()
 			if d.onYes != nil {
 				return d, func() tea.Msg { return d.onYes() }
@@ -545,15 +580,30 @@ func (d *ConfirmDialog) View() string {
 		b.WriteString(DimStyle.Render("  • " + d.scanLine))
 	}
 
+	// Safety checkbox: a tick the user must set before the action unlocks.
+	if d.requireConfirm {
+		b.WriteString("\n\n")
+		if d.confirmChecked {
+			b.WriteString(lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("◉ " + d.confirmLabel))
+		} else {
+			b.WriteString(DimStyle.Render("○ "+d.confirmLabel) + DimStyle.Render("  (space to confirm)"))
+		}
+	}
+
 	// Buttons.
 	b.WriteString("\n\n")
 	actionLabel := "y Confirm"
 	if d.dialogType == "danger" {
 		actionLabel = "y Delete"
 	}
+	// Grey the action while the checkbox gate is unticked so it reads as locked.
+	actionBg, actionFg := bc, ColorBg
+	if d.requireConfirm && !d.confirmChecked {
+		actionBg, actionFg = ColorBorder, ColorTextDim
+	}
 	actionBtn := lipgloss.NewStyle().
-		Background(bc).
-		Foreground(ColorBg).
+		Background(actionBg).
+		Foreground(actionFg).
 		Bold(true).
 		Padding(0, 1).
 		Render(actionLabel)

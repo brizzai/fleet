@@ -87,6 +87,14 @@ type (
 		repoPath         string
 		destroyWorkspace bool
 	}
+	// originDeleteMsg forgets a whole origin group: every checkout under it
+	// (the main repo plus any worktrees) and all their sessions. removeWorktrees
+	// mirrors the config toggle — when true, worktree checkouts are also removed
+	// from disk; the main repo's folder is always kept.
+	originDeleteMsg struct {
+		repoPaths       []string
+		removeWorktrees bool
+	}
 	pendingDeleteExpireMsg struct {
 		nonce string
 	}
@@ -602,6 +610,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case repoDeleteMsg:
 		return h.deferDeleteRepo(msg)
+
+	case originDeleteMsg:
+		return h.deferDeleteOrigin(msg)
 
 	case pendingDeleteExpireMsg:
 		return h.handlePendingDeleteExpire(msg)
@@ -1742,7 +1753,11 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		// On a repo/worktree header, delete acts on the container (§ confirmDeleteHeader).
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
-			return h, h.confirmDeleteHeader(h.flatItems[h.cursor])
+			item := h.flatItems[h.cursor]
+			if item.IsOriginHeader {
+				return h, h.confirmDeleteOrigin(item)
+			}
+			return h, h.confirmDeleteHeader(item)
 		}
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("delete session", s.Title, true)
@@ -2229,6 +2244,122 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// checkoutsForOrigin returns every known checkout (repo root) that maps to the
+// given origin key, scanning the same three sources the sidebar renders from
+// (sessions, pinned repos, pending workspaces). Deduped. Origin-level delete must
+// reach every checkout even when the origin group is collapsed — collapsed
+// checkouts aren't present in flatItems.
+func (h *Home) checkoutsForOrigin(origin string) []string {
+	if origin == "" {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(repo string) {
+		if repo == "" || h.originOf(repo) != origin {
+			return
+		}
+		if _, ok := seen[repo]; ok {
+			return
+		}
+		seen[repo] = struct{}{}
+		out = append(out, repo)
+	}
+	for _, s := range h.sessions {
+		add(session.GetRepoRoot(s.ProjectPath))
+	}
+	for repo := range h.pinnedRepos {
+		add(repo)
+	}
+	for _, pw := range h.pendingWorkspaces {
+		if pw != nil {
+			add(pw.RepoPath)
+		}
+	}
+	return out
+}
+
+// confirmDeleteOrigin handles `d` pressed on an origin header. Scope is the whole
+// group: every checkout under the origin (the main repo plus any worktrees) and
+// all their sessions. Because that wipes a group at once, the confirm is gated
+// behind a checkbox. Whether worktree directories are removed from disk follows
+// the origin_delete_removes_worktrees setting (default on); the main repo's
+// folder is always kept.
+func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
+	checkouts := h.checkoutsForOrigin(item.OriginKey)
+	if len(checkouts) == 0 {
+		return nil
+	}
+	removeWorktrees := h.cfg.GetOriginDeleteRemovesWorktrees()
+
+	sessionCount := 0
+	var worktrees []string
+	for _, repo := range checkouts {
+		sessionCount += h.countSessionsForRepo(repo)
+		if h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo] {
+			worktrees = append(worktrees, repo)
+		}
+	}
+
+	details := []string{
+		fmt.Sprintf("Forgets %d checkout(s) · %d session(s)", len(checkouts), sessionCount),
+	}
+	if removeWorktrees && len(worktrees) > 0 {
+		details = append(details,
+			fmt.Sprintf("Removes %d worktree director(ies) from disk", len(worktrees)),
+			"Main repo folder kept",
+		)
+	} else {
+		details = append(details, "No directories removed — checkouts just un-tracked")
+	}
+	details = append(details, "Press u to undo within 5s")
+
+	label := item.OriginLabel
+	if label == "" {
+		label = labelForOrigin(item.OriginKey)
+	}
+	h.actionLog.Add("delete origin", label, true)
+	h.confirmDialog.ShowDanger("Forget entire origin?", label, details, func() tea.Msg {
+		return originDeleteMsg{repoPaths: checkouts, removeWorktrees: removeWorktrees}
+	})
+	h.confirmDialog.RequireCheckbox("Yes, forget the whole origin group")
+
+	// Best-effort: list the dev processes that removing the worktrees will
+	// force-stop. Aggregate across every worktree under the origin into the one
+	// async scan line (reuses the worktreeHoldersScannedMsg handler).
+	if removeWorktrees && len(worktrees) > 0 {
+		gen := h.nextHolderScanGen()
+		h.confirmDialog.StartScan(gen, "Checking for running processes…")
+		editor := h.cfg.GetEditor()
+		dirs := worktrees
+		return func() tea.Msg {
+			var holders []proc.Holder
+			for _, dir := range dirs {
+				hs, _ := proc.FindHolders(dir, []string{editor})
+				holders = append(holders, hs...)
+			}
+			return worktreeHoldersScannedMsg{gen: gen, holders: holders}
+		}
+	}
+	return nil
+}
+
+// deferDeleteOrigin forgets a whole origin group by fanning out to deferDeleteRepo
+// per checkout — so each checkout follows its own rule (sessions → undoable
+// deferred delete, worktree → optional `git worktree remove`, empty main repo →
+// unpin) and `u`-undo keeps working per session (LIFO).
+func (h *Home) deferDeleteOrigin(msg originDeleteMsg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	for _, repo := range msg.repoPaths {
+		destroyWorkspace := msg.removeWorktrees && (h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo])
+		_, cmd := h.deferDeleteRepo(repoDeleteMsg{repoPath: repo, destroyWorkspace: destroyWorkspace})
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return h, tea.Batch(cmds...)
 }
 
 func (h *Home) nextHolderScanGen() int {
