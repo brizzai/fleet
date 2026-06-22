@@ -242,7 +242,7 @@ func TestUpdateHookStatusCapsUndecidedRotation(t *testing.T) {
 
 	// Owner claims ownership, but its transcript is never written — so the proximity
 	// check can't read ownerLast and the (owner, foreign) pair stays undecidable.
-	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
+	s := &Session{ID: "abcd1234-1700000000", ProjectPath: proj, Status: StatusRunning}
 	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "owner-aaa", UpdatedAt: time.Now()}, true)
 
 	// Foreign session has a real transcript, but with no readable owner transcript the
