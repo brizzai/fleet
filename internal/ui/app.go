@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"os/exec"
@@ -14,6 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/chrome"
@@ -30,10 +34,6 @@ import (
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/workspace"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	overlay "github.com/rmhubbert/bubbletea-overlay"
 )
 
 const (
@@ -356,7 +356,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	fi := textinput.New()
 	fi.Placeholder = "filter..."
 	fi.CharLimit = 64
-	fi.Width = 20
+	fi.SetWidth(20)
 
 	// Apply theme — PaletteByName falls back to the flagship default when
 	// cfg.Theme is empty or unknown.
@@ -521,7 +521,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return h.handleKey(msg)
 
 	case drawerAnimTickMsg: // drive the terminal-drawer slide
@@ -1288,15 +1288,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View implements tea.Model.
-func (h *Home) View() string {
+func (h *Home) View() tea.View {
 	if h.isAttaching.Load() {
-		return ""
+		return h.chrome("")
 	}
 	if h.width == 0 {
-		return lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("   fleet")
+		return h.chrome(lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("   fleet"))
 	}
 	if !h.booted {
-		return RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame)
+		return h.chrome(RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame))
 	}
 	base := h.renderBody()
 	// Command palette is a true overlay: render it on top of the main UI so
@@ -1304,7 +1304,10 @@ func (h *Home) View() string {
 	// dimmed first so the palette visually lifts above the content.
 	if h.commandPalette.IsVisible() {
 		base = dimBackdrop(base)
-		base = overlay.Composite(h.commandPalette.View(), base, overlay.Center, overlay.Center, 0, 0)
+		pv := h.commandPalette.View()
+		x := (h.width - lipgloss.Width(pv)) / 2
+		y := (h.height - lipgloss.Height(pv)) / 2
+		base = overlayAt(pv, base, x, y)
 	}
 	// Contextual tip box — suppressed while a modal owns the screen so a sticky
 	// tip never paints over a dialog.
@@ -1314,7 +1317,7 @@ func (h *Home) View() string {
 	}
 	toast := h.toasts.View(h.width)
 	if tip == "" && toast == "" {
-		return base
+		return h.chrome(base)
 	}
 	// Stack toast(s) above the tip, then anchor the block bottom-right with a
 	// 1-cell right margin and a 1-row lift so it clears the help-bar baseline.
@@ -1326,7 +1329,36 @@ func (h *Home) View() string {
 			stack = tip
 		}
 	}
-	return overlay.Composite(stack, base, overlay.Right, overlay.Bottom, -1, -1)
+	x := h.width - lipgloss.Width(stack) - 1
+	y := h.height - lipgloss.Height(stack) - 1
+	return h.chrome(overlayAt(stack, base, x, y))
+}
+
+// chrome wraps rendered content into the tea.View that carries fleet's terminal
+// modes. Bubble Tea v2 reads AltScreen/MouseMode off the View every frame, so
+// every View() return path must set them or the renderer would toggle
+// alt-screen/mouse off mid-run. (v1 set these once via NewProgram options.)
+func (h *Home) chrome(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// overlayAt composites top over base with top's top-left at (x, y) using Lip
+// Gloss v2's layer compositor. Replaces rmhubbert/bubbletea-overlay, which has
+// no v2 release — its maintainer points to Lip Gloss compositing instead.
+func overlayAt(top, base string, x, y int) string {
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	return lipgloss.NewCompositor(
+		lipgloss.NewLayer(base),
+		lipgloss.NewLayer(top).X(x).Y(y).Z(1),
+	).Render()
 }
 
 // modalOpen reports whether any full-screen view currently owns the screen.
@@ -1434,7 +1466,7 @@ func (h *Home) renderBody() string {
 	// Status counts ride the Sessions panel's top-right border (inset into
 	// the title border, after the "Sessions" label). The top app bar no
 	// longer renders them.
-	statusTitle := h.statusCountsLine("")
+	statusTitle := h.statusCountsLine(nil)
 
 	switch mode {
 	case "single":
@@ -1603,7 +1635,7 @@ func (h *Home) renderBody() string {
 
 // --- Key handling ---
 
-func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Route to active dialog/overlay.
 	if h.helpOverlay.IsVisible() {
 		overlay, cmd := h.helpOverlay.Update(msg)
@@ -1692,7 +1724,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			h.launchpad.Move(-1)
 			return h, nil
-		case " ":
+		case "space":
 			h.launchpad.Toggle()
 			return h, nil
 		case "A":
@@ -1830,7 +1862,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, h.attachSelected()
 		}
 		return h, h.enterFocusMode()
-	case " ":
+	case "space":
 		// Jump to next waiting (or finished) session.
 		h.jumpToNextAttentionSession()
 		analytics.Track(analytics.EventSpaceJump, nil)
@@ -2632,8 +2664,8 @@ func (h *Home) clearPendingFork() {
 
 // isEscKey reports whether msg is a KeyMsg representing the ESC key.
 func isEscKey(msg tea.Msg) bool {
-	km, ok := msg.(tea.KeyMsg)
-	return ok && km.Type == tea.KeyEsc
+	km, ok := msg.(tea.KeyPressMsg)
+	return ok && km.Code == tea.KeyEsc
 }
 
 // dispatchForkToWorktree builds the forkSessionMsg for a resolved destination
@@ -3017,7 +3049,7 @@ func (h *Home) focusTick() tea.Cmd {
 	})
 }
 
-func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := h.selectedSession()
 	if s == nil || !s.IsAlive() {
 		h.focusMode = false
@@ -3025,7 +3057,7 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	if msg.Type == tea.KeyEsc {
+	if msg.Code == tea.KeyEsc {
 		h.focusMode = false
 		h.sidebarDirty = true
 		h.actionLog.Add("unfocus preview", s.Title, true)
@@ -3042,7 +3074,7 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	target := s.GetTmuxSession().Name
 
-	switch msg.Type {
+	switch msg.Code {
 	case tea.KeyEnter:
 		cc.SendKeys(target, "Enter")
 	case tea.KeyBackspace:
@@ -3069,25 +3101,14 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cc.SendKeys(target, "PageDown")
 	case tea.KeyDelete:
 		cc.SendKeys(target, "DC")
-	case tea.KeyCtrlC:
-		cc.SendKeys(target, "C-c")
-	case tea.KeyCtrlD:
-		cc.SendKeys(target, "C-d")
-	case tea.KeyCtrlA:
-		cc.SendKeys(target, "C-a")
-	case tea.KeyCtrlU:
-		cc.SendKeys(target, "C-u")
-	case tea.KeyCtrlL:
-		cc.SendKeys(target, "C-l")
-	case tea.KeyCtrlW:
-		cc.SendKeys(target, "C-w")
-	case tea.KeyCtrlK:
-		cc.SendKeys(target, "C-k")
-	case tea.KeyRunes:
-		cc.SendLiteralKeys(target, string(msg.Runes))
 	default:
-		if str := msg.String(); str != "" {
-			cc.SendLiteralKeys(target, str)
+		// Ctrl chords (⌃C/⌃D/⌃A/⌃U/⌃L/⌃W/⌃K/…) map to tmux "C-x" so the
+		// session's own line-editing keeps working; printable text passes
+		// through literally.
+		if c, ok := ctrlChord(msg.String()); ok {
+			cc.SendKeys(target, c)
+		} else if msg.Text != "" {
+			cc.SendLiteralKeys(target, msg.Text)
 		}
 	}
 	return h, nil
@@ -4166,7 +4187,7 @@ func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
 	if len(sessions) == 0 {
 		return
 	}
-	themeKey := string(ColorBg) + string(ColorAccent) // any theme-change invalidates the cache
+	themeKey := colorHex(ColorBg) + colorHex(ColorAccent) // any theme-change invalidates the cache
 	gitSnap := h.gitInfo()
 
 	for _, s := range sessions {
@@ -4207,7 +4228,7 @@ func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tm
 	branch := ""
 	origin := ""
 	prSummary := ""
-	prColor := string(ColorTextDim)
+	prColor := colorHex(ColorTextDim)
 	if info != nil {
 		branch = info.Branch
 		origin = strings.TrimPrefix(info.OriginKey, "local:")
@@ -4216,18 +4237,18 @@ func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tm
 				prSummary = txt
 				// Reuse the sidebar/preview badge color logic so draft, merged,
 				// fail, approved, and pending stay consistent across the UI.
-				if c, ok := prBadgeStyle(info.PR).GetForeground().(lipgloss.Color); ok {
-					prColor = string(c)
+				if fg := prBadgeStyle(info.PR).GetForeground(); fg != nil {
+					prColor = colorHex(fg)
 				}
 			}
 		}
 	}
 	return tmux.StatusBarOpts{
-		StripBg:     string(ColorBorder),
-		StripFg:     string(ColorText),
-		Dim:         string(ColorTextDim),
-		BorderColor: string(ColorBorder),
-		AccentColor: string(ColorAccent),
+		StripBg:     colorHex(ColorBorder),
+		StripFg:     colorHex(ColorText),
+		Dim:         colorHex(ColorTextDim),
+		BorderColor: colorHex(ColorBorder),
+		AccentColor: colorHex(ColorAccent),
 		Origin:      origin,
 		PRSummary:   prSummary,
 		PRColor:     prColor,
@@ -4544,7 +4565,7 @@ func (h *Home) renderHeader() string {
 	logo := lipgloss.NewStyle().Foreground(ColorBrand).Bold(true).Render("❯_")
 	title := logo + " " + TitleStyle.Render("fleet")
 
-	breadcrumb := h.cursorBreadcrumb("")
+	breadcrumb := h.cursorBreadcrumb(nil)
 
 	left := title
 	if breadcrumb != "" {
@@ -4578,7 +4599,7 @@ func (h *Home) cursorBarContext() BarContext {
 // cursorBreadcrumb returns "origin › checkout › session-title" for the row
 // currently under the cursor. Empty string if there's no useful path (boot,
 // empty fleet). Honours bg so it inlays into the header surface cleanly.
-func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
+func (h *Home) cursorBreadcrumb(bg color.Color) string {
 	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
 		return ""
 	}
@@ -4635,7 +4656,7 @@ func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
 // origin/checkout pills (renderStatusSummary) so the visual language stays
 // consistent across the sidebar. Idle keeps its "N idle" text — knowing the
 // total fleet size is useful info, but it doesn't deserve a glyph.
-func (h *Home) statusCountsLine(bg lipgloss.Color) string {
+func (h *Home) statusCountsLine(bg color.Color) string {
 	counts := make(map[session.Status]int)
 	for _, s := range h.sessions {
 		counts[s.GetStatus()]++

@@ -1,13 +1,27 @@
 package ui
 
 import (
+	"fmt"
+	"image/color"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/session"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
+
+// colorHex renders a color.Color as a "#rrggbb" string for the consumers that
+// still need a hex string rather than a color.Color: the tmux status bar (which
+// takes string colors) and the splash gradient math. Lip Gloss v2 colors are
+// color.Color values, so we derive the hex from their RGBA components.
+func colorHex(c color.Color) string {
+	if c == nil {
+		return ""
+	}
+	r, g, b, _ := c.RGBA()
+	return fmt.Sprintf("#%02x%02x%02x", uint8(r>>8), uint8(g>>8), uint8(b>>8))
+}
 
 // Initial colors match the default Fleet Pink palette. ApplyPalette reassigns
 // these when a theme is loaded, so a fresh fleet without a configured theme

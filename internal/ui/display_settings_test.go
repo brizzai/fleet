@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/config"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // resetDisplayFlags restores the package display globals to their defaults so
@@ -181,10 +181,10 @@ func TestOnboardingDialog_ConfirmAndSkip(t *testing.T) {
 	if v := d.View(); !strings.Contains(v, "Welcome to fleet") {
 		t.Fatalf("onboarding View() missing title:\n%s", v)
 	}
-	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRight}) // advance theme
+	d, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyRight}) // advance theme
 	wantTheme := BuiltinPalettes[1].Name
 	// Update mutates the shared cfg pointer; we assert on cfg, not the return.
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cfg.Theme != wantTheme {
 		t.Errorf("confirm set theme %q, want %q", cfg.Theme, wantTheme)
 	}
@@ -197,8 +197,8 @@ func TestOnboardingDialog_ConfirmAndSkip(t *testing.T) {
 	d2 := NewOnboardingDialog(cfg2)
 	d2.SetSize(120, 40)
 	d2.Show()
-	d2, _ = d2.Update(tea.KeyMsg{Type: tea.KeyRight})
-	_, _ = d2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	d2, _ = d2.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	_, _ = d2.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
 	if cfg2.Theme != "nord" {
 		t.Errorf("skip should revert theme to nord, got %q", cfg2.Theme)
 	}

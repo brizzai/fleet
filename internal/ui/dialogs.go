@@ -2,14 +2,15 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
@@ -56,7 +57,7 @@ func NewNewSessionDialog() *NewSessionDialog {
 	ti := textinput.New()
 	ti.Placeholder = "~/code/my-project"
 	ti.CharLimit = 256
-	ti.Width = 40
+	ti.SetWidth(40)
 	ti.Focus()
 
 	return &NewSessionDialog{
@@ -97,7 +98,7 @@ func (d *NewSessionDialog) SetSize(width, height int) {
 	if inputWidth < 20 {
 		inputWidth = 20
 	}
-	d.pathInput.Width = inputWidth
+	d.pathInput.SetWidth(inputWidth)
 }
 
 // Update handles input events for the dialog.
@@ -314,7 +315,7 @@ func NewRenameDialog() *RenameDialog {
 	ti := textinput.New()
 	ti.Placeholder = "session name"
 	ti.CharLimit = 64
-	ti.Width = 40
+	ti.SetWidth(40)
 	ti.Focus()
 
 	return &RenameDialog{
@@ -343,7 +344,7 @@ func (d *RenameDialog) SetSize(w, h int) {
 	if inputWidth < 20 {
 		inputWidth = 20
 	}
-	d.titleInput.Width = inputWidth
+	d.titleInput.SetWidth(inputWidth)
 }
 
 // Update handles input events for the rename dialog.
@@ -496,7 +497,7 @@ func (d *ConfirmDialog) Update(msg tea.Msg) (*ConfirmDialog, tea.Cmd) {
 	return d, nil
 }
 
-func (d *ConfirmDialog) borderColor() lipgloss.Color {
+func (d *ConfirmDialog) borderColor() color.Color {
 	switch d.dialogType {
 	case "danger":
 		return ColorRed

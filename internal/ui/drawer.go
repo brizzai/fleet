@@ -29,8 +29,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -328,7 +328,7 @@ func (h *Home) restartShell(sh *shell.Shell) tea.Cmd {
 // the active shell, reserving a small set of Ctrl chords for the chrome (new /
 // close / switch / attach) plus ` to close. There is no menu mode — Esc passes
 // through to the shell.
-func (h *Home) handleTypingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "`":
 		return h, h.closeDrawer()
@@ -362,7 +362,7 @@ func (h *Home) handleTypingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// An exited shell has no live process to type to — ⏎ restarts it in place.
 	if sh.Status() == shell.StatusExited {
-		if msg.Type == tea.KeyEnter {
+		if msg.Code == tea.KeyEnter {
 			return h, h.restartShell(sh)
 		}
 		return h, nil
@@ -383,8 +383,8 @@ func (h *Home) handleTypingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Plain Ctrl chords (⌃A/⌃E/⌃R/⌃K/⌃C/…) translate to tmux "C-x" so the shell's
 // own line-editing keeps working; the drawer's reserved chords are intercepted
 // before this is ever reached.
-func forwardKeyToPane(cc *tmux.ControlClient, target string, msg tea.KeyMsg) {
-	switch msg.Type {
+func forwardKeyToPane(cc *tmux.ControlClient, target string, msg tea.KeyPressMsg) {
+	switch msg.Code {
 	case tea.KeyEnter:
 		cc.SendKeys(target, "Enter")
 	case tea.KeyBackspace:
@@ -413,16 +413,14 @@ func forwardKeyToPane(cc *tmux.ControlClient, target string, msg tea.KeyMsg) {
 		cc.SendKeys(target, "PageUp")
 	case tea.KeyPgDown:
 		cc.SendKeys(target, "PageDown")
-	case tea.KeyRunes:
-		cc.SendLiteralKeys(target, string(msg.Runes))
 	default:
-		s := msg.String()
-		if c, ok := ctrlChord(s); ok {
+		// Plain Ctrl chords → tmux "C-x"; printable text passes through literally.
+		if c, ok := ctrlChord(msg.String()); ok {
 			cc.SendKeys(target, c)
 			return
 		}
-		if s != "" {
-			cc.SendLiteralKeys(target, s)
+		if msg.Text != "" {
+			cc.SendLiteralKeys(target, msg.Text)
 		}
 	}
 }

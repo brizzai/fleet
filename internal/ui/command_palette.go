@@ -2,12 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/sahilm/fuzzy"
 )
 
@@ -88,7 +89,7 @@ func NewCommandPaletteDialog() *CommandPaletteDialog {
 	fi := textinput.New()
 	fi.Placeholder = "search commands, repos, worktrees..."
 	fi.CharLimit = 64
-	fi.Width = 40
+	fi.SetWidth(40)
 
 	return &CommandPaletteDialog{
 		filterInput: fi,
@@ -436,16 +437,16 @@ const paletteBadgeWidth = 4
 // renderKindBadge returns a styled, fixed-width tag that identifies the row's kind.
 func renderKindBadge(k PaletteItemKind) string {
 	var label string
-	var color lipgloss.Color
+	var col color.Color
 	switch k {
 	case PaletteKindRepo:
-		label, color = "repo", ColorPurple
+		label, col = "repo", ColorPurple
 	case PaletteKindWorktree:
-		label, color = "wkt ", ColorGreen
+		label, col = "wkt ", ColorGreen
 	default:
-		label, color = "cmd ", ColorTextDim
+		label, col = "cmd ", ColorTextDim
 	}
-	return lipgloss.NewStyle().Foreground(color).Render(label)
+	return lipgloss.NewStyle().Foreground(col).Render(label)
 }
 
 func truncRunes(s string, maxRunes int) string {
@@ -475,10 +476,13 @@ func (d *CommandPaletteDialog) dialogWidth() int {
 	return w
 }
 
-// innerContentWidth is the writable width inside the dialog box (minus DialogStyle padding).
+// innerContentWidth is the writable text width inside the dialog box. In Lip
+// Gloss v2, Style.Width sets the TOTAL frame width (border + padding included),
+// so subtract both: 2 (rounded border) + 4 (DialogStyle's Padding(1, 2), 2 each
+// side). Pre-v2 this only subtracted padding, which left rows 2 cells too wide
+// and wrapped the longest ones.
 func (d *CommandPaletteDialog) innerContentWidth() int {
-	// DialogStyle has Padding(1, 2) — subtract horizontal padding (2 each side).
-	return d.dialogWidth() - 4
+	return d.dialogWidth() - 6
 }
 
 func (d *CommandPaletteDialog) boxed(content string) string {

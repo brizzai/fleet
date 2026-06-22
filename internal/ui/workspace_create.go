@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/workspace"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -79,13 +79,13 @@ func NewCreateWorkspaceDialog() *CreateWorkspaceDialog {
 	ni := textinput.New()
 	ni.Placeholder = "workspace name"
 	ni.CharLimit = 64
-	ni.Width = 40
+	ni.SetWidth(40)
 	ni.Focus()
 
 	bi := textinput.New()
 	bi.Placeholder = "branch name"
 	bi.CharLimit = 128
-	bi.Width = 40
+	bi.SetWidth(40)
 
 	return &CreateWorkspaceDialog{
 		nameInput:   ni,

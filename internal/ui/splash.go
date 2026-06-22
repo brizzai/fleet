@@ -5,7 +5,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // 6-row block-letter wordmark "FLEET" (ANSI Shadow style).
@@ -122,8 +122,8 @@ func gradientLine(s string) string {
 	if n == 0 {
 		return ""
 	}
-	c1 := hexToRGB(string(ColorAccent))
-	c2 := hexToRGB(string(ColorPurple))
+	c1 := hexToRGB(colorHex(ColorAccent))
+	c2 := hexToRGB(colorHex(ColorPurple))
 	var b strings.Builder
 	denom := float64(n - 1)
 	if denom == 0 {

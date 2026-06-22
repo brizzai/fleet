@@ -5,11 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/workspace"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Messages for workspace/worktree flow.
@@ -64,12 +64,12 @@ func NewWorktreeDialog() *WorktreeDialog {
 	base := textinput.New()
 	base.Placeholder = "master"
 	base.CharLimit = 128
-	base.Width = 40
+	base.SetWidth(40)
 
 	branch := textinput.New()
 	branch.Placeholder = "feature/my-feature"
 	branch.CharLimit = 128
-	branch.Width = 40
+	branch.SetWidth(40)
 
 	return &WorktreeDialog{
 		baseBranchInput: base,

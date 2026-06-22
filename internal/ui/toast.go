@@ -1,10 +1,11 @@
 package ui
 
 import (
+	"image/color"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // ToastLevel tags a toast's severity, which picks the icon + accent color.
@@ -107,7 +108,7 @@ func renderToast(t Toast, width int) string {
 // `width` is the final outer width (already clamped by the caller). Toasts pass
 // no footer; tips pass the dismiss hint. Keeping both on this one path is what
 // guarantees the stacked boxes stay the same width and shape.
-func renderHintBox(sigil string, accent lipgloss.TerminalColor, body, footer string, width int) string {
+func renderHintBox(sigil string, accent color.Color, body, footer string, width int) string {
 	// innerWidth is the content area (inside border + padding); reserve 2 cells
 	// for the sigil prefix (line 0) or hanging indent (line 1+).
 	innerWidth := width - toastBorderCols - 2*toastInnerHPad
@@ -141,7 +142,7 @@ func renderHintBox(sigil string, accent lipgloss.TerminalColor, body, footer str
 		Render(b.String())
 }
 
-func toastStyle(level ToastLevel) (lipgloss.TerminalColor, string) {
+func toastStyle(level ToastLevel) (color.Color, string) {
 	switch level {
 	case ToastSuccess:
 		return ColorGreen, "✓"
