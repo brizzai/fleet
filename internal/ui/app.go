@@ -564,6 +564,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
 		s.Agent = ag
+		// Record which conversation we're forking from. The fork resumes the
+		// source session's ClaudeSessionID; if that id is stale (a missed
+		// rotation), the fork opens the wrong conversation (issue #142). Logging
+		// the source id + parent claude id here lets a bug report pin whether the
+		// parent we forked was the source's current conversation.
+		debuglog.Logger.Info("forking session",
+			"newID", s.ID,
+			"newTitle", msg.title,
+			"sourceID", msg.sourceSessionID,
+			"sourceTitle", msg.sourceTitle,
+			"parentClaude", msg.parentClaudeSessionID,
+			"destPath", msg.path)
 		parentSessionID := msg.parentClaudeSessionID
 		sourcePath := msg.sourcePath
 		destPath := msg.path
@@ -2623,12 +2635,16 @@ func (h *Home) forkSelected() tea.Cmd {
 	}
 	title := s.Title + " (fork)"
 	claudeSessionID := s.ClaudeSessionID
+	sourceID := s.ID
+	sourceTitle := s.Title
 	path := s.ProjectPath
 	workspaceName := s.WorkspaceName
 	parentAgent := s.Agent
 	return func() tea.Msg {
 		return forkSessionMsg{
 			parentClaudeSessionID: claudeSessionID,
+			sourceSessionID:       sourceID,
+			sourceTitle:           sourceTitle,
 			sourcePath:            path,
 			path:                  path,
 			title:                 title,
@@ -2643,6 +2659,7 @@ func (h *Home) forkSelected() tea.Cmd {
 // targeting the chosen destination.
 type forkContext struct {
 	parentClaudeSessionID string
+	parentSessionID       string // fleet id of the session being forked (for diagnostics)
 	parentProjectPath     string
 	parentTitle           string
 }
@@ -2668,10 +2685,14 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 		title = ctx.parentTitle + " (" + destWorkspaceName + ")"
 	}
 	parentClaudeSessionID := ctx.parentClaudeSessionID
+	sourceID := ctx.parentSessionID
+	sourceTitle := ctx.parentTitle
 	sourcePath := ctx.parentProjectPath
 	return func() tea.Msg {
 		return forkSessionMsg{
 			parentClaudeSessionID: parentClaudeSessionID,
+			sourceSessionID:       sourceID,
+			sourceTitle:           sourceTitle,
 			sourcePath:            sourcePath,
 			path:                  destPath,
 			title:                 title,
@@ -2708,6 +2729,7 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	}
 	h.pendingForkCtx = &forkContext{
 		parentClaudeSessionID: s.ClaudeSessionID,
+		parentSessionID:       s.ID,
 		parentProjectPath:     s.ProjectPath,
 		parentTitle:           s.Title,
 	}

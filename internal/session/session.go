@@ -392,7 +392,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 						// SessionStart hook beat the first user turn to disk). Reject WITHOUT
 						// neg-caching so the next cycle re-evaluates once it flushes — neg-caching
 						// here would freeze the hook on the dead owner session forever (issue #23).
-						debuglog.Logger.Debug("deferring undecided claude session",
+						debuglog.Logger.Info("deferring undecided claude session",
 							"id", s.ID, "owner", owner, "foreign", hs.SessionID)
 						return false
 					}
@@ -401,7 +401,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 					// owner transcript). Neg-cache so a persistent foreign id doesn't rescan
 					// transcripts every cycle.
 					s.negCacheRotation(owner, hs.SessionID)
-					debuglog.Logger.Debug("ignoring foreign claude session",
+					debuglog.Logger.Info("ignoring foreign claude session",
 						"id", s.ID, "owner", owner, "foreign", hs.SessionID)
 					return false
 				}

@@ -32,6 +32,8 @@ type sessionCreateMsg struct {
 // destination's Claude project dir before the new session launches.
 type forkSessionMsg struct {
 	parentClaudeSessionID string
+	sourceSessionID       string // fleet id of the session being forked (for diagnostics)
+	sourceTitle           string // title of the session being forked (for diagnostics)
 	sourcePath            string
 	path                  string
 	title                 string
