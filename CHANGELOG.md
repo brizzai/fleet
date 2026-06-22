@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-06-22
+
+### Added
+
+- Press `d` on an origin row to forget the whole repo group at once (every checkout and its sessions), gated by a safety checkbox you must tick first. A new Behavior setting controls whether its worktree directories are also removed.
+
+### Fixed
+
+- Emoji and other font-dependent glyphs in a session's preview no longer push the top navbar off-screen or scramble the layout.
+
 ## [2.11.1] - 2026-06-22
 
 ### Fixed
@@ -281,7 +291,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.11.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.12.0...HEAD
+[2.12.0]: https://github.com/brizzai/fleet/releases/tag/v2.12.0
 [2.11.1]: https://github.com/brizzai/fleet/releases/tag/v2.11.1
 [2.11.0]: https://github.com/brizzai/fleet/releases/tag/v2.11.0
 [2.10.0]: https://github.com/brizzai/fleet/releases/tag/v2.10.0
