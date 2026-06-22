@@ -21,7 +21,7 @@ func TestNeutralizeUnsafeWidth(t *testing.T) {
 		{"hebrew untouched", "שלום עולם", "שלום עולם"},
 		{"simple emoji to dots", "ship it 🚀 now", "ship it .. now"},
 		{"heart with VS16 to dots", "love ❤️ this", "love .. this"},
-		{"zwj family emoji to dots", "team \U0001F468‍\U0001F469‍\U0001F467 here", "team .. here"},
+		{"zwj family emoji to dots", "team \U0001F468\u200d\U0001F469\u200d\U0001F467 here", "team .. here"},
 		{"flag to dots", "lang \U0001F1EE\U0001F1F1 set", "lang .. set"},
 	}
 
@@ -42,7 +42,7 @@ func TestNeutralizeUnsafeWidthPreservesMeasuredWidth(t *testing.T) {
 	for _, in := range []string{
 		"ship it 🚀 now",
 		"love ❤️ this",
-		"team \U0001F468‍\U0001F469‍\U0001F467 here",
+		"team \U0001F468\u200d\U0001F469\u200d\U0001F467 here",
 		"\U0001F1EE\U0001F1F1 multi 🎉🎉 emoji",
 	} {
 		out := neutralizeUnsafeWidth(in)
