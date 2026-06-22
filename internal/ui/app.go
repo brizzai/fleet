@@ -33,6 +33,7 @@ import (
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/tmux"
+	"github.com/brizzai/fleet/internal/vterm"
 	"github.com/brizzai/fleet/internal/workspace"
 )
 
@@ -271,11 +272,17 @@ type Home struct {
 	drawerHeight     int            // max body rows when open (from config; clamped at render)
 	drawerCloseArmed bool           // ⌃W pressed once on a running shell; confirm close with ⌃W again
 	drawerRepo       string         // repo the drawer is scoped to (frozen at open)
-	drawerBody       string         // last off-thread capture of the active shell pane
-	drawerBodyShell  string         // shell ID drawerBody belongs to
-	drawerCursorX    int            // tmux cursor column on the active shell pane (-1 = unknown)
-	drawerHotUntil   time.Time      // while now < this, TYPING captures at ~30fps; otherwise it idles at ~2fps
-	drawerLastCapAt  time.Time      // last drawer-body capture time (drives the idle cadence)
+	drawerInnerW     int            // last-rendered drawer body inner width (drives the live emulator size)
+	drawerInnerH     int            // last-rendered drawer body inner height (stable terminal rows)
+
+	// Live terminal stream for the active shell: a tmux control-mode reader
+	// streams the pane's %output into an insulated emulator, rendered each frame
+	// (replaces the old capture-pane polling). shellStreamTarget is the tmux
+	// session the reader is attached to (changes on tab switch / restart).
+	shellReader       *tmux.OutputReader
+	shellTerm         *vterm.Terminal
+	shellStreamTarget string
+	shellWake         atomic.Bool // coalesces output→render wakes (true = one shellOutputMsg in flight)
 
 	// Slot hotkeys (RTS-style quick access: digit=jump, double-digit=attach, alt+digit or =<digit>=bind).
 	slotBindings      map[int]string // slot (0-9) -> session ID
@@ -525,37 +532,23 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h.handleKey(msg)
 
 	case drawerAnimTickMsg: // drive the terminal-drawer slide
+		h.syncShellStream() // attach/resize the live stream as the drawer opens
 		if h.drawerStep() {
 			return h, h.drawerAnimTick()
 		}
 		return h, nil
 
-	case drawerTypeTickMsg: // refresh the drawer body while in TYPING mode
+	case drawerTypeTickMsg: // backstop: keep the live stream attached + sized while open
 		if h.drawerMode != drawerTyping {
-			return h, nil // mode changed → stop the fast loop
+			return h, nil // closed → stop the loop (teardown ran on close)
 		}
-		now := time.Now()
-		// Capture at ~30fps while "hot" (just typed or output flowing), else fall
-		// back to ~2fps so a quiet shell doesn't spin capture-pane needlessly.
-		due := now.Before(h.drawerHotUntil) || now.Sub(h.drawerLastCapAt) >= 500*time.Millisecond
-		var cmd tea.Cmd
-		if due {
-			if sh := h.activeShell(); sh != nil {
-				h.drawerLastCapAt = now
-				cmd = h.fetchDrawerBody(sh)
-			}
-		}
-		return h, tea.Batch(cmd, h.drawerTypeTick())
+		h.syncShellStream()
+		return h, h.drawerTypeTick()
 
-	case drawerBodyMsg:
-		// A fresh authoritative capture: stay "hot" while output keeps changing
-		// so a streaming process refreshes at ~30fps.
-		if msg.shellID == h.drawerBodyShell && msg.content != h.drawerBody {
-			h.drawerHotUntil = time.Now().Add(750 * time.Millisecond)
-		}
-		h.drawerBody = msg.content
-		h.drawerBodyShell = msg.shellID
-		h.drawerCursorX = msg.cursorX
+	case shellOutputMsg:
+		// The reader pushed new bytes into the emulator; clear the wake latch so
+		// the next chunk can schedule another frame. Returning re-renders the View.
+		h.shellWake.Store(false)
 		return h, nil
 
 	case shellCreateResultMsg:
@@ -576,7 +569,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.drawerActiveTab = i
 			}
 		}
-		return h, h.fetchDrawerBody(msg.sh)
+		h.syncShellStream() // attach the live stream to the newly-focused shell
+		return h, nil
 
 	case shellRestartMsg:
 		if msg.err != nil {
@@ -586,6 +580,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := h.storage.UpdateShellTmuxName(msg.id, msg.tmuxName); err != nil {
 			debuglog.Logger.Error("storage: UpdateShellTmuxName", "id", msg.id, "err", err)
 		}
+		h.syncShellStream() // re-attach the live stream to the restarted session
 		return h, nil
 
 	case tickMsg:
@@ -1035,13 +1030,6 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if sel := h.selectedSession(); sel != nil && sel.IsAlive() {
 			cmds = append(cmds, h.fetchPreview(sel))
 		}
-		// Keep the terminal drawer body live while it's open (TYPING has its own
-		// faster tick, so skip here to avoid double-fetching).
-		if h.drawerVisible() && h.drawerMode != drawerTyping {
-			if sh := h.activeShell(); sh != nil {
-				cmds = append(cmds, h.fetchDrawerBody(sh))
-			}
-		}
 		return h, tea.Batch(cmds...)
 
 	case focusTickMsg:
@@ -1084,12 +1072,25 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// writer of gitInfoCache and goes through writeGitInfo's COW so
 		// concurrent readers (View, worker carry-forward) see a stable
 		// immutable snapshot. Empty repo paths are filtered defensively.
+		//
+		// Only origin grouping and the worktree flag feed BuildFlatItems;
+		// branch/dirty/PR are rendered live from the cache. So rebuild the
+		// flat item list only when one of those structural fields actually
+		// changed — otherwise a refresh just marks the sidebar dirty for a
+		// re-render. This collapses the per-cycle, all-repos burst (one
+		// message per repo) from N full rebuilds down to, in steady state,
+		// zero.
 		if msg.repo != "" {
+			prev := h.gitInfo()[msg.repo]
 			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
 				next[msg.repo] = msg.info
 				return true
 			})
-			h.rebuildFlatItems()
+			if structuralGitChange(prev, msg.info) {
+				h.rebuildFlatItems()
+			} else {
+				h.sidebarDirty = true
+			}
 		}
 		return h, nil
 
@@ -2048,6 +2049,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if h.controlClient != nil {
 			h.controlClient.Close()
 		}
+		h.teardownShellStream()
 		// Finalize all pending deletes before quitting.
 		h.finalizeAllPendingDeletes()
 
@@ -4892,6 +4894,19 @@ func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
 	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, originOf, isWorktreeOf)
 	h.sidebarDirty = true
+}
+
+// structuralGitChange reports whether a per-repo git refresh changed a field
+// that BuildFlatItems groups or sorts on (origin identity or the worktree
+// flag). Branch, dirty, and PR changes are render-only — they don't reshape the
+// sidebar tree — so they don't warrant a flat-item rebuild. A nil on either
+// side (first sighting of a repo, or a missing result) is treated as structural
+// so the initial grouping always lands.
+func structuralGitChange(prev, next *git.RepoInfo) bool {
+	if prev == nil || next == nil {
+		return true
+	}
+	return prev.OriginKey != next.OriginKey || prev.IsWorktreeRepo != next.IsWorktreeRepo
 }
 
 // originOf maps a repo root to its stable origin key, falling back to

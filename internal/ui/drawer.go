@@ -20,8 +20,10 @@ package ui
 //	                 ⌃PgUp/⌃PgDn switch tab · ⌃G full-screen attach · ` close.
 //	                 An exited shell restarts on ⏎.
 //
-// The body is a periodic off-thread capture of the active shell's pane (never
-// captured on the View thread), mirroring the preview pane.
+// The body is a live virtual-terminal emulator (internal/vterm) fed by a tmux
+// control-mode reader that streams the active shell's pane %output — byte- and
+// cursor-accurate, event-driven (no capture-pane polling). The reader sizes the
+// pane to the drawer so wrap points match; rendering happens on the View thread.
 
 import (
 	"fmt"
@@ -36,6 +38,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/tmux"
+	"github.com/brizzai/fleet/internal/vterm"
 )
 
 type drawerMode int
@@ -46,13 +49,12 @@ const (
 )
 
 const (
-	drawerMaxBodyRows    = 14                    // body cap when open (also clamped so panels keep ≥3 rows)
-	drawerMinBodyRows    = 3                     // never smaller than this when open
-	drawerMinPreviewRows = 5                     // in the dual split, leave the preview at least this many rows
-	drawerMinTermRows    = 12                    // refuse to open the drawer below this total terminal height
-	drawerSlideStep      = 0.2                   // slide progress per animation frame
-	drawerHotInterval    = 33 * time.Millisecond // ~30fps capture while typing / output flowing
-	drawerHotWindow      = 750 * time.Millisecond
+	drawerMaxBodyRows    = 14                     // body cap when open (also clamped so panels keep ≥3 rows)
+	drawerMinBodyRows    = 3                      // never smaller than this when open
+	drawerMinPreviewRows = 5                      // in the dual split, leave the preview at least this many rows
+	drawerMinTermRows    = 12                     // refuse to open the drawer below this total terminal height
+	drawerSlideStep      = 0.2                    // slide progress per animation frame
+	drawerSyncInterval   = 120 * time.Millisecond // backstop: re-attach/resize the live stream while open
 )
 
 // drawerVisible reports whether the drawer should be drawn (open or sliding).
@@ -68,12 +70,9 @@ func (h *Home) drawerHasFocus() bool {
 // --- messages ---
 
 type (
-	drawerAnimTickMsg struct{}
-	drawerTypeTickMsg struct{}
-	drawerBodyMsg     struct {
-		shellID, content string
-		cursorX          int // tmux #{cursor_x}; -1 if unknown
-	}
+	drawerAnimTickMsg    struct{}
+	drawerTypeTickMsg    struct{}
+	shellOutputMsg       struct{} // the active shell's reader pushed new bytes; coalesced render wake
 	shellCreateResultMsg struct {
 		sh  *shell.Shell
 		err error
@@ -113,7 +112,7 @@ func (h *Home) drawerStep() bool {
 }
 
 func (h *Home) drawerTypeTick() tea.Cmd {
-	return tea.Tick(drawerHotInterval, func(time.Time) tea.Msg { return drawerTypeTickMsg{} })
+	return tea.Tick(drawerSyncInterval, func(time.Time) tea.Msg { return drawerTypeTickMsg{} })
 }
 
 func easeInOut(t float64) float64 {
@@ -147,14 +146,13 @@ func (h *Home) openDrawerTyping() tea.Cmd {
 	}
 	h.drawerMode = drawerTyping
 	h.drawerCloseArmed = false
-	h.drawerHotUntil = time.Now().Add(drawerHotWindow)
 	h.drawerTarget = 1
 	cmds := []tea.Cmd{h.drawerAnimTick(), h.drawerTypeTick()}
-	if sh := h.activeShell(); sh != nil {
-		cmds = append(cmds, h.fetchDrawerBody(sh))
-	} else if first {
+	if h.activeShell() == nil && first {
 		cmds = append(cmds, h.createShell("")) // nothing to type into yet → make one
 	}
+	// The live stream attaches on the first anim/type tick (once renderDrawer has
+	// recorded the body size).
 	return tea.Batch(cmds...)
 }
 
@@ -163,6 +161,7 @@ func (h *Home) closeDrawer() tea.Cmd {
 	h.drawerMode = drawerHidden
 	h.drawerCloseArmed = false
 	h.drawerTarget = 0
+	h.teardownShellStream() // detach the live reader; the slide-out still animates
 	return h.drawerAnimTick()
 }
 
@@ -198,24 +197,84 @@ func (h *Home) switchTab(delta int) tea.Cmd {
 	}
 	h.drawerActiveTab = ((h.clampTab(n)+delta)%n + n) % n
 	h.drawerCloseArmed = false
-	return h.fetchDrawerBody(h.activeShell())
+	h.syncShellStream() // repoint the live stream to the newly-active shell
+	return nil
 }
 
-// --- body capture (off-thread) ---
+// --- live terminal stream (active shell) ---
 
-func (h *Home) fetchDrawerBody(sh *shell.Shell) tea.Cmd {
+// syncShellStream keeps the live emulator stream attached to the active shell at
+// the drawer's current body size. It's called from the drawer ticks (and on tab
+// switch / shell create / restart) and is cheap when nothing changed. Runs on
+// the Update goroutine — the only writer of the stream fields.
+func (h *Home) syncShellStream() {
+	if h.drawerMode == drawerHidden {
+		h.teardownShellStream()
+		return
+	}
+	w, ht := h.drawerInnerW, h.drawerInnerH
+	if w < 1 || ht < 1 {
+		return // the drawer hasn't rendered yet, so we don't know the body size
+	}
+	sh := h.activeShell()
 	if sh == nil {
-		return nil
+		h.teardownShellStream()
+		return
 	}
-	id := sh.ID
-	ts := sh.Tmux()
-	return func() tea.Msg {
-		content, cx, _, err := ts.CaptureWithCursor()
-		if err != nil {
-			return drawerBodyMsg{shellID: id, content: "", cursorX: -1}
+	// An exited shell has no live session to attach to — drop the reader but keep
+	// the emulator's last frame on screen until it's restarted or switched away.
+	if sh.Status() == shell.StatusExited {
+		if h.shellReader != nil {
+			h.shellReader.Close()
+			h.shellReader = nil
 		}
-		return drawerBodyMsg{shellID: id, content: content, cursorX: cx}
+		return
 	}
+	target := sh.TmuxName()
+	if h.shellTerm == nil || h.shellStreamTarget != target {
+		h.startShellStream(target, w, ht)
+		return
+	}
+	// Same shell: keep the pane + emulator sized to the drawer body.
+	if cw, ch := h.shellTerm.Size(); cw != w || ch != ht {
+		h.shellTerm.Resize(w, ht)
+		if h.shellReader != nil {
+			_ = h.shellReader.Resize(w, ht)
+		}
+	}
+}
+
+// startShellStream tears down any existing stream and attaches a fresh control
+// reader + emulator to targetSession at size w×ht. The reader's callback runs on
+// its own goroutine: it writes into the (mutex-guarded) emulator and schedules a
+// single coalesced render wake.
+func (h *Home) startShellStream(target string, w, ht int) {
+	h.teardownShellStream()
+	term := vterm.New(w, ht)
+	reader, err := tmux.NewOutputReader(target, w, ht, func(b []byte) {
+		term.Write(b)
+		if h.shellWake.CompareAndSwap(false, true) {
+			h.send(shellOutputMsg{})
+		}
+	})
+	if err != nil {
+		debuglog.Logger.Error("drawer: attach output reader", "target", target, "err", err)
+		return
+	}
+	h.shellTerm = term
+	h.shellReader = reader
+	h.shellStreamTarget = target
+}
+
+// teardownShellStream closes the active reader and drops the emulator.
+func (h *Home) teardownShellStream() {
+	if h.shellReader != nil {
+		h.shellReader.Close()
+		h.shellReader = nil
+	}
+	h.shellTerm = nil
+	h.shellStreamTarget = ""
+	h.shellWake.Store(false)
 }
 
 // --- lifecycle ---
@@ -272,6 +331,11 @@ func (h *Home) attachShell(sh *shell.Shell) tea.Cmd {
 		return nil
 	}
 	h.isAttaching.Store(true)
+	// Detach the drawer's control reader first: a full-screen attach is another
+	// client on the pane, and tmux sizes a shared window to its smallest client —
+	// leaving the small drawer-sized reader attached would shrink the full-screen
+	// view. The stream re-attaches on the next tick after Ctrl+Q returns.
+	h.teardownShellStream()
 	h.actionLog.Add("attach shell", sh.Name, true)
 	return tea.Exec(attachCmd{session: sh.Tmux()}, func(err error) tea.Msg {
 		h.isAttaching.Store(false)
@@ -373,10 +437,8 @@ func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.setError(fmt.Errorf("type-mode unavailable — Ctrl+G to attach"))
 		return h, nil
 	}
-	// Stay "hot" so the ~30fps capture keeps refreshing while you type.
-	h.drawerHotUntil = time.Now().Add(drawerHotWindow)
 	forwardKeyToPane(cc, sh.TmuxName(), msg)
-	return h, nil // output refreshes via drawerTypeTick
+	return h, nil // the echoed output streams back via the live reader
 }
 
 // forwardKeyToPane sends a keypress to a tmux pane via the control client.
@@ -442,35 +504,46 @@ func ctrlChord(s string) (string, bool) {
 func (h *Home) renderDrawer(width, maxOuterH int) string {
 	shells := h.shellsForActiveRepo()
 
-	// Body lines from the active shell's pane capture (trailing blanks trimmed),
-	// or a CTA when the scope repo has no shells.
+	innerWidth := width - 2 // panel borders
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	// Stable terminal viewport: a real terminal has a fixed size, so the body is
+	// the available rows (clamped), not content-fit. Recorded for syncShellStream,
+	// which sizes the reader + emulator to match so wrap points line up.
+	dispRows := maxOuterH - 2
+	if dispRows > drawerMaxBodyRows {
+		dispRows = drawerMaxBodyRows
+	}
+	if h.drawerHeight > 0 && dispRows > h.drawerHeight {
+		dispRows = h.drawerHeight // honor the drawer_height config cap
+	}
+	if dispRows < drawerMinBodyRows {
+		dispRows = drawerMinBodyRows
+	}
+	h.drawerInnerW = innerWidth
+	h.drawerInnerH = dispRows
+
+	// Body: the live emulator screen for the active shell, a CTA when the scope
+	// repo has no shells, or blank for a frame while the stream attaches.
 	var raw []string
-	if len(shells) == 0 {
+	cursorX, cursorY := -1, -1
+	switch {
+	case len(shells) == 0:
 		raw = []string{drawerEmptyCTA()}
-	} else {
-		active := shells[h.clampTab(len(shells))]
-		content := ""
-		if h.drawerBodyShell == active.ID {
-			content = h.drawerBody
-		}
-		raw = trimTrailingBlank(strings.Split(strings.TrimRight(stripOSC8(content), "\n"), "\n"))
-		if len(raw) == 0 {
-			raw = []string{""}
-		}
+	case h.shellTerm != nil && h.shellStreamTarget == shells[h.clampTab(len(shells))].TmuxName():
+		raw = strings.Split(strings.TrimRight(stripOSC8(h.shellTerm.Render()), "\n"), "\n")
+		cursorX, cursorY = h.shellTerm.Cursor()
+	default:
+		raw = []string{""}
+	}
+	// Pad to the full viewport (the emulator is dispRows tall; TrimRight dropped
+	// trailing blank rows, so restore them for a stable-height box).
+	for len(raw) < dispRows {
+		raw = append(raw, "")
 	}
 
-	// Inner body height: fit content, clamped to [min,max].
-	inner := len(raw)
-	if inner < drawerMinBodyRows {
-		inner = drawerMinBodyRows
-	}
-	if inner > drawerMaxBodyRows {
-		inner = drawerMaxBodyRows
-	}
-	if inner < 1 {
-		inner = 1
-	}
-	fullH := inner + 2 // + top/bottom border
+	fullH := dispRows + 2 // + top/bottom border
 	if fullH > maxOuterH {
 		fullH = maxOuterH
 	}
@@ -494,27 +567,31 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 		innerNow = 1
 	}
 
+	// While the slide is still opening, reveal the top of the viewport; the full
+	// screen shows once open.
 	body := raw
 	if len(body) > innerNow {
-		body = body[len(body)-innerNow:]
+		body = body[:innerNow]
 	}
-	// Block cursor at the real tmux cursor column on the prompt line — so it
-	// lands correctly even when a shell autosuggestion trails the cursor (rather
-	// than after it). Falls back to an end-of-line block when the column is
-	// unknown or past the rendered content.
-	if h.drawerMode == drawerTyping && len(body) > 0 {
-		last := len(body) - 1
-		line := body[last]
+
+	// Block cursor at the emulator's real (x, y). Only overlaid once fully open —
+	// the slide crops rows, so the row index would otherwise be off.
+	if h.drawerMode == drawerTyping && h.drawerProgress >= 0.999 && cursorY >= 0 && cursorY < len(body) {
 		cur := lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
-		cx := h.drawerCursorX
-		if cx < 0 || cx >= lipgloss.Width(line) {
-			body[last] = line + cur.Render(" ")
+		line := body[cursorY]
+		lw := lipgloss.Width(line)
+		if cursorX < 0 || cursorX >= lw {
+			pad := cursorX - lw
+			if pad < 0 {
+				pad = 0
+			}
+			body[cursorY] = line + strings.Repeat(" ", pad) + cur.Render(" ")
 		} else {
-			cell := ansi.Strip(ansi.Cut(line, cx, cx+1))
+			cell := ansi.Strip(ansi.Cut(line, cursorX, cursorX+1))
 			if cell == "" {
 				cell = " "
 			}
-			body[last] = ansi.Truncate(line, cx, "") + cur.Render(cell) + ansi.TruncateLeft(line, cx+1, "")
+			body[cursorY] = ansi.Truncate(line, cursorX, "") + cur.Render(cell) + ansi.TruncateLeft(line, cursorX+1, "")
 		}
 	}
 
@@ -582,14 +659,4 @@ func drawerDot(st shell.Status) string {
 	default:
 		return StatusIdleStyle.Render("○")
 	}
-}
-
-// trimTrailingBlank drops trailing visually-empty lines (a tmux pane capture is
-// full-height and mostly blank for a fresh shell).
-func trimTrailingBlank(lines []string) []string {
-	i := len(lines)
-	for i > 0 && strings.TrimSpace(ansi.Strip(lines[i-1])) == "" {
-		i--
-	}
-	return lines[:i]
 }

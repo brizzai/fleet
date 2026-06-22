@@ -465,33 +465,6 @@ func (s *Session) SendLiteralKeys(text string) error {
 	return nil
 }
 
-// CaptureWithCursor captures the pane AND the cursor position in a single tmux
-// invocation (no caching). Used by the terminal drawer to draw a block cursor
-// at the real cursor cell rather than at end-of-line — so it lands correctly
-// even when a shell autosuggestion trails the cursor. cursorX/cursorY are -1
-// when tmux didn't report them.
-func (s *Session) CaptureWithCursor() (content string, cursorX, cursorY int, err error) {
-	sentinel := captureSentinel()
-	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux",
-		"capture-pane", "-p", "-e", "-t", s.Name,
-		";", "display-message", "-p", "-t", s.Name, sentinel+"\t#{cursor_x}\t#{cursor_y}",
-	).Output()
-	if err != nil {
-		return "", -1, -1, err
-	}
-	full := string(out)
-	idx := strings.LastIndex(full, sentinel+"\t")
-	if idx < 0 {
-		return full, -1, -1, nil
-	}
-	content = full[:idx]
-	cursorX, cursorY = -1, -1
-	fmt.Sscanf(full[idx+len(sentinel):], "\t%d\t%d", &cursorX, &cursorY)
-	return content, cursorX, cursorY, nil
-}
-
 // CapturePaneFresh invalidates the cache before capturing, ensuring fresh output.
 func (s *Session) CapturePaneFresh() (string, error) {
 	s.cacheMu.Lock()
