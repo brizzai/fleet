@@ -79,7 +79,7 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 ```
 
 ## Conventions
-- Tmux session prefix: `fleet_`
+- Tmux session prefix: `fleet_` (agent sessions); drawer shells use a distinct `fleetsh_` prefix — intentionally not a prefix of `fleet_`, so shells never leak into agent-session enumeration (`tmux.ListSessions`)
 - Session ID format: `<8hex>-<unix_timestamp>`
 - SQLite DB: `~/.config/fleet/state.db`
 - Sessions grouped by git repo root in sidebar with tree lines (├─/└─)
