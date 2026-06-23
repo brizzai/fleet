@@ -80,7 +80,13 @@ func (d *BugReportDialog) SetSize(w, h int) {
 func (d *BugReportDialog) Update(msg tea.Msg) (*BugReportDialog, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return d, nil
+		// Non-key messages (notably tea.PasteMsg for cmd+v) go to the input.
+		if d.submitting {
+			return d, nil
+		}
+		var cmd tea.Cmd
+		d.descInput, cmd = d.descInput.Update(msg)
+		return d, cmd
 	}
 
 	switch keyMsg.String() {

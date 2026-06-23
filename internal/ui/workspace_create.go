@@ -162,17 +162,20 @@ func (d *CreateWorkspaceDialog) updateFocus() {
 
 // Update handles key events.
 func (d *CreateWorkspaceDialog) Update(msg tea.Msg) (*CreateWorkspaceDialog, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return d, nil
-	}
+	keyMsg, isKey := msg.(tea.KeyMsg)
 
 	if d.creating {
-		// Only allow esc during creation.
-		if keyMsg.String() == "esc" {
+		// Only allow esc during creation; ignore everything else.
+		if isKey && keyMsg.String() == "esc" {
 			d.Hide()
 		}
 		return d, nil
+	}
+
+	// Non-key messages (notably tea.PasteMsg for cmd+v, which is not a KeyMsg
+	// in Bubble Tea v2) still need to reach the focused text input.
+	if !isKey {
+		return d.routeToInput(msg)
 	}
 
 	switch keyMsg.String() {
@@ -223,7 +226,13 @@ func (d *CreateWorkspaceDialog) Update(msg tea.Msg) (*CreateWorkspaceDialog, tea
 		}
 	}
 
-	// Route to focused input.
+	return d.routeToInput(msg)
+}
+
+// routeToInput forwards a message — a fall-through key, or a non-key msg like
+// tea.PasteMsg (cmd+v) — to the focused text input, applying branch-name
+// sanitization to the branch field.
+func (d *CreateWorkspaceDialog) routeToInput(msg tea.Msg) (*CreateWorkspaceDialog, tea.Cmd) {
 	var cmd tea.Cmd
 	branchTouched := false
 	if d.isNative {

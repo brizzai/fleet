@@ -531,6 +531,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return h.handleKey(msg)
 
+	case tea.PasteMsg: // cmd+v — v2 delivers paste as its own message, not a KeyMsg
+		return h.handlePaste(msg)
+
 	case drawerAnimTickMsg: // drive the terminal-drawer slide
 		h.syncShellStream() // attach/resize the live stream as the drawer opens
 		if h.drawerStep() {
@@ -1636,34 +1639,33 @@ func (h *Home) renderBody() string {
 
 // --- Key handling ---
 
-func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Route to active dialog/overlay.
-	if h.helpOverlay.IsVisible() {
+// routeToModal forwards msg to the topmost visible modal dialog/overlay and
+// reports whether one consumed it. Shared by handleKey and handlePaste so text
+// dialogs receive both key presses and bracketed paste (tea.PasteMsg, which is
+// not a KeyMsg in Bubble Tea v2 and so never flows through handleKey).
+func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
+	switch {
+	case h.helpOverlay.IsVisible():
 		overlay, cmd := h.helpOverlay.Update(msg)
 		h.helpOverlay = overlay
-		return h, cmd
-	}
-	if h.consentDialog.IsVisible() {
+		return cmd, true
+	case h.consentDialog.IsVisible():
 		dialog, cmd := h.consentDialog.Update(msg)
 		h.consentDialog = dialog
-		return h, cmd
-	}
-	if h.onboardingDialog.IsVisible() {
+		return cmd, true
+	case h.onboardingDialog.IsVisible():
 		dialog, cmd := h.onboardingDialog.Update(msg)
 		h.onboardingDialog = dialog
-		return h, cmd
-	}
-	if h.bugReport.IsVisible() {
+		return cmd, true
+	case h.bugReport.IsVisible():
 		dialog, cmd := h.bugReport.Update(msg)
 		h.bugReport = dialog
-		return h, cmd
-	}
-	if h.settingsDialog.IsVisible() {
+		return cmd, true
+	case h.settingsDialog.IsVisible():
 		dialog, cmd := h.settingsDialog.Update(msg)
 		h.settingsDialog = dialog
-		return h, cmd
-	}
-	if h.createWorkspaceDialog.IsVisible() {
+		return cmd, true
+	case h.createWorkspaceDialog.IsVisible():
 		dialog, cmd := h.createWorkspaceDialog.Update(msg)
 		h.createWorkspaceDialog = dialog
 		// User cancelled with ESC — drop fork ctx. Submit (Enter) also hides
@@ -1672,45 +1674,89 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if isEscKey(msg) && !h.createWorkspaceDialog.IsVisible() && !h.worktreeDialog.IsVisible() {
 			h.clearPendingFork()
 		}
-		return h, cmd
-	}
-	if h.worktreeDialog.IsVisible() {
+		return cmd, true
+	case h.worktreeDialog.IsVisible():
 		dialog, cmd := h.worktreeDialog.Update(msg)
 		h.worktreeDialog = dialog
 		// Same reasoning as createWorkspaceDialog above: only ESC clears.
 		if isEscKey(msg) && !h.worktreeDialog.IsVisible() && !h.createWorkspaceDialog.IsVisible() {
 			h.clearPendingFork()
 		}
-		return h, cmd
-	}
-	if h.branchDialog.IsVisible() {
+		return cmd, true
+	case h.branchDialog.IsVisible():
 		dialog, cmd := h.branchDialog.Update(msg)
 		h.branchDialog = dialog
-		return h, cmd
-	}
-	if h.commandPalette.IsVisible() {
+		return cmd, true
+	case h.commandPalette.IsVisible():
 		dialog, cmd := h.commandPalette.Update(msg)
 		h.commandPalette = dialog
-		return h, cmd
-	}
-	if h.sessionCreateDialog.IsVisible() {
+		return cmd, true
+	case h.sessionCreateDialog.IsVisible():
 		dialog, cmd := h.sessionCreateDialog.Update(msg)
 		h.sessionCreateDialog = dialog
-		return h, cmd
-	}
-	if h.newDialog.IsVisible() {
+		return cmd, true
+	case h.newDialog.IsVisible():
 		dialog, cmd := h.newDialog.Update(msg)
 		h.newDialog = dialog
-		return h, cmd
-	}
-	if h.confirmDialog.IsVisible() {
+		return cmd, true
+	case h.confirmDialog.IsVisible():
 		dialog, cmd := h.confirmDialog.Update(msg)
 		h.confirmDialog = dialog
-		return h, cmd
-	}
-	if h.renameDialog.IsVisible() {
+		return cmd, true
+	case h.renameDialog.IsVisible():
 		dialog, cmd := h.renameDialog.Update(msg)
 		h.renameDialog = dialog
+		return cmd, true
+	}
+	return nil, false
+}
+
+// handlePaste routes bracketed paste (cmd+v → tea.PasteMsg) to whatever owns
+// text input: a modal dialog, the focused split session, the drawer's shell, or
+// the sidebar filter. v2 delivers paste as its own message, not a KeyMsg, so it
+// bypasses handleKey.
+func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if cmd, handled := h.routeToModal(msg); handled {
+		return h, cmd
+	}
+	if h.focusMode {
+		if s := h.selectedSession(); s != nil && s.IsAlive() {
+			if cc := h.getControlClient(); cc != nil {
+				_ = cc.SendLiteralKeys(s.GetTmuxSession().Name, msg.Content)
+			}
+		}
+		return h, nil
+	}
+	if h.drawerHasFocus() {
+		if sh := h.activeShell(); sh != nil {
+			if cc := h.getControlClient(); cc != nil {
+				_ = cc.SendLiteralKeys(sh.TmuxName(), msg.Content)
+			}
+		}
+		return h, nil
+	}
+	if h.filterActive {
+		var cmd tea.Cmd
+		h.filterInput, cmd = h.filterInput.Update(msg)
+		h.filterText = h.filterInput.Value()
+		h.rebuildFlatItems()
+		if len(h.flatItems) > 0 {
+			h.cursor = FirstSelectableItem(h.flatItems)
+		} else {
+			h.cursor = 0
+		}
+		h.syncViewport()
+		if previewCmd := h.fetchPreviewForSelected(); previewCmd != nil {
+			return h, tea.Batch(cmd, previewCmd)
+		}
+		return h, cmd
+	}
+	return h, nil
+}
+
+func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Route to the active modal dialog/overlay first (keys + paste share this).
+	if cmd, handled := h.routeToModal(msg); handled {
 		return h, cmd
 	}
 

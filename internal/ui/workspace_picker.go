@@ -141,16 +141,19 @@ func (d *WorktreeDialog) updateFocus() {
 
 // Update handles key events.
 func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return d, nil
-	}
+	keyMsg, isKey := msg.(tea.KeyMsg)
 
 	if d.loading {
-		if keyMsg.String() == "esc" {
+		if isKey && keyMsg.String() == "esc" {
 			d.Hide()
 		}
 		return d, nil
+	}
+
+	// Non-key messages (notably tea.PasteMsg for cmd+v, which is not a KeyMsg
+	// in Bubble Tea v2) still need to reach the focused text input.
+	if !isKey {
+		return d.routeToInput(msg)
 	}
 
 	switch keyMsg.String() {
@@ -221,7 +224,13 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		}
 	}
 
-	// Route to focused input.
+	return d.routeToInput(msg)
+}
+
+// routeToInput forwards a message — a fall-through key, or a non-key msg like
+// tea.PasteMsg (cmd+v) — to the focused branch input (no-op when the worktree
+// list has focus), applying branch-name sanitization to the new-branch field.
+func (d *WorktreeDialog) routeToInput(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 	var cmd tea.Cmd
 	switch d.focus {
 	case focusBaseBranch:

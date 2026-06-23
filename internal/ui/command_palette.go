@@ -228,7 +228,11 @@ func (d *CommandPaletteDialog) syncScroll() {
 func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return d, nil
+		// Non-key messages (notably tea.PasteMsg for cmd+v) go to the filter input.
+		var cmd tea.Cmd
+		d.filterInput, cmd = d.filterInput.Update(msg)
+		d.rebuildFiltered()
+		return d, cmd
 	}
 
 	switch keyMsg.String() {

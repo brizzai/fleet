@@ -148,7 +148,14 @@ func (d *BranchCheckoutDialog) syncScroll() {
 func (d *BranchCheckoutDialog) Update(msg tea.Msg) (*BranchCheckoutDialog, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return d, nil
+		// Non-key messages (notably tea.PasteMsg for cmd+v) go to the filter input.
+		if d.loading {
+			return d, nil
+		}
+		var cmd tea.Cmd
+		d.filterInput, cmd = d.filterInput.Update(msg)
+		d.rebuildFiltered()
+		return d, cmd
 	}
 
 	if d.loading {
