@@ -293,10 +293,11 @@ type Home struct {
 	// streams the pane's %output into an insulated emulator, rendered each frame
 	// (replaces the old capture-pane polling). shellStreamTarget is the tmux
 	// session the reader is attached to (changes on tab switch / restart).
-	shellReader       *tmux.OutputReader
-	shellTerm         *vterm.Terminal
-	shellStreamTarget string
-	shellWake         atomic.Bool // coalesces output→render wakes (true = one shellOutputMsg in flight)
+	shellReader        *tmux.OutputReader
+	shellTerm          *vterm.Terminal
+	shellStreamTarget  string
+	shellStreamPending string      // target of an in-flight async attach ("" = none); dedups dispatches
+	shellWake          atomic.Bool // coalesces output→render wakes (true = one shellOutputMsg in flight)
 
 	// Slot hotkeys (RTS-style quick access: digit=jump, double-digit=attach, alt+digit or =<digit>=bind).
 	slotBindings      map[int]string // slot (0-9) -> session ID
@@ -568,6 +569,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.shellWake.Store(false)
 		return h, nil
 
+	case shellStreamReadyMsg:
+		// An async stream attach completed; install it if still wanted.
+		h.applyShellStream(msg)
+		return h, nil
+
 	case shellCreateResultMsg:
 		if msg.err != nil {
 			h.setError(msg.err)
@@ -791,6 +797,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// flipped) Telemetry toggle — otherwise the change only takes
 		// effect on next launch.
 		analytics.SyncEnabled(h.cfg.IsTelemetryEnabled(), h.version, h.identity)
+		// Re-read the drawer height (clamped) so a change takes effect without a
+		// relaunch; the next render/sync resizes the live stream to match.
+		h.drawerHeight = h.cfg.GetDrawerHeight()
 		// Display toggles are live, but the density flag changes BuildFlatItems
 		// output (inter-group spacer rows), so rebuild the flattened list.
 		h.rebuildFlatItems()
@@ -2120,64 +2129,72 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.helpOverlay.Show()
 		return h, nil
 	case "ctrl+c":
-		debuglog.Logger.Info("quit requested", "key", msg.String())
-		h.cancel() // stops background worker
-		if h.hookWatcher != nil {
-			h.hookWatcher.Stop()
-		}
-		if h.controlClient != nil {
-			h.controlClient.Close()
-		}
-		h.teardownShellStream()
-		// Finalize all pending deletes before quitting.
-		h.finalizeAllPendingDeletes()
-
-		uptime := time.Since(h.startTime).Seconds()
-
-		// h.cancel() above only signals the status worker — it can still be
-		// mid-cycle, holding workerMu and mutating h.sessions. Take the lock
-		// for the direct reads; collectSnapshot and anyAttached self-lock.
-		h.workerMu.Lock()
-		runningCount := 0
-		waitingCount := 0
-		for _, s := range h.sessions {
-			switch s.GetStatus() {
-			case session.StatusRunning:
-				runningCount++
-			case session.StatusWaiting:
-				waitingCount++
-			}
-		}
-		sessionCount := len(h.sessions)
-		h.workerMu.Unlock()
-
-		analytics.Track(analytics.EventAppQuit, map[string]interface{}{
-			"uptime_seconds": int(uptime),
-			"session_count":  sessionCount,
-		})
-		analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
-		analytics.EmitSnapshot(h.collectSnapshot())
-
-		if runningCount > 0 || waitingCount > 0 {
-			analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
-				"running_count": runningCount,
-				"waiting_count": waitingCount,
-			})
-		}
-
-		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
-			analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
-				"uptime_seconds":         int(uptime),
-				"session_count":          sessionCount,
-				"attached_at_least_once": h.anyAttached(),
-			})
-		}
-
-		analytics.Shutdown()
-		return h, tea.Quit
+		return h, h.quitSequence("ctrl+c")
 	}
 
 	return h, nil
+}
+
+// quitSequence runs the full shutdown path — stop the worker, close the hook
+// watcher / control client / drawer stream, finalize pending deletes, emit quit
+// analytics — then returns tea.Quit. Shared by Ctrl+C and the command-palette
+// Quit command so neither leaks the drawer reader or orphans pending deletes.
+func (h *Home) quitSequence(source string) tea.Cmd {
+	debuglog.Logger.Info("quit requested", "source", source)
+	h.cancel() // stops background worker
+	if h.hookWatcher != nil {
+		h.hookWatcher.Stop()
+	}
+	if h.controlClient != nil {
+		h.controlClient.Close()
+	}
+	h.teardownShellStream()
+	// Finalize all pending deletes before quitting.
+	h.finalizeAllPendingDeletes()
+
+	uptime := time.Since(h.startTime).Seconds()
+
+	// h.cancel() above only signals the status worker — it can still be
+	// mid-cycle, holding workerMu and mutating h.sessions. Take the lock
+	// for the direct reads; collectSnapshot and anyAttached self-lock.
+	h.workerMu.Lock()
+	runningCount := 0
+	waitingCount := 0
+	for _, s := range h.sessions {
+		switch s.GetStatus() {
+		case session.StatusRunning:
+			runningCount++
+		case session.StatusWaiting:
+			waitingCount++
+		}
+	}
+	sessionCount := len(h.sessions)
+	h.workerMu.Unlock()
+
+	analytics.Track(analytics.EventAppQuit, map[string]interface{}{
+		"uptime_seconds": int(uptime),
+		"session_count":  sessionCount,
+	})
+	analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
+	analytics.EmitSnapshot(h.collectSnapshot())
+
+	if runningCount > 0 || waitingCount > 0 {
+		analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
+			"running_count": runningCount,
+			"waiting_count": waitingCount,
+		})
+	}
+
+	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
+		analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
+			"uptime_seconds":         int(uptime),
+			"session_count":          sessionCount,
+			"attached_at_least_once": h.anyAttached(),
+		})
+	}
+
+	analytics.Shutdown()
+	return tea.Quit
 }
 
 // --- Session operations ---
@@ -2743,6 +2760,9 @@ func (h *Home) killShellsForRepo(repoPath string) {
 		}
 		_ = sh.Kill()
 	}
+	// If the active drawer shell was among the doomed, re-point (or tear down) the
+	// live stream now instead of leaving it on a killed session until the next tick.
+	h.syncShellStream()
 }
 
 // repoIsWorktree reports whether a repo group is a git worktree, reading from
@@ -5692,7 +5712,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, nil
 	case "quit":
-		return h, tea.Quit
+		return h, h.quitSequence("command-palette")
 	}
 	return h, nil
 }

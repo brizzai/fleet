@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/creack/pty"
@@ -57,18 +58,19 @@ func parseControlOutput(line string) (payload []byte, ok bool) {
 
 // OutputReader attaches a tmux control-mode client to a target session and
 // streams its panes' live output (octal-decoded) to a callback until Close.
-// Unlike ControlClient (which attaches to a private hidden session purely to
-// send-keys and suppresses output), this attaches to the *target* session with
-// output enabled, so it both receives %output and can send keys to the same
-// pane over one connection. The attached client carries a size, which — since
-// fleet's shell sessions are otherwise headless — sets the pane geometry; the
-// caller sizes it to the drawer via NewOutputReader's w/h and Resize.
+// It attaches to the *target* session with output enabled (unlike ControlClient,
+// which attaches to a private hidden session and suppresses output). The attached
+// client carries a size, which — since fleet's shell sessions are otherwise
+// headless — sets the pane geometry; the caller sizes it to the drawer via
+// NewOutputReader's w/h and Resize. Keystrokes are NOT sent over this connection:
+// the drawer forwards input through the shared ControlClient (ui.getControlClient).
 type OutputReader struct {
 	mu     sync.Mutex
 	ptmx   *os.File
 	cmd    *exec.Cmd
 	target string
 	closed bool
+	failed atomic.Bool // read loop ended unexpectedly (not via Close) — caller should re-attach
 }
 
 // NewOutputReader attaches a control client to targetSession at size w×h and
@@ -101,32 +103,19 @@ func (r *OutputReader) readLoop(onData func([]byte)) {
 	if err := sc.Err(); err != nil && !r.IsClosed() {
 		debuglog.Logger.Debug("tmux output reader scan ended", "target", r.target, "err", err)
 	}
-}
-
-func (r *OutputReader) writeCommand(cmd string) error {
-	_, err := fmt.Fprintf(r.ptmx, "%s\n", cmd)
-	return err
-}
-
-// SendKeys sends named keys to the reader's target pane over the same connection.
-func (r *OutputReader) SendKeys(keys ...string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return fmt.Errorf("output reader closed")
+	// The loop ended while we never called Close — e.g. bufio.ErrTooLong on an
+	// oversized single %output line (>8 MiB with no real newline), or the control
+	// process exited. Flag it failed so the caller re-attaches instead of freezing
+	// on the last frame.
+	if !r.IsClosed() {
+		r.failed.Store(true)
 	}
-	return r.writeCommand(fmt.Sprintf("send-keys -t %s %s", r.target, strings.Join(keys, " ")))
 }
 
-// SendLiteralKeys sends literal text to the reader's target pane.
-func (r *OutputReader) SendLiteralKeys(text string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return fmt.Errorf("output reader closed")
-	}
-	return r.writeCommand(fmt.Sprintf("send-keys -t %s -l %s", r.target, quoteTmux(text)))
-}
+// Failed reports whether the read loop ended unexpectedly (without Close) — e.g.
+// an oversized %output line tripped bufio.ErrTooLong or the control process died.
+// The drawer treats a failed reader like a detached one and re-attaches.
+func (r *OutputReader) Failed() bool { return r.failed.Load() }
 
 // Resize re-sizes the control client (and thus the headless pane) to w×h by
 // resizing the PTY, which delivers SIGWINCH to tmux. Keep this in lockstep with
@@ -138,13 +127,6 @@ func (r *OutputReader) Resize(w, h int) error {
 		return fmt.Errorf("output reader closed")
 	}
 	return pty.Setsize(r.ptmx, winsize(w, h))
-}
-
-// Target returns the tmux session this reader is attached to.
-func (r *OutputReader) Target() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.target
 }
 
 // IsClosed reports whether the reader has been closed.

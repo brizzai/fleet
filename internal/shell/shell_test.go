@@ -1,6 +1,9 @@
 package shell
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDeriveStatus(t *testing.T) {
 	cases := []struct {
@@ -27,9 +30,12 @@ func TestDeriveStatus(t *testing.T) {
 }
 
 func TestShellPrefixNotSessionPrefix(t *testing.T) {
-	// "fleetsh_" must NOT be a prefix of an agent-session name check ("fleet_"),
-	// or shells would leak into tmux.ListSessions().
-	if len(ShellPrefix) < 6 || ShellPrefix[:6] != "fleets" {
-		t.Fatalf("unexpected ShellPrefix %q", ShellPrefix)
+	// "fleetsh_" must NOT begin with the agent-session prefix ("fleet_"), or
+	// shells would leak into tmux.ListSessions().
+	if ShellPrefix != "fleetsh_" {
+		t.Fatalf("ShellPrefix = %q, want %q", ShellPrefix, "fleetsh_")
+	}
+	if strings.HasPrefix(ShellPrefix, "fleet_") {
+		t.Fatalf("ShellPrefix %q must not match agent session prefix %q", ShellPrefix, "fleet_")
 	}
 }

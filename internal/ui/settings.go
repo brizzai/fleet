@@ -14,13 +14,15 @@ import (
 type settingsClosedMsg struct{}
 
 var (
-	editorPresets   = []string{"code", "cursor", "vim", "nvim", "nano", "emacs", "zed"}
-	tickPresets     = []int{1, 2, 3, 5, 10}
-	statusStyleSet  = []string{"icon", "bar"}
-	chevronStyleSet = []string{"triangle", "plusminus"}
-	densitySet      = []string{"normal", "compact"}
-	enterModeSet    = []string{"attach", "split"}
-	defaultAgentSet = []string{"claude", "codex", "opencode"}
+	editorPresets = []string{"code", "cursor", "vim", "nvim", "nano", "emacs", "zed"}
+	tickPresets   = []int{1, 2, 3, 5, 10}
+	// Bounded by config.DrawerHeightMax (the UI's hard body cap) — taller can't render.
+	drawerHeightPresets = []int{6, 8, 10, 12, 14}
+	statusStyleSet      = []string{"icon", "bar"}
+	chevronStyleSet     = []string{"triangle", "plusminus"}
+	densitySet          = []string{"normal", "compact"}
+	enterModeSet        = []string{"attach", "split"}
+	defaultAgentSet     = []string{"claude", "codex", "opencode"}
 )
 
 // settingsFocus tracks which pane (category rail or detail list) has the cursor.
@@ -484,6 +486,17 @@ func buildSettingsCategories() []settingsCategory {
 			withLabel("Confirm before restart", toggle(
 				(*config.Config).IsConfirmBeforeRestartEnabled,
 				func(c *config.Config, v bool) { c.ConfirmBeforeRestart = &v }, false)),
+			{
+				label: "Drawer height (rows)",
+				value: func(c *config.Config) string { return fmt.Sprintf("%d", c.GetDrawerHeight()) },
+				cycle: func(d *SettingsDialog, dir int) {
+					idx := indexOfInt(drawerHeightPresets, d.cfg.GetDrawerHeight())
+					if idx < 0 {
+						idx = indexOfInt(drawerHeightPresets, config.DrawerHeightDefault)
+					}
+					d.cfg.DrawerHeight = drawerHeightPresets[(idx+dir+len(drawerHeightPresets))%len(drawerHeightPresets)]
+				},
+			},
 			withLabel("Origin forget removes worktrees", toggle(
 				(*config.Config).GetOriginDeleteRemovesWorktrees,
 				func(c *config.Config, v bool) { c.OriginDeleteRemovesWorktrees = &v }, false)),

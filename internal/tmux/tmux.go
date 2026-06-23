@@ -643,7 +643,11 @@ func RefreshSessionCache() {
 	activityCache := make(map[string]int64)
 	deadCache := make(map[string]bool)
 	cmdCache := make(map[string]string)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	// Do NOT TrimSpace the whole output: a dead pane has an empty
+	// pane_current_command, so its line ends in a trailing tab ("name\t<act>\t1\t").
+	// Trimming the final line's tab would make SplitN yield 3 fields, dropping a
+	// dead pane that happens to be last. The line == "" guard handles blanks.
+	for _, line := range strings.Split(string(output), "\n") {
 		if line == "" {
 			continue
 		}

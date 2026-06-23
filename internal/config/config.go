@@ -344,11 +344,27 @@ func (c *Config) GetStatusIndicator() string {
 	return "icon"
 }
 
+// DrawerHeightMin/Max bound the terminal-drawer body height. The max mirrors the
+// UI's hard body cap (ui.drawerMaxBodyRows) — the panels above always keep a few
+// rows — so a larger drawer_height can never actually render; clamp it here so the
+// config, settings, and rendered height all agree.
+const (
+	DrawerHeightMin     = 4
+	DrawerHeightMax     = 14
+	DrawerHeightDefault = 12
+)
+
 // GetDrawerHeight returns the terminal-drawer body height in rows (default 12
-// when unset). The UI clamps this so the panels above always keep a few rows.
+// when unset), clamped to [DrawerHeightMin, DrawerHeightMax].
 func (c *Config) GetDrawerHeight() int {
 	if c.DrawerHeight <= 0 {
-		return 12
+		return DrawerHeightDefault
+	}
+	if c.DrawerHeight < DrawerHeightMin {
+		return DrawerHeightMin
+	}
+	if c.DrawerHeight > DrawerHeightMax {
+		return DrawerHeightMax
 	}
 	return c.DrawerHeight
 }

@@ -166,15 +166,42 @@ func (s *Shell) ExitInfo() string {
 }
 
 // RefreshStatus recomputes the shell's status from the tmux caches and returns
-// it. Cache-only except for one bounded PaneDeadInfo call when the pane is dead
-// (to capture the exit code). Called off the render thread (status worker).
+// it. Cache-only except for one bounded PaneDeadInfo call on the transition into
+// exited (to capture the exit code). Called off the render thread (status
+// worker), which always refreshes the tmux session cache immediately before this
+// pass, so a just-Started shell is already cached here.
 func (s *Shell) RefreshStatus() Status {
-	ts := s.Tmux()
-	name := s.TmuxName()
-	dead := ts.IsPaneDead()
-	st := DeriveStatus(dead, tmux.PaneCurrentCommand(name))
-	exit := ""
-	if st == StatusExited {
+	// One locked snapshot: a concurrent Restart swaps tmux+tmuxName together, so
+	// reading them in separate lock acquisitions could mix sessions.
+	s.mu.Lock()
+	ts := s.tmux
+	name := s.tmuxName
+	prevExit := s.exitCode
+	s.mu.Unlock()
+
+	exists := ts.Exists()
+	dead := exists && ts.IsPaneDead()
+
+	var st Status
+	if !exists {
+		// An absent session (e.g. after a tmux server restart) has no live pane;
+		// DeriveStatus would read it as idle. Treat it as exited so the drawer
+		// offers Enter→restart instead of stranding a dead "idle" tab.
+		st = StatusExited
+	} else {
+		st = DeriveStatus(dead, tmux.PaneCurrentCommand(name))
+	}
+
+	// Capture the exit code once, on the transition into exited, and only when the
+	// pane is actually dead (an absent session has no pane to query). PaneDeadInfo
+	// is a fresh `tmux list-panes` exec, so re-running it every cycle for every
+	// exited shell would spawn N subprocesses ~2×/s; cache it after first capture.
+	// Restart clears exitCode, so a relaunched-then-re-exited shell re-captures.
+	exit := prevExit
+	switch {
+	case st != StatusExited:
+		exit = ""
+	case dead && exit == "":
 		if _, exitStatus, exitSignal, ok := ts.PaneDeadInfo(); ok {
 			switch {
 			case exitStatus != "":
@@ -184,6 +211,7 @@ func (s *Shell) RefreshStatus() Status {
 			}
 		}
 	}
+
 	s.mu.Lock()
 	s.status = st
 	s.exitCode = exit

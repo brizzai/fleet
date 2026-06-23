@@ -82,6 +82,16 @@ type (
 		tmuxName string
 		err      error
 	}
+	// shellStreamReadyMsg carries the result of an async stream attach (the fork of
+	// tmux -C + PTY happens off the Update goroutine). The handler installs it only
+	// if the requested target + size are still current, else closes the reader.
+	shellStreamReadyMsg struct {
+		target string
+		w, h   int
+		term   *vterm.Terminal
+		reader *tmux.OutputReader
+		err    error
+	}
 )
 
 // --- slide animation ---
@@ -205,8 +215,9 @@ func (h *Home) switchTab(delta int) tea.Cmd {
 
 // syncShellStream keeps the live emulator stream attached to the active shell at
 // the drawer's current body size. It's called from the drawer ticks (and on tab
-// switch / shell create / restart) and is cheap when nothing changed. Runs on
-// the Update goroutine — the only writer of the stream fields.
+// switch / shell create / restart / close) and is cheap when nothing changed.
+// Runs on the Update goroutine — the only writer of the stream fields. The actual
+// attach (tmux -C + PTY fork) is dispatched off-thread via startShellStreamAsync.
 func (h *Home) syncShellStream() {
 	if h.drawerMode == drawerHidden {
 		h.teardownShellStream()
@@ -225,14 +236,20 @@ func (h *Home) syncShellStream() {
 	// the emulator's last frame on screen until it's restarted or switched away.
 	if sh.Status() == shell.StatusExited {
 		if h.shellReader != nil {
-			h.shellReader.Close()
+			r := h.shellReader
+			go r.Close() // off the Update goroutine
 			h.shellReader = nil
 		}
+		h.shellStreamPending = ""
 		return
 	}
 	target := sh.TmuxName()
-	if h.shellTerm == nil || h.shellStreamTarget != target {
-		h.startShellStream(target, w, ht)
+	// (Re)attach when there's no live stream for this target, or the current
+	// reader's loop died unexpectedly (e.g. an oversized %output line — #14).
+	healthy := h.shellTerm != nil && h.shellStreamTarget == target &&
+		h.shellReader != nil && !h.shellReader.Failed()
+	if !healthy {
+		h.startShellStreamAsync(target, w, ht)
 		return
 	}
 	// Same shell: keep the pane + emulator sized to the drawer body.
@@ -244,36 +261,80 @@ func (h *Home) syncShellStream() {
 	}
 }
 
-// startShellStream tears down any existing stream and attaches a fresh control
-// reader + emulator to targetSession at size w×ht. The reader's callback runs on
-// its own goroutine: it writes into the (mutex-guarded) emulator and schedules a
-// single coalesced render wake.
-func (h *Home) startShellStream(target string, w, ht int) {
-	h.teardownShellStream()
-	term := vterm.New(w, ht)
-	reader, err := tmux.NewOutputReader(target, w, ht, func(b []byte) {
-		term.Write(b)
-		if h.shellWake.CompareAndSwap(false, true) {
-			h.send(shellOutputMsg{})
-		}
-	})
-	if err != nil {
-		debuglog.Logger.Error("drawer: attach output reader", "target", target, "err", err)
-		return
+// startShellStreamAsync builds the emulator + control reader OFF the Update
+// goroutine (NewOutputReader forks `tmux -C attach` + a PTY — too heavy for
+// Update) and posts shellStreamReadyMsg. A pending guard dedups dispatches while
+// one is in flight for the same target; the existing stream (if any) keeps
+// rendering until the new one is installed by applyShellStream.
+func (h *Home) startShellStreamAsync(target string, w, ht int) {
+	if h.shellStreamPending == target {
+		return // already attaching to this target
 	}
-	h.shellTerm = term
-	h.shellReader = reader
-	h.shellStreamTarget = target
+	h.shellStreamPending = target
+	go func() {
+		term := vterm.New(w, ht)
+		reader, err := tmux.NewOutputReader(target, w, ht, func(b []byte) {
+			term.Write(b)
+			if h.shellWake.CompareAndSwap(false, true) {
+				h.send(shellOutputMsg{})
+			}
+		})
+		h.send(shellStreamReadyMsg{target: target, w: w, h: ht, term: term, reader: reader, err: err})
+	}()
 }
 
-// teardownShellStream closes the active reader and drops the emulator.
-func (h *Home) teardownShellStream() {
+// applyShellStream installs (or discards) the result of an async attach. Runs on
+// the Update goroutine. It discards the reader if the attach errored or the drawer
+// moved on (closed, switched shell, resized) while the fork was in flight.
+func (h *Home) applyShellStream(msg shellStreamReadyMsg) {
+	if h.shellStreamPending == msg.target {
+		h.shellStreamPending = ""
+	}
+	sh := h.activeShell()
+	wanted := msg.err == nil &&
+		h.drawerMode != drawerHidden &&
+		sh != nil && sh.TmuxName() == msg.target && sh.Status() != shell.StatusExited &&
+		msg.w == h.drawerInnerW && msg.h == h.drawerInnerH
+	if !wanted {
+		if msg.err != nil {
+			debuglog.Logger.Error("drawer: attach output reader", "target", msg.target, "err", msg.err)
+		}
+		if msg.reader != nil {
+			go msg.reader.Close() // stale or failed — reap off the Update goroutine
+		}
+		return // a later sync will re-attach with the current target/size
+	}
+	h.teardownShellStream() // drop any prior stream (closes its reader off-thread)
+	h.shellTerm = msg.term
+	h.shellReader = msg.reader
+	h.shellStreamTarget = msg.target
+}
+
+// teardownShellStream detaches the live reader — closing it (Kill+Wait) OFF the
+// Update goroutine — and drops the emulator. Use teardownShellStreamSync when the
+// detach must complete first (full-screen attach).
+func (h *Home) teardownShellStream() { h.dropShellStream(true) }
+
+// teardownShellStreamSync detaches and waits for the reader to fully close.
+// attachShell needs this: a full-screen takeover shares the pane and tmux sizes
+// the window to the smallest client, so the drawer-sized reader must be gone
+// before the attach starts. We're leaving the render loop via tea.Exec anyway, so
+// a brief synchronous close here is fine.
+func (h *Home) teardownShellStreamSync() { h.dropShellStream(false) }
+
+func (h *Home) dropShellStream(async bool) {
 	if h.shellReader != nil {
-		h.shellReader.Close()
+		r := h.shellReader
+		if async {
+			go r.Close()
+		} else {
+			r.Close()
+		}
 		h.shellReader = nil
 	}
 	h.shellTerm = nil
 	h.shellStreamTarget = ""
+	h.shellStreamPending = ""
 	h.shellWake.Store(false)
 }
 
@@ -327,15 +388,15 @@ func (h *Home) attachShell(sh *shell.Shell) tea.Cmd {
 		return nil
 	}
 	if !sh.Tmux().Exists() {
-		h.setError(fmt.Errorf("shell exited — press r to restart"))
+		h.setError(fmt.Errorf("shell exited — press Enter to restart"))
 		return nil
 	}
 	h.isAttaching.Store(true)
-	// Detach the drawer's control reader first: a full-screen attach is another
-	// client on the pane, and tmux sizes a shared window to its smallest client —
-	// leaving the small drawer-sized reader attached would shrink the full-screen
-	// view. The stream re-attaches on the next tick after Ctrl+Q returns.
-	h.teardownShellStream()
+	// Detach the drawer's control reader first — synchronously: a full-screen
+	// attach is another client on the pane, and tmux sizes a shared window to its
+	// smallest client, so the small drawer-sized reader must be gone before the
+	// attach starts. The stream re-attaches on the next tick after Ctrl+Q returns.
+	h.teardownShellStreamSync()
 	h.actionLog.Add("attach shell", sh.Name, true)
 	return tea.Exec(attachCmd{session: sh.Tmux()}, func(err error) tea.Msg {
 		h.isAttaching.Store(false)
@@ -366,6 +427,10 @@ func (h *Home) closeShell(sh *shell.Shell) tea.Cmd {
 			h.drawerActiveTab = 0
 		}
 	}
+	// Re-point the live stream to the newly-active tab now — otherwise the killed
+	// session keeps streaming and renderDrawer shows a blank body until the next
+	// ~120ms tick repoints it.
+	h.syncShellStream()
 	h.actionLog.Add("close shell", sh.Name, true)
 	return func() tea.Msg {
 		_ = sh.Kill()
