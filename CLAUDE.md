@@ -5,7 +5,7 @@
 TUI tool for managing multiple Claude Code and OpenAI Codex sessions in parallel using tmux.
 
 ## Tech Stack
-- Go 1.26+, Bubble Tea + Lipgloss, tmux, SQLite (WAL mode)
+- Go 1.26+, Bubble Tea v2 + Lip Gloss v2 (`charm.land/.../v2`), `charmbracelet/x/vt` (drawer's live terminal), tmux, SQLite (WAL mode)
 
 ## Build
 ```bash

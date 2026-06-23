@@ -106,6 +106,10 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 **`f`** forks a session — branches off the agent's conversation at that point. Try a different approach without losing the original. Both sessions keep running independently.
 
+### Terminal drawer
+
+**`` ` ``** opens a live terminal drawer — real shells (dev servers, log tails, scratch commands) scoped to the current repo or worktree, rendered through a true terminal emulator so streaming output, colors, and full-screen tools (vim, htop, lazygit) just work. New/close tabs with **`Ctrl+T`** / **`Ctrl+W`**, switch with **`Ctrl+PgUp/PgDn`**, **`Ctrl+G`** for full-screen attach.
+
 ### And more
 
 - **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume`)
