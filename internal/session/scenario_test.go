@@ -954,6 +954,48 @@ func TestScenarioAskUserQuestionNavigationStaysWaiting(t *testing.T) {
 	})
 }
 
+func TestScenarioExitPlanModeApprovalStaysWaiting(t *testing.T) {
+	// Regression: Claude's ExitPlanMode plan-approval prompt ("Claude has written up
+	// a plan and is ready to execute. Would you like to proceed?") is a numbered menu,
+	// but its footer is "shift+tab to approve with this feedback" — it has NO "Esc to
+	// cancel". Before the fix, detectWaiting (which required "Esc to cancel") missed it,
+	// so paneStatus was "" while the menu painted in. applyHookWaiting's "content changed
+	// → assume running" override then fired on each repaint, flipping the genuine waiting
+	// state to running for ~15s until the cooldown expired.
+	//
+	// Fix: detectWaiting accepts "approve with this feedback" as a menu footer, so
+	// paneStatus=Waiting through the prompt; applyHookWaiting suppresses the running
+	// override when paneStatus=Waiting.
+	// Captured from snapshot 2026-06-18T14-27-14_change-quit-keybinding-from-q-.
+	fixture := "pane_waiting_exitplanmode_approve.txt"
+	if _, err := os.Stat(filepath.Join("testdata", fixture)); err != nil {
+		t.Skipf("fixture %s not available", fixture)
+	}
+
+	// Plain-text menu variants: the prompt stays on screen (still waiting) but the
+	// scrollback above it drifts, changing the content hash — simulates the menu
+	// painting in / output above it redrawing while the user hasn't answered yet.
+	menu := func(scrollback string) string {
+		return scrollback + "\n\nClaude has written up a plan and is ready to execute. Would you like to proceed?\n\n" +
+			"❯ 1. Yes, and use auto mode\n  2. Yes, manually approve edits\n  3. No, refine with Ultraplan\n  4. Tell Claude what to change\n     shift+tab to approve with this feedback\n\nctrl+g to edit in  VS Code\n"
+	}
+
+	runScenario(t, Scenario{
+		Name: "ExitPlanMode plan-approval: hook=waiting + drifting hash → stays waiting",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", Pane: "@fixture:" + fixture}, // real ANSI capture
+			{At: 3 * time.Second, Pane: menu("summary line one")},
+			{At: 6 * time.Second, Pane: menu("summary line one\nsummary line two appeared")}, // scrollback drifts, hash changes
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},
+			{At: 3 * time.Second, Expected: StatusWaiting},  // before fix: flipped to running on hash drift
+			{At: 6 * time.Second, Expected: StatusWaiting},  // before fix: still running (15s cooldown)
+			{At: 20 * time.Second, Expected: StatusWaiting}, // long after any cooldown
+		},
+	})
+}
+
 func TestScenarioStaleWaitingWithActiveSpinner(t *testing.T) {
 	// Regression: user approves a PermissionRequest and Claude starts working.
 	// No UserPromptSubmit fires for permission grants, so the hook stays "waiting".
@@ -1005,6 +1047,34 @@ func TestScenarioFreshWaitingHookRenderSpinnerStaysWaiting(t *testing.T) {
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusWaiting},
+		},
+	})
+}
+
+// TestScenarioStaleWaitingLatchRecoversToWaiting reproduces issue #23's stuck-running
+// symptom in isolation. A stale waiting hook gets latched (overridden to finished on an
+// idle frame, then to running on a working frame, all without a new hook timestamp), and
+// then a REAL permission prompt appears on the pane. Before the fix, the latched-override
+// switch in applyHookWaiting had no StatusWaiting case, so the genuine prompt was ignored
+// and the session stayed pinned to running. In the field this latch never resets because
+// a missed session-id rotation froze the hook (no fresh hook ever lands), so recovery has
+// to come from the pane.
+func TestScenarioStaleWaitingLatchRecoversToWaiting(t *testing.T) {
+	const waitingPrompt = "Would you like to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n"
+	runScenario(t, Scenario{
+		Name: "stale waiting latch recovers to waiting on real prompt",
+		Events: []ScenarioEvent{
+			// Stale waiting hook + idle prompt → override to finished and latch.
+			{At: 0, Hook: "waiting", HookAge: 11 * time.Minute, Pane: "@fixture:pane_finished_idle_prompt.txt"},
+			// Same (stale) hook, pane now shows work → latched branch flips to running.
+			{At: 2 * time.Second, Pane: "@fixture:pane_running_extended_thinking.txt"},
+			// Same hook, a genuine permission prompt is now structurally on screen.
+			{At: 4 * time.Second, Pane: waitingPrompt},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},
+			{At: 2 * time.Second, Expected: StatusRunning},
+			{At: 4 * time.Second, Expected: StatusWaiting}, // was stuck at StatusRunning before the fix
 		},
 	})
 }

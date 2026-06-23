@@ -10,7 +10,7 @@ const KEYS: Array<{ key: string; label: string }> = [
   { key: "d", label: "Del" },
   { key: "/", label: "Filter" },
   { key: "?", label: "Help" },
-  { key: "q", label: "Quit" },
+  { key: "⌃C", label: "Quit" },
 ];
 
 export function Footer({ focused }: { focused: boolean }) {

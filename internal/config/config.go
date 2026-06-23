@@ -22,11 +22,17 @@ type Config struct {
 	AutoUpdate           *bool  `json:"auto_update,omitempty"`
 	CopyClaudeSettings   *bool  `json:"copy_claude_settings,omitempty"`
 	ConfirmBeforeRestart *bool  `json:"confirm_before_restart,omitempty"`
-	EnterMode            string `json:"enter_mode,omitempty"`       // "attach" or "split"
-	StatusIndicator      string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
-	Telemetry            *bool  `json:"telemetry,omitempty"`
-	DefaultAgent         string `json:"default_agent,omitempty"` // "claude" or "codex"
-	DrawerHeight         int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
+	// OriginDeleteRemovesWorktrees controls what forgetting a whole origin row
+	// does to worktree directories on disk. Default true: each checkout follows
+	// its own rule (worktrees get `git worktree remove`, the main repo's folder
+	// is kept). False: nothing is removed from disk — every checkout is just
+	// un-tracked.
+	OriginDeleteRemovesWorktrees *bool  `json:"origin_delete_removes_worktrees,omitempty"`
+	EnterMode                    string `json:"enter_mode,omitempty"`       // "attach" or "split"
+	StatusIndicator              string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
+	Telemetry                    *bool  `json:"telemetry,omitempty"`
+	DefaultAgent                 string `json:"default_agent,omitempty"` // "claude" or "codex"
+	DrawerHeight                 int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
 
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
@@ -310,6 +316,15 @@ func (c *Config) IsConfirmBeforeRestartEnabled() bool {
 		return true
 	}
 	return *c.ConfirmBeforeRestart
+}
+
+// GetOriginDeleteRemovesWorktrees reports whether forgetting an origin row also
+// removes its worktree directories from disk (default: true).
+func (c *Config) GetOriginDeleteRemovesWorktrees() bool {
+	if c.OriginDeleteRemovesWorktrees == nil {
+		return true
+	}
+	return *c.OriginDeleteRemovesWorktrees
 }
 
 // GetEnterMode returns the configured Enter key mode ("attach" or "split").

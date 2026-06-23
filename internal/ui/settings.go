@@ -484,6 +484,9 @@ func buildSettingsCategories() []settingsCategory {
 			withLabel("Confirm before restart", toggle(
 				(*config.Config).IsConfirmBeforeRestartEnabled,
 				func(c *config.Config, v bool) { c.ConfirmBeforeRestart = &v }, false)),
+			withLabel("Origin forget removes worktrees", toggle(
+				(*config.Config).GetOriginDeleteRemovesWorktrees,
+				func(c *config.Config, v bool) { c.OriginDeleteRemovesWorktrees = &v }, false)),
 			{
 				label: "Enter mode",
 				value: func(c *config.Config) string { return c.GetEnterMode() },

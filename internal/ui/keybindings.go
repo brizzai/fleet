@@ -53,7 +53,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "X", Desc: "Dismiss on-screen tip", Section: "global"},
 	{Key: "!", BarKey: "!", BarDesc: "Bug", Desc: "Bug report / diagnostics", Section: "global"},
 	{Key: "?", BarKey: "?", BarDesc: "Help", Desc: "Toggle help", Section: "global"},
-	{Key: "q", BarKey: "q", BarDesc: "Quit", Desc: "Quit", Section: "global"},
+	{Key: "Ctrl+C", BarKey: "⌃C", BarDesc: "Quit", Desc: "Quit", Section: "global"},
 
 	// Terminal drawer (shown in overlay only, separated by blank line). It's
 	// always-typing — keys go to the shell; Ctrl chords drive the chrome.
@@ -137,7 +137,7 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 		}
 	}
 	global = []struct{ Key, Desc string }{
-		{"`", "Term"}, {"⌃K", "Cmd"}, {"/", "Filter"}, {"?", "Help"}, {"q", "Quit"},
+		{"`", "Term"}, {"⌃K", "Cmd"}, {"/", "Filter"}, {"?", "Help"}, {"⌃C", "Quit"},
 	}
 	return
 }

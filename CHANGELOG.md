@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-06-22
+
+### Improved
+
+- Forking a session now logs the source and parent conversation ids, making it easier to diagnose a fork that opens the wrong conversation.
+
+### Fixed
+
+- The `?` help overlay no longer gets cut off on short terminals — it lays bindings out in columns sized to the window and scrolls (↑↓) when there's still more than fits.
+
+## [2.12.0] - 2026-06-22
+
+### Added
+
+- Press `d` on an origin row to forget the whole repo group at once (every checkout and its sessions), gated by a safety checkbox you must tick first. A new Behavior setting controls whether its worktree directories are also removed.
+
+### Fixed
+
+- Emoji and other font-dependent glyphs in a session's preview no longer push the top navbar off-screen or scramble the layout.
+
+## [2.11.1] - 2026-06-22
+
+### Fixed
+
+- Sessions no longer get stuck showing "running" while genuinely waiting for a permission prompt after a `/clear`-style session rotation.
+
+## [2.11.0] - 2026-06-18
+
+### Changed
+
+- Quit is now Ctrl+C instead of q.
+
+### Fixed
+
+- Plan-approval prompts ("Claude has written up a plan… proceed?") now show **waiting** immediately instead of briefly flashing as running for ~15s.
+
+## [2.10.0] - 2026-06-16
+
+### Added
+
+- OpenCode is now supported as a third agent alongside Claude and Codex — pick it in the `A` new-session dialog (or set it as your default agent), with live status detection (running / waiting / finished).
+
 ## [2.9.0] - 2026-06-16
 
 ### Added
@@ -259,7 +301,12 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.9.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.12.1...HEAD
+[2.12.1]: https://github.com/brizzai/fleet/releases/tag/v2.12.1
+[2.12.0]: https://github.com/brizzai/fleet/releases/tag/v2.12.0
+[2.11.1]: https://github.com/brizzai/fleet/releases/tag/v2.11.1
+[2.11.0]: https://github.com/brizzai/fleet/releases/tag/v2.11.0
+[2.10.0]: https://github.com/brizzai/fleet/releases/tag/v2.10.0
 [2.9.0]: https://github.com/brizzai/fleet/releases/tag/v2.9.0
 [2.8.2]: https://github.com/brizzai/fleet/releases/tag/v2.8.2
 [2.8.1]: https://github.com/brizzai/fleet/releases/tag/v2.8.1
