@@ -155,17 +155,31 @@ func runTUI() {
 	// Force legacy key encoding so Ctrl+K (and other modified combos) reach the
 	// TUI as control bytes rather than CSI-u sequences Bubble Tea v1 can't parse.
 	// Terminals/tmux configs (e.g. gpakosz/.tmux) that enable modifyOtherKeys
-	// otherwise break the Ctrl+K command palette. Restore on exit.
+	// otherwise break the Ctrl+K command palette.
+	restoreKeys := func() {} // no-op unless Disable below succeeds
 	if err := termkeys.Disable(os.Stdout); err != nil {
 		debuglog.Logger.Warn("failed to set legacy key reporting", "err", err)
-	}
-	defer func() {
-		if err := termkeys.Restore(os.Stdout); err != nil {
-			debuglog.Logger.Warn("failed to restore key reporting", "err", err)
+	} else {
+		// Restore only when Disable succeeded, so a failed Disable leaves the
+		// terminal untouched (fail-safe). Idempotent so the deferred call and the
+		// explicit pre-os.Exit call below never double-restore.
+		restored := false
+		restoreKeys = func() {
+			if restored {
+				return
+			}
+			restored = true
+			if err := termkeys.Restore(os.Stdout); err != nil {
+				debuglog.Logger.Warn("failed to restore key reporting", "err", err)
+			}
 		}
-	}()
+	}
+	defer restoreKeys()
 
 	if _, err := p.Run(); err != nil {
+		// os.Exit below skips deferred funcs, so restore key reporting first —
+		// otherwise extended-key mode stays off for other apps in this terminal.
+		restoreKeys()
 		// A Bubble Tea loop/cmd panic surfaces here as ErrProgramKilled rather
 		// than a Go panic, so log it — otherwise the exit is invisible in debug.log.
 		debuglog.Logger.Error("TUI exited with error", "err", err)

@@ -6,39 +6,34 @@
 // CSI-u / xterm modifyOtherKeys encoding instead of the legacy control byte.
 // A Ctrl+K then arrives as `ESC[107;5u` (or `ESC[27;5;107~`) rather than the
 // 0x0b byte. Bubble Tea v1 cannot decode those sequences, so it silently drops
-// the keystroke: the Ctrl+K command palette appears to do nothing. (Ctrl+C and
-// Ctrl+Q still work because modifyOtherKeys mode 1 keeps well-known combos in
-// their legacy encoding, which is why only Ctrl+K looks broken.)
+// the keystroke: the Ctrl+K command palette appears to do nothing. Ctrl+Q still
+// detaches under these modes only because the PTY layer explicitly decodes its
+// CSI-u / modifyOtherKeys forms (see ctrlQSequences in internal/tmux/pty.go);
+// Ctrl+K has no such handling, which is why only it looked broken.
 //
 // Asking the terminal for legacy key reporting forces Ctrl+K back to 0x0b, so
 // the palette opens reliably. Alt+<digit> slot bindings benefit the same way.
 package termkeys
 
-import "io"
+import (
+	"io"
 
-// Escape sequences that select legacy vs. enhanced key reporting.
-const (
-	// disableModifyOtherKeys sets the xterm modifyOtherKeys resource (XTMODKEYS,
-	// Ps=4) to mode 0 (off): keys are reported with their legacy encoding.
-	disableModifyOtherKeys = "\x1b[>4;0m"
-	// resetModifyOtherKeys (Pm omitted) restores the terminal's initial value.
-	resetModifyOtherKeys = "\x1b[>4m"
-	// pushKittyLegacy pushes flags=0 (no progressive enhancements) onto the Kitty
-	// keyboard protocol stack, forcing legacy CSI-u-free key reporting while
-	// preserving whatever state the shell/tmux had. popKittyKeyboard removes that
-	// entry on exit, restoring the prior state symmetrically. Terminals without
-	// the protocol ignore both sequences.
-	pushKittyLegacy  = "\x1b[>0u"
-	popKittyKeyboard = "\x1b[<u"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// disablePreamble forces legacy key reporting across the two enhancement
-// mechanisms a Ctrl+K could be intercepted by.
-const disablePreamble = disableModifyOtherKeys + pushKittyLegacy
+// disableModifyOtherKeys sets the xterm modifyOtherKeys resource (XTMODKEYS,
+// Ps=4) to mode 0 (off): keys are reported with their legacy encoding. x/ansi
+// only exposes this as the deprecated ansi.DisableModifyOtherKeys (its
+// suggested replacement, ResetModifyOtherKeys, resets to the terminal default
+// instead of forcing off), so we keep the literal here.
+const disableModifyOtherKeys = "\x1b[>4;0m"
 
-// restorePreamble undoes disablePreamble in reverse: pop our Kitty entry, then
-// reset modifyOtherKeys to the terminal's initial value.
-const restorePreamble = popKittyKeyboard + resetModifyOtherKeys
+// disablePreamble forces legacy key reporting across the two enhancement
+// mechanisms a Ctrl+K could be intercepted by: modifyOtherKeys off, plus a
+// flags=0 entry pushed onto the Kitty keyboard protocol stack
+// (ansi.DisableKittyKeyboard) so CSI-u reporting is suppressed while preserving
+// whatever state the shell/tmux had. Terminals without a mode ignore its bytes.
+const disablePreamble = disableModifyOtherKeys + ansi.DisableKittyKeyboard
 
 // Disable asks the terminal for legacy key reporting so modified keys (Ctrl+K
 // in particular) arrive in their legacy encoding instead of as CSI-u sequences
@@ -49,10 +44,11 @@ func Disable(w io.Writer) error {
 	return err
 }
 
-// Restore undoes Disable: it pops the Kitty keyboard entry we pushed and resets
+// Restore undoes Disable in reverse: it pops the Kitty keyboard entry we pushed
+// (ansi.PopKittyKeyboard, a func so it can't be a package const) and resets
 // modifyOtherKeys to the terminal's initial value. Call on exit to leave the
 // terminal's key-reporting state as we found it.
 func Restore(w io.Writer) error {
-	_, err := io.WriteString(w, restorePreamble)
+	_, err := io.WriteString(w, ansi.PopKittyKeyboard(1)+ansi.ResetModifyOtherKeys)
 	return err
 }
