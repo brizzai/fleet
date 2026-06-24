@@ -32,7 +32,7 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 		if idx := strings.IndexByte(prompt, '\n'); idx != -1 {
 			prompt = prompt[:idx] + "…"
 		}
-		full := "  > " + prompt
+		full := "  > " + neutralizeUnsafeWidth(prompt)
 		if lipgloss.Width(full) > width {
 			full = ansi.Truncate(full, width, "…")
 		}
@@ -59,6 +59,7 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 	}
 
 	content = stripOSC8(content)
+	content = neutralizeUnsafeWidth(content)
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	start := len(lines) - contentHeight
 	if start < 0 {
@@ -250,6 +251,82 @@ func relativeTime(t time.Time) string {
 			return "1d ago"
 		}
 		return fmt.Sprintf("%dd ago", days)
+	}
+}
+
+// neutralizeUnsafeWidth replaces emoji / ZWJ / variation-selector grapheme
+// clusters in captured pane output with width-matched ASCII dots so fleet's
+// measured width can never undercount what the terminal actually draws.
+//
+// Why this exists: the preview pane is a live mirror of an external agent pane
+// (codex/claude/opencode) — the only place fleet renders untrusted content.
+// Every width decision downstream (RenderPreview truncation, ensureExactWidth
+// padding, the bordered-panel content rows) trusts ansi/lipgloss wcwidth
+// tables. When iTerm2 + a font render a cluster WIDER than those tables claim
+// (newer-than-the-table emoji, ZWJ family sequences, flags, VS16 emoji), the
+// row overflows the panel, the terminal wraps it onto an extra physical line,
+// the fixed-height frame grows by a row, and the whole UI scrolls up — taking
+// the top navbar off-screen (issue #143). Replacing each such cluster with N
+// dots, where N is the SAME width the tables measured, forces measured==actual
+// for those cells, so no row can overflow regardless of how the font draws it.
+// Box-drawing, arrows, dingbat checkmarks (✓/✗), CJK, Hebrew and ordinary text
+// all measure reliably and are passed through untouched.
+func neutralizeUnsafeWidth(content string) string {
+	if !strings.ContainsFunc(content, isUnsafeWidthRune) {
+		return content // fast path: pure text / box-drawing / arrows — no risk
+	}
+
+	var b strings.Builder
+	b.Grow(len(content))
+
+	var state byte
+	data := content
+	for len(data) > 0 {
+		seq, width, n, newState := ansi.GraphemeWidth.DecodeSequenceInString(data, state, nil)
+		if width > 0 && clusterHasUnsafeWidthRune(seq) {
+			b.WriteString(strings.Repeat(".", width))
+		} else {
+			b.WriteString(seq)
+		}
+		data = data[n:]
+		state = newState
+	}
+	return b.String()
+}
+
+// clusterHasUnsafeWidthRune reports whether a grapheme cluster contains a rune
+// whose terminal display width can disagree with the wcwidth tables.
+func clusterHasUnsafeWidthRune(cluster string) bool {
+	return strings.ContainsFunc(cluster, isUnsafeWidthRune)
+}
+
+// isUnsafeWidthRune flags codepoints whose terminal display width can disagree
+// with the wcwidth tables fleet measures with: the emoji planes (incl.
+// regional-indicator flags), variation selectors, and ZWJ — multi-codepoint
+// and font-ligated sequences the tables are most likely to undercount.
+//
+// Deliberately narrow. BMP default-emoji points (⌚U+231A, ⏰U+23F0, ✅U+2705,
+// ❌U+274C, ✨U+2728, …) are intentionally left OUT not because they render as
+// text — they don't, they're Emoji_Presentation=Yes — but because the width
+// table already reports them width-2, matching how the terminal draws them, so
+// there's no disagreement to close. Listing them would only turn correctly
+// rendered emoji into dots. Text-default dingbats (✓, ✗) and arrows (→) measure
+// width-1 and render width-1, so they also stay out.
+//
+// Residual gap: a cluster the table undercounts that contains none of the
+// flagged runes — e.g. a codepoint newer than the bundled Unicode tables that
+// the table calls width-1 while the font draws width-2 — still slips through.
+// Extend the ranges below if such a case is reported.
+func isUnsafeWidthRune(r rune) bool {
+	switch {
+	case r == 0x200D: // ZERO WIDTH JOINER (emoji sequences)
+		return true
+	case r >= 0xFE00 && r <= 0xFE0F: // variation selectors (VS1–VS16)
+		return true
+	case r >= 0x1F000 && r <= 0x1FAFF: // emoji, pictographs, flags, supplemental
+		return true
+	default:
+		return false
 	}
 }
 

@@ -6,31 +6,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 )
-
-// helpMinInnerWidth is the floor for the dialog's text column; below this the
-// sheet is unreadable, so we truncate rather than shrink further.
-const helpMinInnerWidth = 24
-
-// helpKeyColWidth is the fixed width of the key column. It must fit the widest
-// key label (currently "= = then digit", 14 cells); padding/truncating to it
-// keeps every binding on exactly one row so the height math stays exact.
-const helpKeyColWidth = 14
-
-// helpChromeHeight is the vertical space consumed by everything around the
-// scrollable body: dialog border (2) + padding (2) + title block (title +
-// blank = 2) + footer block (blank + footer = 2). The body therefore gets
-// h.height - helpChromeHeight rows, which keeps the rendered box no taller
-// than the terminal so lipgloss.Place never clips it.
-const helpChromeHeight = 8
 
 // HelpOverlay shows a keybindings cheat sheet.
 type HelpOverlay struct {
 	visible bool
 	width   int
 	height  int
-	scroll  int
+	scroll  int // top grid row when the sheet is taller than the screen
 }
 
 // NewHelpOverlay creates a new help overlay.
@@ -38,148 +21,216 @@ func NewHelpOverlay() *HelpOverlay {
 	return &HelpOverlay{}
 }
 
-func (h *HelpOverlay) Show()             { h.visible = true; h.scroll = 0 }
-func (h *HelpOverlay) Hide()             { h.visible = false }
-func (h *HelpOverlay) IsVisible() bool   { return h.visible }
-func (h *HelpOverlay) SetSize(w, ht int) { h.width = w; h.height = ht }
+func (h *HelpOverlay) Show()           { h.visible = true; h.scroll = 0 }
+func (h *HelpOverlay) Hide()           { h.visible = false }
+func (h *HelpOverlay) IsVisible() bool { return h.visible }
 
-// bodyLines renders one line per keybinding (blank lines act as section
-// separators), independent of the current scroll position.
-func (h *HelpOverlay) bodyLines() []string {
-	bindings := HelpOverlayBindings()
-	keyStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	lines := make([]string, 0, len(bindings))
-	for _, bind := range bindings {
-		if bind.Key == "" {
-			lines = append(lines, "")
-			continue
-		}
-		// Pad/truncate the key text to a fixed cell BEFORE styling so lipgloss
-		// can never wrap a long label onto a second line.
-		key := keyStyle.Render(padOrTruncate(bind.Key, helpKeyColWidth))
-		lines = append(lines, "  "+key+"  "+bind.Desc)
-	}
-	return lines
+// SetSize records the terminal size and re-clamps the scroll offset, so it
+// owns the scroll invariant on resize and View() can stay read-only.
+func (h *HelpOverlay) SetSize(w, ht int) {
+	h.width, h.height = w, ht
+	h.scroll = clampInt(h.scroll, 0, h.layout().maxScroll)
 }
 
-// visibleRows is how many body lines fit in the current terminal height.
-func (h *HelpOverlay) visibleRows() int {
-	return max(h.height-helpChromeHeight, 1)
-}
-
-// maxScroll is the largest valid scroll offset for the current size; 0 means
-// the whole sheet fits and isn't scrollable.
-func (h *HelpOverlay) maxScroll() int {
-	if m := len(h.bodyLines()) - h.visibleRows(); m > 0 {
-		return m
-	}
-	return 0
-}
-
-// Update scrolls when the sheet is taller than the screen; any non-scroll key
-// (and any key at all when it already fits) dismisses the overlay.
+// Update scrolls when the sheet overflows; any non-scroll key closes it.
 func (h *HelpOverlay) Update(msg tea.Msg) (*HelpOverlay, tea.Cmd) {
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return h, nil
 	}
-
-	maxScroll := h.maxScroll()
-	if maxScroll == 0 {
-		// Everything fits — preserve the "any key closes" behaviour.
+	lay := h.layout()
+	if lay.maxScroll == 0 {
+		// Whole sheet is visible — preserve the "any key closes" behaviour.
 		h.Hide()
 		return h, nil
 	}
-
-	page := h.visibleRows()
 	switch key.String() {
-	case "j", "down", "ctrl+n":
-		h.scroll = clampInt(h.scroll+1, 0, maxScroll)
-	case "k", "up", "ctrl+p":
-		h.scroll = clampInt(h.scroll-1, 0, maxScroll)
-	case "pgdown", "ctrl+d", " ":
-		h.scroll = clampInt(h.scroll+page, 0, maxScroll)
-	case "pgup", "ctrl+u":
-		h.scroll = clampInt(h.scroll-page, 0, maxScroll)
-	case "g", "home":
+	case "up", "k":
+		h.scroll--
+	case "down", "j":
+		h.scroll++
+	case "pgup":
+		h.scroll -= lay.pageStep
+	case "pgdown":
+		h.scroll += lay.pageStep
+	case "home", "g":
 		h.scroll = 0
-	case "G", "end":
-		h.scroll = maxScroll
+	case "end", "G":
+		h.scroll = lay.maxScroll
 	default:
 		h.Hide()
+		return h, nil
 	}
+	h.scroll = clampInt(h.scroll, 0, lay.maxScroll)
 	return h, nil
 }
 
-// innerWidth is the text column width: wide enough for the longest binding,
-// but never wider than the terminal allows (border 2 + padding 4 = 6 cells of
-// chrome). Lines wider than this are truncated so each binding is exactly one
-// row, which keeps the height math exact and avoids vertical clipping.
-func (h *HelpOverlay) innerWidth(lines []string) int {
-	longest := 0
-	for _, l := range lines {
-		if w := lipgloss.Width(l); w > longest {
-			longest = w
-		}
-	}
-	maxInner := max(h.width-6, helpMinInnerWidth)
-	return clampInt(longest, helpMinInnerWidth, maxInner)
+// helpLayout holds the geometry computed from the terminal size, shared by
+// Update (clamping/paging) and View (rendering) so they can't disagree.
+type helpLayout struct {
+	entries     []struct{ Key, Desc string }
+	keyW        int
+	colW        int
+	gutter      int
+	cols        int
+	rowsPerCol  int
+	visibleRows int // grid rows shown at once
+	pageStep    int
+	maxScroll   int
 }
 
-// View renders the keybinding cheat sheet, windowed to the terminal height.
+// layout lays the bindings out as newspaper-style columns sized to the
+// terminal: a short/wide pane gets more columns so it fits without scrolling.
+// When even the widest-possible column count is still too tall, the remaining
+// rows scroll.
+func (h *HelpOverlay) layout() helpLayout {
+	var entries []struct{ Key, Desc string }
+	for _, b := range HelpOverlayBindings() {
+		if b.Key == "" { // drop section separators; columns provide the gaps
+			continue
+		}
+		entries = append(entries, b)
+	}
+	n := len(entries)
+
+	const (
+		gutter  = 2 // space between columns
+		marginH = 2 // breathing room from the screen edges
+		indRows = 2 // ⋮ above / ⋮ below lines reserved when scrolling
+		// Non-grid lines View() always emits: title+blank and blank+hint.
+		titleLines = 2
+		hintLines  = 2
+	)
+	// Frame overhead (border + padding) is read from DialogStyle, so the scroll
+	// math follows automatically if the dialog is ever restyled.
+	frameV := DialogStyle.GetVerticalFrameSize()
+	frameH := DialogStyle.GetHorizontalFrameSize()
+
+	// keyW is the true widest key (not capped), so colW always accounts for it —
+	// lipgloss .Width is a minimum, so a capped value could be overflowed.
+	keyW, descW := 0, 0
+	for _, e := range entries {
+		keyW = max(keyW, lipgloss.Width(e.Key))
+		descW = max(descW, lipgloss.Width(e.Desc))
+	}
+	colW := keyW + 2 + descW
+
+	availH := max(1, h.height-frameV-titleLines-hintLines)
+	availW := max(colW, h.width-frameH-marginH)
+
+	colsByWidth := max(1, (availW+gutter)/(colW+gutter))
+	colsByHeight := ceilDiv(n, availH)
+	cols := clampInt(colsByHeight, 1, colsByWidth)
+	rowsPerCol := ceilDiv(n, cols)
+
+	visibleRows, maxScroll := rowsPerCol, 0
+	if rowsPerCol > availH { // can't fit even at max columns → scroll
+		visibleRows = max(1, availH-indRows)
+		maxScroll = rowsPerCol - visibleRows
+	}
+
+	return helpLayout{
+		entries:     entries,
+		keyW:        keyW,
+		colW:        colW,
+		gutter:      gutter,
+		cols:        cols,
+		rowsPerCol:  rowsPerCol,
+		visibleRows: visibleRows,
+		pageStep:    max(1, visibleRows-1),
+		maxScroll:   maxScroll,
+	}
+}
+
+// row renders one grid line: each column's cell joined by the gutter.
+func (lay helpLayout) row(r int) string {
+	keyStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Width(lay.keyW)
+	var b strings.Builder
+	for c := 0; c < lay.cols; c++ {
+		if c > 0 {
+			b.WriteString(strings.Repeat(" ", lay.gutter))
+		}
+		cell := ""
+		if idx := c*lay.rowsPerCol + r; idx < len(lay.entries) {
+			e := lay.entries[idx]
+			cell = keyStyle.Render(e.Key) + "  " + e.Desc
+		}
+		if w := lipgloss.Width(cell); w < lay.colW {
+			cell += strings.Repeat(" ", lay.colW-w)
+		}
+		b.WriteString(cell)
+	}
+	return b.String()
+}
+
+// View renders the keybinding cheat sheet.
 func (h *HelpOverlay) View() string {
-	lines := h.bodyLines()
-	avail := h.visibleRows()
-	inner := h.innerWidth(lines)
+	lay := h.layout()
 
-	var rows []string
-	var footer string
-	if len(lines) <= avail {
-		rows = lines
-		footer = "Press any key to close"
+	var lines []string
+	lines = append(lines, TitleStyle.Render("Keybindings"), "")
+
+	if lay.maxScroll == 0 {
+		for r := 0; r < lay.rowsPerCol; r++ {
+			lines = append(lines, lay.row(r))
+		}
 	} else {
-		maxScroll := len(lines) - avail
-		h.scroll = clampInt(h.scroll, 0, maxScroll)
-		rows = lines[h.scroll : h.scroll+avail]
-		footer = fmt.Sprintf("↑↓ scroll  ·  %d–%d of %d  ·  any other key closes",
-			h.scroll+1, h.scroll+avail, len(lines))
+		above, below := lay.hiddenCounts(h.scroll)
+		if above > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf("⋮ +%d above", above)))
+		} else {
+			lines = append(lines, "")
+		}
+		for r := h.scroll; r < h.scroll+lay.visibleRows; r++ {
+			lines = append(lines, lay.row(r))
+		}
+		if below > 0 {
+			lines = append(lines, DimStyle.Render(fmt.Sprintf("⋮ +%d below", below)))
+		} else {
+			lines = append(lines, "")
+		}
 	}
 
-	// Truncate every line (and the footer) to the text column so nothing wraps.
-	body := make([]string, len(rows))
-	for i, r := range rows {
-		body[i] = truncateToWidth(r, inner)
+	hint := "Press any key to close"
+	if lay.maxScroll > 0 {
+		hint = "↑↓ scroll · any other key to close"
 	}
+	lines = append(lines, "", DimStyle.Render(hint))
 
-	content := TitleStyle.Render("Keybindings") + "\n\n" +
-		strings.Join(body, "\n") + "\n\n" +
-		DimStyle.Render(truncateToWidth(footer, inner))
-	box := DialogStyle.Width(inner + 4).Render(content)
+	// Let the box auto-size to its widest line (the padded grid rows). Forcing
+	// an explicit Width would make lipgloss count the horizontal padding against
+	// the content area and wrap the longest binding.
+	box := DialogStyle.Render(strings.Join(lines, "\n"))
+	// Safety net so the box never bleeds past the screen. Below ~9 rows the
+	// frame + title + one binding + hint can't all fit and MaxHeight drops the
+	// hint — but that's sub-usable territory (the main sidebar/preview UI can't
+	// render at that height either).
+	box = lipgloss.NewStyle().MaxWidth(h.width).MaxHeight(h.height).Render(box)
 	return lipgloss.Place(h.width, h.height, lipgloss.Center, lipgloss.Center, box)
 }
 
-// truncateToWidth shortens s (ANSI-aware) to at most width display cells.
-func truncateToWidth(s string, width int) string {
-	if lipgloss.Width(s) <= width {
-		return s
+// hiddenCounts returns how many bindings sit above and below the visible
+// window, counting actual entries (the last column may be short).
+func (lay helpLayout) hiddenCounts(scroll int) (above, below int) {
+	end := scroll + lay.visibleRows
+	for i := range lay.entries {
+		row := i % lay.rowsPerCol
+		if row < scroll {
+			above++
+		} else if row >= end {
+			below++
+		}
 	}
-	return ansi.Truncate(s, width, "…")
+	return
 }
 
-// padOrTruncate fits s to exactly width display cells: right-pad with spaces if
-// shorter, ANSI-aware truncate (with an ellipsis) if longer.
-func padOrTruncate(s string, width int) string {
-	w := lipgloss.Width(s)
-	if w == width {
-		return s
+func ceilDiv(a, b int) int {
+	if b <= 0 {
+		return a
 	}
-	if w < width {
-		return s + strings.Repeat(" ", width-w)
-	}
-	return ansi.Truncate(s, width, "…")
+	return (a + b - 1) / b
 }
 
-// clampInt constrains v to the inclusive range [lo, hi].
 func clampInt(v, lo, hi int) int {
 	if v < lo {
 		return lo
