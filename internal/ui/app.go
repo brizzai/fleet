@@ -3062,6 +3062,148 @@ func (h *Home) focusTick() tea.Cmd {
 	})
 }
 
+// focusKeySend is one tmux send-keys invocation produced for a focused-pane
+// keypress. When literal is true the value is sent verbatim (`send-keys -l`);
+// otherwise it is a tmux key name, optionally with an "M-"/"C-" modifier
+// prefix (`send-keys`).
+type focusKeySend struct {
+	literal bool
+	val     string
+}
+
+// allASCIILetters reports whether rs is non-empty and every rune is an ASCII
+// letter — i.e. safe to embed in a tmux "M-<rune>" key name without tripping
+// the control-mode command parser.
+func allASCIILetters(rs []rune) bool {
+	if len(rs) == 0 {
+		return false
+	}
+	for _, r := range rs {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// translateFocusKey maps a bubbletea key event onto the tmux send-keys
+// invocation(s) needed to reproduce it inside the focused session. It returns
+// (nil, true) when the key should instead exit focus mode (Esc).
+//
+// Modified keys must keep their modifier: Alt/Meta keys go through with the
+// tmux "M-" prefix (M-BSpace, M-Left, M-a, ...) so word-wise line editing
+// works in the focused pane instead of degrading to an unmodified keypress.
+// Alt+<non-letter rune> can't safely use "M-<rune>" (tmux's command parser
+// treats `;`, quotes, `#`, ... specially), so it falls back to ESC followed by
+// the rune sent literally.
+func translateFocusKey(msg tea.KeyMsg) (sends []focusKeySend, unfocus bool) {
+	if msg.Type == tea.KeyEsc {
+		return nil, true
+	}
+	named := func(v string) []focusKeySend { return []focusKeySend{{val: v}} }
+
+	if msg.Alt {
+		switch msg.Type {
+		case tea.KeyRunes:
+			if allASCIILetters(msg.Runes) {
+				for _, r := range msg.Runes {
+					sends = append(sends, focusKeySend{val: "M-" + string(r)})
+				}
+				return sends, false
+			}
+			// ESC then the rune(s) sent literally (-l → quoteTmux), which is
+			// what Alt+<rune> is at the terminal level anyway.
+			return []focusKeySend{{val: "Escape"}, {literal: true, val: string(msg.Runes)}}, false
+		case tea.KeyBackspace:
+			return named("M-BSpace"), false
+		case tea.KeyDelete:
+			return named("M-DC"), false
+		case tea.KeyLeft:
+			return named("M-Left"), false
+		case tea.KeyRight:
+			return named("M-Right"), false
+		case tea.KeyUp:
+			return named("M-Up"), false
+		case tea.KeyDown:
+			return named("M-Down"), false
+		case tea.KeyEnter:
+			return named("M-Enter"), false
+		default:
+			// Alt+X == ESC then X: emit Escape, then translate the bare key.
+			rest, _ := translateFocusKey(tea.KeyMsg{Type: msg.Type, Runes: msg.Runes})
+			return append(named("Escape"), rest...), false
+		}
+	}
+
+	switch msg.Type {
+	case tea.KeyEnter:
+		return named("Enter"), false
+	case tea.KeyBackspace:
+		return named("BSpace"), false
+	case tea.KeyTab:
+		return named("Tab"), false
+	case tea.KeyShiftTab:
+		return named("BTab"), false
+	case tea.KeySpace:
+		return named("Space"), false
+	case tea.KeyUp:
+		return named("Up"), false
+	case tea.KeyDown:
+		return named("Down"), false
+	case tea.KeyLeft:
+		return named("Left"), false
+	case tea.KeyRight:
+		return named("Right"), false
+	case tea.KeyCtrlLeft:
+		return named("C-Left"), false
+	case tea.KeyCtrlRight:
+		return named("C-Right"), false
+	case tea.KeyCtrlUp:
+		return named("C-Up"), false
+	case tea.KeyCtrlDown:
+		return named("C-Down"), false
+	case tea.KeyHome:
+		return named("Home"), false
+	case tea.KeyEnd:
+		return named("End"), false
+	case tea.KeyPgUp:
+		return named("PageUp"), false
+	case tea.KeyPgDown:
+		return named("PageDown"), false
+	case tea.KeyDelete:
+		return named("DC"), false
+	case tea.KeyCtrlC:
+		return named("C-c"), false
+	case tea.KeyCtrlD:
+		return named("C-d"), false
+	case tea.KeyCtrlA:
+		return named("C-a"), false
+	case tea.KeyCtrlU:
+		return named("C-u"), false
+	case tea.KeyCtrlL:
+		return named("C-l"), false
+	case tea.KeyCtrlW:
+		return named("C-w"), false
+	case tea.KeyCtrlK:
+		return named("C-k"), false
+	case tea.KeyRunes:
+		return []focusKeySend{{literal: true, val: string(msg.Runes)}}, false
+	default:
+		if str := msg.String(); str != "" {
+			return []focusKeySend{{literal: true, val: str}}, false
+		}
+		return nil, false
+	}
+}
+
+// handleFocusKey forwards a keypress to the focused session's tmux pane, or
+// exits focus mode on Esc.
+//
+// The tmux sends run synchronously here rather than from a tea.Cmd on purpose:
+// Bubble Tea processes KeyMsgs sequentially, so staying in Update() keeps
+// forwarded keystrokes in order — concurrent tea.Cmds would not preserve that.
+// Each send is a sub-millisecond write to the long-lived `tmux -C` control
+// client, not a shell-out.
 func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := h.selectedSession()
 	if s == nil || !s.IsAlive() {
@@ -3070,7 +3212,8 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	if msg.Type == tea.KeyEsc {
+	sends, unfocus := translateFocusKey(msg)
+	if unfocus {
 		h.focusMode = false
 		h.sidebarDirty = true
 		h.actionLog.Add("unfocus preview", s.Title, true)
@@ -3086,53 +3229,11 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	target := s.GetTmuxSession().Name
-
-	switch msg.Type {
-	case tea.KeyEnter:
-		cc.SendKeys(target, "Enter")
-	case tea.KeyBackspace:
-		cc.SendKeys(target, "BSpace")
-	case tea.KeyTab:
-		cc.SendKeys(target, "Tab")
-	case tea.KeySpace:
-		cc.SendKeys(target, "Space")
-	case tea.KeyUp:
-		cc.SendKeys(target, "Up")
-	case tea.KeyDown:
-		cc.SendKeys(target, "Down")
-	case tea.KeyLeft:
-		cc.SendKeys(target, "Left")
-	case tea.KeyRight:
-		cc.SendKeys(target, "Right")
-	case tea.KeyHome:
-		cc.SendKeys(target, "Home")
-	case tea.KeyEnd:
-		cc.SendKeys(target, "End")
-	case tea.KeyPgUp:
-		cc.SendKeys(target, "PageUp")
-	case tea.KeyPgDown:
-		cc.SendKeys(target, "PageDown")
-	case tea.KeyDelete:
-		cc.SendKeys(target, "DC")
-	case tea.KeyCtrlC:
-		cc.SendKeys(target, "C-c")
-	case tea.KeyCtrlD:
-		cc.SendKeys(target, "C-d")
-	case tea.KeyCtrlA:
-		cc.SendKeys(target, "C-a")
-	case tea.KeyCtrlU:
-		cc.SendKeys(target, "C-u")
-	case tea.KeyCtrlL:
-		cc.SendKeys(target, "C-l")
-	case tea.KeyCtrlW:
-		cc.SendKeys(target, "C-w")
-	case tea.KeyCtrlK:
-		cc.SendKeys(target, "C-k")
-	case tea.KeyRunes:
-		cc.SendLiteralKeys(target, string(msg.Runes))
-	default:
-		if str := msg.String(); str != "" {
-			cc.SendLiteralKeys(target, str)
+	for _, sk := range sends {
+		if sk.literal {
+			cc.SendLiteralKeys(target, sk.val)
+		} else {
+			cc.SendKeys(target, sk.val)
 		}
 	}
 	return h, nil
