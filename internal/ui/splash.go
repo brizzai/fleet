@@ -113,6 +113,16 @@ func RenderSplash(width, height int, progress float64, frame int) string {
 	return out.String()
 }
 
+// renderShutdownBox builds the small "Shutting down…" box floated over the
+// dimmed UI while fleet tears down. Spinner + label in the shared DialogStyle so
+// it reads as part of fleet's dialog vocabulary. `frame` advances the spinner.
+func renderShutdownBox(frame int) string {
+	spinner := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).
+		Render(splashSpinnerFrames[frame%len(splashSpinnerFrames)])
+	label := lipgloss.NewStyle().Foreground(ColorText).Render("Shutting down…")
+	return DialogStyle.Render(spinner + "  " + label)
+}
+
 // gradientLine colors each rune of s by lerping ColorAccent → ColorPurple
 // across the row. Spaces pass through uncolored to keep the gap glyphs from
 // burning extra escape sequences.

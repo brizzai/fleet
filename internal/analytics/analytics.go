@@ -35,9 +35,10 @@ const (
 	// Mixpanel is slow before we start losing events.
 	queueSize = 256
 
-	// shutdownTimeout caps how long Shutdown blocks waiting for the worker
-	// to drain the queue. 2s matches what the previous Sentry impl used.
-	shutdownTimeout = 2 * time.Second
+	// shutdownTimeout caps how long Shutdown blocks waiting for the worker to
+	// drain the queue. Kept short so quitting fleet exits promptly; on a slow
+	// or unreachable network any events still queued past this are dropped.
+	shutdownTimeout = 500 * time.Millisecond
 )
 
 var (
