@@ -100,6 +100,48 @@ func (d *SettingsDialog) maxBlockHeight() int {
 	return h
 }
 
+// labelColWidth returns the width of the widest interactive (non-subheader)
+// label in rows. The detail pane sizes its label column to this so labels never
+// wrap (wrapping inflates the rendered line count past the fixed block height,
+// which would silently truncate the rows below).
+func labelColWidth(rows []settingRow) int {
+	w := 0
+	for _, r := range rows {
+		if r.subheader {
+			continue
+		}
+		if lw := lipgloss.Width(r.label); lw > w {
+			w = lw
+		}
+	}
+	return w
+}
+
+// detailContentWidth is the width the detail column needs to render every
+// category's rows on a single line each (label column + arrows + value). Taken
+// across all categories so the modal keeps a constant width when switching.
+func (d *SettingsDialog) detailContentWidth() int {
+	// Non-label chrome per row: "  " + "◂" + " " + value + " " + "▸" = 6 cells.
+	const rowChrome = 6
+	need := 0
+	for _, c := range d.categories {
+		labelW := labelColWidth(c.rows)
+		maxVal := 0
+		for _, r := range c.rows {
+			if r.subheader || r.value == nil {
+				continue
+			}
+			if vw := lipgloss.Width(r.value(d.cfg)); vw > maxVal {
+				maxVal = vw
+			}
+		}
+		if w := labelW + rowChrome + maxVal; w > need {
+			need = w
+		}
+	}
+	return need
+}
+
 // firstSelectableRow returns the first non-subheader row index of a category.
 func (d *SettingsDialog) firstSelectableRow(cat int) int {
 	for i, r := range d.categories[cat].rows {
@@ -199,11 +241,11 @@ func (d *SettingsDialog) View() string {
 		chrome = 6 // rounded border (2) + horizontal padding (2×2)
 	)
 
-	// The detail column flexes with the terminal so the modal fits narrow panes
-	// (the old dialog clamped its width the same way); the floor keeps values
-	// readable. detailW + railW + ruleW never exceeds the content area, so the
-	// bordered box stays within d.width.
-	detailW := 36
+	// Size the detail column to the widest row across all categories so labels
+	// render on one line (no wrap → no truncation of the rows below). It still
+	// flexes down to fit narrow panes; the floor keeps values readable. detailW +
+	// railW + ruleW never exceeds the content area, so the box stays within d.width.
+	detailW := d.detailContentWidth()
 	if fit := d.width - chrome - railW - ruleW; fit < detailW {
 		detailW = fit
 	}
@@ -299,6 +341,7 @@ func (d *SettingsDialog) renderRail() string {
 func (d *SettingsDialog) renderDetail() string {
 	var b strings.Builder
 	rows := d.curRows()
+	labelW := labelColWidth(rows)
 	for i, r := range rows {
 		if i > 0 {
 			b.WriteString("\n")
@@ -309,7 +352,7 @@ func (d *SettingsDialog) renderDetail() string {
 		}
 
 		selected := d.focus == focusDetail && i == d.rowCursor
-		labelStyle := lipgloss.NewStyle().Width(13).Align(lipgloss.Left)
+		labelStyle := lipgloss.NewStyle().Width(labelW).Align(lipgloss.Left)
 		var arrowStyle, valueStyle lipgloss.Style
 		if selected {
 			labelStyle = labelStyle.Foreground(ColorAccent).Bold(true)
