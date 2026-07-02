@@ -8,10 +8,11 @@ const (
 	// Lifecycle.
 	EventAppStarted = "app_started"
 	EventAppQuit    = "app_quit"
-
-	// Consent. Sent once per install when the user declines the first-launch
-	// analytics prompt — see analytics.TrackDeclined.
-	EventTelemetryDeclined = "telemetry_declined"
+	// EventAppActive is the daily-active heartbeat — emitted at most once per
+	// calendar day per process (see analytics.Heartbeat) so daily-active-user
+	// counts stay accurate for long-running instances that rarely restart.
+	// Sent in both full and minimal mode.
+	EventAppActive = "app_active"
 
 	// Sessions.
 	EventSessionCreated   = "session_created"

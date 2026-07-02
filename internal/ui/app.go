@@ -809,9 +809,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case settingsClosedMsg:
 		// Re-read tick interval from config after settings change.
 		// Also reconcile the live analytics client with the (possibly
-		// flipped) Telemetry toggle — otherwise the change only takes
-		// effect on next launch.
-		analytics.SyncEnabled(h.cfg.IsTelemetryEnabled(), h.version, h.identity)
+		// changed) telemetry mode — otherwise the change only takes
+		// effect on next launch. If the user just enabled telemetry
+		// mid-session, mark them active today so DAU catches them now.
+		analytics.SyncEnabled(h.cfg.GetTelemetryMode(), h.version, h.identity)
+		analytics.Heartbeat()
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
@@ -825,29 +827,29 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case consentResultMsg:
-		// Persist the answer so we don't ask again, then run startup
-		// analytics if (and only if) the user accepted.
-		enabled := msg.accepted
-		h.cfg.Telemetry = &enabled
+		// Accept → full (usage + git identity); decline → minimal (anonymous
+		// daily-active ping only, no identity). "Off" is Settings-only. Persist
+		// the mode so we don't ask again, clearing any legacy bool so it can't
+		// shadow the new field, then run startup analytics in the chosen mode.
+		mode := config.TelemetryMinimal
+		if msg.accepted {
+			mode = config.TelemetryFull
+		}
+		h.cfg.TelemetryMode = mode
+		h.cfg.Telemetry = nil
 		h.cfg.AnalyticsConsentSeen = true
 		if err := h.cfg.Save(); err != nil {
 			debuglog.Logger.Error("config: save after consent", "err", err)
 		}
-		var cmd tea.Cmd
-		if enabled {
-			// Worker is already running by this point — guard the read.
-			h.workerMu.Lock()
-			repoCount := len(session.GroupByRepo(h.sessions))
-			h.workerMu.Unlock()
-			h.fireStartupAnalytics(repoCount)
-		} else {
-			// Declined: emit a single anonymous decline beacon (device hash
-			// only). Guarded against env opt-out inside TrackDeclined.
-			cmd = h.fireDeclineBeacon()
-		}
+		// Both outcomes initialize the client and emit the anonymous DAU
+		// signals; only full mode additionally attaches identity + rich usage.
+		h.workerMu.Lock()
+		repoCount := len(session.GroupByRepo(h.sessions))
+		h.workerMu.Unlock()
+		h.fireStartupAnalytics(repoCount)
 		// First-run theme onboarding follows the consent prompt.
 		h.maybeShowOnboarding()
-		return h, cmd
+		return h, nil
 
 	case bugReportClosedMsg:
 		return h, nil
@@ -1307,9 +1309,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.fireStartupAnalytics(len(groups))
 			case analytics.IsOptedOutByEnv():
 				h.fireStartupAnalytics(len(groups))
-			case !h.cfg.IsTelemetryEnabled():
-				// User already opted out via config (e.g. from a pre-consent-dialog
-				// version). Don't re-prompt; treat as already answered.
+			case h.cfg.TelemetryConfigured():
+				// User already set a telemetry preference in config (e.g. from a
+				// pre-consent-dialog version). Don't re-prompt; honor the
+				// configured mode (GetTelemetryMode migrates the legacy bool).
 				h.fireStartupAnalytics(len(groups))
 			default:
 				h.consentDialog.Show()
@@ -3914,6 +3917,11 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 
 	h.rebuildFlatItems()
 	h.refreshTips(!h.modalOpen())
+
+	// Daily-active heartbeat: no-op until the calendar day rolls over (or the
+	// client is disabled), so this is cheap to call every tick. Keeps DAU
+	// accurate for instances left running for days without a restart.
+	analytics.Heartbeat()
 
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	return h, h.tick()

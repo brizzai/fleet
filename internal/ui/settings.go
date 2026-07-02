@@ -23,6 +23,7 @@ var (
 	densitySet          = []string{"normal", "compact"}
 	enterModeSet        = []string{"attach", "split"}
 	defaultAgentSet     = []string{"claude", "codex", "opencode"}
+	telemetryModeSet    = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
 )
 
 // settingsFocus tracks which pane (category rail or detail list) has the cursor.
@@ -641,9 +642,23 @@ func buildSettingsCategories() []settingsCategory {
 					d.cfg.EnterMode = cycleString(d.cfg.GetEnterMode(), enterModeSet, dir)
 				},
 			},
-			withLabel("Telemetry", toggle(
-				(*config.Config).IsTelemetryEnabled,
-				func(c *config.Config, v bool) { c.Telemetry = &v }, false)),
+			{
+				label: "Telemetry",
+				value: func(c *config.Config) string {
+					switch c.GetTelemetryMode() {
+					case config.TelemetryMinimal:
+						return "Minimal (anon)"
+					case config.TelemetryOff:
+						return "Off"
+					default:
+						return "Full"
+					}
+				},
+				cycle: func(d *SettingsDialog, dir int) {
+					d.cfg.TelemetryMode = cycleString(d.cfg.GetTelemetryMode(), telemetryModeSet, dir)
+					d.cfg.Telemetry = nil // supersede any legacy bool
+				},
+			},
 			{
 				label: "Default agent",
 				value: func(c *config.Config) string {

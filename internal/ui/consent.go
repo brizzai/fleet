@@ -13,10 +13,12 @@ type consentResultMsg struct {
 	accepted bool
 }
 
-// ConsentDialog is the first-launch analytics opt-in prompt. It surfaces
-// exactly what fleet collects before initializing the Mixpanel client so
-// the user can make an informed choice. Dismissing the dialog any way
-// other than explicit "Yes" is treated as a decline.
+// ConsentDialog is the first-launch analytics prompt. It surfaces exactly what
+// fleet collects before initializing the Mixpanel client so the user can make
+// an informed choice. "Yes" → full telemetry (usage + git name/email). Any
+// other dismissal → minimal: an anonymous daily-active ping only (no identity),
+// so daily-active users can still be counted. Turning telemetry fully off is a
+// Settings-only choice, disclosed in the dialog copy.
 type ConsentDialog struct {
 	visible bool
 	width   int
@@ -74,41 +76,44 @@ func (d *ConsentDialog) View() string {
 	b.WriteString("\n\n")
 
 	body := lipgloss.NewStyle().Foreground(ColorText)
-	b.WriteString(body.Render("fleet sends usage events so I can see what"))
+	b.WriteString(body.Render("fleet can send a little usage info so I can see"))
 	b.WriteString("\n")
-	b.WriteString(body.Render("works and what doesn't. With your permission"))
-	b.WriteString("\n")
-	b.WriteString(body.Render("each event is tagged with:"))
+	b.WriteString(body.Render("how it's doing. Pick what you're comfortable with:"))
 	b.WriteString("\n\n")
 
-	bulletMark := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	bulletText := lipgloss.NewStyle().Foreground(ColorText)
-	bullets := []string{
-		"git user.name",
-		"git user.email",
-		"OS version, theme, session counts, error categories",
-	}
-	for _, item := range bullets {
-		b.WriteString("  ")
-		b.WriteString(bulletMark.Render("›"))
-		b.WriteString(" ")
-		b.WriteString(bulletText.Render(item))
-		b.WriteString("\n")
-	}
+	// Two outcomes, kept intentionally light and vague. "Basic" still sends a
+	// tiny anonymous signal (so it's honest that something goes out) but the
+	// copy avoids the scary/technical framing — no "anonymous", no "identity",
+	// no enumerating what isn't collected.
+	markStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	optStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
+	subStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+
+	b.WriteString("  ")
+	b.WriteString(markStyle.Render("Y"))
+	b.WriteString(" ")
+	b.WriteString(optStyle.Render("Full"))
+	b.WriteString("   ")
+	b.WriteString(subStyle.Render("the full picture — includes git name & email"))
 	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(markStyle.Render("N"))
+	b.WriteString(" ")
+	b.WriteString(optStyle.Render("Basic"))
+	b.WriteString("  ")
+	b.WriteString(subStyle.Render("just a quiet heads-up that fleet's in use"))
+	b.WriteString("\n\n")
 
 	checkStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
 	neverStyle := lipgloss.NewStyle().Foreground(ColorGreen)
 	b.WriteString(checkStyle.Render("✓ "))
 	b.WriteString(neverStyle.Render("Never sent: file paths, prompts, code, repo/branch names."))
-	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("Change this any time in Settings (S key)."))
 	b.WriteString("\n\n")
 
 	// Buttons. Selected Yes gets a green background (positive / inviting);
-	// selected No gets the neutral accent — declining is fine, not scary.
-	yesLabel := " Y  Yes, help out "
-	noLabel := " N  No thanks "
+	// selected No gets the neutral accent — choosing basic is fine, not scary.
+	yesLabel := " Y  Yes, full "
+	noLabel := " N  Keep it basic "
 
 	idleStyle := lipgloss.NewStyle().
 		Foreground(ColorTextDim).

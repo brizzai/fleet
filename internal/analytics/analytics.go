@@ -27,6 +27,14 @@ import (
 	"github.com/mixpanel/mixpanel-go"
 )
 
+// Telemetry modes, mirroring config.Telemetry{Full,Minimal,Off}. Kept as
+// plain strings so this package stays decoupled from internal/config.
+const (
+	ModeFull    = "full"
+	ModeMinimal = "minimal"
+	ModeOff     = "off"
+)
+
 const (
 	mixpanelToken = "89fa427751dcb749b67d524d1dbc9f98"
 
@@ -56,9 +64,24 @@ type Client struct {
 	mp         *mixpanel.ApiClient
 	deviceID   string
 	distinctID string
+	version    string
 	queue      chan job
 	wg         sync.WaitGroup
 	disabled   bool
+	// mode is the resolved telemetry mode this client runs in
+	// (ModeFull/ModeMinimal) — the single source of truth, also emitted as the
+	// "mode" property on DAU events. Minimal is anonymous, DAU-only: no git
+	// name/email, no people profile, and Track/Gauge/Distribution/
+	// SetUserProperties all no-op; only app_started and the app_active heartbeat
+	// are sent, keyed on the anonymous device hash. A disabled client leaves
+	// this empty.
+	mode string
+
+	// mu guards lastActiveDay, which the daily-active Heartbeat reads and
+	// updates. lastActiveDay is the calendar day (YYYY-MM-DD) of the last
+	// app_active event, so a long-running instance emits at most one per day.
+	mu            sync.Mutex
+	lastActiveDay string
 }
 
 // Identity is the resolved per-install identity that callers pass into Init.
@@ -97,9 +120,12 @@ type job struct {
 // Init wires up the Mixpanel client and starts the worker goroutine using a
 // pre-resolved Identity. Pass the result of DiscoverIdentity() (called before
 // the TUI starts) so no blocking I/O happens here. Safe to call once;
-// subsequent calls are no-ops. When telemetry is disabled the client is
-// created in a "disabled" state and all helper calls become no-ops.
-func Init(telemetryEnabled bool, version string, identity Identity) {
+// subsequent calls are no-ops. mode is one of ModeFull/ModeMinimal/ModeOff.
+// ModeOff (or an env opt-out) creates a "disabled" client and all helper calls
+// become no-ops. ModeMinimal creates an anonymous client that sends only the
+// DAU signals (app_started + app_active) with no git name/email and no people
+// profile.
+func Init(mode string, version string, identity Identity) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 
@@ -107,16 +133,19 @@ func Init(telemetryEnabled bool, version string, identity Identity) {
 		return
 	}
 
-	if !telemetryEnabled || isOptedOut() {
+	if mode == ModeOff || isOptedOut() {
 		global = &Client{disabled: true}
 		debuglog.Logger.Info("analytics disabled")
 		return
 	}
 
-	// Mixpanel distinct_id: prefer git email (one Mixpanel user across all
-	// of the person's machines), fall back to the anonymous device hash.
+	minimal := mode == ModeMinimal
+
+	// Mixpanel distinct_id: in full mode prefer git email (one Mixpanel user
+	// across all of the person's machines); in minimal mode always use the
+	// anonymous device hash so no identity leaves the machine.
 	distinctID := identity.DeviceID
-	if identity.GitEmail != "" {
+	if !minimal && identity.GitEmail != "" {
 		distinctID = identity.GitEmail
 	}
 
@@ -126,6 +155,8 @@ func Init(telemetryEnabled bool, version string, identity Identity) {
 		mp:         mp,
 		deviceID:   identity.DeviceID,
 		distinctID: distinctID,
+		version:    version,
+		mode:       mode,
 		queue:      make(chan job, queueSize),
 	}
 	c.wg.Add(1)
@@ -133,25 +164,29 @@ func Init(telemetryEnabled bool, version string, identity Identity) {
 
 	global = c
 
-	// Set baseline people properties so Mixpanel sees this device/install
-	// even before the first explicit SetUserProperties call.
-	people := map[string]any{
-		"app_version":  version,
-		"os_version":   identity.OSVersion,
-		"arch":         runtime.GOARCH,
-		"machine_hash": identity.DeviceID,
+	// Minimal mode ships no people profile at all — only anonymous events.
+	if !minimal {
+		// Set baseline people properties so Mixpanel sees this device/install
+		// even before the first explicit SetUserProperties call.
+		people := map[string]any{
+			"app_version":  version,
+			"os_version":   identity.OSVersion,
+			"arch":         runtime.GOARCH,
+			"machine_hash": identity.DeviceID,
+		}
+		if identity.GitName != "" {
+			people["$name"] = identity.GitName
+		}
+		if identity.GitEmail != "" {
+			people["$email"] = identity.GitEmail
+		}
+		enqueuePeople(c, people)
 	}
-	if identity.GitName != "" {
-		people["$name"] = identity.GitName
-	}
-	if identity.GitEmail != "" {
-		people["$email"] = identity.GitEmail
-	}
-	enqueuePeople(c, people)
 
-	// Log only whether git identity was present, not the value or any prefix
-	// of it (which for a git email is plenty to identify a person).
-	debuglog.Logger.Info("analytics initialized", "git_identity_present", identity.GitEmail != "")
+	// Log the mode and only whether git identity was present, never the value
+	// or any prefix of it (which for a git email is plenty to identify a
+	// person).
+	debuglog.Logger.Info("analytics initialized", "mode", mode, "git_identity_present", !minimal && identity.GitEmail != "")
 }
 
 // readGitIdentity returns the user's globally-configured git name and email.
@@ -193,14 +228,48 @@ func (c *Client) worker() {
 	}
 }
 
-// Track enqueues a Mixpanel event with the given properties.
+// Track enqueues a Mixpanel event with the given properties. No-op in minimal
+// mode, which only ships the anonymous DAU signals (see Heartbeat / trackRaw).
 func Track(eventType string, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	event := c.mp.NewEvent(eventType, c.distinctID, sanitizeProperties(properties))
 	enqueueEvent(c, event)
+}
+
+// trackRaw enqueues an event bypassing the minimal-mode gate. Reserved for the
+// DAU signals (app_started, app_active) that must send even in minimal mode.
+// Callers must pass already-clean, PII-free properties.
+func trackRaw(c *Client, eventType string, properties map[string]any) {
+	if c == nil || c.disabled {
+		return
+	}
+	event := c.mp.NewEvent(eventType, c.distinctID, properties)
+	enqueueEvent(c, event)
+}
+
+// Heartbeat records that this device is active today, at most once per calendar
+// day per process. It is the DAU signal that survives long-running instances:
+// app_started only fires at launch, but fleet is often left open for days, so a
+// midnight rollover re-emits app_active on the next tick. Sends in both full
+// and minimal mode; no-op when disabled.
+func Heartbeat() {
+	c := current()
+	if c == nil || c.disabled {
+		return
+	}
+	day := time.Now().Format("2006-01-02")
+	c.mu.Lock()
+	if c.lastActiveDay == day {
+		c.mu.Unlock()
+		return
+	}
+	c.lastActiveDay = day
+	c.mu.Unlock()
+
+	trackRaw(c, EventAppActive, map[string]any{"version": c.version, "mode": c.mode})
 }
 
 // Gauge records a point-in-time value as an event with a numeric `value`
@@ -208,7 +277,7 @@ func Track(eventType string, properties map[string]interface{}) {
 // chart averages or maxes by event name.
 func Gauge(name string, value float64, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	props := mergeValue(properties, value)
@@ -221,7 +290,7 @@ func Gauge(name string, value float64, properties map[string]interface{}) {
 // the caller's intent only.
 func Distribution(name string, sample float64, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	props := mergeValue(properties, sample)
@@ -234,33 +303,36 @@ func Distribution(name string, sample float64, properties map[string]interface{}
 // property, so repeated calls during a session are fine.
 func SetUserProperties(props map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	enqueuePeople(c, sanitizeProperties(props))
 }
 
 // SyncEnabled reconciles the live client with the user's current telemetry
-// preference — call this when the Settings dialog closes. Without it, the
-// Settings toggle would only take effect on the next launch: Track checks
-// c.disabled (set once at Init), not the live config. Env opt-out always
-// wins; this is a no-op when nothing changed. State changes tear the live
-// client down and re-init in the requested mode.
-func SyncEnabled(telemetryEnabled bool, version string, identity Identity) {
+// mode — call this when the Settings dialog closes. Without it, a mode change
+// would only take effect on the next launch: the helpers check c.disabled /
+// c.mode (set once at Init), not the live config. Env opt-out always wins;
+// this is a no-op when the effective state (disabled + minimal) is unchanged.
+// Otherwise the live client is torn down and re-inited in the requested mode.
+func SyncEnabled(mode string, version string, identity Identity) {
 	globalMu.Lock()
 	c := global
 	globalMu.Unlock()
 
-	wantDisabled := !telemetryEnabled || isOptedOut()
-	switch {
-	case c == nil && wantDisabled:
-		return
-	case c != nil && c.disabled == wantDisabled:
+	wantDisabled := mode == ModeOff || isOptedOut()
+	wantMinimal := !wantDisabled && mode == ModeMinimal
+
+	if c == nil {
+		if wantDisabled {
+			return
+		}
+	} else if c.disabled == wantDisabled && (c.mode == ModeMinimal) == wantMinimal {
 		return
 	}
 
 	Shutdown()
-	Init(telemetryEnabled, version, identity)
+	Init(mode, version, identity)
 }
 
 // Shutdown closes the queue, drains in-flight events with a timeout, and
@@ -465,9 +537,22 @@ func osVersion() string {
 	return strings.TrimSpace(string(out))
 }
 
-// TrackAppStarted records app launch with user properties merged into the
-// people profile, then emits an EventAppStarted event.
+// TrackAppStarted records app launch. In full mode it merges usage properties
+// into the people profile and emits an app_started event with session/repo
+// counts. In minimal mode it emits only an anonymous app_started (version +
+// mode), with no people profile and no counts — the leanest launch signal that
+// still marks the device active today.
 func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMode string, autoName, copyClaudeSettings bool) {
+	c := current()
+	if c == nil || c.disabled {
+		return
+	}
+
+	if c.mode == ModeMinimal {
+		trackRaw(c, EventAppStarted, map[string]any{"version": version, "mode": c.mode})
+		return
+	}
+
 	SetUserProperties(map[string]interface{}{
 		"theme":                theme,
 		"enter_mode":           enterMode,
@@ -479,33 +564,6 @@ func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMo
 		"version":       version,
 		"session_count": sessionCount,
 		"repo_count":    repoCount,
+		"mode":          c.mode,
 	})
 }
-
-// TrackDeclined sends a single anonymous "telemetry_declined" event keyed on the
-// hashed device ID. It is fully independent of the global queued client (which is
-// never initialized when the user declines) and carries no git name/email/path —
-// only the anonymous machine hash plus app/OS version. It is a no-op under env
-// opt-out (FLEET_TELEMETRY_DISABLED / DO_NOT_TRACK). Blocks up to 5s; call it
-// from a background goroutine (e.g. a tea.Cmd), not the Update() loop.
-func TrackDeclined(version string, identity Identity) {
-	if !declineShouldSend() {
-		return
-	}
-	mp := mixpanel.NewApiClient(mixpanelToken)
-	event := mp.NewEvent(EventTelemetryDeclined, identity.DeviceID, map[string]any{
-		"version":      version,
-		"os_version":   identity.OSVersion,
-		"arch":         runtime.GOARCH,
-		"machine_hash": identity.DeviceID,
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := mp.Track(ctx, []*mixpanel.Event{event}); err != nil {
-		debuglog.Logger.Debug("mixpanel telemetry_declined track failed", "err", err)
-	}
-}
-
-// declineShouldSend reports whether the decline beacon may be sent. Split out so
-// the env opt-out guard is unit-testable without a network call.
-func declineShouldSend() bool { return !isOptedOut() }
