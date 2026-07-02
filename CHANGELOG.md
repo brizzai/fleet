@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- New terminal drawer (press `` ` ``) for live, repo-scoped shells — dev servers, log tails, scratch commands — with faithful colors and full-screen tools (vim, htop, lazygit). Type straight in; `Ctrl+T` new, `Ctrl+W` close, `Ctrl+PgUp/PgDn` switch tabs, `Ctrl+G` full-screen attach.
+- New terminal drawer (press `` ` ``) for live, repo-scoped shells — dev servers, log tails, scratch commands — with faithful colors and full-screen tools (vim, htop, lazygit). Type straight in; `Ctrl+T` new, `Ctrl+W` close, `PgUp/PgDn` switch tabs, `Ctrl+G` full-screen attach.
 
 ### Improved
 
