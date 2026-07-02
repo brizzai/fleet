@@ -76,13 +76,15 @@ func (d *ConsentDialog) View() string {
 	b.WriteString("\n\n")
 
 	body := lipgloss.NewStyle().Foreground(ColorText)
-	b.WriteString(body.Render("fleet sends usage events so I can see how many"))
+	b.WriteString(body.Render("fleet can send a little usage info so I can see"))
 	b.WriteString("\n")
-	b.WriteString(body.Render("people use it and what breaks. You choose how much:"))
+	b.WriteString(body.Render("how it's doing. Pick what you're comfortable with:"))
 	b.WriteString("\n\n")
 
-	// Two outcomes, stated plainly. "No" is not "nothing" — it's still an
-	// anonymous daily-active ping, so the copy must say so.
+	// Two outcomes, kept intentionally light and vague. "Basic" still sends a
+	// tiny anonymous signal (so it's honest that something goes out) but the
+	// copy avoids the scary/technical framing — no "anonymous", no "identity",
+	// no enumerating what isn't collected.
 	markStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	optStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	subStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
@@ -91,18 +93,15 @@ func (d *ConsentDialog) View() string {
 	b.WriteString(markStyle.Render("Y"))
 	b.WriteString(" ")
 	b.WriteString(optStyle.Render("Full"))
-	b.WriteString("     ")
-	b.WriteString(subStyle.Render("git name + email + usage events"))
+	b.WriteString("   ")
+	b.WriteString(subStyle.Render("the full picture — includes git name & email"))
 	b.WriteString("\n")
 	b.WriteString("  ")
 	b.WriteString(markStyle.Render("N"))
 	b.WriteString(" ")
-	b.WriteString(optStyle.Render("Minimal"))
+	b.WriteString(optStyle.Render("Basic"))
 	b.WriteString("  ")
-	b.WriteString(subStyle.Render("anonymous daily-active ping only —"))
-	b.WriteString("\n")
-	b.WriteString("             ")
-	b.WriteString(subStyle.Render("no name, no email, no identity"))
+	b.WriteString(subStyle.Render("just a quiet heads-up that fleet's in use"))
 	b.WriteString("\n\n")
 
 	checkStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
@@ -112,9 +111,9 @@ func (d *ConsentDialog) View() string {
 	b.WriteString("\n\n")
 
 	// Buttons. Selected Yes gets a green background (positive / inviting);
-	// selected No gets the neutral accent — choosing minimal is fine, not scary.
+	// selected No gets the neutral accent — choosing basic is fine, not scary.
 	yesLabel := " Y  Yes, full "
-	noLabel := " N  Anonymous only "
+	noLabel := " N  Keep it basic "
 
 	idleStyle := lipgloss.NewStyle().
 		Foreground(ColorTextDim).
