@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-07-02
+
+### Added
+
+- New terminal drawer (press `` ` ``) for live, repo-scoped shells — dev servers, log tails, scratch commands — with faithful colors and full-screen tools (vim, htop, lazygit). Type straight in; `Ctrl+T` new, `Ctrl+W` close, `Ctrl+PgUp/PgDn` switch tabs, `Ctrl+G` full-screen attach.
+
+### Improved
+
+- Smoother, lower-flicker rendering — the TUI now redraws only the cells that changed, via Bubble Tea v2's cell-diff renderer with synchronized output.
+
+### Fixed
+
+- The Ctrl+K command palette now opens in terminals and tmux configs (e.g. gpakosz/.tmux) that enable extended/CSI-u key reporting, which previously encoded Ctrl+K in a form fleet couldn't read so the keystroke did nothing.
+- Fewer periodic UI stutters — the per-repo status refresh now spawns 3 git subprocesses instead of 5, easing fork/exec-lock contention that occasionally stalled the preview by ~0.5s.
+
 ## [2.12.1] - 2026-06-22
 
 ### Improved
@@ -301,7 +316,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.12.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.13.0...HEAD
+[2.13.0]: https://github.com/brizzai/fleet/releases/tag/v2.13.0
 [2.12.1]: https://github.com/brizzai/fleet/releases/tag/v2.12.1
 [2.12.0]: https://github.com/brizzai/fleet/releases/tag/v2.12.0
 [2.11.1]: https://github.com/brizzai/fleet/releases/tag/v2.11.1
