@@ -278,16 +278,17 @@ type Home struct {
 	// repo/worktree, shown in the drawer (never the sidebar). The drawer is
 	// either hidden or focused (always-typing: keystrokes go to the active
 	// shell, a few Ctrl chords drive the chrome). See drawer.go.
-	shells           []*shell.Shell // all live shells, all repos (mirror of the shells table)
-	drawerMode       drawerMode     // drawerHidden / drawerTyping
-	drawerProgress   float64        // animated slide 0 (closed) → 1 (open)
-	drawerTarget     float64        // where the slide is heading
-	drawerActiveTab  int            // index into shellsForActiveRepo()
-	drawerHeight     int            // max body rows when open (from config; clamped at render)
-	drawerCloseArmed bool           // ⌃W pressed once on a running shell; confirm close with ⌃W again
-	drawerRepo       string         // repo the drawer is scoped to (frozen at open)
-	drawerInnerW     int            // last-rendered drawer body inner width (drives the live emulator size)
-	drawerInnerH     int            // last-rendered drawer body inner height (stable terminal rows)
+	shells            []*shell.Shell // all live shells, all repos (mirror of the shells table)
+	drawerMode        drawerMode     // drawerHidden / drawerTyping
+	drawerProgress    float64        // animated slide 0 (closed) → 1 (open)
+	drawerTarget      float64        // where the slide is heading
+	drawerActiveTab   int            // index into shellsForActiveRepo()
+	drawerHeight      int            // max body rows when open (from config; clamped at render)
+	drawerCloseArmed  bool           // ⌃W pressed once on a running shell; confirm close with ⌃W again
+	drawerTickRunning bool           // a drawerTypeTick loop is live; guards against spawning duplicates on fast toggling
+	drawerRepo        string         // repo the drawer is scoped to (frozen at open)
+	drawerInnerW      int            // last-rendered drawer body inner width (drives the live emulator size)
+	drawerInnerH      int            // last-rendered drawer body inner height (stable terminal rows)
 
 	// Live terminal stream for the active shell: a tmux control-mode reader
 	// streams the pane's %output into an insulated emulator, rendered each frame
@@ -559,7 +560,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case drawerTypeTickMsg: // backstop: keep the live stream attached + sized while open
 		if h.drawerMode != drawerTyping {
-			return h, nil // closed → stop the loop (teardown ran on close)
+			h.drawerTickRunning = false // stop the loop (teardown ran on close); a reopen starts a fresh one
+			return h, nil
 		}
 		h.syncShellStream()
 		return h, h.drawerTypeTick()
@@ -2749,12 +2751,17 @@ func (h *Home) countShellsForRepo(repoPath string) int {
 	return n
 }
 
-// killShellsForRepo closes (kills tmux + forgets) every shell scoped to
-// repoPath. Done synchronously so the worktree dir is freed before
-// `git worktree remove` runs — a shell's dev server holds the dir open exactly
-// like a session's detached daemon, and proc.FindHolders won't kill the shell
-// process itself (shells are on its denylist). No undo (shells carry no state).
-func (h *Home) killShellsForRepo(repoPath string) {
+// killShellsForRepo forgets every shell scoped to repoPath and returns a tea.Cmd
+// that kills their tmux sessions + deletes their rows. The in-memory removal and
+// live-stream re-point happen synchronously on the Update goroutine (single
+// writer of h.shells/stream), but the actual `tmux kill-session` subprocess per
+// shell + DB delete run in the returned command OFF the Update goroutine (per the
+// no-blocking-I/O rule). Because a shell's dev server holds the worktree dir open
+// (like a session's detached daemon, and proc.FindHolders spares shells), the
+// caller must run this command BEFORE `git worktree remove` — see deferDeleteRepo,
+// which tea.Sequence()s it ahead of the destroy. Returns nil when nothing is
+// scoped here. No undo (shells carry no state).
+func (h *Home) killShellsForRepo(repoPath string) tea.Cmd {
 	var doomed []*shell.Shell
 	h.workerMu.Lock()
 	kept := make([]*shell.Shell, 0, len(h.shells))
@@ -2767,15 +2774,22 @@ func (h *Home) killShellsForRepo(repoPath string) {
 	}
 	h.shells = kept
 	h.workerMu.Unlock()
-	for _, sh := range doomed {
-		if err := h.storage.DeleteShell(sh.ID); err != nil {
-			debuglog.Logger.Error("storage: DeleteShell", "id", sh.ID, "err", err)
-		}
-		_ = sh.Kill()
-	}
 	// If the active drawer shell was among the doomed, re-point (or tear down) the
 	// live stream now instead of leaving it on a killed session until the next tick.
 	h.syncShellStream()
+	if len(doomed) == 0 {
+		return nil
+	}
+	storage := h.storage
+	return func() tea.Msg {
+		for _, sh := range doomed {
+			if err := storage.DeleteShell(sh.ID); err != nil {
+				debuglog.Logger.Error("storage: DeleteShell", "id", sh.ID, "err", err)
+			}
+			_ = sh.Kill()
+		}
+		return nil
+	}
 }
 
 // repoIsWorktree reports whether a repo group is a git worktree, reading from
@@ -2830,9 +2844,11 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 	// Remove the worktree's shells up front so their tmux sessions (and the dev
 	// servers they host) don't pin the dir against `git worktree remove`. Only
 	// when the directory is actually being destroyed — a plain "forget repo"
-	// leaves the folder (and its shells) alone.
+	// leaves the folder (and its shells) alone. The in-memory removal is
+	// synchronous; killShellsForRepo returns a command for the (off-Update) kills.
+	var killShellsCmd tea.Cmd
 	if msg.destroyWorkspace {
-		h.killShellsForRepo(msg.repoPath)
+		killShellsCmd = h.killShellsForRepo(msg.repoPath)
 	}
 
 	var cmds []tea.Cmd
@@ -2844,7 +2860,7 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 			repoPath := msg.repoPath
 			name := filepath.Base(repoPath)
 			editor := h.cfg.GetEditor()
-			cmds = append(cmds, func() tea.Msg {
+			destroyCmd := func() tea.Msg {
 				remaining, err := destroyWorktree(repoPath, name, editor, 2*time.Second)
 				return deleteCleanupDoneMsg{
 					workspaceErr:     err,
@@ -2853,9 +2869,19 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 					remainingHolders: remaining,
 					destroyAttempted: true,
 				}
-			})
+			}
+			// Kill the shells FIRST (frees the dir), THEN remove the worktree.
+			// tea.Sequence drops a nil killShellsCmd, so this is just destroyCmd
+			// when there were no shells.
+			cmds = append(cmds, tea.Sequence(killShellsCmd, destroyCmd))
 		}
 		return h, tea.Batch(cmds...)
+	}
+
+	// Non-empty path: the per-session finalize→destroyWorktree is 5s-deferred, so
+	// the async kills complete well before it — just fire them alongside.
+	if killShellsCmd != nil {
+		cmds = append(cmds, killShellsCmd)
 	}
 
 	for i, s := range sess {

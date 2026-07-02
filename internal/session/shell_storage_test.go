@@ -57,9 +57,6 @@ func TestUpdateAndDeleteShell(t *testing.T) {
 		t.Fatalf("SaveShell: %v", err)
 	}
 
-	if err := db.UpdateShellName("sh1", "logs"); err != nil {
-		t.Fatalf("UpdateShellName: %v", err)
-	}
 	if err := db.UpdateShellTmuxName("sh1", "fleetsh_logs_ffff0000"); err != nil {
 		t.Fatalf("UpdateShellTmuxName: %v", err)
 	}
@@ -67,7 +64,7 @@ func TestUpdateAndDeleteShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadShells after update: %v", err)
 	}
-	if len(shells) != 1 || shells[0].Name != "logs" || shells[0].TmuxName != "fleetsh_logs_ffff0000" {
+	if len(shells) != 1 || shells[0].Name != "shell" || shells[0].TmuxName != "fleetsh_logs_ffff0000" {
 		t.Fatalf("update did not persist: %+v", shells)
 	}
 

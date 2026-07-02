@@ -164,7 +164,15 @@ func (h *Home) openDrawerTyping() tea.Cmd {
 	h.drawerMode = drawerTyping
 	h.drawerCloseArmed = false
 	h.drawerTarget = 1
-	cmds := []tea.Cmd{h.drawerAnimTick(), h.drawerTypeTick()}
+	// The anim tick self-terminates when the slide settles, so it's fine to start
+	// per open. The type tick is a permanent 120ms loop, so start at most one —
+	// otherwise fast open→close→open toggling accumulates leaked loops (the old
+	// loop is still pending when the reopen would start another).
+	cmds := []tea.Cmd{h.drawerAnimTick()}
+	if !h.drawerTickRunning {
+		h.drawerTickRunning = true
+		cmds = append(cmds, h.drawerTypeTick())
+	}
 	if h.activeShell() == nil && first {
 		cmds = append(cmds, h.createShell("")) // nothing to type into yet → make one
 	}
@@ -199,7 +207,12 @@ func (h *Home) clampTab(n int) int {
 }
 
 func (h *Home) activeShell() *shell.Shell {
-	shells := h.shellsForActiveRepo()
+	return h.activeShellIn(h.shellsForActiveRepo())
+}
+
+// activeShellIn returns the active tab's shell from an already-computed slice,
+// so render-path callers don't each re-filter h.shells.
+func (h *Home) activeShellIn(shells []*shell.Shell) *shell.Shell {
 	if len(shells) == 0 {
 		return nil
 	}
@@ -456,9 +469,12 @@ func (h *Home) attachShell(sh *shell.Shell) tea.Cmd {
 	if sh == nil {
 		return nil
 	}
-	if !sh.Tmux().Exists() {
-		h.setError(fmt.Errorf("shell exited — press Enter to restart"))
-		return nil
+	// Gate on the derived status, not pane existence: Session.Start sets
+	// remain-on-exit=on, so an exited shell keeps a dead pane and Tmux().Exists()
+	// still returns true — attaching would drop the user into a `[dead]` pane. An
+	// exited shell has no live process, so restart it in place (same as Enter).
+	if sh.Status() == shell.StatusExited {
+		return h.restartShell(sh)
 	}
 	h.isAttaching.Store(true)
 	// Detach the drawer's control reader first — synchronously: a full-screen
@@ -721,26 +737,35 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 			}
 			body[cursorY] = line + strings.Repeat(" ", pad) + cur.Render(" ")
 		} else {
-			cell := ansi.Strip(ansi.Cut(line, cursorX, cursorX+1))
+			// The grapheme under the cursor may be double-width (CJK/emoji/wide box
+			// drawing). A 1-cell cut of a wide glyph returns "" (it can't fit), which
+			// would blank the cursor and leave the glyph in the right-hand remainder
+			// — garbling the row. Detect the wide case and slice by the full width.
+			cellW := 1
+			if ansi.Strip(ansi.Cut(line, cursorX, cursorX+1)) == "" &&
+				ansi.StringWidth(ansi.Cut(line, cursorX, cursorX+2)) == 2 {
+				cellW = 2
+			}
+			cell := ansi.Strip(ansi.Cut(line, cursorX, cursorX+cellW))
 			if cell == "" {
 				cell = " "
 			}
-			body[cursorY] = ansi.Truncate(line, cursorX, "") + cur.Render(cell) + ansi.TruncateLeft(line, cursorX+1, "")
+			body[cursorY] = ansi.Truncate(line, cursorX, "") + cur.Render(cell) + ansi.TruncateLeft(line, cursorX+cellW, "")
 		}
 	}
 
 	return RenderBorderedPanelFull(
 		strings.Join(body, "\n"),
-		h.drawerTitle(),
-		h.drawerModeLabel(),
+		h.drawerTitle(shells),
+		h.drawerModeLabel(shells),
 		h.drawerCwdLabel(),
 		width, curH, true, /* accent: drawer is focused while visible */
 	)
 }
 
-// drawerTitle is the top-border-left: the tab chips.
-func (h *Home) drawerTitle() string {
-	shells := h.shellsForActiveRepo()
+// drawerTitle is the top-border-left: the tab chips. Takes the active-repo shell
+// slice (computed once per render by renderDrawer) to avoid re-filtering h.shells.
+func (h *Home) drawerTitle(shells []*shell.Shell) string {
 	active := h.clampTab(len(shells))
 	parts := []string{lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("Terminal")}
 	for i, sh := range shells {
@@ -763,10 +788,11 @@ func (h *Home) drawerTitle() string {
 }
 
 // drawerModeLabel is the loud top-border-right indicator: the live target, or
-// a close confirmation for a running shell.
-func (h *Home) drawerModeLabel() string {
+// a close confirmation for a running shell. Takes the active-repo shell slice to
+// avoid re-filtering h.shells (renderDrawer computes it once).
+func (h *Home) drawerModeLabel(shells []*shell.Shell) string {
 	name := "shell"
-	if sh := h.activeShell(); sh != nil {
+	if sh := h.activeShellIn(shells); sh != nil {
 		name = sh.Name
 	}
 	if h.drawerCloseArmed {

@@ -406,12 +406,6 @@ func (s *StateDB) UpdateShellTmuxName(id, tmuxName string) error {
 	return err
 }
 
-// UpdateShellName updates a shell's display name (rename).
-func (s *StateDB) UpdateShellName(id, name string) error {
-	_, err := s.db.Exec("UPDATE shells SET name = ? WHERE id = ?", name, id)
-	return err
-}
-
 // UpdateStatus updates the status field and auto-clears acknowledged on "running".
 func (s *StateDB) UpdateStatus(id, status string) error {
 	_, err := s.db.Exec(`
