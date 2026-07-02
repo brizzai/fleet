@@ -73,6 +73,22 @@ type OutputReader struct {
 	failed atomic.Bool // read loop ended unexpectedly (not via Close) — caller should re-attach
 }
 
+// CapturePaneANSI returns targetSession's active pane as its current visible
+// screen, with SGR (color) escapes. Control mode replays nothing on attach — it
+// streams only post-attach %output — so a freshly attached OutputReader renders a
+// blank emulator until new output arrives. Seeding the emulator with this makes
+// the existing screen (e.g. the shell's prompt) visible immediately. Uncached and
+// fresh (unlike Session.CapturePane), and takes a bare session name so the drawer
+// can call it off-thread without a *Session.
+func CapturePaneANSI(targetSession string) []byte {
+	out, err := exec.Command("tmux", "capture-pane", "-p", "-e", "-t", targetSession).Output()
+	if err != nil {
+		debuglog.Logger.Debug("tmux capture-pane (drawer seed) failed", "target", targetSession, "err", err)
+		return nil
+	}
+	return out
+}
+
 // NewOutputReader attaches a control client to targetSession at size w×h and
 // invokes onData with each decoded %output chunk on a background goroutine until
 // Close. onData runs on the reader goroutine, so it must be cheap / non-blocking

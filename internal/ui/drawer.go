@@ -273,6 +273,13 @@ func (h *Home) startShellStreamAsync(target string, w, ht int) {
 	h.shellStreamPending = target
 	go func() {
 		term := vterm.New(w, ht)
+		// Seed the emulator with the pane's current screen BEFORE attaching the
+		// live reader — control mode replays nothing on attach, so otherwise the
+		// drawer shows a blank body (no prompt) until the next output. Done here
+		// (before the reader's goroutine starts) so there's no write race on term.
+		if seed := drawerSeedBytes(tmux.CapturePaneANSI(target)); len(seed) > 0 {
+			term.Write(seed)
+		}
 		reader, err := tmux.NewOutputReader(target, w, ht, func(b []byte) {
 			term.Write(b)
 			if h.shellWake.CompareAndSwap(false, true) {
@@ -281,6 +288,25 @@ func (h *Home) startShellStreamAsync(target string, w, ht int) {
 		})
 		h.send(shellStreamReadyMsg{target: target, w: w, h: ht, term: term, reader: reader, err: err})
 	}()
+}
+
+// drawerSeedBytes prepares capture-pane output for writing into a fresh emulator:
+// trailing blank lines are dropped (else the prompt scrolls off the top of a
+// short drawer), and bare "\n" becomes "\r\n" so lines don't stairstep (the
+// emulator treats "\n" as line-feed only, no carriage return).
+func drawerSeedBytes(capture []byte) []byte {
+	if len(capture) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(capture), "\n")
+	end := len(lines)
+	for end > 0 && strings.TrimRight(lines[end-1], " ") == "" {
+		end--
+	}
+	if end == 0 {
+		return nil
+	}
+	return []byte(strings.Join(lines[:end], "\r\n"))
 }
 
 // applyShellStream installs (or discards) the result of an async attach. Runs on
