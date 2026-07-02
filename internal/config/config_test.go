@@ -154,7 +154,7 @@ func TestGetTelemetryMode(t *testing.T) {
 		{"explicit full", &Config{TelemetryMode: TelemetryFull}, TelemetryFull},
 		{"explicit minimal", &Config{TelemetryMode: TelemetryMinimal}, TelemetryMinimal},
 		{"explicit off", &Config{TelemetryMode: TelemetryOff}, TelemetryOff},
-		{"unrecognized mode falls through to default", &Config{TelemetryMode: "bogus"}, TelemetryFull},
+		{"unrecognized mode falls back to minimal (conservative)", &Config{TelemetryMode: "bogus"}, TelemetryMinimal},
 		{"legacy true migrates to full", &Config{Telemetry: ptr(true)}, TelemetryFull},
 		{"legacy false (old decline) migrates to minimal", &Config{Telemetry: ptr(false)}, TelemetryMinimal},
 		{"explicit mode overrides legacy bool", &Config{TelemetryMode: TelemetryOff, Telemetry: ptr(true)}, TelemetryOff},
@@ -179,6 +179,12 @@ func TestTelemetryConfigured(t *testing.T) {
 	}
 	if !(&Config{Telemetry: ptr(false)}).TelemetryConfigured() {
 		t.Error("legacy bool should report configured")
+	}
+	if (&Config{TelemetryMode: "bogus"}).TelemetryConfigured() {
+		t.Error("invalid mode should not report configured (consent must still apply)")
+	}
+	if !(&Config{TelemetryMode: "bogus", Telemetry: ptr(true)}).TelemetryConfigured() {
+		t.Error("invalid mode with a legacy bool should still report configured")
 	}
 }
 

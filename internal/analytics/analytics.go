@@ -68,11 +68,14 @@ type Client struct {
 	queue      chan job
 	wg         sync.WaitGroup
 	disabled   bool
-	// minimal marks an anonymous, DAU-only client: no git name/email, no
-	// people profile, and Track/Gauge/Distribution/SetUserProperties all
-	// no-op. Only app_started and the app_active heartbeat are sent, keyed on
-	// the anonymous device hash.
-	minimal bool
+	// mode is the resolved telemetry mode this client runs in
+	// (ModeFull/ModeMinimal) — the single source of truth, also emitted as the
+	// "mode" property on DAU events. Minimal is anonymous, DAU-only: no git
+	// name/email, no people profile, and Track/Gauge/Distribution/
+	// SetUserProperties all no-op; only app_started and the app_active heartbeat
+	// are sent, keyed on the anonymous device hash. A disabled client leaves
+	// this empty.
+	mode string
 
 	// mu guards lastActiveDay, which the daily-active Heartbeat reads and
 	// updates. lastActiveDay is the calendar day (YYYY-MM-DD) of the last
@@ -153,7 +156,7 @@ func Init(mode string, version string, identity Identity) {
 		deviceID:   identity.DeviceID,
 		distinctID: distinctID,
 		version:    version,
-		minimal:    minimal,
+		mode:       mode,
 		queue:      make(chan job, queueSize),
 	}
 	c.wg.Add(1)
@@ -229,7 +232,7 @@ func (c *Client) worker() {
 // mode, which only ships the anonymous DAU signals (see Heartbeat / trackRaw).
 func Track(eventType string, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled || c.minimal {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	event := c.mp.NewEvent(eventType, c.distinctID, sanitizeProperties(properties))
@@ -266,11 +269,7 @@ func Heartbeat() {
 	c.lastActiveDay = day
 	c.mu.Unlock()
 
-	mode := ModeFull
-	if c.minimal {
-		mode = ModeMinimal
-	}
-	trackRaw(c, EventAppActive, map[string]any{"version": c.version, "mode": mode})
+	trackRaw(c, EventAppActive, map[string]any{"version": c.version, "mode": c.mode})
 }
 
 // Gauge records a point-in-time value as an event with a numeric `value`
@@ -278,7 +277,7 @@ func Heartbeat() {
 // chart averages or maxes by event name.
 func Gauge(name string, value float64, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled || c.minimal {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	props := mergeValue(properties, value)
@@ -291,7 +290,7 @@ func Gauge(name string, value float64, properties map[string]interface{}) {
 // the caller's intent only.
 func Distribution(name string, sample float64, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled || c.minimal {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	props := mergeValue(properties, sample)
@@ -304,7 +303,7 @@ func Distribution(name string, sample float64, properties map[string]interface{}
 // property, so repeated calls during a session are fine.
 func SetUserProperties(props map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled || c.minimal {
+	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	enqueuePeople(c, sanitizeProperties(props))
@@ -313,7 +312,7 @@ func SetUserProperties(props map[string]interface{}) {
 // SyncEnabled reconciles the live client with the user's current telemetry
 // mode — call this when the Settings dialog closes. Without it, a mode change
 // would only take effect on the next launch: the helpers check c.disabled /
-// c.minimal (set once at Init), not the live config. Env opt-out always wins;
+// c.mode (set once at Init), not the live config. Env opt-out always wins;
 // this is a no-op when the effective state (disabled + minimal) is unchanged.
 // Otherwise the live client is torn down and re-inited in the requested mode.
 func SyncEnabled(mode string, version string, identity Identity) {
@@ -328,7 +327,7 @@ func SyncEnabled(mode string, version string, identity Identity) {
 		if wantDisabled {
 			return
 		}
-	} else if c.disabled == wantDisabled && c.minimal == wantMinimal {
+	} else if c.disabled == wantDisabled && (c.mode == ModeMinimal) == wantMinimal {
 		return
 	}
 
@@ -549,8 +548,8 @@ func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMo
 		return
 	}
 
-	if c.minimal {
-		trackRaw(c, EventAppStarted, map[string]any{"version": version, "mode": ModeMinimal})
+	if c.mode == ModeMinimal {
+		trackRaw(c, EventAppStarted, map[string]any{"version": version, "mode": c.mode})
 		return
 	}
 
@@ -565,6 +564,6 @@ func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMo
 		"version":       version,
 		"session_count": sessionCount,
 		"repo_count":    repoCount,
-		"mode":          ModeFull,
+		"mode":          c.mode,
 	})
 }

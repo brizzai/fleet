@@ -429,16 +429,32 @@ func (c *Config) GetSidebarDensity() string {
 	return "normal"
 }
 
-// GetTelemetryMode returns the telemetry mode: "full", "minimal", or "off".
-// Precedence: an explicit TelemetryMode wins; otherwise the legacy Telemetry
-// bool is migrated (true→full, false→minimal — a previously-declined user
-// keeps anonymous daily-active tracking); otherwise the default is "full". A
-// brand-new install is shown the consent prompt before anything is sent, so
-// this default only governs pre-answer and edge paths.
-func (c *Config) GetTelemetryMode() string {
-	switch c.TelemetryMode {
+// isValidTelemetryMode reports whether mode is one of the documented telemetry
+// modes. An unrecognized value (typo, corruption, or a mode written by a newer
+// build) must not be treated as explicit consent.
+func isValidTelemetryMode(mode string) bool {
+	switch mode {
 	case TelemetryFull, TelemetryMinimal, TelemetryOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetTelemetryMode returns the telemetry mode: "full", "minimal", or "off".
+// Precedence: a valid explicit TelemetryMode wins; otherwise the legacy
+// Telemetry bool is migrated (true→full, false→minimal — a previously-declined
+// user keeps anonymous daily-active tracking); otherwise the default is "full".
+// A non-empty but unrecognized mode falls back to "minimal", never "full", so a
+// corrupt/typo value can't silently grant identity-tagged telemetry. A
+// brand-new install is shown the consent prompt before anything is sent, so
+// these defaults only govern pre-answer and edge paths.
+func (c *Config) GetTelemetryMode() string {
+	if isValidTelemetryMode(c.TelemetryMode) {
 		return c.TelemetryMode
+	}
+	if c.TelemetryMode != "" && c.Telemetry == nil {
+		return TelemetryMinimal
 	}
 	if c.Telemetry != nil {
 		if *c.Telemetry {
@@ -450,10 +466,11 @@ func (c *Config) GetTelemetryMode() string {
 }
 
 // TelemetryConfigured reports whether the user already has an explicit
-// telemetry preference on disk (the new mode field or the legacy bool). Used
-// to skip the first-launch consent prompt for upgrading users.
+// telemetry preference on disk (a valid mode field or the legacy bool). Used
+// to skip the first-launch consent prompt for upgrading users. An invalid mode
+// value does not count as configured, so consent still applies.
 func (c *Config) TelemetryConfigured() bool {
-	return c.TelemetryMode != "" || c.Telemetry != nil
+	return isValidTelemetryMode(c.TelemetryMode) || c.Telemetry != nil
 }
 
 // GetEditor returns the configured editor, falling back to $EDITOR then "code".
