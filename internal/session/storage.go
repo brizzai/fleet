@@ -53,6 +53,18 @@ type SessionRow struct {
 	PromptCount     int
 }
 
+// ShellRow is the persisted form of a drawer shell (a plain non-agent
+// terminal). Lives in the session package alongside SessionRow so the shell
+// package can depend on it without an import cycle (session never imports shell).
+type ShellRow struct {
+	ID        string
+	Name      string
+	RepoPath  string
+	Command   string
+	TmuxName  string
+	CreatedAt time.Time
+}
+
 // DefaultDBPath returns the default database path.
 func DefaultDBPath() string {
 	home, _ := os.UserHomeDir()
@@ -224,6 +236,29 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	// Shells: plain non-agent terminals (dev servers, logs, scratch shells)
+	// shown in the bottom drawer, scoped to a repo/worktree checkout. Wholly
+	// independent of sessions — no FK, no hooks, no auto-naming.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS shells (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			repo_path  TEXT NOT NULL,
+			command    TEXT NOT NULL DEFAULT '',
+			tmux_name  TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create shells table", "error", err)
+		return err
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_shells_repo ON shells(repo_path)`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create idx_shells_repo", "error", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -310,6 +345,64 @@ func (s *StateDB) DeleteSession(id string) error {
 	if err != nil {
 		debuglog.Logger.Error("failed to delete session", "id", id, "error", err)
 	}
+	return err
+}
+
+// --- Shells (drawer terminals) ---
+
+// SaveShell inserts or replaces a shell row.
+func (s *StateDB) SaveShell(row *ShellRow) error {
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO shells (id, name, repo_path, command, tmux_name, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, row.ID, row.Name, row.RepoPath, row.Command, row.TmuxName, row.CreatedAt.Unix())
+	if err != nil {
+		debuglog.Logger.Error("failed to save shell", "id", row.ID, "error", err)
+	}
+	return err
+}
+
+// LoadShells returns all shells ordered by creation time.
+func (s *StateDB) LoadShells() ([]*ShellRow, error) {
+	rows, err := s.db.Query(`
+		SELECT id, name, repo_path, command, tmux_name, created_at
+		FROM shells ORDER BY created_at
+	`)
+	if err != nil {
+		debuglog.Logger.Error("failed to query shells", "error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shells []*ShellRow
+	for rows.Next() {
+		var r ShellRow
+		var createdAt int64
+		if err := rows.Scan(&r.ID, &r.Name, &r.RepoPath, &r.Command, &r.TmuxName, &createdAt); err != nil {
+			debuglog.Logger.Error("failed to scan shell row", "error", err)
+			return nil, err
+		}
+		r.CreatedAt = time.Unix(createdAt, 0)
+		shells = append(shells, &r)
+	}
+	if err := rows.Err(); err != nil {
+		return shells, err
+	}
+	return shells, nil
+}
+
+// DeleteShell removes a shell by ID.
+func (s *StateDB) DeleteShell(id string) error {
+	_, err := s.db.Exec("DELETE FROM shells WHERE id = ?", id)
+	if err != nil {
+		debuglog.Logger.Error("failed to delete shell", "id", id, "error", err)
+	}
+	return err
+}
+
+// UpdateShellTmuxName updates a shell's tmux session name (after a restart).
+func (s *StateDB) UpdateShellTmuxName(id, tmuxName string) error {
+	_, err := s.db.Exec("UPDATE shells SET tmux_name = ? WHERE id = ?", tmuxName, id)
 	return err
 }
 

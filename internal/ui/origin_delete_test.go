@@ -3,26 +3,26 @@ package ui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/session"
 )
 
 // confirmKey sends one key to a ConfirmDialog and returns the resulting cmd.
-// Space is delivered as a rune so its String() is " " — the same value a real
-// space press yields (the app's space-jump binding relies on that).
+// Space is delivered as KeySpace so its String() is "space" — what a real space
+// press yields in Bubble Tea v2 (the checkbox tick matches on "space").
 func confirmKey(d *ConfirmDialog, s string) tea.Cmd {
-	var km tea.KeyMsg
+	var km tea.KeyPressMsg
 	switch s {
 	case " ":
-		km = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}
+		km = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 	case "enter":
-		km = tea.KeyMsg{Type: tea.KeyEnter}
+		km = tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "esc":
-		km = tea.KeyMsg{Type: tea.KeyEsc}
+		km = tea.KeyPressMsg{Code: tea.KeyEsc}
 	default:
-		km = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+		km = tea.KeyPressMsg{Code: rune(s[0]), Text: s}
 	}
 	_, cmd := d.Update(km)
 	return cmd

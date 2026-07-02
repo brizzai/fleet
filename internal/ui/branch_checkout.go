@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/git"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Messages for branch checkout flow.
@@ -53,7 +53,7 @@ func NewBranchCheckoutDialog() *BranchCheckoutDialog {
 	fi := textinput.New()
 	fi.Placeholder = "type to filter"
 	fi.CharLimit = 64
-	fi.Width = 30
+	fi.SetWidth(30)
 
 	return &BranchCheckoutDialog{
 		filterInput: fi,
@@ -148,7 +148,14 @@ func (d *BranchCheckoutDialog) syncScroll() {
 func (d *BranchCheckoutDialog) Update(msg tea.Msg) (*BranchCheckoutDialog, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return d, nil
+		// Non-key messages (notably tea.PasteMsg for cmd+v) go to the filter input.
+		if d.loading {
+			return d, nil
+		}
+		var cmd tea.Cmd
+		d.filterInput, cmd = d.filterInput.Update(msg)
+		d.rebuildFiltered()
+		return d, cmd
 	}
 
 	if d.loading {

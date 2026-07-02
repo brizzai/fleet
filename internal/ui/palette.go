@@ -1,23 +1,27 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"image/color"
+
+	"charm.land/lipgloss/v2"
+)
 
 // Palette defines a complete color theme for the TUI.
 type Palette struct {
 	Name    string
-	Bg      lipgloss.Color
-	Surface lipgloss.Color
-	Border  lipgloss.Color
-	Text    lipgloss.Color
-	TextDim lipgloss.Color
-	Accent  lipgloss.Color
-	Green   lipgloss.Color
-	Yellow  lipgloss.Color
-	Blue    lipgloss.Color
-	Red     lipgloss.Color
-	Gray    lipgloss.Color
-	Orange  lipgloss.Color
-	Purple  lipgloss.Color
+	Bg      color.Color
+	Surface color.Color
+	Border  color.Color
+	Text    color.Color
+	TextDim color.Color
+	Accent  color.Color
+	Green   color.Color
+	Yellow  color.Color
+	Blue    color.Color
+	Red     color.Color
+	Gray    color.Color
+	Orange  color.Color
+	Purple  color.Color
 }
 
 // Built-in palette definitions.

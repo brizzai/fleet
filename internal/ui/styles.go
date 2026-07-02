@@ -1,13 +1,27 @@
 package ui
 
 import (
+	"fmt"
+	"image/color"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/session"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
+
+// colorHex renders a color.Color as a "#rrggbb" string for the consumers that
+// still need a hex string rather than a color.Color: the tmux status bar (which
+// takes string colors) and the splash gradient math. Lip Gloss v2 colors are
+// color.Color values, so we derive the hex from their RGBA components.
+func colorHex(c color.Color) string {
+	if c == nil {
+		return ""
+	}
+	r, g, b, _ := c.RGBA()
+	return fmt.Sprintf("#%02x%02x%02x", uint8(r>>8), uint8(g>>8), uint8(b>>8))
+}
 
 // Initial colors match the default Fleet Pink palette. ApplyPalette reassigns
 // these when a theme is loaded, so a fresh fleet without a configured theme
@@ -95,6 +109,17 @@ var (
 	TreeConnectorSelStyle  = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
 	ToolBadgeSelStyle      = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
 
+	// Dimmed selection (used when the sidebar doesn't own the keyboard — e.g.
+	// the terminal drawer is focused). A muted bar instead of the bright accent
+	// pill, so the row still reads as "selected" but clearly inactive.
+	SessionTitleSelDimStyle  = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(ColorBorder)
+	SessionStatusSelDimStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
+
+	// selectionDimmed makes the sidebar's selected-row pill render muted instead
+	// of accent — set by RenderSidebar when the sidebar doesn't own the keyboard
+	// (terminal drawer focused). Render-thread only, so a plain package var is safe.
+	selectionDimmed bool
+
 	// Panel title style (cyan/blue like agent-deck).
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 
@@ -176,6 +201,8 @@ func ApplyPalette(p Palette) {
 	SessionStatusSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
 	TreeConnectorSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
 	ToolBadgeSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
+	SessionTitleSelDimStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(ColorBorder)
+	SessionStatusSelDimStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
 
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
@@ -222,6 +249,30 @@ func RenderBorderedPanelTopRight(content, title, titleRight string, width, heigh
 // unbroken bottom border.
 func RenderBorderedPanelFooter(content, title, footerRight string, width, height int, accent bool) string {
 	return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
+}
+
+// selTitle returns the selected-row title style — muted when the sidebar is
+// unfocused (terminal drawer focused), accent otherwise.
+func selTitle() lipgloss.Style {
+	if selectionDimmed {
+		return SessionTitleSelDimStyle
+	}
+	return SessionTitleSelStyle
+}
+
+// selStatus returns the selected-row status/count style (muted when unfocused).
+func selStatus() lipgloss.Style {
+	if selectionDimmed {
+		return SessionStatusSelDimStyle
+	}
+	return SessionStatusSelStyle
+}
+
+// RenderBorderedPanelFull embeds a right-aligned inset into BOTH the top border
+// (after the title) and the bottom border. Used by the terminal drawer for a
+// top-border mode label + a bottom-border cwd/hint.
+func RenderBorderedPanelFull(content, title, titleRight, footerRight string, width, height int, accent bool) string {
+	return renderBorderedPanel(content, title, titleRight, footerRight, width, height, accent)
 }
 
 func renderBorderedPanel(content, title, titleRight, footerRight string, width, height int, accent bool) string {

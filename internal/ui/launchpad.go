@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/discovery"
 	"github.com/brizzai/fleet/internal/session"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Launchpad is the first-run / empty-fleet experience. Instead of an empty

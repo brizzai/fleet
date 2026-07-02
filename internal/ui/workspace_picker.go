@@ -5,11 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/workspace"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Messages for workspace/worktree flow.
@@ -64,12 +64,12 @@ func NewWorktreeDialog() *WorktreeDialog {
 	base := textinput.New()
 	base.Placeholder = "master"
 	base.CharLimit = 128
-	base.Width = 40
+	base.SetWidth(40)
 
 	branch := textinput.New()
 	branch.Placeholder = "feature/my-feature"
 	branch.CharLimit = 128
-	branch.Width = 40
+	branch.SetWidth(40)
 
 	return &WorktreeDialog{
 		baseBranchInput: base,
@@ -141,16 +141,19 @@ func (d *WorktreeDialog) updateFocus() {
 
 // Update handles key events.
 func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return d, nil
-	}
+	keyMsg, isKey := msg.(tea.KeyMsg)
 
 	if d.loading {
-		if keyMsg.String() == "esc" {
+		if isKey && keyMsg.String() == "esc" {
 			d.Hide()
 		}
 		return d, nil
+	}
+
+	// Non-key messages (notably tea.PasteMsg for cmd+v, which is not a KeyMsg
+	// in Bubble Tea v2) still need to reach the focused text input.
+	if !isKey {
+		return d.routeToInput(msg)
 	}
 
 	switch keyMsg.String() {
@@ -221,7 +224,13 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		}
 	}
 
-	// Route to focused input.
+	return d.routeToInput(msg)
+}
+
+// routeToInput forwards a message — a fall-through key, or a non-key msg like
+// tea.PasteMsg (cmd+v) — to the focused branch input (no-op when the worktree
+// list has focus), applying branch-name sanitization to the new-branch field.
+func (d *WorktreeDialog) routeToInput(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 	var cmd tea.Cmd
 	switch d.focus {
 	case focusBaseBranch:

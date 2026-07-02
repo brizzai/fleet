@@ -22,12 +22,16 @@ type RepoInfo struct {
 }
 
 // RefreshGitInfo fetches branch, dirty status, and worktree info for a repo.
-// Fast operation (<10ms, all local git commands).
+// Fast operation (<10ms, all local git commands). Runs three git subprocesses:
+// a combined rev-parse for branch + worktree status (revParseLayout), the dirty
+// check, and the origin lookup — down from five, to ease fork/exec-lock
+// contention on the per-cycle, all-repos fan-out.
 func RefreshGitInfo(repoPath string) *RepoInfo {
+	branch, isWorktree := revParseLayout(repoPath)
 	return &RepoInfo{
-		Branch:         GetBranchName(repoPath),
+		Branch:         branch,
 		IsDirty:        HasUncommittedChanges(repoPath),
-		IsWorktreeRepo: IsWorktree(repoPath),
+		IsWorktreeRepo: isWorktree,
 		OriginKey:      GetOriginKey(repoPath),
 		LastGitRefresh: time.Now(),
 	}

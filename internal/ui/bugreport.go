@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/diagnostics"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // bugReportClosedMsg is sent when the bug report dialog closes.
@@ -41,7 +41,7 @@ func NewBugReportDialog() *BugReportDialog {
 	ti := textinput.New()
 	ti.Placeholder = "Describe what happened..."
 	ti.CharLimit = 256
-	ti.Width = 48
+	ti.SetWidth(48)
 	return &BugReportDialog{descInput: ti}
 }
 
@@ -80,7 +80,13 @@ func (d *BugReportDialog) SetSize(w, h int) {
 func (d *BugReportDialog) Update(msg tea.Msg) (*BugReportDialog, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return d, nil
+		// Non-key messages (notably tea.PasteMsg for cmd+v) go to the input.
+		if d.submitting {
+			return d, nil
+		}
+		var cmd tea.Cmd
+		d.descInput, cmd = d.descInput.Update(msg)
+		return d, cmd
 	}
 
 	switch keyMsg.String() {
@@ -187,7 +193,7 @@ func (d *BugReportDialog) View() string {
 	b.WriteString("\n")
 	b.WriteString(sectionStyle.Render("Description"))
 	b.WriteString("\n")
-	d.descInput.Width = innerWidth - 2
+	d.descInput.SetWidth(innerWidth - 2)
 	b.WriteString("  " + d.descInput.View())
 	b.WriteString("\n")
 

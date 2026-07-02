@@ -47,12 +47,23 @@ var allKeyBindings = []KeyBinding{
 	{Key: "= = then digit", Desc: "Unbind slot", Section: "session"},
 
 	// Global.
+	{Key: "`", BarKey: "`", BarDesc: "Term", Desc: "Toggle terminal drawer", Section: "global"},
 	{Key: "Ctrl+K", BarKey: "⌃K", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
 	{Key: "S", BarKey: "S", BarDesc: "Set", Desc: "Open settings", Section: "global"},
 	{Key: "X", Desc: "Dismiss on-screen tip", Section: "global"},
 	{Key: "!", BarKey: "!", BarDesc: "Bug", Desc: "Bug report / diagnostics", Section: "global"},
 	{Key: "?", BarKey: "?", BarDesc: "Help", Desc: "Toggle help", Section: "global"},
 	{Key: "Ctrl+C", BarKey: "⌃C", BarDesc: "Quit", Desc: "Quit", Section: "global"},
+
+	// Terminal drawer (shown in overlay only, separated by blank line). It's
+	// always-typing — keys go to the shell; Ctrl chords drive the chrome.
+	{Key: "`", Desc: "Open terminal drawer + start typing", Section: "drawer"},
+	{Key: "Ctrl+T", Desc: "New shell ($SHELL in repo dir)", Section: "drawer"},
+	{Key: "Ctrl+W", Desc: "Close shell (twice if running)", Section: "drawer"},
+	{Key: "PgUp / PgDn", Desc: "Switch shell tab", Section: "drawer"},
+	{Key: "Ctrl+G", Desc: "Full-screen attach (Ctrl+Q returns)", Section: "drawer"},
+	{Key: "Enter", Desc: "Restart shell (when exited)", Section: "drawer"},
+	{Key: "`", Desc: "Close drawer → sidebar", Section: "drawer"},
 
 	// Focus mode (shown in overlay only, separated by blank line).
 	{Key: "Esc", Desc: "Unfocus preview", Section: "focus"},
@@ -126,7 +137,7 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 		}
 	}
 	global = []struct{ Key, Desc string }{
-		{"⌃K", "Cmd"}, {"/", "Filter"}, {"?", "Help"}, {"⌃C", "Quit"},
+		{"`", "Term"}, {"⌃K", "Cmd"}, {"/", "Filter"}, {"?", "Help"}, {"⌃C", "Quit"},
 	}
 	return
 }
@@ -137,7 +148,7 @@ func HelpOverlayBindings() []struct{ Key, Desc string } {
 	var result []struct{ Key, Desc string }
 	prevSection := ""
 	for _, kb := range allKeyBindings {
-		if (kb.Section == "focus" || kb.Section == "attach") && prevSection != kb.Section {
+		if (kb.Section == "drawer" || kb.Section == "focus" || kb.Section == "attach") && prevSection != kb.Section {
 			result = append(result, struct{ Key, Desc string }{"", ""})
 		}
 		result = append(result, struct{ Key, Desc string }{kb.Key, kb.Desc})

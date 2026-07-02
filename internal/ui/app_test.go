@@ -46,7 +46,7 @@ func TestHomeInitializes(t *testing.T) {
 
 	// View() should not panic and should return non-empty output.
 	output := home.View()
-	if output == "" {
+	if output.Content == "" {
 		t.Error("View() returned empty string")
 	}
 }

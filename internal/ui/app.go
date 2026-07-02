@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"os/exec"
@@ -14,6 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/chrome"
@@ -27,12 +31,10 @@ import (
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/proc"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/tmux"
+	"github.com/brizzai/fleet/internal/vterm"
 	"github.com/brizzai/fleet/internal/workspace"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	overlay "github.com/rmhubbert/bubbletea-overlay"
 )
 
 const (
@@ -119,6 +121,7 @@ type (
 	}
 	loadSessionsMsg struct {
 		sessions     []*session.Session
+		shells       []*shell.Shell
 		slotBindings map[int]string
 		ghAvailable  bool
 		warning      string
@@ -271,6 +274,33 @@ type Home struct {
 	filterActive bool
 	filterText   string
 
+	// Terminal drawer (shells). Shells are non-agent terminals scoped to a
+	// repo/worktree, shown in the drawer (never the sidebar). The drawer is
+	// either hidden or focused (always-typing: keystrokes go to the active
+	// shell, a few Ctrl chords drive the chrome). See drawer.go.
+	shells            []*shell.Shell // all live shells, all repos (mirror of the shells table)
+	drawerMode        drawerMode     // drawerHidden / drawerTyping
+	drawerProgress    float64        // animated slide 0 (closed) → 1 (open)
+	drawerTarget      float64        // where the slide is heading
+	drawerActiveTab   int            // index into shellsForActiveRepo()
+	drawerHeight      int            // max body rows when open (from config; clamped at render)
+	drawerCloseArmed  bool           // ⌃W pressed once on a running shell; confirm close with ⌃W again
+	drawerTickRunning bool           // a drawerTypeTick loop is live; guards against spawning duplicates on fast toggling
+	drawerRepo        string         // repo the drawer is scoped to (frozen at open)
+	drawerInnerW      int            // last-rendered drawer body inner width (drives the live emulator size)
+	drawerInnerH      int            // last-rendered drawer body inner height (stable terminal rows)
+
+	// Live terminal stream for the active shell: a tmux control-mode reader
+	// streams the pane's %output into an insulated emulator, rendered each frame
+	// (replaces the old capture-pane polling). shellStreamTarget is the tmux
+	// session the reader is attached to (changes on tab switch / restart).
+	shellReader        *tmux.OutputReader
+	shellTerm          *vterm.Terminal
+	shellStreamTarget  string
+	shellStreamPending string      // target of an in-flight async attach ("" = none); dedups dispatches
+	shellReseedPending bool        // a capture-pane re-seed of a blank emulator is in flight
+	shellWake          atomic.Bool // coalesces output→render wakes (true = one shellOutputMsg in flight)
+
 	// Slot hotkeys (RTS-style quick access: digit=jump, double-digit=attach, alt+digit or =<digit>=bind).
 	slotBindings      map[int]string // slot (0-9) -> session ID
 	lastSlotTapSlot   int            // -1 when no pending tap
@@ -350,7 +380,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	fi := textinput.New()
 	fi.Placeholder = "filter..."
 	fi.CharLimit = 64
-	fi.Width = 20
+	fi.SetWidth(20)
 
 	// Apply theme — PaletteByName falls back to the flagship default when
 	// cfg.Theme is empty or unknown.
@@ -398,6 +428,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		cancel:                 cancel,
 		startTime:              time.Now(),
 	}
+	h.drawerHeight = cfg.GetDrawerHeight()
 	emptyCache := make(map[string]*git.RepoInfo)
 	h.gitInfoCache.Store(&emptyCache)
 	return h
@@ -514,8 +545,81 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return h.handleKey(msg)
+
+	case tea.PasteMsg: // cmd+v — v2 delivers paste as its own message, not a KeyMsg
+		return h.handlePaste(msg)
+
+	case drawerAnimTickMsg: // drive the terminal-drawer slide
+		h.syncShellStream() // attach/resize the live stream as the drawer opens
+		if h.drawerStep() {
+			return h, h.drawerAnimTick()
+		}
+		return h, nil
+
+	case drawerTypeTickMsg: // backstop: keep the live stream attached + sized while open
+		if h.drawerMode != drawerTyping {
+			h.drawerTickRunning = false // stop the loop (teardown ran on close); a reopen starts a fresh one
+			return h, nil
+		}
+		h.syncShellStream()
+		return h, h.drawerTypeTick()
+
+	case shellOutputMsg:
+		// The reader pushed new bytes into the emulator; clear the wake latch so
+		// the next chunk can schedule another frame. Returning re-renders the View.
+		h.shellWake.Store(false)
+		return h, nil
+
+	case shellStreamReadyMsg:
+		// An async stream attach completed; install it if still wanted.
+		h.applyShellStream(msg)
+		return h, nil
+
+	case shellReseedMsg:
+		// A capture-pane re-seed of a blank emulator completed off-thread. Apply
+		// only if the same shell is still streaming AND still blank, so we never
+		// clobber content the live reader has since delivered.
+		h.shellReseedPending = false
+		if len(msg.seed) > 0 && h.shellTerm != nil && h.shellStreamTarget == msg.target &&
+			strings.TrimSpace(h.shellTerm.Render()) == "" {
+			h.shellTerm.Write(msg.seed)
+			h.shellWake.Store(false)
+		}
+		return h, nil
+
+	case shellCreateResultMsg:
+		if msg.err != nil {
+			h.setError(msg.err)
+			return h, nil
+		}
+		h.workerMu.Lock()
+		h.shells = append(h.shells, msg.sh)
+		h.workerMu.Unlock()
+		if err := h.storage.SaveShell(msg.sh.ToRow()); err != nil {
+			debuglog.Logger.Error("storage: SaveShell", "id", msg.sh.ID, "err", err)
+		}
+		// Focus the new tab if it's in the drawer's current scope.
+		shells := h.shellsForActiveRepo()
+		for i, s := range shells {
+			if s.ID == msg.sh.ID {
+				h.drawerActiveTab = i
+			}
+		}
+		h.syncShellStream() // attach the live stream to the newly-focused shell
+		return h, nil
+
+	case shellRestartMsg:
+		if msg.err != nil {
+			h.setError(msg.err)
+			return h, nil
+		}
+		if err := h.storage.UpdateShellTmuxName(msg.id, msg.tmuxName); err != nil {
+			debuglog.Logger.Error("storage: UpdateShellTmuxName", "id", msg.id, "err", err)
+		}
+		h.syncShellStream() // re-attach the live stream to the restarted session
+		return h, nil
 
 	case tickMsg:
 		return h.handleTick()
@@ -708,6 +812,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// flipped) Telemetry toggle — otherwise the change only takes
 		// effect on next launch.
 		analytics.SyncEnabled(h.cfg.IsTelemetryEnabled(), h.version, h.identity)
+		// Re-read the drawer height (clamped) so a change takes effect without a
+		// relaunch; the next render/sync resizes the live stream to match.
+		h.drawerHeight = h.cfg.GetDrawerHeight()
 		// Display toggles are live, but the density flag changes BuildFlatItems
 		// output (inter-group spacer rows), so rebuild the flattened list.
 		h.rebuildFlatItems()
@@ -975,14 +1082,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.focusMode {
 			return h, h.previewTick() // focus mode has its own faster tick
 		}
-		var previewCmd tea.Cmd
+		cmds := []tea.Cmd{h.previewTick()}
 		if sel := h.selectedSession(); sel != nil && sel.IsAlive() {
-			previewCmd = h.fetchPreview(sel)
+			cmds = append(cmds, h.fetchPreview(sel))
 		}
-		if previewCmd != nil {
-			return h, tea.Batch(previewCmd, h.previewTick())
-		}
-		return h, h.previewTick()
+		return h, tea.Batch(cmds...)
 
 	case focusTickMsg:
 		if !h.focusMode {
@@ -1024,12 +1128,25 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// writer of gitInfoCache and goes through writeGitInfo's COW so
 		// concurrent readers (View, worker carry-forward) see a stable
 		// immutable snapshot. Empty repo paths are filtered defensively.
+		//
+		// Only origin grouping and the worktree flag feed BuildFlatItems;
+		// branch/dirty/PR are rendered live from the cache. So rebuild the
+		// flat item list only when one of those structural fields actually
+		// changed — otherwise a refresh just marks the sidebar dirty for a
+		// re-render. This collapses the per-cycle, all-repos burst (one
+		// message per repo) from N full rebuilds down to, in steady state,
+		// zero.
 		if msg.repo != "" {
+			prev := h.gitInfo()[msg.repo]
 			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
 				next[msg.repo] = msg.info
 				return true
 			})
-			h.rebuildFlatItems()
+			if structuralGitChange(prev, msg.info) {
+				h.rebuildFlatItems()
+			} else {
+				h.sidebarDirty = true
+			}
 		}
 		return h, nil
 
@@ -1077,6 +1194,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setError(fmt.Errorf("%s", msg.warning))
 		}
 		h.sessions = msg.sessions
+		h.shells = msg.shells
 		h.rebuildSessionMap()
 		// Keep only bindings whose session is present in the loaded view. Do
 		// NOT delete absent bindings from storage here: FLEET_DEMO_PREFIX and
@@ -1227,15 +1345,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View implements tea.Model.
-func (h *Home) View() string {
+func (h *Home) View() tea.View {
 	if h.isAttaching.Load() {
-		return ""
+		return h.chrome("")
 	}
 	if h.width == 0 {
-		return lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("   fleet")
+		return h.chrome(lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("   fleet"))
 	}
 	if !h.booted {
-		return RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame)
+		return h.chrome(RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame))
 	}
 	base := h.renderBody()
 	// Command palette is a true overlay: render it on top of the main UI so
@@ -1243,7 +1361,10 @@ func (h *Home) View() string {
 	// dimmed first so the palette visually lifts above the content.
 	if h.commandPalette.IsVisible() {
 		base = dimBackdrop(base)
-		base = overlay.Composite(h.commandPalette.View(), base, overlay.Center, overlay.Center, 0, 0)
+		pv := h.commandPalette.View()
+		x := (h.width - lipgloss.Width(pv)) / 2
+		y := (h.height - lipgloss.Height(pv)) / 2
+		base = overlayAt(pv, base, x, y)
 	}
 	// Contextual tip box — suppressed while a modal owns the screen so a sticky
 	// tip never paints over a dialog.
@@ -1253,7 +1374,7 @@ func (h *Home) View() string {
 	}
 	toast := h.toasts.View(h.width)
 	if tip == "" && toast == "" {
-		return base
+		return h.chrome(base)
 	}
 	// Stack toast(s) above the tip, then anchor the block bottom-right with a
 	// 1-cell right margin and a 1-row lift so it clears the help-bar baseline.
@@ -1265,7 +1386,36 @@ func (h *Home) View() string {
 			stack = tip
 		}
 	}
-	return overlay.Composite(stack, base, overlay.Right, overlay.Bottom, -1, -1)
+	x := h.width - lipgloss.Width(stack) - 1
+	y := h.height - lipgloss.Height(stack) - 1
+	return h.chrome(overlayAt(stack, base, x, y))
+}
+
+// chrome wraps rendered content into the tea.View that carries fleet's terminal
+// modes. Bubble Tea v2 reads AltScreen/MouseMode off the View every frame, so
+// every View() return path must set them or the renderer would toggle
+// alt-screen/mouse off mid-run. (v1 set these once via NewProgram options.)
+func (h *Home) chrome(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// overlayAt composites top over base with top's top-left at (x, y) using Lip
+// Gloss v2's layer compositor. Replaces rmhubbert/bubbletea-overlay, which has
+// no v2 release — its maintainer points to Lip Gloss compositing instead.
+func overlayAt(top, base string, x, y int) string {
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	return lipgloss.NewCompositor(
+		lipgloss.NewLayer(base),
+		lipgloss.NewLayer(top).X(x).Y(y).Z(1),
+	).Render()
 }
 
 // modalOpen reports whether any full-screen view currently owns the screen.
@@ -1354,17 +1504,33 @@ func (h *Home) renderBody() string {
 		contentHeight = 1
 	}
 
+	mode := h.layoutMode()
+
+	// Terminal drawer placement depends on the layout. In dual it splits the
+	// right column (rendered inside that branch, so it doesn't steal global
+	// content height). In single/stacked there is no right column, so it falls
+	// back to a full-width band at the bottom — contentHeight shrinks to make
+	// room and the panels above appear pushed up.
+	bottomDrawer := ""
+	if h.drawerVisible() && mode != "dual" {
+		bottomDrawer = h.renderDrawer(h.width, h.height-1-footerH-3)
+		contentHeight -= lipgloss.Height(bottomDrawer)
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+	}
+
 	// Status counts ride the Sessions panel's top-right border (inset into
 	// the title border, after the "Sessions" label). The top app bar no
 	// longer renders them.
-	statusTitle := h.statusCountsLine("")
+	statusTitle := h.statusCountsLine(nil)
 
-	switch h.layoutMode() {
+	switch mode {
 	case "single":
 		// Inner content area = total - 2 for the border on each side.
 		innerW := h.width - 2
 		innerH := contentHeight - 2
-		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH)
+		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH, !h.drawerHasFocus())
 		sidebar = ensureExactHeight(sidebar, innerH)
 		sidebar = ensureExactWidth(sidebar, innerW)
 		b.WriteString(RenderBorderedPanelTopRight(sidebar, "Sessions", statusTitle, h.width, contentHeight, h.focusMode))
@@ -1376,7 +1542,7 @@ func (h *Home) renderBody() string {
 		previewHeight := contentHeight - sidebarHeight - 1 // 1 for gap row
 		innerW := h.width - 2
 
-		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2)
+		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2, !h.drawerHasFocus())
 		sidebarInner = ensureExactHeight(sidebarInner, sidebarHeight-2)
 		sidebarInner = ensureExactWidth(sidebarInner, innerW)
 		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, "Sessions", statusTitle, h.width, sidebarHeight, h.focusMode))
@@ -1416,7 +1582,7 @@ func (h *Home) renderBody() string {
 		if h.focusMode && !h.sidebarDirty && h.cachedSidebar != "" {
 			leftPanel = h.cachedSidebar
 		} else {
-			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH)
+			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH, !h.drawerHasFocus())
 			inner = ensureExactHeight(inner, innerH)
 			inner = ensureExactWidth(inner, sidebarInnerW)
 			leftPanel = RenderBorderedPanelTopRight(inner, "Sessions", statusTitle, sidebarWidth, contentHeight, h.focusMode)
@@ -1424,14 +1590,33 @@ func (h *Home) renderBody() string {
 			h.sidebarDirty = false
 		}
 
+		// Right column: preview on top; the terminal drawer (when open) splits
+		// the bottom of the same column, leaving the session list untouched.
+		previewPanelH := contentHeight
+		rightDrawer := ""
+		if h.drawerVisible() {
+			rightDrawer = h.renderDrawer(previewWidth, contentHeight-drawerMinPreviewRows)
+			previewPanelH = contentHeight - lipgloss.Height(rightDrawer)
+			if previewPanelH < drawerMinPreviewRows {
+				previewPanelH = drawerMinPreviewRows
+			}
+		}
+		previewInnerH := previewPanelH - 2
+		if previewInnerH < 1 {
+			previewInnerH = 1
+		}
+
 		s, content := h.selectedPreview()
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
-		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, innerH, h.focusMode)
-		previewInner = ensureExactHeight(previewInner, innerH)
+		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
+		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, previewWidth-6)
-		rightPanel := RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, previewWidth, contentHeight, h.focusMode)
+		rightPanel := RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, previewWidth, previewPanelH, h.focusMode)
+		if rightDrawer != "" {
+			rightPanel = lipgloss.JoinVertical(lipgloss.Left, rightPanel, rightDrawer)
+		}
 
 		// Build the single-column gap as transparent spaces.
 		gapLines := make([]string, contentHeight)
@@ -1441,6 +1626,13 @@ func (h *Home) renderBody() string {
 		gapCol := strings.Join(gapLines, "\n")
 
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, gapCol, rightPanel))
+	}
+
+	// Terminal drawer band, below the panels (single/stacked only; dual renders
+	// the drawer inside its right column above).
+	if bottomDrawer != "" {
+		b.WriteString("\n")
+		b.WriteString(bottomDrawer)
 	}
 
 	// Pad to fill content area.
@@ -1500,34 +1692,33 @@ func (h *Home) renderBody() string {
 
 // --- Key handling ---
 
-func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Route to active dialog/overlay.
-	if h.helpOverlay.IsVisible() {
+// routeToModal forwards msg to the topmost visible modal dialog/overlay and
+// reports whether one consumed it. Shared by handleKey and handlePaste so text
+// dialogs receive both key presses and bracketed paste (tea.PasteMsg, which is
+// not a KeyMsg in Bubble Tea v2 and so never flows through handleKey).
+func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
+	switch {
+	case h.helpOverlay.IsVisible():
 		overlay, cmd := h.helpOverlay.Update(msg)
 		h.helpOverlay = overlay
-		return h, cmd
-	}
-	if h.consentDialog.IsVisible() {
+		return cmd, true
+	case h.consentDialog.IsVisible():
 		dialog, cmd := h.consentDialog.Update(msg)
 		h.consentDialog = dialog
-		return h, cmd
-	}
-	if h.onboardingDialog.IsVisible() {
+		return cmd, true
+	case h.onboardingDialog.IsVisible():
 		dialog, cmd := h.onboardingDialog.Update(msg)
 		h.onboardingDialog = dialog
-		return h, cmd
-	}
-	if h.bugReport.IsVisible() {
+		return cmd, true
+	case h.bugReport.IsVisible():
 		dialog, cmd := h.bugReport.Update(msg)
 		h.bugReport = dialog
-		return h, cmd
-	}
-	if h.settingsDialog.IsVisible() {
+		return cmd, true
+	case h.settingsDialog.IsVisible():
 		dialog, cmd := h.settingsDialog.Update(msg)
 		h.settingsDialog = dialog
-		return h, cmd
-	}
-	if h.createWorkspaceDialog.IsVisible() {
+		return cmd, true
+	case h.createWorkspaceDialog.IsVisible():
 		dialog, cmd := h.createWorkspaceDialog.Update(msg)
 		h.createWorkspaceDialog = dialog
 		// User cancelled with ESC — drop fork ctx. Submit (Enter) also hides
@@ -1536,45 +1727,89 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if isEscKey(msg) && !h.createWorkspaceDialog.IsVisible() && !h.worktreeDialog.IsVisible() {
 			h.clearPendingFork()
 		}
-		return h, cmd
-	}
-	if h.worktreeDialog.IsVisible() {
+		return cmd, true
+	case h.worktreeDialog.IsVisible():
 		dialog, cmd := h.worktreeDialog.Update(msg)
 		h.worktreeDialog = dialog
 		// Same reasoning as createWorkspaceDialog above: only ESC clears.
 		if isEscKey(msg) && !h.worktreeDialog.IsVisible() && !h.createWorkspaceDialog.IsVisible() {
 			h.clearPendingFork()
 		}
-		return h, cmd
-	}
-	if h.branchDialog.IsVisible() {
+		return cmd, true
+	case h.branchDialog.IsVisible():
 		dialog, cmd := h.branchDialog.Update(msg)
 		h.branchDialog = dialog
-		return h, cmd
-	}
-	if h.commandPalette.IsVisible() {
+		return cmd, true
+	case h.commandPalette.IsVisible():
 		dialog, cmd := h.commandPalette.Update(msg)
 		h.commandPalette = dialog
-		return h, cmd
-	}
-	if h.sessionCreateDialog.IsVisible() {
+		return cmd, true
+	case h.sessionCreateDialog.IsVisible():
 		dialog, cmd := h.sessionCreateDialog.Update(msg)
 		h.sessionCreateDialog = dialog
-		return h, cmd
-	}
-	if h.newDialog.IsVisible() {
+		return cmd, true
+	case h.newDialog.IsVisible():
 		dialog, cmd := h.newDialog.Update(msg)
 		h.newDialog = dialog
-		return h, cmd
-	}
-	if h.confirmDialog.IsVisible() {
+		return cmd, true
+	case h.confirmDialog.IsVisible():
 		dialog, cmd := h.confirmDialog.Update(msg)
 		h.confirmDialog = dialog
-		return h, cmd
-	}
-	if h.renameDialog.IsVisible() {
+		return cmd, true
+	case h.renameDialog.IsVisible():
 		dialog, cmd := h.renameDialog.Update(msg)
 		h.renameDialog = dialog
+		return cmd, true
+	}
+	return nil, false
+}
+
+// handlePaste routes bracketed paste (cmd+v → tea.PasteMsg) to whatever owns
+// text input: a modal dialog, the focused split session, the drawer's shell, or
+// the sidebar filter. v2 delivers paste as its own message, not a KeyMsg, so it
+// bypasses handleKey.
+func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if cmd, handled := h.routeToModal(msg); handled {
+		return h, cmd
+	}
+	if h.focusMode {
+		if s := h.selectedSession(); s != nil && s.IsAlive() {
+			if cc := h.getControlClient(); cc != nil {
+				_ = cc.SendLiteralKeys(s.GetTmuxSession().Name, msg.Content)
+			}
+		}
+		return h, nil
+	}
+	if h.drawerHasFocus() {
+		if sh := h.activeShell(); sh != nil {
+			if cc := h.getControlClient(); cc != nil {
+				_ = cc.SendLiteralKeys(sh.TmuxName(), msg.Content)
+			}
+		}
+		return h, nil
+	}
+	if h.filterActive {
+		var cmd tea.Cmd
+		h.filterInput, cmd = h.filterInput.Update(msg)
+		h.filterText = h.filterInput.Value()
+		h.rebuildFlatItems()
+		if len(h.flatItems) > 0 {
+			h.cursor = FirstSelectableItem(h.flatItems)
+		} else {
+			h.cursor = 0
+		}
+		h.syncViewport()
+		if previewCmd := h.fetchPreviewForSelected(); previewCmd != nil {
+			return h, tea.Batch(cmd, previewCmd)
+		}
+		return h, cmd
+	}
+	return h, nil
+}
+
+func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Route to the active modal dialog/overlay first (keys + paste share this).
+	if cmd, handled := h.routeToModal(msg); handled {
 		return h, cmd
 	}
 
@@ -1589,7 +1824,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			h.launchpad.Move(-1)
 			return h, nil
-		case " ":
+		case "space":
 			h.launchpad.Toggle()
 			return h, nil
 		case "A":
@@ -1653,6 +1888,13 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// While the terminal drawer is focused it captures keys (tab nav, type-mode,
+	// lifecycle) so they don't also drive the session list. Sits after the focus
+	// (split) route above so split focus mode wins if somehow both are set.
+	if h.drawerHasFocus() {
+		return h.handleTypingKey(msg)
+	}
+
 	// Snapshot and clear the double-tap window: only a consecutive digit press
 	// should attach, so any other key falling through this switch invalidates
 	// the window for free. The digit case restores the snapshot before jumping.
@@ -1661,6 +1903,8 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	h.lastSlotTapSlot = -1
 
 	switch msg.String() {
+	case "`": // open the terminal drawer + move focus into it
+		return h, h.openDrawerTyping()
 	case "j", "down":
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
 		h.syncViewport()
@@ -1718,7 +1962,7 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, h.attachSelected()
 		}
 		return h, h.enterFocusMode()
-	case " ":
+	case "space":
 		// Jump to next waiting (or finished) session.
 		h.jumpToNextAttentionSession()
 		analytics.Track(analytics.EventSpaceJump, nil)
@@ -1900,63 +2144,72 @@ func (h *Home) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.helpOverlay.Show()
 		return h, nil
 	case "ctrl+c":
-		debuglog.Logger.Info("quit requested", "key", msg.String())
-		h.cancel() // stops background worker
-		if h.hookWatcher != nil {
-			h.hookWatcher.Stop()
-		}
-		if h.controlClient != nil {
-			h.controlClient.Close()
-		}
-		// Finalize all pending deletes before quitting.
-		h.finalizeAllPendingDeletes()
-
-		uptime := time.Since(h.startTime).Seconds()
-
-		// h.cancel() above only signals the status worker — it can still be
-		// mid-cycle, holding workerMu and mutating h.sessions. Take the lock
-		// for the direct reads; collectSnapshot and anyAttached self-lock.
-		h.workerMu.Lock()
-		runningCount := 0
-		waitingCount := 0
-		for _, s := range h.sessions {
-			switch s.GetStatus() {
-			case session.StatusRunning:
-				runningCount++
-			case session.StatusWaiting:
-				waitingCount++
-			}
-		}
-		sessionCount := len(h.sessions)
-		h.workerMu.Unlock()
-
-		analytics.Track(analytics.EventAppQuit, map[string]interface{}{
-			"uptime_seconds": int(uptime),
-			"session_count":  sessionCount,
-		})
-		analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
-		analytics.EmitSnapshot(h.collectSnapshot())
-
-		if runningCount > 0 || waitingCount > 0 {
-			analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
-				"running_count": runningCount,
-				"waiting_count": waitingCount,
-			})
-		}
-
-		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
-			analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
-				"uptime_seconds":         int(uptime),
-				"session_count":          sessionCount,
-				"attached_at_least_once": h.anyAttached(),
-			})
-		}
-
-		analytics.Shutdown()
-		return h, tea.Quit
+		return h, h.quitSequence("ctrl+c")
 	}
 
 	return h, nil
+}
+
+// quitSequence runs the full shutdown path — stop the worker, close the hook
+// watcher / control client / drawer stream, finalize pending deletes, emit quit
+// analytics — then returns tea.Quit. Shared by Ctrl+C and the command-palette
+// Quit command so neither leaks the drawer reader or orphans pending deletes.
+func (h *Home) quitSequence(source string) tea.Cmd {
+	debuglog.Logger.Info("quit requested", "source", source)
+	h.cancel() // stops background worker
+	if h.hookWatcher != nil {
+		h.hookWatcher.Stop()
+	}
+	if h.controlClient != nil {
+		h.controlClient.Close()
+	}
+	h.teardownShellStream()
+	// Finalize all pending deletes before quitting.
+	h.finalizeAllPendingDeletes()
+
+	uptime := time.Since(h.startTime).Seconds()
+
+	// h.cancel() above only signals the status worker — it can still be
+	// mid-cycle, holding workerMu and mutating h.sessions. Take the lock
+	// for the direct reads; collectSnapshot and anyAttached self-lock.
+	h.workerMu.Lock()
+	runningCount := 0
+	waitingCount := 0
+	for _, s := range h.sessions {
+		switch s.GetStatus() {
+		case session.StatusRunning:
+			runningCount++
+		case session.StatusWaiting:
+			waitingCount++
+		}
+	}
+	sessionCount := len(h.sessions)
+	h.workerMu.Unlock()
+
+	analytics.Track(analytics.EventAppQuit, map[string]interface{}{
+		"uptime_seconds": int(uptime),
+		"session_count":  sessionCount,
+	})
+	analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
+	analytics.EmitSnapshot(h.collectSnapshot())
+
+	if runningCount > 0 || waitingCount > 0 {
+		analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
+			"running_count": runningCount,
+			"waiting_count": waitingCount,
+		})
+	}
+
+	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
+		analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
+			"uptime_seconds":         int(uptime),
+			"session_count":          sessionCount,
+			"attached_at_least_once": h.anyAttached(),
+		})
+	}
+
+	analytics.Shutdown()
+	return tea.Quit
 }
 
 // --- Session operations ---
@@ -2481,7 +2734,62 @@ func (h *Home) worktreeDeleteWarnings(repoPath string) []string {
 	if active > 0 {
 		w = append(w, fmt.Sprintf("%d session(s) here are still running", active))
 	}
+	if n := h.countShellsForRepo(repoPath); n > 0 {
+		w = append(w, fmt.Sprintf("%d terminal(s) here will be closed", n))
+	}
 	return w
+}
+
+// countShellsForRepo returns how many shells are scoped to repoPath.
+func (h *Home) countShellsForRepo(repoPath string) int {
+	n := 0
+	for _, sh := range h.shells {
+		if sh.RepoPath == repoPath {
+			n++
+		}
+	}
+	return n
+}
+
+// killShellsForRepo forgets every shell scoped to repoPath and returns a tea.Cmd
+// that kills their tmux sessions + deletes their rows. The in-memory removal and
+// live-stream re-point happen synchronously on the Update goroutine (single
+// writer of h.shells/stream), but the actual `tmux kill-session` subprocess per
+// shell + DB delete run in the returned command OFF the Update goroutine (per the
+// no-blocking-I/O rule). Because a shell's dev server holds the worktree dir open
+// (like a session's detached daemon, and proc.FindHolders spares shells), the
+// caller must run this command BEFORE `git worktree remove` — see deferDeleteRepo,
+// which tea.Sequence()s it ahead of the destroy. Returns nil when nothing is
+// scoped here. No undo (shells carry no state).
+func (h *Home) killShellsForRepo(repoPath string) tea.Cmd {
+	var doomed []*shell.Shell
+	h.workerMu.Lock()
+	kept := make([]*shell.Shell, 0, len(h.shells))
+	for _, sh := range h.shells {
+		if sh.RepoPath == repoPath {
+			doomed = append(doomed, sh)
+		} else {
+			kept = append(kept, sh)
+		}
+	}
+	h.shells = kept
+	h.workerMu.Unlock()
+	// If the active drawer shell was among the doomed, re-point (or tear down) the
+	// live stream now instead of leaving it on a killed session until the next tick.
+	h.syncShellStream()
+	if len(doomed) == 0 {
+		return nil
+	}
+	storage := h.storage
+	return func() tea.Msg {
+		for _, sh := range doomed {
+			if err := storage.DeleteShell(sh.ID); err != nil {
+				debuglog.Logger.Error("storage: DeleteShell", "id", sh.ID, "err", err)
+			}
+			_ = sh.Kill()
+		}
+		return nil
+	}
 }
 
 // repoIsWorktree reports whether a repo group is a git worktree, reading from
@@ -2533,6 +2841,16 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Remove the worktree's shells up front so their tmux sessions (and the dev
+	// servers they host) don't pin the dir against `git worktree remove`. Only
+	// when the directory is actually being destroyed — a plain "forget repo"
+	// leaves the folder (and its shells) alone. The in-memory removal is
+	// synchronous; killShellsForRepo returns a command for the (off-Update) kills.
+	var killShellsCmd tea.Cmd
+	if msg.destroyWorkspace {
+		killShellsCmd = h.killShellsForRepo(msg.repoPath)
+	}
+
 	var cmds []tea.Cmd
 	if len(sess) == 0 {
 		// Empty worktree: unpin + background `git worktree remove` (not undoable;
@@ -2542,7 +2860,7 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 			repoPath := msg.repoPath
 			name := filepath.Base(repoPath)
 			editor := h.cfg.GetEditor()
-			cmds = append(cmds, func() tea.Msg {
+			destroyCmd := func() tea.Msg {
 				remaining, err := destroyWorktree(repoPath, name, editor, 2*time.Second)
 				return deleteCleanupDoneMsg{
 					workspaceErr:     err,
@@ -2551,9 +2869,19 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 					remainingHolders: remaining,
 					destroyAttempted: true,
 				}
-			})
+			}
+			// Kill the shells FIRST (frees the dir), THEN remove the worktree.
+			// tea.Sequence drops a nil killShellsCmd, so this is just destroyCmd
+			// when there were no shells.
+			cmds = append(cmds, tea.Sequence(killShellsCmd, destroyCmd))
 		}
 		return h, tea.Batch(cmds...)
+	}
+
+	// Non-empty path: the per-session finalize→destroyWorktree is 5s-deferred, so
+	// the async kills complete well before it — just fire them alongside.
+	if killShellsCmd != nil {
+		cmds = append(cmds, killShellsCmd)
 	}
 
 	for i, s := range sess {
@@ -2672,8 +3000,8 @@ func (h *Home) clearPendingFork() {
 
 // isEscKey reports whether msg is a KeyMsg representing the ESC key.
 func isEscKey(msg tea.Msg) bool {
-	km, ok := msg.(tea.KeyMsg)
-	return ok && km.Type == tea.KeyEsc
+	km, ok := msg.(tea.KeyPressMsg)
+	return ok && km.Code == tea.KeyEsc
 }
 
 // dispatchForkToWorktree builds the forkSessionMsg for a resolved destination
@@ -3062,7 +3390,7 @@ func (h *Home) focusTick() tea.Cmd {
 	})
 }
 
-func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := h.selectedSession()
 	if s == nil || !s.IsAlive() {
 		h.focusMode = false
@@ -3070,7 +3398,7 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	if msg.Type == tea.KeyEsc {
+	if msg.Code == tea.KeyEsc {
 		h.focusMode = false
 		h.sidebarDirty = true
 		h.actionLog.Add("unfocus preview", s.Title, true)
@@ -3087,7 +3415,7 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	target := s.GetTmuxSession().Name
 
-	switch msg.Type {
+	switch msg.Code {
 	case tea.KeyEnter:
 		cc.SendKeys(target, "Enter")
 	case tea.KeyBackspace:
@@ -3114,25 +3442,14 @@ func (h *Home) handleFocusKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cc.SendKeys(target, "PageDown")
 	case tea.KeyDelete:
 		cc.SendKeys(target, "DC")
-	case tea.KeyCtrlC:
-		cc.SendKeys(target, "C-c")
-	case tea.KeyCtrlD:
-		cc.SendKeys(target, "C-d")
-	case tea.KeyCtrlA:
-		cc.SendKeys(target, "C-a")
-	case tea.KeyCtrlU:
-		cc.SendKeys(target, "C-u")
-	case tea.KeyCtrlL:
-		cc.SendKeys(target, "C-l")
-	case tea.KeyCtrlW:
-		cc.SendKeys(target, "C-w")
-	case tea.KeyCtrlK:
-		cc.SendKeys(target, "C-k")
-	case tea.KeyRunes:
-		cc.SendLiteralKeys(target, string(msg.Runes))
 	default:
-		if str := msg.String(); str != "" {
-			cc.SendLiteralKeys(target, str)
+		// Ctrl chords (⌃C/⌃D/⌃A/⌃U/⌃L/⌃W/⌃K/…) map to tmux "C-x" so the
+		// session's own line-editing keeps working; printable text passes
+		// through literally.
+		if c, ok := ctrlChord(msg.String()); ok {
+			cc.SendKeys(target, c)
+		} else if msg.Text != "" {
+			cc.SendLiteralKeys(target, msg.Text)
 		}
 	}
 	return h, nil
@@ -3946,13 +4263,15 @@ func (h *Home) statusWorkerCycle() {
 		h.lastHeavyCycleAt = time.Now()
 	}
 
-	// Take a snapshot of sessions under lock.
+	// Take a snapshot of sessions + shells under lock.
 	h.workerMu.Lock()
 	sessions := make([]*session.Session, len(h.sessions))
 	copy(sessions, h.sessions)
+	shells := make([]*shell.Shell, len(h.shells))
+	copy(shells, h.shells)
 	h.workerMu.Unlock()
 
-	if len(sessions) == 0 {
+	if len(sessions) == 0 && len(shells) == 0 {
 		return
 	}
 
@@ -3965,6 +4284,13 @@ func (h *Home) statusWorkerCycle() {
 	// stale, shrinking the 3s hold to ~1s and flipping busy sessions to finished
 	// prematurely.
 	tmux.RefreshSessionCache()
+
+	// Refresh shell statuses from the just-updated cache (cache-only reads,
+	// plus one bounded PaneDeadInfo on an exited pane). Shells aren't in
+	// h.sessions, so they get their own pass.
+	for _, sh := range shells {
+		sh.RefreshStatus()
+	}
 
 	// 3. Sync hook status (fast: in-memory map lookups; worker may resolve a
 	// session-id rotation here — off the UI loop, so its transcript I/O is safe).
@@ -4202,7 +4528,7 @@ func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
 	if len(sessions) == 0 {
 		return
 	}
-	themeKey := string(ColorBg) + string(ColorAccent) // any theme-change invalidates the cache
+	themeKey := colorHex(ColorBg) + colorHex(ColorAccent) // any theme-change invalidates the cache
 	gitSnap := h.gitInfo()
 
 	for _, s := range sessions {
@@ -4243,7 +4569,7 @@ func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tm
 	branch := ""
 	origin := ""
 	prSummary := ""
-	prColor := string(ColorTextDim)
+	prColor := colorHex(ColorTextDim)
 	if info != nil {
 		branch = info.Branch
 		origin = strings.TrimPrefix(info.OriginKey, "local:")
@@ -4252,18 +4578,18 @@ func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tm
 				prSummary = txt
 				// Reuse the sidebar/preview badge color logic so draft, merged,
 				// fail, approved, and pending stay consistent across the UI.
-				if c, ok := prBadgeStyle(info.PR).GetForeground().(lipgloss.Color); ok {
-					prColor = string(c)
+				if fg := prBadgeStyle(info.PR).GetForeground(); fg != nil {
+					prColor = colorHex(fg)
 				}
 			}
 		}
 	}
 	return tmux.StatusBarOpts{
-		StripBg:     string(ColorBorder),
-		StripFg:     string(ColorText),
-		Dim:         string(ColorTextDim),
-		BorderColor: string(ColorBorder),
-		AccentColor: string(ColorAccent),
+		StripBg:     colorHex(ColorBorder),
+		StripFg:     colorHex(ColorText),
+		Dim:         colorHex(ColorTextDim),
+		BorderColor: colorHex(ColorBorder),
+		AccentColor: colorHex(ColorAccent),
 		Origin:      origin,
 		PRSummary:   prSummary,
 		PRColor:     prColor,
@@ -4494,6 +4820,32 @@ func (h *Home) resolveCurrentRepo() string {
 	return ""
 }
 
+// drawerScopeRepo returns the repo the terminal drawer is scoped to: frozen to
+// drawerRepo while open (set when the drawer was opened), else the repo under
+// the cursor (used by createShell before the drawer opens).
+func (h *Home) drawerScopeRepo() string {
+	if h.drawerMode != drawerHidden && h.drawerRepo != "" {
+		return h.drawerRepo
+	}
+	return h.resolveCurrentRepo()
+}
+
+// shellsForActiveRepo returns the drawer's shells for its current scope repo,
+// in creation order. The drawer only ever shows one repo's shells at a time.
+func (h *Home) shellsForActiveRepo() []*shell.Shell {
+	repo := h.drawerScopeRepo()
+	if repo == "" {
+		return nil
+	}
+	out := make([]*shell.Shell, 0, len(h.shells))
+	for _, sh := range h.shells {
+		if sh.RepoPath == repo {
+			out = append(out, sh)
+		}
+	}
+	return out
+}
+
 func (h *Home) fetchBranchList(repoPath string) tea.Cmd {
 	return func() tea.Msg {
 		branches, err := git.ListBranches(repoPath)
@@ -4554,7 +4906,7 @@ func (h *Home) renderHeader() string {
 	logo := lipgloss.NewStyle().Foreground(ColorBrand).Bold(true).Render("❯_")
 	title := logo + " " + TitleStyle.Render("fleet")
 
-	breadcrumb := h.cursorBreadcrumb("")
+	breadcrumb := h.cursorBreadcrumb(nil)
 
 	left := title
 	if breadcrumb != "" {
@@ -4588,7 +4940,7 @@ func (h *Home) cursorBarContext() BarContext {
 // cursorBreadcrumb returns "origin › checkout › session-title" for the row
 // currently under the cursor. Empty string if there's no useful path (boot,
 // empty fleet). Honours bg so it inlays into the header surface cleanly.
-func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
+func (h *Home) cursorBreadcrumb(bg color.Color) string {
 	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
 		return ""
 	}
@@ -4645,7 +4997,7 @@ func (h *Home) cursorBreadcrumb(bg lipgloss.Color) string {
 // origin/checkout pills (renderStatusSummary) so the visual language stays
 // consistent across the sidebar. Idle keeps its "N idle" text — knowing the
 // total fleet size is useful info, but it doesn't deserve a glyph.
-func (h *Home) statusCountsLine(bg lipgloss.Color) string {
+func (h *Home) statusCountsLine(bg color.Color) string {
 	counts := make(map[session.Status]int)
 	for _, s := range h.sessions {
 		counts[s.GetStatus()]++
@@ -4667,6 +5019,10 @@ func (h *Home) statusCountsLine(bg lipgloss.Color) string {
 }
 
 func (h *Home) renderHelpBar() string {
+	// When the terminal drawer owns the keyboard, the help bar shows its keys.
+	if h.drawerHasFocus() {
+		return h.renderDrawerHelpBar()
+	}
 	contextKeys, globalKeys := HelpBarBindingsFor(h.cursorBarContext(), h.cfg.GetEnterMode())
 
 	var parts []string
@@ -4686,6 +5042,19 @@ func (h *Home) renderHelpBar() string {
 	// next line. Without it the keys would be appended to the bottom border
 	// of the Sessions panel.
 	return "\n " + left + sep + right
+}
+
+// renderDrawerHelpBar shows the drawer's Ctrl-chord key hints in the footer.
+func (h *Home) renderDrawerHelpBar() string {
+	pairs := [][2]string{
+		{"keys", "→ shell"}, {"⌃T", "new"}, {"⌃W", "close"},
+		{"⌃PgUp/Dn", "tab"}, {"⌃G", "full"}, {"`", "close drawer"},
+	}
+	var parts []string
+	for _, p := range pairs {
+		parts = append(parts, HelpKeyStyle.Render(p[0])+" "+HelpDescStyle.Render(p[1]))
+	}
+	return "\n " + strings.Join(parts, "  ")
 }
 
 func (h *Home) layoutMode() string {
@@ -4866,6 +5235,19 @@ func (h *Home) rebuildFlatItems() {
 	h.sidebarDirty = true
 }
 
+// structuralGitChange reports whether a per-repo git refresh changed a field
+// that BuildFlatItems groups or sorts on (origin identity or the worktree
+// flag). Branch, dirty, and PR changes are render-only — they don't reshape the
+// sidebar tree — so they don't warrant a flat-item rebuild. A nil on either
+// side (first sighting of a repo, or a missing result) is treated as structural
+// so the initial grouping always lands.
+func structuralGitChange(prev, next *git.RepoInfo) bool {
+	if prev == nil || next == nil {
+		return true
+	}
+	return prev.OriginKey != next.OriginKey || prev.IsWorktreeRepo != next.IsWorktreeRepo
+}
+
 // originOf maps a repo root to its stable origin key, falling back to
 // "local:<basename>" for repos whose RepoInfo hasn't been refreshed yet.
 // Lock-free read from the atomic gitInfo snapshot.
@@ -5014,6 +5396,17 @@ func (h *Home) loadSessions() tea.Msg {
 		slotBindings = map[int]string{}
 	}
 
+	// Load + reconnect shells (drawer terminals). No liveness check — the
+	// worker derives status from tmux; a dead shell renders as exited.
+	shellRows, err := h.storage.LoadShells()
+	if err != nil {
+		debuglog.Logger.Error("failed to load shells", "err", err)
+	}
+	shells := make([]*shell.Shell, 0, len(shellRows))
+	for _, row := range shellRows {
+		shells = append(shells, shell.FromRow(row))
+	}
+
 	// These block but run in the tea.Cmd goroutine, not Update().
 	configDir := hooks.GetClaudeConfigDir()
 	hooks.InjectClaudeHooks(configDir)
@@ -5053,6 +5446,7 @@ func (h *Home) loadSessions() tea.Msg {
 
 	return loadSessionsMsg{
 		sessions:     sessions,
+		shells:       shells,
 		slotBindings: slotBindings,
 		ghAvailable:  ghAvailable,
 		warning:      warning,
@@ -5357,7 +5751,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, nil
 	case "quit":
-		return h, tea.Quit
+		return h, h.quitSequence("command-palette")
 	}
 	return h, nil
 }

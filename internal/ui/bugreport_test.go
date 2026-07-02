@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestBugReportDialog_EnterWithGhMissing_ReturnsCmd(t *testing.T) {
@@ -14,7 +14,7 @@ func TestBugReportDialog_EnterWithGhMissing_ReturnsCmd(t *testing.T) {
 	d.visible = true
 	d.descInput.SetValue("something broke")
 
-	_, cmd := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if cmd == nil {
 		t.Fatal("expected non-nil cmd when gh is missing, got nil (dialog would freeze)")
@@ -34,7 +34,7 @@ func TestBugReportDialog_EnterWithEmptyDesc_Noop(t *testing.T) {
 	d.visible = true
 	d.descInput.SetValue("")
 
-	_, cmd := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if cmd != nil {
 		t.Fatal("expected nil cmd for empty description")
@@ -50,7 +50,7 @@ func TestBugReportDialog_EnterWhileSubmitting_Noop(t *testing.T) {
 	d.submitting = true
 	d.descInput.SetValue("something broke")
 
-	_, cmd := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
 	if cmd != nil {
 		t.Fatal("expected nil cmd while already submitting")
@@ -62,7 +62,7 @@ func TestBugReportDialog_Esc_Hides(t *testing.T) {
 	d.visible = true
 	d.submitting = true
 
-	_, cmd := d.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	if d.visible {
 		t.Fatal("expected dialog to be hidden after esc")

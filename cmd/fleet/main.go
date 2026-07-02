@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -19,7 +20,6 @@ import (
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/ui"
 	"github.com/brizzai/fleet/internal/update"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // version is set via -ldflags at build time. GoReleaser populates this automatically.
@@ -143,11 +143,9 @@ func runTUI() {
 	identity := analytics.DiscoverIdentity()
 
 	model := ui.NewHome(storage, cfg, version, identity)
-	p := tea.NewProgram(
-		model,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+	// v2: alt-screen and mouse mode are declared on the View each frame
+	// (see Home.chrome), not as program options.
+	p := tea.NewProgram(model)
 	// Wire the program back into the model so worker goroutines can push
 	// state updates to the Update loop via h.send. Must happen before Run.
 	model.SetProgram(p)
