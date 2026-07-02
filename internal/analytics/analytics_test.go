@@ -117,25 +117,25 @@ func TestMergeValueAttachesValueAndStrips(t *testing.T) {
 	}
 }
 
-func TestDeclineShouldSendRespectsEnvOptOut(t *testing.T) {
+func TestIsOptedOutByEnv(t *testing.T) {
 	// Not parallel: mutates process env via t.Setenv.
 
 	// Clear both opt-out vars so the default case is unambiguous regardless of
 	// the runner's environment.
 	t.Setenv("FLEET_TELEMETRY_DISABLED", "")
 	t.Setenv("DO_NOT_TRACK", "")
-	if !declineShouldSend() {
-		t.Error("declineShouldSend() = false with no opt-out env, want true")
+	if IsOptedOutByEnv() {
+		t.Error("IsOptedOutByEnv() = true with no opt-out env, want false")
 	}
 
 	t.Setenv("FLEET_TELEMETRY_DISABLED", "1")
-	if declineShouldSend() {
-		t.Error("declineShouldSend() = true with FLEET_TELEMETRY_DISABLED=1, want false")
+	if !IsOptedOutByEnv() {
+		t.Error("IsOptedOutByEnv() = false with FLEET_TELEMETRY_DISABLED=1, want true")
 	}
 
 	t.Setenv("FLEET_TELEMETRY_DISABLED", "")
 	t.Setenv("DO_NOT_TRACK", "1")
-	if declineShouldSend() {
-		t.Error("declineShouldSend() = true with DO_NOT_TRACK=1, want false")
+	if !IsOptedOutByEnv() {
+		t.Error("IsOptedOutByEnv() = false with DO_NOT_TRACK=1, want true")
 	}
 }

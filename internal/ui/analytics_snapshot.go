@@ -1,9 +1,8 @@
 package ui
 
 import (
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/brizzai/fleet/internal/analytics"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -59,7 +58,8 @@ func (h *Home) collectSnapshot() analytics.SnapshotStats {
 // the consentResultMsg handler. The pre-discovered Identity is passed in
 // so Init does no shell-outs on the UI thread.
 func (h *Home) fireStartupAnalytics(repoCount int) {
-	analytics.Init(h.cfg.IsTelemetryEnabled(), h.version, h.identity)
+	mode := h.cfg.GetTelemetryMode()
+	analytics.Init(mode, h.version, h.identity)
 
 	effectiveTheme := h.cfg.Theme
 	if effectiveTheme == "" {
@@ -68,6 +68,10 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 	h.workerMu.Lock()
 	sessionCount := len(h.sessions)
 	h.workerMu.Unlock()
+	// TrackAppStarted internally trims itself in minimal mode (anonymous,
+	// version-only). The snapshot + onboarding-funnel emissions are full-mode
+	// only — their Gauge/Distribution/Track calls no-op in minimal anyway, so
+	// gating here just avoids the wasted work of collecting a snapshot.
 	analytics.TrackAppStarted(
 		h.version,
 		sessionCount,
@@ -77,21 +81,15 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 		h.cfg.IsAutoNameEnabled(),
 		h.cfg.IsCopyClaudeSettingsEnabled(),
 	)
-	analytics.EmitSnapshot(h.collectSnapshot())
-	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
-		analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
+	if mode == config.TelemetryFull {
+		analytics.EmitSnapshot(h.collectSnapshot())
+		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
+			analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
+		}
 	}
-}
-
-// fireDeclineBeacon returns a Cmd that sends the one-shot telemetry_declined
-// event off the Update() loop. Captures version/identity by value so the
-// goroutine touches no shared Home state.
-func (h *Home) fireDeclineBeacon() tea.Cmd {
-	version, identity := h.version, h.identity
-	return func() tea.Msg {
-		analytics.TrackDeclined(version, identity)
-		return nil
-	}
+	// Mark this device active today (full + minimal); the UI tick keeps it
+	// fresh across day boundaries for long-running instances.
+	analytics.Heartbeat()
 }
 
 // anyAttached reports whether the user attached to at least one session this

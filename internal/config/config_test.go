@@ -142,29 +142,44 @@ func TestIsCopyClaudeSettingsEnabled(t *testing.T) {
 	})
 }
 
-func TestIsTelemetryEnabled(t *testing.T) {
-	t.Run("nil defaults to true", func(t *testing.T) {
-		cfg := &Config{}
-		if !cfg.IsTelemetryEnabled() {
-			t.Error("expected true when Telemetry is nil")
-		}
-	})
+func TestGetTelemetryMode(t *testing.T) {
+	ptr := func(b bool) *bool { return &b }
 
-	t.Run("true", func(t *testing.T) {
-		v := true
-		cfg := &Config{Telemetry: &v}
-		if !cfg.IsTelemetryEnabled() {
-			t.Error("expected true")
-		}
-	})
+	cases := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{"unset defaults to full", &Config{}, TelemetryFull},
+		{"explicit full", &Config{TelemetryMode: TelemetryFull}, TelemetryFull},
+		{"explicit minimal", &Config{TelemetryMode: TelemetryMinimal}, TelemetryMinimal},
+		{"explicit off", &Config{TelemetryMode: TelemetryOff}, TelemetryOff},
+		{"unrecognized mode falls through to default", &Config{TelemetryMode: "bogus"}, TelemetryFull},
+		{"legacy true migrates to full", &Config{Telemetry: ptr(true)}, TelemetryFull},
+		{"legacy false (old decline) migrates to minimal", &Config{Telemetry: ptr(false)}, TelemetryMinimal},
+		{"explicit mode overrides legacy bool", &Config{TelemetryMode: TelemetryOff, Telemetry: ptr(true)}, TelemetryOff},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.GetTelemetryMode(); got != tc.want {
+				t.Errorf("GetTelemetryMode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
-	t.Run("false", func(t *testing.T) {
-		v := false
-		cfg := &Config{Telemetry: &v}
-		if cfg.IsTelemetryEnabled() {
-			t.Error("expected false")
-		}
-	})
+func TestTelemetryConfigured(t *testing.T) {
+	ptr := func(b bool) *bool { return &b }
+
+	if (&Config{}).TelemetryConfigured() {
+		t.Error("empty config should report telemetry not configured")
+	}
+	if !(&Config{TelemetryMode: TelemetryMinimal}).TelemetryConfigured() {
+		t.Error("explicit mode should report configured")
+	}
+	if !(&Config{Telemetry: ptr(false)}).TelemetryConfigured() {
+		t.Error("legacy bool should report configured")
+	}
 }
 
 func TestGetEnterMode(t *testing.T) {

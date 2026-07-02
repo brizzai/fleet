@@ -12,6 +12,15 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
+// Telemetry modes. Full sends usage events tagged with the user's git
+// name/email; Minimal sends only an anonymous daily-active ping (enough to
+// count daily active users, no identity); Off sends nothing.
+const (
+	TelemetryFull    = "full"
+	TelemetryMinimal = "minimal"
+	TelemetryOff     = "off"
+)
+
 // Config holds user-configurable settings.
 type Config struct {
 	TickIntervalSec      int    `json:"tick_interval_sec,omitempty"`
@@ -30,9 +39,16 @@ type Config struct {
 	OriginDeleteRemovesWorktrees *bool  `json:"origin_delete_removes_worktrees,omitempty"`
 	EnterMode                    string `json:"enter_mode,omitempty"`       // "attach" or "split"
 	StatusIndicator              string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
-	Telemetry                    *bool  `json:"telemetry,omitempty"`
-	DefaultAgent                 string `json:"default_agent,omitempty"` // "claude" or "codex"
-	DrawerHeight                 int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
+	// TelemetryMode is the three-way telemetry preference: "full" (usage +
+	// git name/email), "minimal" (anonymous daily-active ping only, no
+	// identity), or "off" (nothing). Read via GetTelemetryMode, which migrates
+	// the legacy Telemetry bool below when this is unset.
+	TelemetryMode string `json:"telemetry_mode,omitempty"`
+	// Telemetry is the legacy on/off flag, kept only for migration — new writes
+	// go to TelemetryMode. See GetTelemetryMode.
+	Telemetry    *bool  `json:"telemetry,omitempty"`
+	DefaultAgent string `json:"default_agent,omitempty"` // "claude" or "codex"
+	DrawerHeight int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
 
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
@@ -413,12 +429,31 @@ func (c *Config) GetSidebarDensity() string {
 	return "normal"
 }
 
-// IsTelemetryEnabled returns whether telemetry is enabled (default: true).
-func (c *Config) IsTelemetryEnabled() bool {
-	if c.Telemetry == nil {
-		return true
+// GetTelemetryMode returns the telemetry mode: "full", "minimal", or "off".
+// Precedence: an explicit TelemetryMode wins; otherwise the legacy Telemetry
+// bool is migrated (true→full, false→minimal — a previously-declined user
+// keeps anonymous daily-active tracking); otherwise the default is "full". A
+// brand-new install is shown the consent prompt before anything is sent, so
+// this default only governs pre-answer and edge paths.
+func (c *Config) GetTelemetryMode() string {
+	switch c.TelemetryMode {
+	case TelemetryFull, TelemetryMinimal, TelemetryOff:
+		return c.TelemetryMode
 	}
-	return *c.Telemetry
+	if c.Telemetry != nil {
+		if *c.Telemetry {
+			return TelemetryFull
+		}
+		return TelemetryMinimal
+	}
+	return TelemetryFull
+}
+
+// TelemetryConfigured reports whether the user already has an explicit
+// telemetry preference on disk (the new mode field or the legacy bool). Used
+// to skip the first-launch consent prompt for upgrading users.
+func (c *Config) TelemetryConfigured() bool {
+	return c.TelemetryMode != "" || c.Telemetry != nil
 }
 
 // GetEditor returns the configured editor, falling back to $EDITOR then "code".
