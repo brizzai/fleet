@@ -532,9 +532,9 @@ func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.closeDrawer()
 	case "ctrl+t":
 		return h, h.createShell("") // becomes the active tab via shellCreateResultMsg
-	case "ctrl+pgup":
+	case "pgup", "ctrl+pgup":
 		return h, h.switchTab(-1)
-	case "ctrl+pgdown":
+	case "pgdown", "ctrl+pgdown":
 		return h, h.switchTab(1)
 	case "ctrl+g":
 		return h, h.attachShell(h.activeShell())

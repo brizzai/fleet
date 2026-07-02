@@ -60,7 +60,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "`", Desc: "Open terminal drawer + start typing", Section: "drawer"},
 	{Key: "Ctrl+T", Desc: "New shell ($SHELL in repo dir)", Section: "drawer"},
 	{Key: "Ctrl+W", Desc: "Close shell (twice if running)", Section: "drawer"},
-	{Key: "Ctrl+PgUp/PgDn", Desc: "Switch shell tab", Section: "drawer"},
+	{Key: "PgUp / PgDn", Desc: "Switch shell tab", Section: "drawer"},
 	{Key: "Ctrl+G", Desc: "Full-screen attach (Ctrl+Q returns)", Section: "drawer"},
 	{Key: "Enter", Desc: "Restart shell (when exited)", Section: "drawer"},
 	{Key: "`", Desc: "Close drawer → sidebar", Section: "drawer"},
