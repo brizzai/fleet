@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strings"
 
@@ -82,7 +83,7 @@ func RenderSplash(width, height int, progress float64, frame int) string {
 	barEmpty := lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat(splashEmptyChar, splashBarCells-filled))
 	bar := barFilled + barEmpty
 
-	spinner := lipgloss.NewStyle().Foreground(ColorPurple).Bold(true).Render(splashSpinnerFrames[frame%len(splashSpinnerFrames)])
+	spinner := renderSpinnerGlyph(frame, ColorPurple)
 	label := lipgloss.NewStyle().Foreground(ColorTextDim).Italic(true).Render(splashLabels[(frame/splashLabelDwell)%len(splashLabels)])
 
 	// Layout width = whichever is wider: the wordmark or the bar — so the
@@ -113,12 +114,19 @@ func RenderSplash(width, height int, progress float64, frame int) string {
 	return out.String()
 }
 
+// renderSpinnerGlyph renders the current Braille spinner frame in the given
+// color (bold). Shared by the boot splash and the shutdown overlay so the two
+// spinners stay glyph- and cadence-identical.
+func renderSpinnerGlyph(frame int, c color.Color) string {
+	return lipgloss.NewStyle().Foreground(c).Bold(true).
+		Render(splashSpinnerFrames[frame%len(splashSpinnerFrames)])
+}
+
 // renderShutdownBox builds the small "Shutting down…" box floated over the
 // dimmed UI while fleet tears down. Spinner + label in the shared DialogStyle so
 // it reads as part of fleet's dialog vocabulary. `frame` advances the spinner.
 func renderShutdownBox(frame int) string {
-	spinner := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).
-		Render(splashSpinnerFrames[frame%len(splashSpinnerFrames)])
+	spinner := renderSpinnerGlyph(frame, ColorAccent)
 	label := lipgloss.NewStyle().Foreground(ColorText).Render("Shutting down…")
 	return DialogStyle.Render(spinner + "  " + label)
 }

@@ -528,11 +528,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	// While shutting down, the blocking teardown runs off-loop (see beginQuit);
 	// keep the spinner animating and swallow everything else so no key or worker
-	// message mutates state the teardown goroutine is touching concurrently.
+	// message mutates state the teardown goroutine is touching concurrently. A
+	// second Ctrl+C is the escape hatch: if teardown wedges (a stuck worktree
+	// remove, a wedged telemetry drain), force an immediate exit rather than
+	// spinning forever with no way out.
 	if h.quitting {
-		if _, ok := msg.(shutdownFrameMsg); ok {
+		switch m := msg.(type) {
+		case shutdownFrameMsg:
 			h.shutdownFrame++
 			return h, h.shutdownTick()
+		case tea.KeyPressMsg:
+			if m.String() == "ctrl+c" {
+				return h, tea.Quit
+			}
 		}
 		return h, nil
 	}
@@ -2199,8 +2207,19 @@ func (h *Home) beginQuit(source string) tea.Cmd {
 	}
 	debuglog.Logger.Info("quit requested", "source", source)
 	h.quitting = true
-	h.frozenFrame = h.renderBody() // capture the exact last frame to dim behind the overlay
-	h.cancel()                     // stop the worker now so it stops feeding Update
+	// Capture the frame to dim behind the overlay, mirroring View()'s guard
+	// order so a quit during boot freezes what the user is actually looking at
+	// (splash) rather than a half-built body — and never runs renderBody with a
+	// negative inner width in the pre-first-WindowSizeMsg (width == 0) window.
+	switch {
+	case h.width == 0:
+		h.frozenFrame = "" // nothing meaningful to freeze yet
+	case !h.booted:
+		h.frozenFrame = RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame)
+	default:
+		h.frozenFrame = h.renderBody()
+	}
+	h.cancel() // stop the worker now so it stops feeding Update
 	return tea.Batch(h.shutdownTick(), h.performShutdown())
 }
 
