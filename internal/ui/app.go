@@ -297,6 +297,7 @@ type Home struct {
 	shellTerm          *vterm.Terminal
 	shellStreamTarget  string
 	shellStreamPending string      // target of an in-flight async attach ("" = none); dedups dispatches
+	shellReseedPending bool        // a capture-pane re-seed of a blank emulator is in flight
 	shellWake          atomic.Bool // coalesces output→render wakes (true = one shellOutputMsg in flight)
 
 	// Slot hotkeys (RTS-style quick access: digit=jump, double-digit=attach, alt+digit or =<digit>=bind).
@@ -572,6 +573,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellStreamReadyMsg:
 		// An async stream attach completed; install it if still wanted.
 		h.applyShellStream(msg)
+		return h, nil
+
+	case shellReseedMsg:
+		// A capture-pane re-seed of a blank emulator completed off-thread. Apply
+		// only if the same shell is still streaming AND still blank, so we never
+		// clobber content the live reader has since delivered.
+		h.shellReseedPending = false
+		if len(msg.seed) > 0 && h.shellTerm != nil && h.shellStreamTarget == msg.target &&
+			strings.TrimSpace(h.shellTerm.Render()) == "" {
+			h.shellTerm.Write(msg.seed)
+			h.shellWake.Store(false)
+		}
 		return h, nil
 
 	case shellCreateResultMsg:

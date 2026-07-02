@@ -83,14 +83,21 @@ type (
 		err      error
 	}
 	// shellStreamReadyMsg carries the result of an async stream attach (the fork of
-	// tmux -C + PTY happens off the Update goroutine). The handler installs it only
-	// if the requested target + size are still current, else closes the reader.
+	// tmux -C + PTY happens off the Update goroutine). The handler installs it if
+	// the drawer still wants that shell, else closes the reader.
 	shellStreamReadyMsg struct {
 		target string
 		w, h   int
 		term   *vterm.Terminal
 		reader *tmux.OutputReader
 		err    error
+	}
+	// shellReseedMsg carries a capture-pane re-seed for a still-blank emulator
+	// (control mode never replays a static screen). Captured off the Update
+	// goroutine; applied only if the emulator is still blank for the same target.
+	shellReseedMsg struct {
+		target string
+		seed   []byte
 	}
 )
 
@@ -259,6 +266,26 @@ func (h *Home) syncShellStream() {
 			_ = h.shellReader.Resize(w, ht)
 		}
 	}
+	h.maybeReseedBlank(target)
+}
+
+// maybeReseedBlank re-captures the pane into the emulator while it is still
+// blank. tmux control mode never replays a static screen, so a shell whose
+// prompt rendered before (or in a gap around) attach shows nothing until it next
+// writes — this backstop (driven by the ~120ms drawer tick) fills it in. The
+// capture runs off the Update goroutine; the result is applied in the
+// shellReseedMsg handler, which re-checks blank + target before writing.
+func (h *Home) maybeReseedBlank(target string) {
+	if h.shellReseedPending || h.shellTerm == nil {
+		return
+	}
+	if strings.TrimSpace(h.shellTerm.Render()) != "" {
+		return // already has content (live stream or a prior seed)
+	}
+	h.shellReseedPending = true
+	go func() {
+		h.send(shellReseedMsg{target: target, seed: drawerSeedBytes(tmux.CapturePaneANSI(target))})
+	}()
 }
 
 // startShellStreamAsync builds the emulator + control reader OFF the Update
@@ -306,7 +333,9 @@ func drawerSeedBytes(capture []byte) []byte {
 	if end == 0 {
 		return nil
 	}
-	return []byte(strings.Join(lines[:end], "\r\n"))
+	// Clear + home first so a re-seed into a (possibly dirty) emulator reproduces
+	// the screen from the top-left, cursor landing after the last line.
+	return append([]byte("\x1b[2J\x1b[H"), []byte(strings.Join(lines[:end], "\r\n"))...)
 }
 
 // applyShellStream installs (or discards) the result of an async attach. Runs on
@@ -317,10 +346,15 @@ func (h *Home) applyShellStream(msg shellStreamReadyMsg) {
 		h.shellStreamPending = ""
 	}
 	sh := h.activeShell()
+	// Install as long as the drawer still wants THIS shell. Size is deliberately
+	// NOT required to match: the drawer resizes every frame as it slides open, so
+	// requiring msg.w/h == current would discard the fresh reader mid-animation and
+	// re-fork a later one — which then attaches after the shell's prompt has
+	// rendered and (control mode never replaying) shows blank. Install now and
+	// resize to the current body below.
 	wanted := msg.err == nil &&
 		h.drawerMode != drawerHidden &&
-		sh != nil && sh.TmuxName() == msg.target && sh.Status() != shell.StatusExited &&
-		msg.w == h.drawerInnerW && msg.h == h.drawerInnerH
+		sh != nil && sh.TmuxName() == msg.target && sh.Status() != shell.StatusExited
 	if !wanted {
 		if msg.err != nil {
 			debuglog.Logger.Error("drawer: attach output reader", "target", msg.target, "err", msg.err)
@@ -328,12 +362,20 @@ func (h *Home) applyShellStream(msg shellStreamReadyMsg) {
 		if msg.reader != nil {
 			go msg.reader.Close() // stale or failed — reap off the Update goroutine
 		}
-		return // a later sync will re-attach with the current target/size
+		return // a later sync will re-attach with the current target
 	}
 	h.teardownShellStream() // drop any prior stream (closes its reader off-thread)
 	h.shellTerm = msg.term
 	h.shellReader = msg.reader
 	h.shellStreamTarget = msg.target
+	// Bring the emulator + pane to the current body size if the drawer resized
+	// while the fork was in flight.
+	if w, ht := h.drawerInnerW, h.drawerInnerH; w > 0 && ht > 0 {
+		if cw, ch := msg.term.Size(); cw != w || ch != ht {
+			msg.term.Resize(w, ht)
+			_ = msg.reader.Resize(w, ht)
+		}
+	}
 }
 
 // teardownShellStream detaches the live reader — closing it (Kill+Wait) OFF the
@@ -361,6 +403,7 @@ func (h *Home) dropShellStream(async bool) {
 	h.shellTerm = nil
 	h.shellStreamTarget = ""
 	h.shellStreamPending = ""
+	h.shellReseedPending = false
 	h.shellWake.Store(false)
 }
 
