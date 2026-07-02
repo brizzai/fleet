@@ -39,6 +39,7 @@ type settingRow struct {
 	label     string
 	subheader bool
 	value     func(c *config.Config) string    // display value (interactive rows only)
+	valueW    func() int                       // widest *possible* display width of value; stable across cfg (nil for subheaders)
 	cycle     func(d *SettingsDialog, dir int) // mutate cfg + live-apply (interactive rows only)
 }
 
@@ -60,6 +61,7 @@ type SettingsDialog struct {
 	cfg            *config.Config
 	origTheme      string
 	categories     []settingsCategory
+	detailWByCat   []int // natural detail-column width per category (cached; depends only on static labels/presets)
 	categoryCursor int
 	rowCursor      int
 	focus          settingsFocus
@@ -67,7 +69,15 @@ type SettingsDialog struct {
 
 // NewSettingsDialog creates a settings dialog.
 func NewSettingsDialog(cfg *config.Config) *SettingsDialog {
-	return &SettingsDialog{cfg: cfg, categories: buildSettingsCategories()}
+	d := &SettingsDialog{cfg: cfg, categories: buildSettingsCategories()}
+	// The natural detail width per category depends only on static label text and
+	// the fixed preset sets (via each row's widest *possible* value), so compute
+	// it once here rather than on every View() frame.
+	d.detailWByCat = make([]int, len(d.categories))
+	for i, c := range d.categories {
+		d.detailWByCat[i] = categoryContentWidth(c)
+	}
+	return d
 }
 
 func (d *SettingsDialog) Show() {
@@ -117,29 +127,60 @@ func labelColWidth(rows []settingRow) int {
 	return w
 }
 
-// detailContentWidth is the width the detail column needs to render every
-// category's rows on a single line each (label column + arrows + value). Taken
-// across all categories so the modal keeps a constant width when switching.
-func (d *SettingsDialog) detailContentWidth() int {
-	// Non-label chrome per row: "  " + "◂" + " " + value + " " + "▸" = 6 cells.
-	const rowChrome = 6
-	need := 0
-	for _, c := range d.categories {
-		labelW := labelColWidth(c.rows)
-		maxVal := 0
-		for _, r := range c.rows {
-			if r.subheader || r.value == nil {
-				continue
-			}
-			if vw := lipgloss.Width(r.value(d.cfg)); vw > maxVal {
-				maxVal = vw
-			}
+// rowChrome is the non-label, non-value width of a detail row:
+// "  " + "◂" + " " + value + " " + "▸" = 6 cells.
+const rowChrome = 6
+
+// categoryContentWidth is the width a category needs to render each of its rows
+// on a single line: widest label + chrome + widest *possible* value. It uses the
+// widest possible value (not the current one) so the modal width stays constant
+// as the user cycles values, and reads no live config — only static labels and
+// preset sets — so it's safe to cache.
+func categoryContentWidth(c settingsCategory) int {
+	labelW := labelColWidth(c.rows)
+	maxVal := 0
+	for _, r := range c.rows {
+		if r.subheader || r.valueW == nil {
+			continue
 		}
-		if w := labelW + rowChrome + maxVal; w > need {
-			need = w
+		if vw := r.valueW(); vw > maxVal {
+			maxVal = vw
 		}
 	}
-	return need
+	return labelW + rowChrome + maxVal
+}
+
+// maxStrW returns the widest rendered width among ss.
+func maxStrW(ss []string) int {
+	w := 0
+	for _, s := range ss {
+		if x := lipgloss.Width(s); x > w {
+			w = x
+		}
+	}
+	return w
+}
+
+// maxIntStrW returns the widest decimal-rendered width among ns.
+func maxIntStrW(ns []int) int {
+	w := 0
+	for _, n := range ns {
+		if x := len(fmt.Sprintf("%d", n)); x > w {
+			w = x
+		}
+	}
+	return w
+}
+
+// themeValueW is the widest theme display name.
+func themeValueW() int {
+	w := 0
+	for _, p := range BuiltinPalettes {
+		if x := lipgloss.Width(PaletteDisplayName(p.Name)); x > w {
+			w = x
+		}
+	}
+	return w
 }
 
 // firstSelectableRow returns the first non-subheader row index of a category.
@@ -241,11 +282,13 @@ func (d *SettingsDialog) View() string {
 		chrome = 6 // rounded border (2) + horizontal padding (2×2)
 	)
 
-	// Size the detail column to the widest row across all categories so labels
-	// render on one line (no wrap → no truncation of the rows below). It still
-	// flexes down to fit narrow panes; the floor keeps values readable. detailW +
-	// railW + ruleW never exceeds the content area, so the box stays within d.width.
-	detailW := d.detailContentWidth()
+	// Size the detail column to the current category's widest row so labels render
+	// on one line (no wrap → no truncation of the rows below). Per-category so the
+	// smaller Appearance column doesn't inherit Behavior's long labels and squeeze
+	// out the live preview. It still flexes down to fit narrow panes; the floor
+	// keeps values readable. detailW + railW + ruleW never exceeds the content
+	// area, so the box stays within d.width.
+	detailW := d.detailWByCat[d.categoryCursor]
 	if fit := d.width - chrome - railW - ruleW; fit < detailW {
 		detailW = fit
 	}
@@ -254,7 +297,7 @@ func (d *SettingsDialog) View() string {
 	}
 
 	rail := d.renderRail()
-	detail := d.renderDetail()
+	detail := d.renderDetail(detailW)
 	// Constant block height across all categories so the modal doesn't grow or
 	// shrink vertically when switching between Appearance and Behavior.
 	blockH := d.maxBlockHeight()
@@ -338,10 +381,20 @@ func (d *SettingsDialog) renderRail() string {
 }
 
 // renderDetail renders the selected category's settings rows (right pane).
-func (d *SettingsDialog) renderDetail() string {
+// detailW is the (possibly terminal-clamped) column width.
+func (d *SettingsDialog) renderDetail(detailW int) string {
 	var b strings.Builder
 	rows := d.curRows()
 	labelW := labelColWidth(rows)
+	// Narrow-pane clamp: if detailW was clamped below its natural width, shrink the
+	// label column so a minimum value width survives (rather than the long label
+	// eating the row and clipping the value). Over-long labels are then truncated
+	// with … — never wrapped, which would re-inflate the line count past blockH and
+	// truncate the rows below.
+	const minVal = 4
+	if maxLabel := detailW - rowChrome - minVal; maxLabel > 0 && labelW > maxLabel {
+		labelW = maxLabel
+	}
 	for i, r := range rows {
 		if i > 0 {
 			b.WriteString("\n")
@@ -367,7 +420,7 @@ func (d *SettingsDialog) renderDetail() string {
 		if r.value != nil {
 			val = r.value(d.cfg)
 		}
-		line := labelStyle.Render(r.label) + "  " +
+		line := labelStyle.Render(truncLabel(r.label, labelW)) + "  " +
 			arrowStyle.Render("◂") + " " +
 			valueStyle.Render(val) + " " +
 			arrowStyle.Render("▸")
@@ -390,6 +443,35 @@ func (d *SettingsDialog) renderPreviewColumn(w, h int) string {
 }
 
 // --- column layout helpers ---
+
+// truncLabel truncates s to at most w display columns, appending … when it cuts,
+// so a clamped label stays on one line. (Letting lipgloss wrap a too-wide label
+// would re-inflate the rendered line count past the fixed block height and
+// truncate the rows below — the very bug this dialog's sizing exists to avoid.)
+func truncLabel(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	target := w - 1 // leave a column for the ellipsis
+	var b strings.Builder
+	cur := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if cur+rw > target {
+			break
+		}
+		b.WriteRune(r)
+		cur += rw
+	}
+	b.WriteRune('…')
+	return b.String()
+}
 
 // padBlock pads/truncates a multiline block to exactly w columns × h rows,
 // reusing the shared panel-sizing helpers (ensureExactHeight/ensureExactWidth).
@@ -418,7 +500,8 @@ func buildSettingsCategories() []settingsCategory {
 	}
 	toggle := func(get func(*config.Config) bool, set func(*config.Config, bool), live bool) settingRow {
 		return settingRow{
-			value: func(c *config.Config) string { return onOff(get(c)) },
+			value:  func(c *config.Config) string { return onOff(get(c)) },
+			valueW: func() int { return maxStrW([]string{"On", "Off"}) },
 			cycle: func(d *SettingsDialog, _ int) {
 				set(d.cfg, !get(d.cfg))
 				if live {
@@ -442,11 +525,13 @@ func buildSettingsCategories() []settingsCategory {
 					}
 					return PaletteDisplayName(name)
 				},
-				cycle: cycleTheme,
+				valueW: themeValueW,
+				cycle:  cycleTheme,
 			},
 			{
-				label: "Status style",
-				value: func(c *config.Config) string { return c.GetStatusIndicator() },
+				label:  "Status style",
+				value:  func(c *config.Config) string { return c.GetStatusIndicator() },
+				valueW: func() int { return maxStrW(statusStyleSet) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.StatusIndicator = cycleString(d.cfg.GetStatusIndicator(), statusStyleSet, dir)
 					ApplyDisplayConfig(d.cfg)
@@ -474,16 +559,18 @@ func buildSettingsCategories() []settingsCategory {
 				func(c *config.Config, v bool) { c.ShowHeaderCounts = &v }, true)),
 			{label: "LAYOUT", subheader: true},
 			{
-				label: "Chevron",
-				value: func(c *config.Config) string { return c.GetChevronStyle() },
+				label:  "Chevron",
+				value:  func(c *config.Config) string { return c.GetChevronStyle() },
+				valueW: func() int { return maxStrW(chevronStyleSet) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.ChevronStyle = cycleString(d.cfg.GetChevronStyle(), chevronStyleSet, dir)
 					ApplyDisplayConfig(d.cfg)
 				},
 			},
 			{
-				label: "Density",
-				value: func(c *config.Config) string { return c.GetSidebarDensity() },
+				label:  "Density",
+				value:  func(c *config.Config) string { return c.GetSidebarDensity() },
+				valueW: func() int { return maxStrW(densitySet) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.SidebarDensity = cycleString(d.cfg.GetSidebarDensity(), densitySet, dir)
 					ApplyDisplayConfig(d.cfg)
@@ -496,15 +583,17 @@ func buildSettingsCategories() []settingsCategory {
 		name: "Behavior",
 		rows: []settingRow{
 			{
-				label: "Editor",
-				value: func(c *config.Config) string { return c.GetEditor() },
+				label:  "Editor",
+				value:  func(c *config.Config) string { return c.GetEditor() },
+				valueW: func() int { return maxStrW(editorPresets) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.Editor = cycleString(d.cfg.GetEditor(), editorPresets, dir)
 				},
 			},
 			{
-				label: "Tick (sec)",
-				value: func(c *config.Config) string { return fmt.Sprintf("%d", c.TickIntervalSec) },
+				label:  "Tick (sec)",
+				value:  func(c *config.Config) string { return fmt.Sprintf("%d", c.TickIntervalSec) },
+				valueW: func() int { return maxIntStrW(tickPresets) },
 				cycle: func(d *SettingsDialog, dir int) {
 					cur := d.cfg.TickIntervalSec
 					if cur <= 0 {
@@ -530,8 +619,9 @@ func buildSettingsCategories() []settingsCategory {
 				(*config.Config).IsConfirmBeforeRestartEnabled,
 				func(c *config.Config, v bool) { c.ConfirmBeforeRestart = &v }, false)),
 			{
-				label: "Drawer height (rows)",
-				value: func(c *config.Config) string { return fmt.Sprintf("%d", c.GetDrawerHeight()) },
+				label:  "Drawer height (rows)",
+				value:  func(c *config.Config) string { return fmt.Sprintf("%d", c.GetDrawerHeight()) },
+				valueW: func() int { return maxIntStrW(drawerHeightPresets) },
 				cycle: func(d *SettingsDialog, dir int) {
 					idx := indexOfInt(drawerHeightPresets, d.cfg.GetDrawerHeight())
 					if idx < 0 {
@@ -544,8 +634,9 @@ func buildSettingsCategories() []settingsCategory {
 				(*config.Config).GetOriginDeleteRemovesWorktrees,
 				func(c *config.Config, v bool) { c.OriginDeleteRemovesWorktrees = &v }, false)),
 			{
-				label: "Enter mode",
-				value: func(c *config.Config) string { return c.GetEnterMode() },
+				label:  "Enter mode",
+				value:  func(c *config.Config) string { return c.GetEnterMode() },
+				valueW: func() int { return maxStrW(enterModeSet) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.EnterMode = cycleString(d.cfg.GetEnterMode(), enterModeSet, dir)
 				},
@@ -565,6 +656,7 @@ func buildSettingsCategories() []settingsCategory {
 						return "Claude"
 					}
 				},
+				valueW: func() int { return maxStrW([]string{"Claude", "Codex", "OpenCode"}) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.DefaultAgent = cycleString(d.cfg.GetDefaultAgent(), defaultAgentSet, dir)
 				},
