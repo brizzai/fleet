@@ -109,8 +109,6 @@ func (d *ConsentDialog) View() string {
 	neverStyle := lipgloss.NewStyle().Foreground(ColorGreen)
 	b.WriteString(checkStyle.Render("✓ "))
 	b.WriteString(neverStyle.Render("Never sent: file paths, prompts, code, repo/branch names."))
-	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("Want none at all? Turn telemetry Off in Settings (S key)."))
 	b.WriteString("\n\n")
 
 	// Buttons. Selected Yes gets a green background (positive / inviting);
