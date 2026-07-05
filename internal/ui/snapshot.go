@@ -15,6 +15,7 @@ import (
 
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
+	"github.com/brizzai/fleet/internal/proc"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -75,6 +76,17 @@ func captureStatusSnapshot(s *session.Session, sessionID string, hb workerHeartb
 		}
 	}
 
+	// 6b. Freeze Claude Code's own per-process status file
+	// (~/.claude/sessions/<pid>.json), located by sessionId. It carries Claude's
+	// first-party busy/idle/shell flag — a Running-vs-Idle corroborator the hook,
+	// pane, and transcript all lack. Best-effort; keyed by pid, so we prefer a
+	// live process over a stale dead one.
+	var claudeStatus map[string]any
+	if css := findClaudeSessionStatus(snap.ClaudeSessionID); css != nil {
+		claudeStatus = buildClaudeStatusBlock(css, now)
+		_ = os.WriteFile(filepath.Join(snapshotDir, "claude_session_status.json"), css.raw, 0644)
+	}
+
 	// 7. Write files.
 	_ = os.WriteFile(filepath.Join(snapshotDir, "pane_raw.txt"), []byte(rawPane), 0644)
 	_ = os.WriteFile(filepath.Join(snapshotDir, "pane_clean.txt"), []byte(session.StripANSI(rawPane)), 0644)
@@ -83,7 +95,7 @@ func captureStatusSnapshot(s *session.Session, sessionID string, hb workerHeartb
 	// when its heartbeat (worker block in snapshot.json) shows it stalled.
 	writeGoroutineDump(filepath.Join(snapshotDir, "goroutines.txt"))
 
-	meta := buildSnapshotJSON(snap, hookFileContent, hookFileInfo, now, claudeLog, hb)
+	meta := buildSnapshotJSON(snap, hookFileContent, hookFileInfo, now, claudeLog, claudeStatus, hb)
 	jsonData, _ := json.MarshalIndent(meta, "", "  ")
 	_ = os.WriteFile(filepath.Join(snapshotDir, "snapshot.json"), jsonData, 0644)
 
@@ -92,7 +104,7 @@ func captureStatusSnapshot(s *session.Session, sessionID string, hb workerHeartb
 	return statusSnapshotMsg{path: snapshotDir}
 }
 
-func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFileInfo os.FileInfo, now time.Time, claudeLog map[string]any, hb workerHeartbeat) map[string]any {
+func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFileInfo os.FileInfo, now time.Time, claudeLog, claudeStatus map[string]any, hb workerHeartbeat) map[string]any {
 	m := map[string]any{
 		"captured_at": now.Format(time.RFC3339Nano),
 		"session": map[string]any{
@@ -107,6 +119,9 @@ func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFile
 	}
 	if claudeLog != nil {
 		m["claude_log"] = claudeLog
+	}
+	if claudeStatus != nil {
+		m["claude_status"] = claudeStatus
 	}
 
 	// Worker liveness. `stalled: true` (or a large last_cycle_ago) means the
@@ -299,6 +314,90 @@ func buildClaudeLogBlock(st *claudeLogStat, hookUpdatedAt, now time.Time) map[st
 			m["seconds_past_hook"] = math.Round(delta*10) / 10
 			m["advanced_past_hook"] = delta > 2
 		}
+	}
+	return m
+}
+
+// claudeSessionStatus mirrors the fields we read from Claude Code's own
+// per-process status file (~/.claude/sessions/<pid>.json). status is Claude's
+// first-party flag (busy / idle / shell); statusUpdatedAt is epoch-ms. raw holds
+// the untouched file bytes so the snapshot can freeze a verbatim copy.
+type claudeSessionStatus struct {
+	raw             []byte
+	alive           bool   // liveness verdict, computed once during the match
+	PID             int    `json:"pid"`
+	SessionID       string `json:"sessionId"`
+	Status          string `json:"status"`
+	StatusUpdatedAt int64  `json:"statusUpdatedAt"`
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+}
+
+// findClaudeSessionStatus scans ~/.claude/sessions/*.json for the file(s) whose
+// sessionId matches claudeSessionID and returns the best match. The dir is keyed
+// by pid, so a session can have a stale dead-process file alongside the live one:
+// a live process wins over a dead one, and newest statusUpdatedAt breaks ties.
+// Returns nil if nothing matches.
+func findClaudeSessionStatus(claudeSessionID string) *claudeSessionStatus {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return findClaudeSessionStatusIn(filepath.Join(home, ".claude", "sessions"), claudeSessionID)
+}
+
+// findClaudeSessionStatusIn is findClaudeSessionStatus with the sessions dir
+// injected, so the match/liveness/tiebreak logic is testable off a temp dir.
+func findClaudeSessionStatusIn(dir, claudeSessionID string) *claudeSessionStatus {
+	if claudeSessionID == "" {
+		return nil
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	var best *claudeSessionStatus
+	var bestAlive bool
+	for _, p := range matches {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var css claudeSessionStatus
+		if json.Unmarshal(raw, &css) != nil || css.SessionID != claudeSessionID {
+			continue
+		}
+		css.raw = raw
+		css.alive = proc.Alive(css.PID)
+		if best == nil || (css.alive && !bestAlive) ||
+			(css.alive == bestAlive && css.StatusUpdatedAt > best.StatusUpdatedAt) {
+			pick := css
+			best, bestAlive = &pick, css.alive
+		}
+	}
+	return best
+}
+
+// buildClaudeStatusBlock renders the Claude session status file signal for
+// snapshot.json. status is Claude Code's own busy/idle/shell flag; pid_alive
+// distinguishes a live flag from a dead process's last-known value. Trust the
+// value while alive, not status_age — the flag is event-driven, not a heartbeat,
+// and it stays "idle" through /compact (so it can't explain a compaction stall).
+// Caveat: pid_alive is PID-only — a recycled PID (the file's process exited and
+// the OS reassigned its PID) can report a dead session's last status as live.
+func buildClaudeStatusBlock(css *claudeSessionStatus, now time.Time) map[string]any {
+	if css == nil {
+		return nil
+	}
+	m := map[string]any{
+		"file":      "claude_session_status.json",
+		"pid":       css.PID,
+		"pid_alive": css.alive,
+		"status":    css.Status,
+		"name":      css.Name,
+		"version":   css.Version,
+	}
+	if css.StatusUpdatedAt > 0 {
+		t := time.UnixMilli(css.StatusUpdatedAt)
+		m["status_updated_at"] = t.UTC().Format(time.RFC3339Nano)
+		m["status_age"] = fmtSnapshotAge(t, now)
 	}
 	return m
 }

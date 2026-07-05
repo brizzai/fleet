@@ -21,12 +21,14 @@ Status flows through a pipeline. Your job is to trace the pipeline and find wher
 ```text
 Claude Code → hook event → hook-handler binary → status file → fsnotify → UpdateStatus() → TUI
                                                                               ↓
-                                                  pane capture + conversation-log (JSONL) — fallback/supplement
+                             pane capture + conversation-log (JSONL) + Claude session status file — fallback/supplement
 ```
 
 At each stage, ask: **what does this stage think the status is, and is it correct?**
 
 The **conversation log** (`~/.claude/projects/*/<claude_session_id>.jsonl`) is a fourth, often-decisive signal: it is appended on real conversation events (tool calls, results, thinking), so unlike the pane it is immune to repaint/spinner/queued-message quirks. Its key use: **if the log's last entry is newer than a `waiting` hook's timestamp, the user already acted and the agent resumed** — the session is running even though the hook still says waiting. (It can only *confirm running*, not waiting: a genuine unanswered prompt and a long-running tool both leave the log static — see Step 2.)
+
+The **Claude session status file** (`~/.claude/sessions/<pid>.json`, one per live `claude` process) is a fifth signal — the only one carrying Claude Code's *own* `status` flag (`busy` / `idle` / `shell`) rather than something fleet infers. It's keyed by pid but records `sessionId`, so you match it to a fleet session by the hook's `session_id`. Best use: a clean **Running-vs-Idle corroborator** when the pane is ambiguous. Three sharp limits: (1) **trust the value, not `statusUpdatedAt`** — it's event-driven, not a heartbeat, so a busy turn can carry a minutes-old timestamp; gate on whether the pid is alive instead. (2) **No `waiting` value** — a permission prompt reads `idle`/`busy` here, so it can't source Waiting. (3) **Blind to `/compact`** — compaction isn't counted as `busy`, so it stays `idle` right through a multi-minute compaction (see Step 2's compaction note). fleet does not consult this file for status detection yet, but the `D` snapshot **does** freeze it (`claude_session_status.json` + a `claude_status` block in `snapshot.json`).
 
 ## Step 0: Check for snapshots (only if user mentions they took one)
 
@@ -44,6 +46,7 @@ cat ~/.config/fleet/snapshots/<dir>/pane_clean.txt   # Human-readable pane conte
 cat ~/.config/fleet/snapshots/<dir>/debug_tail.txt   # Last 100 debug log lines for this session
 # pane_raw.txt          = ANSI-preserved capture, ready to copy to testdata/ for golden tests
 # claude_session.jsonl  = frozen copy of the Claude conversation transcript at capture time
+# claude_session_status.json = frozen copy of Claude Code's own status file (busy/idle/shell flag)
 ```
 
 Two fields in `snapshot.json` resolve most cases immediately:
@@ -51,6 +54,8 @@ Two fields in `snapshot.json` resolve most cases immediately:
 - `claude_log.advanced_past_hook` — **`true` means the conversation advanced >2s past the `waiting` hook, so the agent already resumed and a lingering `waiting` is stale** (the classic stuck-at-waiting bug). Also surfaces `last_entry_age`, `seconds_past_hook`, and `recent_gaps_s` (append cadence). `claude_log` is absent for Codex sessions (no Claude transcript).
 
 If a snapshot is available, you can often skip directly to Step 3 (Find the divergence). The frozen `claude_session.jsonl` lets you replay the exact transcript offline without racing the live file.
+
+The snapshot also carries the **Claude session status file** (Step 2): `snapshot.json` → `claude_status` block (`status`, `pid_alive`, `status_age`, `name`, `version`) with the full file frozen as `claude_session_status.json`. `pid_alive: false` means the `status` is a dead process's last-known value, not live.
 
 ## Step 1: Identify the session
 
@@ -73,7 +78,7 @@ sqlite3 ~/.config/fleet/state.db "SELECT tmux_session_name, title FROM sessions 
 
 ## Step 2: What does each layer say?
 
-Check all four layers and compare:
+Check all five layers and compare:
 
 **Hook file** (what hooks last reported):
 ```bash
@@ -113,6 +118,21 @@ Read it as:
 - **last entry == hook ts and file static** → genuinely still waiting (the prompt is unanswered).
 - Timestamps are **UTC (`Z`)**; the hook `ts` and `debug.log` are **local** — convert before comparing.
 - Caveats: a long-running tool or extended-thinking block leaves the log static for up to ~50s, so absence of growth ≠ idle. Sub-agents write `isSidechain:true` entries; filter them when asking "did the *lead* advance?". There is **no explicit status field** in the JSONL — infer from progress, not a flag.
+
+**Claude session status file** (Claude Code's *own* status flag — `~/.claude/sessions/<pid>.json`, one per live `claude` process; from a snapshot, read the `claude_status` block / `claude_session_status.json` instead):
+```bash
+CS=$(jq -r .session_id ~/.config/fleet/hooks/<instance_id>.json)
+grep -l "\"$CS\"" ~/.claude/sessions/*.json 2>/dev/null | while read -r f; do
+  jq '{pid, status, statusUpdatedAt, name, cwd, version}' "$f"
+  P=$(jq -r .pid "$f")
+  ps -p "$P" >/dev/null 2>&1 && echo "  → pid $P ALIVE (status is live)" || echo "  → pid $P DEAD (status is last-known, likely stale)"
+done
+```
+Read it as:
+- `status` is Claude Code's own flag: **`busy`** (processing a turn) → running, **`idle`** (done / at prompt) → finished/idle, **`shell`** (running a shell command) → running. Keyed by pid but carries `sessionId`, so match on the hook's `session_id`.
+- **Trust the value, not the timestamp.** `statusUpdatedAt` is event-driven, not a heartbeat — a genuinely-busy turn can show a `statusUpdatedAt` minutes old. Don't read "stale ⇒ wrong"; gate on **liveness** (is the pid alive?) instead. A dead pid's file is just its last-known status.
+- **No `waiting` value exists.** A permission prompt still reads `idle`/`busy` here, so this **corroborates Running vs Idle but cannot source Waiting** — use hooks/pane for waiting.
+- **Blind to `/compact`.** Compaction is not counted as `busy`, so the file stays `idle` through a multi-minute compaction — the same blind spot the hook, pane, and transcript all share. If the symptom is "idle during compaction," this file won't rescue it; the fix is detection-side (a `PreCompact` hook → running).
 
 ## Step 3: Find the divergence
 

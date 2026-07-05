@@ -367,6 +367,7 @@ func buildHooksMapWithMarker() map[string]json.RawMessage {
 	hooks := map[string]json.RawMessage{
 		"UserPromptSubmit":  json.RawMessage(fleetHookJSON),
 		"Stop":              json.RawMessage(fleetHookJSON),
+		"PreCompact":        json.RawMessage(fleetHookJSON),
 		"PermissionRequest": json.RawMessage(fleetHookJSON),
 		"Notification":      json.RawMessage(notificationHook),
 		"SessionStart":      json.RawMessage(fleetHookJSON),

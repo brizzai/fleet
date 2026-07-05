@@ -1,0 +1,37 @@
+
+  [1mWhere the stream stands after this marathon:[0m 16 terminal verdicts (15 evidence-kills + 1 preference-shelve), zero phantoms survived, two durable trading rules produced
+  (far-touch is optimal on momentum arms; don't trust minute-bucket grids without floor semantics), ~50GB of reusable corpora banked, and one live candidate in flight. The
+  remaining open items are exactly three: the G11 verdict, the bundled G1/Polygon decision (rides on your dense-feed call), and — standing quietly in the background — the
+  broker-latency lever, which is still the largest known-positive number on the board.
+
+[38;5;239m[48;5;237m❯ [38;5;231mis it runing? we waiting on something?[39m
+  [38;5;231malso tell me when to compact, when we get the chance[39m
+
+[49m  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m⏺[39m [1mYes, it's running — we're only waiting on the StockTwits back-paging[0m (politeness-rate-limited, not compute-bound):
+
+  - [1mLive processes:[0m 4 pullers (NVDA, TSLA, AMD, QQQ), the supervisor, and the autorun watcher — all detached and caffeinated.
+  - [1mProgress toward Feb 12:[0m AAPL ✅ done (35k msgs) · AMD → May 4 · TSLA → May 11 · NVDA → May 23 · QQQ just started · SPY queued (starts when a slot frees). The slow tails are
+  NVDA/TSLA/SPY (high message volume), so figure [1m~3–4 more hours[0m until all six corpus names are done — at which point the probe [1mfires itself[0m and writes the verdict to
+  [38;5;153mvar/g11_probe.out[39m (status breadcrumbs in [38;5;153mvar/g11_probe.status[39m). Nothing needs me or you awake for it.
+
+  [1mOn compacting: now is the ideal moment.[0m Everything is externalized — LOG.md carries the full STATUS + resume recipes, all work is committed, the pulls/probe are
+  session-independent, and results land in files. After compacting (or even in a totally fresh session), the pickup is just: read [38;5;153mvar/g11_probe.status[39m, then [38;5;153mvar/g11_probe.out[39m,
+  judge against the gates declared in the LOG. There's no in-context state worth preserving that isn't already on disk.
+
+[38;5;239m[48;5;237m❯ [38;5;231m/compact[39m
+[49m
+[38;5;147m·[39m [38;5;147mCompacting conversation… [38;5;246m(2m 27s)[39m
+  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰[38;5;246m▱▱▱▱▱▱▱▱[39m [38;5;246m81%[39m
+
+  [38;5;239m[48;5;237m❯ [38;5;231mbtw what do u think about some "news effect trade"[39m                                                                                                                        [49m
+  [48;5;237m  [38;5;231mor "weather effect trade"?[39m                                                                                                                                                [49m
+  [48;5;237m  [38;5;231masses, is that something worth pursing?[39m                                                                                                                                   [49m
+  [48;5;237m  [38;5;231mgive me ur based recommendation[39m                                                                                                                                           [49m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [2m[39mPress up to edit queued messages[0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [36m󰧑 Fable 5[38;5;246m [90m│[38;5;246m [33m██████░░░░[38;5;246m [90m│[38;5;246m [33m60%[38;5;246m [90m│[38;5;246m [35m󰍛 600.0k/1000k[38;5;246m [90m│[38;5;246m [33m fable-fresh-ideas[38;5;246m [90m│[38;5;246m [1m[37m  stonks-fable-fresh-ideas[0m                                                                         [38;5;114m]8;id=bkwziw;https://claude.ai/code/session_017ZNQAJBbHhSoD8mwCzHAPi\/rc[39m]8;;\
+  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · ← for agents[39m

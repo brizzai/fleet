@@ -116,9 +116,10 @@ Location: `~/.config/fleet/snapshots/<timestamp>_<title>/`
 |------|----------|
 | `pane_raw.txt` | Raw ANSI pane capture (copy to `testdata/` for golden tests) |
 | `pane_clean.txt` | ANSI-stripped for human reading |
-| `snapshot.json` | Session state, hook state, content tracking, pane detection, `mismatch` flag, `claude_log` block |
+| `snapshot.json` | Session state, hook state, content tracking, pane detection, `mismatch` flag, `claude_log` + `claude_status` blocks |
 | `debug_tail.txt` | Last 100 debug.log lines filtered for this session |
 | `claude_session.jsonl` | Frozen full copy of the Claude conversation transcript at capture time (absent for Codex sessions) |
+| `claude_session_status.json` | Frozen copy of Claude Code's own per-process status file (`busy`/`idle`/`shell`), matched by `sessionId` (absent for Codex, or if no live/stale file matches) |
 
 The `snapshot.json` `detection.mismatch` field is `true` when pane detection disagrees with the TUI status — the key signal for status bugs.
 
@@ -138,7 +139,21 @@ The `snapshot.json` `claude_log` block derives activity-recency from the transcr
 
 `advanced_past_hook` is the decisive signal for the stuck-at-waiting class: a `waiting` hook never gets a resume event (no hook fires on permission-grant or AskUserQuestion-answer), so the transcript advancing past it proves the agent is running even when pane detection is blind.
 
-Implementation: `internal/ui/snapshot.go` (capture logic), `internal/session/session.go` `SnapshotData()` (state export).
+The `snapshot.json` `claude_status` block carries Claude Code's own status flag, read from `~/.claude/sessions/<pid>.json` (matched by `sessionId`, live process preferred over a stale dead one):
+
+```json
+"claude_status": {
+  "file": "claude_session_status.json",
+  "pid": 18581, "pid_alive": true,   // false ⇒ status is a dead process's last-known value
+  "status": "busy",                  // Claude's own flag: busy | idle | shell (no "waiting" value)
+  "status_updated_at": "...Z", "status_age": "1m9s",  // event-driven, NOT a heartbeat — trust the value, not the age
+  "name": "…", "version": "2.1.201"
+}
+```
+
+Use it as a Running-vs-Idle corroborator only: there is no `waiting` value, and it stays `idle` through `/compact`. Trust `status` while `pid_alive` is true regardless of `status_age` (a long busy turn legitimately carries a minutes-old stamp). One caveat on `pid_alive`: it is **PID-only**, so a recycled PID (the file's process exited and the OS reassigned its number) can report a dead session's last status as live — sanity-check against the pane/transcript if a `busy` reading looks impossible.
+
+Implementation: `internal/ui/snapshot.go` (capture logic + `findClaudeSessionStatus`), `internal/session/session.go` `SnapshotData()` (state export).
 
 ## Hook Status Files
 

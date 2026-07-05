@@ -170,14 +170,21 @@ func Kill(pids []int, grace time.Duration) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 	for _, pid := range pids {
-		if alive(pid) {
+		if Alive(pid) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
 	return nil
 }
 
-// alive probes whether a pid exists using signal 0 (sends no signal).
-func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+// Alive probes whether a pid exists using signal 0 (sends no signal). A
+// non-positive pid is treated as dead: signal 0 to pid 0/-1 targets a process
+// group, which is never what a liveness check wants.
+func Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
 
-func anyAlive(pids []int) bool { return slices.ContainsFunc(pids, alive) }
+func anyAlive(pids []int) bool { return slices.ContainsFunc(pids, Alive) }
