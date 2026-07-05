@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-07-05
+
+### Improved
+
+- Quitting now shows a "Shutting down…" indicator and exits faster, instead of appearing frozen for a couple of seconds.
+
+### Changed
+
+- Telemetry is now three-way: Full (usage + git name/email), Minimal (an anonymous daily-active ping only, no identity), or Off. On first launch, accepting sends Full and declining sends Minimal; switch to Off any time in Settings.
+
+### Fixed
+
+- Sessions now show as running (not idle) while Claude compacts the conversation, via `/compact` or auto-compaction.
+- Settings › Behavior no longer wraps long labels and cuts off the last rows (Telemetry, Default agent); each setting fits on one line.
+
 ## [2.13.0] - 2026-07-02
 
 ### Added
@@ -316,7 +331,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.13.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.14.0...HEAD
+[2.14.0]: https://github.com/brizzai/fleet/releases/tag/v2.14.0
 [2.13.0]: https://github.com/brizzai/fleet/releases/tag/v2.13.0
 [2.12.1]: https://github.com/brizzai/fleet/releases/tag/v2.12.1
 [2.12.0]: https://github.com/brizzai/fleet/releases/tag/v2.12.0
