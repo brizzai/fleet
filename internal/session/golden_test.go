@@ -36,6 +36,7 @@ var goldenTests = []struct {
 	{"pane_waiting_askuserquestion_checkbox_focus.txt", StatusWaiting, "AskUserQuestion dialog with focus on checkbox question header (no `❯ N.` cursor in numbered options)"},
 	{"pane_waiting_exitplanmode_approve.txt", StatusWaiting, "ExitPlanMode plan-approval menu — numbered options with `shift+tab to approve with this feedback` footer (no `Esc to cancel`)"},
 	{"finished_idle_background_agent.txt", StatusFinished, "idle prompt while a background agent runs (`✻ Waiting for 1 background agent to finish` in scrollback + active sub-agent footer)"},
+	{"pane_finished_compacting.txt", StatusFinished, "mid-`/compact` pane — reads finished from the prompt/queued-message `❯`s (pane detection can't see compaction; the PreCompact hook is what keeps this session running)"},
 }
 
 func TestGoldenDetection(t *testing.T) {

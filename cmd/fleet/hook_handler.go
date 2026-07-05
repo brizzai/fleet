@@ -33,6 +33,12 @@ func mapEventToStatus(event string) string {
 		return "running"
 	case "Stop":
 		return "finished"
+	case "PreCompact":
+		// /compact (and auto-compaction) is a multi-minute busy phase that fires no
+		// other hook. Without this, the session reads finished/idle for the whole
+		// compaction (SessionStart→finished on completion closes the bracket, and
+		// any queued prompt then flips it back to running via UserPromptSubmit).
+		return "running"
 	case "PermissionRequest":
 		return "waiting"
 	case "Notification":

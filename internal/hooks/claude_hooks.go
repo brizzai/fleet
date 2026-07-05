@@ -49,6 +49,7 @@ var hookEventConfigs = []struct {
 }{
 	{Event: "UserPromptSubmit", Async: true},
 	{Event: "Stop", Async: true},
+	{Event: "PreCompact", Async: true},
 	{Event: "PermissionRequest", Async: true},
 	{Event: "Notification", Matcher: "permission_prompt|elicitation_dialog", Async: true},
 	{Event: "Notification", Matcher: "idle_prompt", Async: true},
