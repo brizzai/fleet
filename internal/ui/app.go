@@ -157,6 +157,9 @@ type (
 	// splashFrameMsg advances the boot-splash spinner. Self-rescheduled
 	// while !booted; not emitted after bootstrapDoneMsg.
 	splashFrameMsg time.Time
+	// shutdownFrameMsg advances the shutdown-overlay spinner. Self-rescheduled
+	// while `quitting`, until the teardown command emits tea.Quit.
+	shutdownFrameMsg time.Time
 	// discoveryMsg carries the launchpad's scan of ~/.claude/projects back to
 	// Update. Fired once, only on an empty fleet.
 	discoveryMsg struct {
@@ -369,6 +372,14 @@ type Home struct {
 	bootstrapRepos    int          // total repos the bootstrap is waiting on (for progress UI)
 	bootstrapResolved atomic.Int32 // goroutines that have finished within the current bootstrap fan-out
 
+	// Shutdown overlay. Once `quitting` is set, View() renders `frozenFrame`
+	// (the last body, captured at quit time) dimmed with a "Shutting down…"
+	// box overlaid, while the blocking teardown runs off the Update loop.
+	// `shutdownFrame` advances the box's spinner.
+	quitting      bool
+	shutdownFrame int
+	frozenFrame   string
+
 	// Rendering diagnostics (accumulated counters for bug reports).
 	renderStats RenderStats
 }
@@ -514,6 +525,24 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if perfwatch.Enabled() {
 		tok := perfwatch.MarkUpdateStart(fmt.Sprintf("%T", msg))
 		defer perfwatch.MarkUpdateEnd(tok)
+	}
+	// While shutting down, the blocking teardown runs off-loop (see beginQuit);
+	// keep the spinner animating and swallow everything else so no key or worker
+	// message mutates state the teardown goroutine is touching concurrently. A
+	// second Ctrl+C is the escape hatch: if teardown wedges (a stuck worktree
+	// remove, a wedged telemetry drain), force an immediate exit rather than
+	// spinning forever with no way out.
+	if h.quitting {
+		switch m := msg.(type) {
+		case shutdownFrameMsg:
+			h.shutdownFrame++
+			return h, h.shutdownTick()
+		case tea.KeyPressMsg:
+			if m.String() == "ctrl+c" {
+				return h, tea.Quit
+			}
+		}
+		return h, nil
 	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1355,6 +1384,15 @@ func (h *Home) View() tea.View {
 	if h.width == 0 {
 		return h.chrome(lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("   fleet"))
 	}
+	// Shutting down: dim the last frame and float a "Shutting down…" box while the
+	// blocking teardown runs off-loop. Same overlay pipeline as the command palette.
+	if h.quitting {
+		base := dimBackdrop(h.frozenFrame)
+		box := renderShutdownBox(h.shutdownFrame)
+		x := (h.width - lipgloss.Width(box)) / 2
+		y := (h.height - lipgloss.Height(box)) / 2
+		return h.chrome(overlayAt(box, base, x, y))
+	}
 	if !h.booted {
 		return h.chrome(RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame))
 	}
@@ -2147,72 +2185,109 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.helpOverlay.Show()
 		return h, nil
 	case "ctrl+c":
-		return h, h.quitSequence("ctrl+c")
+		return h, h.beginQuit("ctrl+c")
 	}
 
 	return h, nil
 }
 
-// quitSequence runs the full shutdown path — stop the worker, close the hook
-// watcher / control client / drawer stream, finalize pending deletes, emit quit
-// analytics — then returns tea.Quit. Shared by Ctrl+C and the command-palette
-// Quit command so neither leaks the drawer reader or orphans pending deletes.
-func (h *Home) quitSequence(source string) tea.Cmd {
-	debuglog.Logger.Info("quit requested", "source", source)
-	h.cancel() // stops background worker
-	if h.hookWatcher != nil {
-		h.hookWatcher.Stop()
-	}
-	if h.controlClient != nil {
-		h.controlClient.Close()
-	}
-	h.teardownShellStream()
-	// Finalize all pending deletes before quitting.
-	h.finalizeAllPendingDeletes()
-
-	uptime := time.Since(h.startTime).Seconds()
-
-	// h.cancel() above only signals the status worker — it can still be
-	// mid-cycle, holding workerMu and mutating h.sessions. Take the lock
-	// for the direct reads; collectSnapshot and anyAttached self-lock.
-	h.workerMu.Lock()
-	runningCount := 0
-	waitingCount := 0
-	for _, s := range h.sessions {
-		switch s.GetStatus() {
-		case session.StatusRunning:
-			runningCount++
-		case session.StatusWaiting:
-			waitingCount++
-		}
-	}
-	sessionCount := len(h.sessions)
-	h.workerMu.Unlock()
-
-	analytics.Track(analytics.EventAppQuit, map[string]interface{}{
-		"uptime_seconds": int(uptime),
-		"session_count":  sessionCount,
+// shutdownTick schedules the next shutdown-overlay spinner advance (~80ms,
+// matching splashTick). Self-rescheduled by Update while `quitting`, until the
+// teardown command emits tea.Quit and the program exits.
+func (h *Home) shutdownTick() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+		return shutdownFrameMsg(t)
 	})
-	analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
-	analytics.EmitSnapshot(h.collectSnapshot())
+}
 
-	if runningCount > 0 || waitingCount > 0 {
-		analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
-			"running_count": runningCount,
-			"waiting_count": waitingCount,
-		})
+// beginQuit starts the shutdown sequence. It flips into the "Shutting down…"
+// overlay (freezing the current frame behind it) and hands the blocking teardown
+// off to performShutdown, so a frame renders and the spinner animates instead of
+// the UI appearing frozen. Shared by Ctrl+C and the command-palette Quit command.
+func (h *Home) beginQuit(source string) tea.Cmd {
+	if h.quitting {
+		return nil // already tearing down; ignore repeat presses
 	}
-
-	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
-		analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
-			"uptime_seconds":         int(uptime),
-			"session_count":          sessionCount,
-			"attached_at_least_once": h.anyAttached(),
-		})
+	debuglog.Logger.Info("quit requested", "source", source)
+	h.quitting = true
+	// Capture the frame to dim behind the overlay, mirroring View()'s guard
+	// order so a quit during boot freezes what the user is actually looking at
+	// (splash) rather than a half-built body — and never runs renderBody with a
+	// negative inner width in the pre-first-WindowSizeMsg (width == 0) window.
+	switch {
+	case h.width == 0:
+		h.frozenFrame = "" // nothing meaningful to freeze yet
+	case !h.booted:
+		h.frozenFrame = RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame)
+	default:
+		h.frozenFrame = h.renderBody()
 	}
+	h.cancel() // stop the worker now so it stops feeding Update
+	return tea.Batch(h.shutdownTick(), h.performShutdown())
+}
 
-	analytics.Shutdown()
-	return tea.Quit
+// performShutdown runs the full teardown off the Update loop — close the hook
+// watcher / control client / drawer stream, finalize pending deletes, emit quit
+// analytics, drain telemetry — then returns tea.Quit. Runs in a command
+// goroutine; the Update loop is guarded (see the h.quitting short-circuit) so
+// nothing else touches the state this mutates concurrently.
+func (h *Home) performShutdown() tea.Cmd {
+	return func() tea.Msg {
+		if h.hookWatcher != nil {
+			h.hookWatcher.Stop()
+		}
+		if h.controlClient != nil {
+			h.controlClient.Close()
+		}
+		h.teardownShellStream()
+		// Finalize all pending deletes before quitting.
+		h.finalizeAllPendingDeletes()
+
+		uptime := time.Since(h.startTime).Seconds()
+
+		// h.cancel() (in beginQuit) only signals the status worker — it can
+		// still be mid-cycle, holding workerMu and mutating h.sessions. Take
+		// the lock for the direct reads; collectSnapshot and anyAttached
+		// self-lock.
+		h.workerMu.Lock()
+		runningCount := 0
+		waitingCount := 0
+		for _, s := range h.sessions {
+			switch s.GetStatus() {
+			case session.StatusRunning:
+				runningCount++
+			case session.StatusWaiting:
+				waitingCount++
+			}
+		}
+		sessionCount := len(h.sessions)
+		h.workerMu.Unlock()
+
+		analytics.Track(analytics.EventAppQuit, map[string]interface{}{
+			"uptime_seconds": int(uptime),
+			"session_count":  sessionCount,
+		})
+		analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
+		analytics.EmitSnapshot(h.collectSnapshot())
+
+		if runningCount > 0 || waitingCount > 0 {
+			analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
+				"running_count": runningCount,
+				"waiting_count": waitingCount,
+			})
+		}
+
+		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstQuit) {
+			analytics.Track(analytics.EventOnboardingFirstQuit, map[string]interface{}{
+				"uptime_seconds":         int(uptime),
+				"session_count":          sessionCount,
+				"attached_at_least_once": h.anyAttached(),
+			})
+		}
+
+		analytics.Shutdown()
+		return tea.Quit()
+	}
 }
 
 // --- Session operations ---
@@ -5759,7 +5834,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, nil
 	case "quit":
-		return h, h.quitSequence("command-palette")
+		return h, h.beginQuit("command-palette")
 	}
 	return h, nil
 }
