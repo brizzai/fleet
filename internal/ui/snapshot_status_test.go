@@ -84,6 +84,7 @@ func TestBuildClaudeStatusBlock(t *testing.T) {
 	now := time.Now()
 	updated := now.Add(-90 * time.Second)
 	css := &claudeSessionStatus{
+		alive:           true,
 		PID:             os.Getpid(),
 		Status:          "busy",
 		StatusUpdatedAt: updated.UnixMilli(),
@@ -96,7 +97,7 @@ func TestBuildClaudeStatusBlock(t *testing.T) {
 		t.Errorf("status = %v, want busy", m["status"])
 	}
 	if m["pid_alive"] != true {
-		t.Errorf("pid_alive = %v, want true (the test process is alive)", m["pid_alive"])
+		t.Errorf("pid_alive = %v, want true (verdict threaded from the match)", m["pid_alive"])
 	}
 	if m["file"] != "claude_session_status.json" {
 		t.Errorf("file = %v", m["file"])

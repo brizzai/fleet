@@ -151,7 +151,7 @@ The `snapshot.json` `claude_status` block carries Claude Code's own status flag,
 }
 ```
 
-Use it as a Running-vs-Idle corroborator only: there is no `waiting` value, and it stays `idle` through `/compact`. Trust `status` while `pid_alive` is true regardless of `status_age` (a long busy turn legitimately carries a minutes-old stamp).
+Use it as a Running-vs-Idle corroborator only: there is no `waiting` value, and it stays `idle` through `/compact`. Trust `status` while `pid_alive` is true regardless of `status_age` (a long busy turn legitimately carries a minutes-old stamp). One caveat on `pid_alive`: it is **PID-only**, so a recycled PID (the file's process exited and the OS reassigned its number) can report a dead session's last status as live — sanity-check against the pane/transcript if a `busy` reading looks impossible.
 
 Implementation: `internal/ui/snapshot.go` (capture logic + `findClaudeSessionStatus`), `internal/session/session.go` `SnapshotData()` (state export).
 

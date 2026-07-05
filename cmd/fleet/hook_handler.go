@@ -36,8 +36,9 @@ func mapEventToStatus(event string) string {
 	case "PreCompact":
 		// /compact (and auto-compaction) is a multi-minute busy phase that fires no
 		// other hook. Without this, the session reads finished/idle for the whole
-		// compaction (SessionStart→finished on completion closes the bracket, and
-		// any queued prompt then flips it back to running via UserPromptSubmit).
+		// compaction. The closing SessionStart(source="compact") is skipped in
+		// handleHookHandler (not force-finished), so pane + stability detection —
+		// or a queued prompt's UserPromptSubmit — settle the end of compaction.
 		return "running"
 	case "PermissionRequest":
 		return "waiting"
@@ -64,6 +65,16 @@ func mapEventToStatus(event string) string {
 	default:
 		return ""
 	}
+}
+
+// isCompactSessionStart reports the SessionStart that Claude Code fires when a
+// compaction completes. Its status must NOT be forced to "finished": on
+// auto-compaction the turn is still running, so finishing here would flash a
+// spurious "finished" mid-turn. Skipping it lets the prior "running" (from the
+// PreCompact hook) stand; pane + stability detection settle a manual /compact
+// that ends at an idle prompt.
+func isCompactSessionStart(event, source string) bool {
+	return event == "SessionStart" && source == "compact"
 }
 
 // handleHookHandler processes a Claude Code hook event.
@@ -98,6 +109,14 @@ func handleHookHandler() {
 			"claudeSession", payload.SessionID,
 			"source", payload.Source,
 		)
+		return
+	}
+
+	// A compaction's closing SessionStart must not force "finished" (see
+	// isCompactSessionStart): keep the prior status file so PreCompact's "running"
+	// stands and detection settles the end.
+	if isCompactSessionStart(payload.HookEventName, payload.Source) {
+		log.Debug("hook-handler: skipping compact SessionStart", "instance", instanceID)
 		return
 	}
 

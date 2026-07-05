@@ -11,11 +11,11 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
+	"github.com/brizzai/fleet/internal/proc"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -324,6 +324,7 @@ func buildClaudeLogBlock(st *claudeLogStat, hookUpdatedAt, now time.Time) map[st
 // the untouched file bytes so the snapshot can freeze a verbatim copy.
 type claudeSessionStatus struct {
 	raw             []byte
+	alive           bool   // liveness verdict, computed once during the match
 	PID             int    `json:"pid"`
 	SessionID       string `json:"sessionId"`
 	Status          string `json:"status"`
@@ -364,11 +365,11 @@ func findClaudeSessionStatusIn(dir, claudeSessionID string) *claudeSessionStatus
 			continue
 		}
 		css.raw = raw
-		alive := pidAlive(css.PID)
-		if best == nil || (alive && !bestAlive) ||
-			(alive == bestAlive && css.StatusUpdatedAt > best.StatusUpdatedAt) {
+		css.alive = proc.Alive(css.PID)
+		if best == nil || (css.alive && !bestAlive) ||
+			(css.alive == bestAlive && css.StatusUpdatedAt > best.StatusUpdatedAt) {
 			pick := css
-			best, bestAlive = &pick, alive
+			best, bestAlive = &pick, css.alive
 		}
 	}
 	return best
@@ -379,6 +380,8 @@ func findClaudeSessionStatusIn(dir, claudeSessionID string) *claudeSessionStatus
 // distinguishes a live flag from a dead process's last-known value. Trust the
 // value while alive, not status_age — the flag is event-driven, not a heartbeat,
 // and it stays "idle" through /compact (so it can't explain a compaction stall).
+// Caveat: pid_alive is PID-only — a recycled PID (the file's process exited and
+// the OS reassigned its PID) can report a dead session's last status as live.
 func buildClaudeStatusBlock(css *claudeSessionStatus, now time.Time) map[string]any {
 	if css == nil {
 		return nil
@@ -386,7 +389,7 @@ func buildClaudeStatusBlock(css *claudeSessionStatus, now time.Time) map[string]
 	m := map[string]any{
 		"file":      "claude_session_status.json",
 		"pid":       css.PID,
-		"pid_alive": pidAlive(css.PID),
+		"pid_alive": css.alive,
 		"status":    css.Status,
 		"name":      css.Name,
 		"version":   css.Version,
@@ -397,16 +400,6 @@ func buildClaudeStatusBlock(css *claudeSessionStatus, now time.Time) map[string]
 		m["status_age"] = fmtSnapshotAge(t, now)
 	}
 	return m
-}
-
-// pidAlive reports whether a process with pid currently exists. Mirrors
-// internal/proc's liveness probe: signal 0 checks existence without delivering a
-// signal. A dead pid means a status file is only a last-known value.
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	return syscall.Kill(pid, 0) == nil
 }
 
 // copyFileStreaming copies src to dst without loading the whole file into memory

@@ -27,3 +27,23 @@ func TestMapEventToStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestIsCompactSessionStart(t *testing.T) {
+	cases := []struct {
+		event, source string
+		want          bool
+	}{
+		{"SessionStart", "compact", true},  // the closing bracket we must skip
+		{"SessionStart", "startup", false}, // normal boot → finished
+		{"SessionStart", "resume", false},
+		{"SessionStart", "clear", false}, // /clear → fresh idle → finished
+		{"SessionStart", "", false},
+		{"Stop", "compact", false},       // only SessionStart is special-cased
+		{"PreCompact", "compact", false}, // PreCompact still maps to running
+	}
+	for _, c := range cases {
+		if got := isCompactSessionStart(c.event, c.source); got != c.want {
+			t.Errorf("isCompactSessionStart(%q, %q) = %v, want %v", c.event, c.source, got, c.want)
+		}
+	}
+}
