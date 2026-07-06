@@ -233,7 +233,8 @@ func ApplyPalette(p Palette) {
 // When accent is true, the border is drawn in the accent color (used for the
 // focused panel in dual mode); otherwise it uses the muted border color.
 // Use RenderBorderedPanelTopRight to embed a right-aligned status pill into
-// the top border, or RenderBorderedPanelFooter for the bottom-border variant.
+// the top border, or RenderBorderedPanelInsets to also embed footer insets in
+// the bottom border.
 func RenderBorderedPanel(content, title string, width, height int, accent bool) string {
 	return renderBorderedPanel(content, title, "", "", "", width, height, accent)
 }
@@ -242,13 +243,6 @@ func RenderBorderedPanel(content, title string, width, height int, accent bool) 
 // right-aligned status pill into the TOP border (after the title).
 func RenderBorderedPanelTopRight(content, title, titleRight string, width, height int, accent bool) string {
 	return renderBorderedPanel(content, title, titleRight, "", "", width, height, accent)
-}
-
-// RenderBorderedPanelFooter is like RenderBorderedPanel but also embeds a
-// right-aligned status pill into the bottom border. Empty footer renders an
-// unbroken bottom border.
-func RenderBorderedPanelFooter(content, title, footerRight string, width, height int, accent bool) string {
-	return renderBorderedPanel(content, title, "", "", footerRight, width, height, accent)
 }
 
 // RenderBorderedPanelInsets embeds all four optional insets: title + titleRight

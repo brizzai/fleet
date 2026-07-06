@@ -154,10 +154,10 @@ func normalizeCmd(s string) string {
 }
 
 // ForegroundCommands maps each given pane-shell pid to the command line of the
-// process it is currently running — the shell's own child process (e.g. a
-// `pane_pid` shell running "npm run dev" has an npm child). Shells sitting at a
-// prompt have no child and are absent from the result. One `ps` call regardless
-// of how many pids are passed. macOS-only.
+// process it is currently running — the leader of its tty's foreground process
+// group (e.g. a `pane_pid` shell running "npm run dev" reports "npm run dev").
+// Background jobs are excluded and a shell sitting at its prompt is absent from
+// the result. One `ps` call regardless of how many pids are passed. macOS-only.
 func ForegroundCommands(shellPIDs []int) map[int]string {
 	if len(shellPIDs) == 0 {
 		return nil
@@ -174,61 +174,74 @@ func ForegroundCommands(shellPIDs []int) map[int]string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	// pid, ppid, then the full argv (command= is last so it may contain spaces).
-	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,command=").Output()
+	// pid, ppid, tpgid (the tty's foreground process group), then the full argv
+	// (command= is last so it may contain spaces).
+	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,tpgid=,command=").Output()
 	if len(out) == 0 || err != nil {
 		return nil
 	}
 	return parseForeground(string(out), want)
 }
 
-// parseForeground is the pure core of ForegroundCommands: it maps each wanted
-// shell pid to its child's command line. When a shell has several children (a
-// pipeline), the lowest child pid wins — the leftmost, first-started command.
+// parseForeground is the pure core of ForegroundCommands. A shell's tpgid is the
+// process group its tty currently gives keyboard input to; the leader of that
+// group (pid == tpgid) is a direct child of the shell and the command it is
+// running. Reading the leader by tpgid means background jobs (a different group)
+// never win, a pipeline resolves to its first stage (the group leader), and an
+// idle shell — whose foreground group is the shell itself, not a child — yields
+// nothing so its previous command persists.
 func parseForeground(psOut string, want map[int]bool) map[int]string {
-	type child struct {
-		pid int
-		cmd string
+	type proc struct {
+		ppid int
+		cmd  string
 	}
-	best := make(map[int]child) // shell pid -> chosen child
+	byPID := make(map[int]proc)
+	fgPgrp := make(map[int]int) // wanted shell pid -> its tty's foreground process group
 	for line := range strings.SplitSeq(psOut, "\n") {
-		line = strings.TrimLeft(line, " ")
-		if line == "" {
-			continue
-		}
-		pidStr, rest, ok := strings.Cut(line, " ")
+		pidStr, rest, ok := cutField(line)
 		if !ok {
 			continue
 		}
-		rest = strings.TrimLeft(rest, " ")
-		ppidStr, cmd, ok := strings.Cut(rest, " ")
+		ppidStr, rest, ok := cutField(rest)
 		if !ok {
 			continue
 		}
-		ppid, err := strconv.Atoi(ppidStr)
-		if err != nil || !want[ppid] {
+		tpgidStr, rest, ok := cutField(rest)
+		if !ok {
 			continue
 		}
-		pid, err := strconv.Atoi(pidStr)
-		if err != nil {
+		pid, e1 := strconv.Atoi(pidStr)
+		ppid, e2 := strconv.Atoi(ppidStr)
+		tpgid, e3 := strconv.Atoi(tpgidStr)
+		if e1 != nil || e2 != nil || e3 != nil {
 			continue
 		}
-		cmd = strings.TrimSpace(cmd)
-		if cmd == "" {
-			continue
-		}
-		if cur, seen := best[ppid]; !seen || pid < cur.pid {
-			best[ppid] = child{pid: pid, cmd: cmd}
+		byPID[pid] = proc{ppid: ppid, cmd: strings.TrimSpace(rest)}
+		if want[pid] {
+			fgPgrp[pid] = tpgid
 		}
 	}
-	if len(best) == 0 {
+
+	out := make(map[int]string)
+	for shellPID, pgrp := range fgPgrp {
+		// The foreground group's leader has pid == pgrp. Require it to be a direct
+		// child of the shell — an idle shell is its own foreground group, so its
+		// leader is the shell (parented elsewhere) and is correctly skipped.
+		if leader, ok := byPID[pgrp]; ok && leader.ppid == shellPID && leader.cmd != "" {
+			out[shellPID] = leader.cmd
+		}
+	}
+	if len(out) == 0 {
 		return nil
 	}
-	out := make(map[int]string, len(best))
-	for ppid, c := range best {
-		out[ppid] = c.cmd
-	}
 	return out
+}
+
+// cutField splits off the first space-delimited field from s (skipping any
+// leading spaces, as ps right-pads numeric columns). ok is false when s has no
+// field separator left.
+func cutField(s string) (field, rest string, ok bool) {
+	return strings.Cut(strings.TrimLeft(s, " "), " ")
 }
 
 // Kill sends SIGTERM to each pid, waits up to grace for them to exit, then

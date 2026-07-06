@@ -92,15 +92,17 @@ func TestNormalizeCmd(t *testing.T) {
 }
 
 func TestParseForeground(t *testing.T) {
-	// Mirrors `ps -axo pid=,ppid=,command=`: leading-padded pid, ppid, then the
-	// full argv (which may contain spaces). want = the pane-shell pids.
+	// Mirrors `ps -axo pid=,ppid=,tpgid=,command=`: leading-padded pid, ppid,
+	// tpgid (the tty's foreground process group), then the full argv (which may
+	// contain spaces). A shell's row carries its tpgid; the child whose pid ==
+	// that tpgid is the foreground command. want = the pane-shell pids.
 	out := "" +
-		"  100     1 /sbin/launchd\n" + // unrelated root process
-		"  200   100 -zsh\n" + // shell A itself (its own ppid isn't a shell we track)
-		"  350   200 npm run dev --port 3000\n" + // A's child: the running command
-		"  360   350 node /repo/server.js\n" + // grandchild: NOT a direct child of 200
-		"  400   999 -zsh\n" + // shell B (pid 999 not tracked)
-		"  510   400 tail -f app.log\n" // B's child
+		"  100     1     0 /sbin/launchd\n" + // unrelated root process (no tty)
+		"  200   100   350 -zsh\n" + // shell A: foreground group is 350
+		"  350   200   350 npm run dev --port 3000\n" + // A's fg leader (pid == tpgid)
+		"  360   350   350 node /repo/server.js\n" + // grandchild in the group: not the leader
+		"  400   999   510 -zsh\n" + // shell B: foreground group is 510
+		"  510   400   510 tail -f app.log\n" // B's fg leader
 	want := map[int]bool{200: true, 400: true}
 	got := parseForeground(out, want)
 	expect := map[int]string{
@@ -112,12 +114,27 @@ func TestParseForeground(t *testing.T) {
 	}
 }
 
-func TestParseForegroundPicksLowestChildPid(t *testing.T) {
-	// A pipeline `a | b` gives the shell two children; the lowest pid (leftmost,
-	// first-started) wins.
+func TestParseForegroundExcludesBackgroundJob(t *testing.T) {
+	// `some-server &` (lower pid, its own group) then `npm run dev` (foreground):
+	// tpgid points at the foreground group, so the background job never wins even
+	// though it has the lower pid.
 	out := "" +
-		"  700   300 sort -u\n" +
-		"  650   300 grep foo\n"
+		"  300   100   650 -zsh\n" + // shell: foreground group is 650
+		"  500   300   500 some-server\n" + // backgrounded: its own group, not foreground
+		"  650   300   650 npm run dev\n" // foreground leader (pid == tpgid)
+	got := parseForeground(out, map[int]bool{300: true})
+	if got[300] != "npm run dev" {
+		t.Fatalf("parseForeground bg job = %q, want %q", got[300], "npm run dev")
+	}
+}
+
+func TestParseForegroundPipelinePicksLeader(t *testing.T) {
+	// A pipeline `grep foo | sort -u` shares one foreground group led by the first
+	// stage; tpgid resolves to that leader.
+	out := "" +
+		"  300   100   650 -zsh\n" +
+		"  650   300   650 grep foo\n" + // group leader (pid == tpgid)
+		"  700   300   650 sort -u\n" // same group, not the leader
 	got := parseForeground(out, map[int]bool{300: true})
 	if got[300] != "grep foo" {
 		t.Fatalf("parseForeground pipeline = %q, want %q", got[300], "grep foo")
@@ -125,8 +142,9 @@ func TestParseForegroundPicksLowestChildPid(t *testing.T) {
 }
 
 func TestParseForegroundIdleShellHasNoChild(t *testing.T) {
-	// A shell at a prompt has no child rows → absent from the result.
-	out := "  200     1 -zsh\n"
+	// At a prompt the shell is its own foreground group (tpgid == its pid), so the
+	// group leader is the shell — not a child — and is excluded.
+	out := "  200     1   200 -zsh\n"
 	if got := parseForeground(out, map[int]bool{200: true}); len(got) != 0 {
 		t.Fatalf("idle shell should have no foreground command, got %+v", got)
 	}

@@ -4391,16 +4391,16 @@ func (h *Home) statusWorkerCycle() {
 	// at a prompt has no child, so its last command persists. Heavy cadence
 	// only — a tab label doesn't need sub-second freshness.
 	if heavy && len(shells) > 0 {
+		byPID := make(map[int]*shell.Shell, len(shells))
 		pids := make([]int, 0, len(shells))
 		for _, sh := range shells {
 			if pid := tmux.PanePID(sh.TmuxName()); pid > 0 {
+				byPID[pid] = sh
 				pids = append(pids, pid)
 			}
 		}
-		if fg := proc.ForegroundCommands(pids); len(fg) > 0 {
-			for _, sh := range shells {
-				sh.SetLastCommand(fg[tmux.PanePID(sh.TmuxName())])
-			}
+		for pid, cmd := range proc.ForegroundCommands(pids) {
+			byPID[pid].SetLastCommand(cmd)
 		}
 	}
 
