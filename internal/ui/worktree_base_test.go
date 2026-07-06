@@ -70,6 +70,35 @@ func TestOriginBaseRepoFallsBackToWorktree(t *testing.T) {
 	}
 }
 
+// With multiple non-worktree checkouts under one origin, originBaseRepo must
+// pick the same one every call regardless of pinnedRepos map iteration order —
+// it sorts candidates first.
+func TestOriginBaseRepoDeterministic(t *testing.T) {
+	h := newPersistTestHome(t)
+
+	const origin = "github.com/acme/repo"
+	const repoB = "/tmp/acme-b"
+	const repoA = "/tmp/acme-a"
+	const repoC = "/tmp/acme-c"
+
+	gi := map[string]*git.RepoInfo{
+		repoA: {OriginKey: origin},
+		repoB: {OriginKey: origin},
+		repoC: {OriginKey: origin},
+	}
+	h.gitInfoCache.Store(&gi)
+	h.pinnedRepos[repoB] = true
+	h.pinnedRepos[repoA] = true
+	h.pinnedRepos[repoC] = true
+
+	// Sorted order → lowest path wins, stably across repeated calls.
+	for i := 0; i < 20; i++ {
+		if got := h.originBaseRepo(origin); got != repoA {
+			t.Fatalf("originBaseRepo() = %q, want deterministic %q", got, repoA)
+		}
+	}
+}
+
 // A cursor on a session (not an origin header) must keep delegating to
 // resolveCurrentRepo — the origin path is additive, not a replacement.
 func TestResolveWorktreeBaseRepoOnSession(t *testing.T) {

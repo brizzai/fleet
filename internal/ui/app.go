@@ -961,6 +961,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.createWorkspaceDialog.Show(msg.provider, msg.repoPath)
 			return h, nil
 		}
+		// Seed gitInfoCache for the normalized main-clone path when it isn't
+		// already tracked, so the Creating… phantom (and the anti-flicker seed in
+		// workspaceCreateResultMsg) group under the real origin instead of a
+		// spurious local:<dir> header. Harmless when the path is already known.
+		if msg.originKey != "" {
+			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+				if _, ok := next[msg.repoPath]; ok {
+					return false
+				}
+				next[msg.repoPath] = &git.RepoInfo{OriginKey: msg.originKey}
+				return true
+			})
+		}
 		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch)
 		return h, nil
 
@@ -4931,6 +4944,9 @@ func (h *Home) originBaseRepo(origin string) string {
 	if len(checkouts) == 0 {
 		return ""
 	}
+	// checkoutsForOrigin gathers pinnedRepos via map iteration, so sort the fresh
+	// slice for a stable pick when an origin has multiple non-worktree checkouts.
+	sort.Strings(checkouts)
 	_, isWorktreeOf := h.originResolvers()
 	for _, repo := range checkouts {
 		if !isWorktreeOf(repo) {
@@ -4983,12 +4999,19 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		// main repo — not from whichever linked worktree is currently selected,
 		// else names snowball (issue #168). Custom shell providers own their own
 		// naming and run relative to the selected repo, so leave them untouched.
+		var originKey string
 		if !provider.IsCustom() {
 			repoPath = git.GetMainWorktreePath(repoPath)
+			// The normalized main-clone path may not be a tracked gitInfoCache key
+			// (origin with only a worktree tracked), which would misgroup the
+			// Creating… phantom under a spurious local:<dir> header. Resolve the
+			// origin here (worker goroutine, blocking git is fine) so the handler
+			// can seed the cache.
+			originKey = git.GetOriginKey(repoPath)
 		}
 		workspaces, err := provider.List(repoPath)
 		defaultBranch := git.GetDefaultBranch(repoPath)
-		return workspaceListMsg{workspaces: workspaces, provider: provider, repoPath: repoPath, defaultBranch: defaultBranch, err: err}
+		return workspaceListMsg{workspaces: workspaces, provider: provider, repoPath: repoPath, defaultBranch: defaultBranch, originKey: originKey, err: err}
 	}
 }
 

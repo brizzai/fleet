@@ -228,7 +228,15 @@ func GetMainWorktreePath(repoPath string) string {
 	if filepath.Base(commonDir) != ".git" {
 		return repoPath
 	}
-	return filepath.Dir(commonDir)
+	main := filepath.Dir(commonDir)
+	// git's stored commondir may be un-symlink-resolved (e.g. macOS /var vs
+	// /private/var), while tracked repo keys come from `rev-parse --show-toplevel`
+	// (symlinks resolved). Normalize so callers that key off the path — the origin
+	// grouping cache — see the same form and don't miss.
+	if resolved, err := filepath.EvalSymlinks(main); err == nil {
+		return resolved
+	}
+	return main
 }
 
 // revParseLayout fetches the branch name and worktree status in a single git
