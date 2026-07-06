@@ -37,6 +37,7 @@ const (
 	tipReloadFailedID = "reload_failed_sessions"
 	tipCmdPaletteID   = "command_palette"
 	tipDrawerID       = "terminal_drawer"
+	tipTCCBlockedID   = "tcc_blocked_folder"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -47,6 +48,19 @@ const (
 
 // tipRegistry is the catalog of contextual tips. Add new tips here.
 var tipRegistry = []Tip{
+	{
+		// Highest priority: a TCC-blocked folder makes every session/shell there
+		// unusable, so it outranks the reload-failed hint.
+		ID:       tipTCCBlockedID,
+		Policy:   tipRecurring,
+		Priority: 120,
+		active:   func(h *Home) bool { return h.anyTCCBlocked() },
+		text: func(h *Home) string {
+			return fmt.Sprintf("macOS blocks tmux from %s — sessions there fail with \"Operation not permitted\". "+
+				"Move the project outside it, or grant Full Disk Access to your terminal + tmux and run `tmux kill-server`. "+
+				"Press Ctrl+K → \"Open Full Disk Access Settings\".", shortenPath(h.firstTCCBlockedRoot()))
+		},
+	},
 	{
 		ID:       tipReloadFailedID,
 		Policy:   tipRecurring,

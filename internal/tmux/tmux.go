@@ -100,6 +100,57 @@ func envIsTruthy(name string) bool {
 	}
 }
 
+// DirAccessBlocked reports whether the tmux server is blocked by macOS from
+// reading dir — the TCC "Operation not permitted" wall that hits ~/Documents,
+// ~/Desktop and ~/Downloads. The check must run *inside* the tmux server: it
+// daemonizes (double-fork + setsid) into its own TCC "responsible process", so a
+// pane there can be denied a folder that fleet's own process (a child of the
+// granted terminal) reads fine — probing from Go would give the wrong answer.
+//
+// Uses `tmux run-shell`, which executes the command from the server process, and
+// captures `ls`'s stderr via a temp file (run-shell's output isn't returned to
+// the CLI). Returns (blocked, determined): a folder counts as blocked only when
+// stderr carries the specific EPERM "Operation not permitted" signature, so an
+// empty stderr (accessible) or any other failure (deleted root, transient error)
+// never raises a false alarm. determined is false when the probe couldn't run a
+// conclusive check (no server yet, tmux error, unreadable result) — the caller
+// treats that as unknown and re-probes later rather than caching a false answer.
+// Set FLEET_NO_TCC_WARNING to skip the probe entirely (e.g. a remote tmux over
+// SSH where the block is expected).
+func DirAccessBlocked(dir string) (blocked, determined bool) {
+	if dir == "" || envIsTruthy("FLEET_NO_TCC_WARNING") {
+		return false, true
+	}
+	f, err := os.CreateTemp("", "fleet-tcc-*")
+	if err != nil {
+		return false, false
+	}
+	tmpPath := f.Name()
+	_ = f.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	// run-shell runs in the daemonized server context; ls enumerates dir exactly
+	// as the failing `ls` does, and its stderr (captured to the temp file) carries
+	// the EPERM signature when TCC denies it.
+	script := fmt.Sprintf("ls %s >/dev/null 2>%s", shellQuote(dir), shellQuote(tmpPath))
+	ctx, cancel := context.WithTimeout(context.Background(), listPanesTimeout)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "tmux", "run-shell", script).Run(); err != nil {
+		return false, false // no server yet, or tmux error — inconclusive.
+	}
+	stderr, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return false, false
+	}
+	return strings.Contains(string(stderr), "Operation not permitted"), true
+}
+
+// shellQuote wraps s in single quotes for safe interpolation into a /bin/sh
+// command, escaping any embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // NewSession creates a new Session with a unique tmux name.
 func NewSession(displayName, workDir string) *Session {
 	return NewSessionWithPrefix(SessionPrefix, displayName, workDir)

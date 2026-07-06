@@ -320,6 +320,13 @@ type Home struct {
 	lastTipTickAt       time.Time                // wall clock of the previous refreshTips, for the delta
 	activeTipID         string                   // tip currently rendered (set by refreshTips)
 
+	// macOS TCC: tmux can't read ~/Documents/~/Desktop/~/Downloads once its server
+	// daemonizes. Probed lazily (once per protected root per launch) when a session
+	// or shell is created under one; drives the tcc-blocked tip. Read/written on the
+	// Update goroutine only. See probeTCCCmd / tips.go.
+	tccProbed       map[string]bool // protected root -> probe dispatched this launch
+	tccBlockedRoots map[string]bool // protected root -> tmux read blocked
+
 	// Recently picked palette item IDs (most recent first). In-memory only.
 	recentPaletteIDs []string
 
@@ -408,6 +415,8 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		toasts:                 NewToastStack(),
 		tipEpisodeDismissed:    make(map[string]bool),
 		tipVisibleFor:          make(map[string]time.Duration),
+		tccProbed:              make(map[string]bool),
+		tccBlockedRoots:        make(map[string]bool),
 		pinnedRepos:            make(map[string]bool),
 		failedWorktreeRemovals: make(map[string]bool),
 		newDialog:              NewNewSessionDialog(),
@@ -637,7 +646,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.syncShellStream() // attach the live stream to the newly-focused shell
-		return h, nil
+		// Probe for a TCC-blocked folder against the now-live tmux server.
+		return h, h.probeTCCCmd(msg.sh.RepoPath)
 
 	case shellRestartMsg:
 		if msg.err != nil {
@@ -730,6 +740,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionCreateResultMsg:
 		return h.handleSessionCreateResult(msg)
+
+	case tccProbeResultMsg:
+		if !msg.determined {
+			// Inconclusive (no server yet / tmux error) — unlatch so a later create
+			// re-probes instead of caching a false "not blocked" for the whole launch.
+			delete(h.tccProbed, msg.root)
+			return h, nil
+		}
+		h.tccBlockedRoots[msg.root] = msg.blocked
+		if msg.blocked {
+			debuglog.Logger.Info("tcc: tmux blocked from protected folder", "root", msg.root)
+		}
+		return h, nil
 
 	case slotAssignTimeoutMsg:
 		if h.slotAssignMode != 0 && !time.Now().Before(h.slotAssignExpires) {
@@ -2428,6 +2451,103 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 	return h, h.startSessionCmd(msg)
 }
 
+// tccProbeResultMsg carries the outcome of a lazy macOS-TCC access probe.
+// determined is false when the probe was inconclusive (no server / tmux error).
+type tccProbeResultMsg struct {
+	root       string
+	blocked    bool
+	determined bool
+}
+
+// protectedRoot reports whether path lives inside a macOS TCC-protected user
+// folder (~/Documents, ~/Desktop, ~/Downloads) and returns that root. A
+// daemonized tmux server is denied access to these unless the user grants Full
+// Disk Access, so anything fleet spawns there fails with "Operation not
+// permitted". Returns ("", false) for any other location.
+func protectedRoot(path string) (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || path == "" {
+		return "", false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	// Resolve symlinks so a repo reached via a link into a protected folder is
+	// still caught. Best-effort — EvalSymlinks fails on a path that doesn't exist
+	// yet (e.g. a worktree mid-creation), so fall back to abs.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	for _, name := range []string{"Documents", "Desktop", "Downloads"} {
+		root := filepath.Join(home, name)
+		// Case-insensitive compare: the default macOS APFS/HFS+ volume is
+		// case-insensitive, so ~/documents is the same folder as ~/Documents.
+		if strings.EqualFold(abs, root) ||
+			strings.HasPrefix(strings.ToLower(abs), strings.ToLower(root)+string(os.PathSeparator)) {
+			return root, true
+		}
+	}
+	return "", false
+}
+
+// probeTCCCmd returns a command that checks — once per protected root per launch
+// — whether tmux is blocked from reading a macOS-protected folder that path sits
+// under. Returns nil when path isn't under such a root or its root was already
+// probed. The probe is blocking I/O (a tmux run-shell), so it runs off the Update
+// goroutine and reports back via tccProbeResultMsg. Scheduled from the session/
+// shell *result* handlers, after Start() has spun up the tmux server, so the
+// probe always runs against a live server (no cold-start race).
+func (h *Home) probeTCCCmd(path string) tea.Cmd {
+	root, ok := protectedRoot(path)
+	if !ok || h.tccProbed[root] {
+		return nil
+	}
+	h.tccProbed[root] = true // guard against concurrent duplicate probes
+	return func() tea.Msg {
+		blocked, determined := tmux.DirAccessBlocked(root)
+		return tccProbeResultMsg{root: root, blocked: blocked, determined: determined}
+	}
+}
+
+// openFullDiskAccessSettings opens the macOS Full Disk Access settings pane so
+// the user can grant access to their terminal + tmux in one hop. The URL scheme
+// is the Ventura+/Tahoe form; older macOS used
+// x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles.
+func openFullDiskAccessSettings() tea.Cmd {
+	return func() tea.Msg {
+		_ = exec.Command("open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles").Start()
+		return nil
+	}
+}
+
+// anyTCCBlocked reports whether any probed protected root is blocked. Pure read
+// of tccBlockedRoots (Update goroutine only) — drives the tcc-blocked tip.
+func (h *Home) anyTCCBlocked() bool {
+	for _, blocked := range h.tccBlockedRoots {
+		if blocked {
+			return true
+		}
+	}
+	return false
+}
+
+// firstTCCBlockedRoot returns the lowest-sorted blocked root (stable across
+// renders when several are blocked), or "" if none.
+func (h *Home) firstTCCBlockedRoot() string {
+	roots := make([]string, 0, len(h.tccBlockedRoots))
+	for root, blocked := range h.tccBlockedRoots {
+		if blocked {
+			roots = append(roots, root)
+		}
+	}
+	if len(roots) == 0 {
+		return ""
+	}
+	sort.Strings(roots)
+	return roots[0]
+}
+
 // startSessionCmd builds the tea.Cmd that creates and starts one session off
 // the UI thread. Shared by the new-session flow and the launchpad (which fires
 // several at once). A non-empty resumeClaudeID makes buildClaudeCmd() launch
@@ -2518,7 +2638,9 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 		}
 	}
 
-	return h, h.fetchPreviewForSelected()
+	// Probe for a TCC-blocked folder now that Start() has spun up the tmux server
+	// (covers both new sessions and forks, which flow through here).
+	return h, tea.Batch(h.probeTCCCmd(s.ProjectPath), h.fetchPreviewForSelected())
 }
 
 func (h *Home) confirmDeleteSelected() tea.Cmd {
@@ -5653,6 +5775,11 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "collapse_all", Name: "Collapse All Repos"},
 		{Kind: PaletteKindCommand, ID: "quit", Name: "Quit", Shortcut: "⌃C"},
 	}
+	// Surfaced only while a macOS-protected folder is blocking tmux, so it's the
+	// fix the tcc-blocked tip points to without cluttering the palette otherwise.
+	if h.anyTCCBlocked() {
+		commands = append(commands, PaletteItem{Kind: PaletteKindCommand, ID: "open_fda", Name: "Open Full Disk Access Settings"})
+	}
 	for i := range commands {
 		commands[i].Haystack = commands[i].Name
 	}
@@ -5867,6 +5994,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "reload_all":
 		analytics.Track(analytics.EventReloadAll, nil)
 		return h, h.reloadAll()
+	case "open_fda":
+		h.actionLog.Add("open full disk access", "", true)
+		return h, openFullDiskAccessSettings()
 	case "mark_all_read":
 		analytics.Track(analytics.EventMarkAllRead, nil)
 		h.markAllAsRead()
