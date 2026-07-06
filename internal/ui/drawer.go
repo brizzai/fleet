@@ -765,26 +765,46 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 
 // drawerTitle is the top-border-left: the tab chips. Takes the active-repo shell
 // slice (computed once per render by renderDrawer) to avoid re-filtering h.shells.
+// The active tab renders as a filled accent pill — the same selected-row
+// vocabulary as the sidebar — so the focused shell reads at a glance.
 func (h *Home) drawerTitle(shells []*shell.Shell) string {
 	active := h.clampTab(len(shells))
+	selStyle := lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent).Bold(true).Padding(0, 1)
 	parts := []string{lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("Terminal")}
 	for i, sh := range shells {
-		name := sh.Name
+		name := truncCmd(sh.DisplayName(), drawerTabNameMax)
 		if sh.Status() == shell.StatusExited {
 			if c := sh.ExitInfo(); c != "" {
 				name += "(" + c + ")"
 			}
 		}
-		chip := drawerDot(sh.Status()) + " "
 		if i == active {
-			chip += lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render(name)
+			parts = append(parts, drawerDot(sh.Status())+selStyle.Render(name))
 		} else {
-			chip += lipgloss.NewStyle().Foreground(ColorTextDim).Render(name)
+			parts = append(parts, drawerDot(sh.Status())+" "+lipgloss.NewStyle().Foreground(ColorTextDim).Render(name))
 		}
-		parts = append(parts, chip)
 	}
 	parts = append(parts, lipgloss.NewStyle().Foreground(ColorTextDim).Render("+"))
 	return strings.Join(parts, "  ")
+}
+
+// drawerTabNameMax caps a shell tab/chip label — command lines can be long, so
+// they're truncated to keep the tab bar and collapsed border readable.
+const drawerTabNameMax = 22
+
+// truncCmd shortens a command-line label to max runes, appending an ellipsis.
+func truncCmd(s string, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max == 1 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // drawerModeLabel is the loud top-border-right indicator: the live target, or
@@ -793,7 +813,7 @@ func (h *Home) drawerTitle(shells []*shell.Shell) string {
 func (h *Home) drawerModeLabel(shells []*shell.Shell) string {
 	name := "shell"
 	if sh := h.activeShellIn(shells); sh != nil {
-		name = sh.Name
+		name = truncCmd(sh.DisplayName(), drawerTabNameMax)
 	}
 	if h.drawerCloseArmed {
 		return lipgloss.NewStyle().Foreground(ColorYellow).Bold(true).Render("kill " + name + "? ⌃W again")
@@ -804,6 +824,39 @@ func (h *Home) drawerModeLabel(shells []*shell.Shell) string {
 // drawerCwdLabel is the bottom-border-right cwd hint.
 func (h *Home) drawerCwdLabel() string {
 	return lipgloss.NewStyle().Foreground(ColorTextDim).Render(shortenPath(h.drawerScopeRepo()))
+}
+
+// collapsedShellMax caps how many shell chips ride a panel's bottom border while
+// the drawer is closed — a glance-able summary, not the whole list.
+const collapsedShellMax = 3
+
+// collapsedShellChips renders the selected repo's shells as a compact
+// dot + name summary for a panel's bottom border, shown while the drawer is
+// closed. Returns "" when the drawer is open/sliding (the drawer itself shows
+// the shells) or the scope repo has no shells. Capped at collapsedShellMax with
+// a "+N" overflow marker.
+func (h *Home) collapsedShellChips() string {
+	if h.drawerVisible() {
+		return ""
+	}
+	shells := h.shellsForActiveRepo()
+	if len(shells) == 0 {
+		return ""
+	}
+	nameStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+	n := len(shells)
+	shown := n
+	if shown > collapsedShellMax {
+		shown = collapsedShellMax
+	}
+	parts := make([]string, 0, shown+1)
+	for _, sh := range shells[:shown] {
+		parts = append(parts, drawerDot(sh.Status())+" "+nameStyle.Render(truncCmd(sh.DisplayName(), drawerTabNameMax)))
+	}
+	if n > shown {
+		parts = append(parts, nameStyle.Render(fmt.Sprintf("+%d", n-shown)))
+	}
+	return strings.Join(parts, "  ")
 }
 
 func drawerEmptyCTA() string {

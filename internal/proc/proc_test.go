@@ -90,3 +90,44 @@ func TestNormalizeCmd(t *testing.T) {
 		}
 	}
 }
+
+func TestParseForeground(t *testing.T) {
+	// Mirrors `ps -axo pid=,ppid=,command=`: leading-padded pid, ppid, then the
+	// full argv (which may contain spaces). want = the pane-shell pids.
+	out := "" +
+		"  100     1 /sbin/launchd\n" + // unrelated root process
+		"  200   100 -zsh\n" + // shell A itself (its own ppid isn't a shell we track)
+		"  350   200 npm run dev --port 3000\n" + // A's child: the running command
+		"  360   350 node /repo/server.js\n" + // grandchild: NOT a direct child of 200
+		"  400   999 -zsh\n" + // shell B (pid 999 not tracked)
+		"  510   400 tail -f app.log\n" // B's child
+	want := map[int]bool{200: true, 400: true}
+	got := parseForeground(out, want)
+	expect := map[int]string{
+		200: "npm run dev --port 3000",
+		400: "tail -f app.log",
+	}
+	if !reflect.DeepEqual(got, expect) {
+		t.Fatalf("parseForeground = %+v, want %+v", got, expect)
+	}
+}
+
+func TestParseForegroundPicksLowestChildPid(t *testing.T) {
+	// A pipeline `a | b` gives the shell two children; the lowest pid (leftmost,
+	// first-started) wins.
+	out := "" +
+		"  700   300 sort -u\n" +
+		"  650   300 grep foo\n"
+	got := parseForeground(out, map[int]bool{300: true})
+	if got[300] != "grep foo" {
+		t.Fatalf("parseForeground pipeline = %q, want %q", got[300], "grep foo")
+	}
+}
+
+func TestParseForegroundIdleShellHasNoChild(t *testing.T) {
+	// A shell at a prompt has no child rows → absent from the result.
+	out := "  200     1 -zsh\n"
+	if got := parseForeground(out, map[int]bool{200: true}); len(got) != 0 {
+		t.Fatalf("idle shell should have no foreground command, got %+v", got)
+	}
+}

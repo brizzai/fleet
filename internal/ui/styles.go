@@ -235,20 +235,28 @@ func ApplyPalette(p Palette) {
 // Use RenderBorderedPanelTopRight to embed a right-aligned status pill into
 // the top border, or RenderBorderedPanelFooter for the bottom-border variant.
 func RenderBorderedPanel(content, title string, width, height int, accent bool) string {
-	return renderBorderedPanel(content, title, "", "", width, height, accent)
+	return renderBorderedPanel(content, title, "", "", "", width, height, accent)
 }
 
 // RenderBorderedPanelTopRight is like RenderBorderedPanel but also embeds a
 // right-aligned status pill into the TOP border (after the title).
 func RenderBorderedPanelTopRight(content, title, titleRight string, width, height int, accent bool) string {
-	return renderBorderedPanel(content, title, titleRight, "", width, height, accent)
+	return renderBorderedPanel(content, title, titleRight, "", "", width, height, accent)
 }
 
 // RenderBorderedPanelFooter is like RenderBorderedPanel but also embeds a
 // right-aligned status pill into the bottom border. Empty footer renders an
 // unbroken bottom border.
 func RenderBorderedPanelFooter(content, title, footerRight string, width, height int, accent bool) string {
-	return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
+	return renderBorderedPanel(content, title, "", "", footerRight, width, height, accent)
+}
+
+// RenderBorderedPanelInsets embeds all four optional insets: title + titleRight
+// in the top border, footerLeft + footerRight in the bottom border. Used to ride
+// the collapsed-shell chips on a panel's bottom-left while keeping its existing
+// footer (cwd / status). Any inset may be "".
+func RenderBorderedPanelInsets(content, title, titleRight, footerLeft, footerRight string, width, height int, accent bool) string {
+	return renderBorderedPanel(content, title, titleRight, footerLeft, footerRight, width, height, accent)
 }
 
 // selTitle returns the selected-row title style — muted when the sidebar is
@@ -272,10 +280,10 @@ func selStatus() lipgloss.Style {
 // (after the title) and the bottom border. Used by the terminal drawer for a
 // top-border mode label + a bottom-border cwd/hint.
 func RenderBorderedPanelFull(content, title, titleRight, footerRight string, width, height int, accent bool) string {
-	return renderBorderedPanel(content, title, titleRight, footerRight, width, height, accent)
+	return renderBorderedPanel(content, title, titleRight, "", footerRight, width, height, accent)
 }
 
-func renderBorderedPanel(content, title, titleRight, footerRight string, width, height int, accent bool) string {
+func renderBorderedPanel(content, title, titleRight, footerLeft, footerRight string, width, height int, accent bool) string {
 	if width < 6 || height < 3 {
 		return content
 	}
@@ -301,10 +309,10 @@ func renderBorderedPanel(content, title, titleRight, footerRight string, width, 
 		dashes := width - 8 - titleWidth - rightW
 		if dashes < 1 {
 			// Top is too tight; drop the trailing right text rather than wrap.
-			return renderBorderedPanel(content, title, "", footerRight, width, height, accent)
+			return renderBorderedPanel(content, title, "", footerLeft, footerRight, width, height, accent)
 		}
 		top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", dashes)+" ") + rightText + borderStyle.Render(" ─╮")
-		return finishBorderedPanel(top, content, footerRight, width, height, borderStyle)
+		return finishBorderedPanel(top, content, footerLeft, footerRight, width, height, borderStyle)
 	}
 	// Layout: ╭ ─ ' ' title ' ' ─*K ╮ — leading dash count is 1, K fills the rest.
 	fillRight := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space*/ - titleWidth - 1 /*space*/
@@ -317,7 +325,7 @@ func renderBorderedPanel(content, title, titleRight, footerRight string, width, 
 		fillRight = max(width-5-titleWidth, 1)
 	}
 	top := borderStyle.Render("╭─ ") + titleText + borderStyle.Render(" "+strings.Repeat("─", fillRight)+"╮")
-	return finishBorderedPanel(top, content, footerRight, width, height, borderStyle)
+	return finishBorderedPanel(top, content, footerLeft, footerRight, width, height, borderStyle)
 }
 
 // styleIfPlain renders s with style only when s is plain text. If s already
@@ -330,12 +338,40 @@ func styleIfPlain(s string, style lipgloss.Style) string {
 	return style.Render(s)
 }
 
-func finishBorderedPanel(top, content, footerRight string, width, height int, borderStyle lipgloss.Style) string {
+func finishBorderedPanel(top, content, footerLeft, footerRight string, width, height int, borderStyle lipgloss.Style) string {
 
-	// Bottom border, optionally with a right-aligned status pill inset.
+	footerStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+
+	// Bottom border, optionally with a left-aligned inset (footerLeft, e.g. the
+	// collapsed-shell chips) and/or a right-aligned inset (footerRight, e.g. the
+	// preview cwd). The left/right and both-insets layouts mirror the top border.
 	var bottom string
-	if footerRight != "" {
-		footerStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+	switch {
+	case footerLeft != "" && footerRight != "":
+		leftText := styleIfPlain(footerLeft, footerStyle)
+		leftW := lipgloss.Width(leftText)
+		rightText := styleIfPlain(footerRight, footerStyle)
+		rightW := lipgloss.Width(rightText)
+		// Layout: ╰ ─ ' ' left ' ' ─*K ' ' right ' ' ─ ╯ — 8 fixed chars.
+		dashes := width - 8 - leftW - rightW
+		if dashes < 1 {
+			// Too tight for both — keep the right (cwd) and drop the left (chips).
+			return finishBorderedPanel(top, content, "", footerRight, width, height, borderStyle)
+		}
+		bottom = borderStyle.Render("╰─ ") + leftText + borderStyle.Render(" "+strings.Repeat("─", dashes)+" ") + rightText + borderStyle.Render(" ─╯")
+	case footerLeft != "":
+		leftText := styleIfPlain(footerLeft, footerStyle)
+		leftW := lipgloss.Width(leftText)
+		// Layout: ╰ ─ ' ' left ' ' ─*K ╯ — leading dash count is 1.
+		fillRight := width - 2 /*corners*/ - 1 /*leading dash*/ - 1 /*space*/ - leftW - 1 /*space*/
+		if fillRight < 1 {
+			maxLeft := max(width-6, 1)
+			leftText = styleIfPlain(ansi.Truncate(footerLeft, maxLeft, ""), footerStyle)
+			leftW = lipgloss.Width(leftText)
+			fillRight = max(width-5-leftW, 1)
+		}
+		bottom = borderStyle.Render("╰─ ") + leftText + borderStyle.Render(" "+strings.Repeat("─", fillRight)+"╯")
+	case footerRight != "":
 		footerText := styleIfPlain(footerRight, footerStyle)
 		footerW := lipgloss.Width(footerText)
 		// Layout: ╰─*K ' ' footer ' '─╯ — trailing dash count is 1.
@@ -348,7 +384,7 @@ func finishBorderedPanel(top, content, footerRight string, width, height int, bo
 			fillLeft = max(width-5-footerW, 1)
 		}
 		bottom = borderStyle.Render("╰"+strings.Repeat("─", fillLeft)+" ") + footerText + borderStyle.Render(" ─╯")
-	} else {
+	default:
 		bottom = borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
 	}
 

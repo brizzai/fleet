@@ -9,6 +9,7 @@ package shell
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +57,7 @@ type Shell struct {
 	mu       sync.Mutex
 	status   Status
 	exitCode string // set when status == StatusExited (from tmux PaneDeadInfo)
+	lastCmd  string // latest foreground command line the shell ran (drives the tab label)
 	tmuxName string
 	tmux     *tmux.Session
 }
@@ -163,6 +165,31 @@ func (s *Shell) ExitInfo() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.exitCode
+}
+
+// SetLastCommand records the latest foreground command line the shell ran. Empty
+// input is ignored so the last real command persists while the shell sits idle.
+// Called off the render thread (status worker).
+func (s *Shell) SetLastCommand(cmd string) {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return
+	}
+	s.mu.Lock()
+	s.lastCmd = cmd
+	s.mu.Unlock()
+}
+
+// DisplayName is the user-facing tab label: the latest command the shell ran,
+// falling back to the creation Name ("shell", "shell 2", …) before it has run
+// anything. Immutable Name is the stable identity; DisplayName is cosmetic.
+func (s *Shell) DisplayName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastCmd != "" {
+		return s.lastCmd
+	}
+	return s.Name
 }
 
 // RefreshStatus recomputes the shell's status from the tmux caches and returns

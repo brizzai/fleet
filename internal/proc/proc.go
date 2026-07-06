@@ -153,6 +153,84 @@ func normalizeCmd(s string) string {
 	return strings.ToLower(filepath.Base(s))
 }
 
+// ForegroundCommands maps each given pane-shell pid to the command line of the
+// process it is currently running — the shell's own child process (e.g. a
+// `pane_pid` shell running "npm run dev" has an npm child). Shells sitting at a
+// prompt have no child and are absent from the result. One `ps` call regardless
+// of how many pids are passed. macOS-only.
+func ForegroundCommands(shellPIDs []int) map[int]string {
+	if len(shellPIDs) == 0 {
+		return nil
+	}
+	want := make(map[int]bool, len(shellPIDs))
+	for _, p := range shellPIDs {
+		if p > 0 {
+			want[p] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// pid, ppid, then the full argv (command= is last so it may contain spaces).
+	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,command=").Output()
+	if len(out) == 0 || err != nil {
+		return nil
+	}
+	return parseForeground(string(out), want)
+}
+
+// parseForeground is the pure core of ForegroundCommands: it maps each wanted
+// shell pid to its child's command line. When a shell has several children (a
+// pipeline), the lowest child pid wins — the leftmost, first-started command.
+func parseForeground(psOut string, want map[int]bool) map[int]string {
+	type child struct {
+		pid int
+		cmd string
+	}
+	best := make(map[int]child) // shell pid -> chosen child
+	for line := range strings.SplitSeq(psOut, "\n") {
+		line = strings.TrimLeft(line, " ")
+		if line == "" {
+			continue
+		}
+		pidStr, rest, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		rest = strings.TrimLeft(rest, " ")
+		ppidStr, cmd, ok := strings.Cut(rest, " ")
+		if !ok {
+			continue
+		}
+		ppid, err := strconv.Atoi(ppidStr)
+		if err != nil || !want[ppid] {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			continue
+		}
+		if cur, seen := best[ppid]; !seen || pid < cur.pid {
+			best[ppid] = child{pid: pid, cmd: cmd}
+		}
+	}
+	if len(best) == 0 {
+		return nil
+	}
+	out := make(map[int]string, len(best))
+	for ppid, c := range best {
+		out[ppid] = c.cmd
+	}
+	return out
+}
+
 // Kill sends SIGTERM to each pid, waits up to grace for them to exit, then
 // SIGKILLs any survivors. Pids already gone are ignored. macOS-only.
 func Kill(pids []int, grace time.Duration) error {

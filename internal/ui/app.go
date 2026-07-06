@@ -1566,6 +1566,11 @@ func (h *Home) renderBody() string {
 	// longer renders them.
 	statusTitle := h.statusCountsLine(nil)
 
+	// When the drawer is closed, the selected repo's shells ride the bottom
+	// border of whichever panel the drawer would open from (preview in
+	// dual/stacked, sidebar in single). "" while the drawer is open/absent.
+	shellChips := h.collapsedShellChips()
+
 	switch mode {
 	case "single":
 		// Inner content area = total - 2 for the border on each side.
@@ -1574,7 +1579,9 @@ func (h *Home) renderBody() string {
 		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH, !h.drawerHasFocus())
 		sidebar = ensureExactHeight(sidebar, innerH)
 		sidebar = ensureExactWidth(sidebar, innerW)
-		b.WriteString(RenderBorderedPanelTopRight(sidebar, "Sessions", statusTitle, h.width, contentHeight, h.focusMode))
+		// Single layout: the sidebar is the only (bottom-most) panel, so the
+		// collapsed shell chips ride its bottom border.
+		b.WriteString(RenderBorderedPanelInsets(sidebar, "Sessions", statusTitle, shellChips, "", h.width, contentHeight, h.focusMode))
 	case "stacked":
 		sidebarHeight := (contentHeight * 55) / 100
 		if sidebarHeight < 3 {
@@ -1596,7 +1603,8 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactWidth(previewInner, innerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
 		previewFooter := BuildPreviewFooter(s, h.width-6)
-		b.WriteString(RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, h.width, previewHeight, h.focusMode))
+		// Stacked: preview is the bottom-most panel, so it carries the chips.
+		b.WriteString(RenderBorderedPanelInsets(previewInner, previewTitle, "", shellChips, previewFooter, h.width, previewHeight, h.focusMode))
 	default: // dual
 		gap := 1 // single-column gap between the two bordered panels
 		// Sidebar wants a ~target absolute width that's comfortable for long
@@ -1654,7 +1662,10 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, previewWidth-6)
-		rightPanel := RenderBorderedPanelFooter(previewInner, previewTitle, previewFooter, previewWidth, previewPanelH, h.focusMode)
+		// Dual: the drawer opens from the bottom of this right column, so its
+		// collapsed chips ride the preview's bottom-left border (shellChips is
+		// "" while the drawer is open, since the drawer then shows the shells).
+		rightPanel := RenderBorderedPanelInsets(previewInner, previewTitle, "", shellChips, previewFooter, previewWidth, previewPanelH, h.focusMode)
 		if rightDrawer != "" {
 			rightPanel = lipgloss.JoinVertical(lipgloss.Left, rightPanel, rightDrawer)
 		}
@@ -4373,6 +4384,24 @@ func (h *Home) statusWorkerCycle() {
 	// h.sessions, so they get their own pass.
 	for _, sh := range shells {
 		sh.RefreshStatus()
+	}
+
+	// Label each shell with the latest command it ran. One `ps` call resolves
+	// every shell's foreground child process from its cached pane pid; a shell
+	// at a prompt has no child, so its last command persists. Heavy cadence
+	// only — a tab label doesn't need sub-second freshness.
+	if heavy && len(shells) > 0 {
+		pids := make([]int, 0, len(shells))
+		for _, sh := range shells {
+			if pid := tmux.PanePID(sh.TmuxName()); pid > 0 {
+				pids = append(pids, pid)
+			}
+		}
+		if fg := proc.ForegroundCommands(pids); len(fg) > 0 {
+			for _, sh := range shells {
+				sh.SetLastCommand(fg[tmux.PanePID(sh.TmuxName())])
+			}
+		}
 	}
 
 	// 3. Sync hook status (fast: in-memory map lookups; worker may resolve a
