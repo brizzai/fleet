@@ -46,6 +46,7 @@ var (
 	sessionCacheData map[string]int64  // session_name -> window_activity timestamp
 	sessionDeadData  map[string]bool   // session_name -> pane_dead
 	sessionCmdData   map[string]string // session_name -> pane_current_command (foreground proc)
+	sessionPidData   map[string]int    // session_name -> pane_pid (the pane's shell process)
 	sessionCacheTime time.Time
 )
 
@@ -685,7 +686,10 @@ func captureSentinel() string {
 // call feeds Exists, GetActivity and IsPaneDead for every session, so the
 // status worker never shells out per-session for these.
 func RefreshSessionCache() {
-	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{session_name}\t#{window_activity}\t#{pane_dead}\t#{pane_current_command}")
+	// pane_current_command stays LAST because a dead pane reports it empty, so its
+	// line ends in a trailing tab; keeping the always-present pane_pid ahead of it
+	// preserves the "possibly-empty trailing field" parsing below.
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{session_name}\t#{window_activity}\t#{pane_dead}\t#{pane_pid}\t#{pane_current_command}")
 	output, err := cmd.Output()
 	if err != nil {
 		return // tmux server may not be running.
@@ -693,17 +697,18 @@ func RefreshSessionCache() {
 
 	activityCache := make(map[string]int64)
 	deadCache := make(map[string]bool)
+	pidCache := make(map[string]int)
 	cmdCache := make(map[string]string)
 	// Do NOT TrimSpace the whole output: a dead pane has an empty
-	// pane_current_command, so its line ends in a trailing tab ("name\t<act>\t1\t").
-	// Trimming the final line's tab would make SplitN yield 3 fields, dropping a
+	// pane_current_command, so its line ends in a trailing tab ("name\t<act>\t1\t<pid>\t").
+	// Trimming the final line's tab would make SplitN yield 4 fields, dropping a
 	// dead pane that happens to be last. The line == "" guard handles blanks.
 	for _, line := range strings.Split(string(output), "\n") {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 4)
-		if len(parts) < 4 {
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) < 5 {
 			continue
 		}
 		name := parts[0]
@@ -711,12 +716,16 @@ func RefreshSessionCache() {
 		fmt.Sscanf(parts[1], "%d", &activity)
 		activityCache[name] = activity
 		deadCache[name] = parts[2] == "1"
-		cmdCache[name] = parts[3]
+		var pid int
+		fmt.Sscanf(parts[3], "%d", &pid)
+		pidCache[name] = pid
+		cmdCache[name] = parts[4]
 	}
 
 	sessionCacheMu.Lock()
 	sessionCacheData = activityCache
 	sessionDeadData = deadCache
+	sessionPidData = pidCache
 	sessionCmdData = cmdCache
 	sessionCacheTime = time.Now()
 	sessionCacheMu.Unlock()
@@ -734,6 +743,19 @@ func PaneCurrentCommand(name string) string {
 		return ""
 	}
 	return sessionCmdData[name]
+}
+
+// PanePID returns the cached pane process id (the pane's shell) for a session,
+// or 0 when unknown. Cache-only; RefreshSessionCache populates it once per tick.
+// Used by the shells feature to find each shell's foreground child process (the
+// command it's running) via proc.ForegroundCommands.
+func PanePID(name string) int {
+	sessionCacheMu.RLock()
+	defer sessionCacheMu.RUnlock()
+	if sessionPidData == nil {
+		return 0
+	}
+	return sessionPidData[name]
 }
 
 // ListSessions returns all fleet managed tmux session names.
