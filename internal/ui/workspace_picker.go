@@ -19,6 +19,7 @@ type (
 		provider      workspace.Provider
 		repoPath      string
 		defaultBranch string
+		originKey     string // origin of repoPath (native provider); seeds gitInfoCache so the phantom groups correctly
 		err           error
 	}
 	workspaceSelectedMsg struct {

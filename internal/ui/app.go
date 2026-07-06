@@ -961,6 +961,19 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.createWorkspaceDialog.Show(msg.provider, msg.repoPath)
 			return h, nil
 		}
+		// Seed gitInfoCache for the normalized main-clone path when it isn't
+		// already tracked, so the Creating… phantom (and the anti-flicker seed in
+		// workspaceCreateResultMsg) group under the real origin instead of a
+		// spurious local:<dir> header. Harmless when the path is already known.
+		if msg.originKey != "" {
+			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+				if _, ok := next[msg.repoPath]; ok {
+					return false
+				}
+				next[msg.repoPath] = &git.RepoInfo{OriginKey: msg.originKey}
+				return true
+			})
+		}
 		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch)
 		return h, nil
 
@@ -1008,7 +1021,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.pendingWorkspaces = append(h.pendingWorkspaces, pw)
 
-		// Expand the repo group and rebuild sidebar.
+		// Expand the origin group and the checkout, then rebuild sidebar so the
+		// phantom is visible — when creation is triggered from an origin header the
+		// group may be collapsed, which would otherwise hide the phantom row.
+		h.setExpanded(OriginExpandKey(h.originOf(msg.repoPath)), true)
 		h.setExpanded(msg.repoPath, true)
 		h.rebuildFlatItems()
 
@@ -2041,8 +2057,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.newDialog.Show()
 		return h, nil
 	case "w":
-		// New worktree session.
-		repoPath := h.resolveCurrentRepo()
+		// New worktree session (works on a session, checkout header, or origin header).
+		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
 			h.setError(fmt.Errorf("no repo selected"))
 			return h, nil
@@ -4903,6 +4919,43 @@ func (h *Home) resolveCurrentRepo() string {
 	return ""
 }
 
+// resolveWorktreeBaseRepo resolves the repo a new worktree should be based on for
+// the current cursor. It extends resolveCurrentRepo with origin-header support:
+// an origin header carries no RepoPath (it stands for the whole group), so it
+// resolves to a checkout of that origin group instead. fetchWorkspaceListForRepo
+// then normalizes the result to the main worktree, so a worktree checkout still
+// yields correct sibling naming.
+func (h *Home) resolveWorktreeBaseRepo() string {
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+		if item := h.flatItems[h.cursor]; item.IsOriginHeader {
+			return h.originBaseRepo(item.OriginKey)
+		}
+	}
+	return h.resolveCurrentRepo()
+}
+
+// originBaseRepo returns a checkout to base a new worktree on for an origin
+// group, preferring the main clone over a linked worktree (both resolve to the
+// same main worktree, but the main clone is the more stable pick). Returns "" if
+// the origin has no known checkouts. Works even when the origin is collapsed —
+// checkoutsForOrigin scans sessions/pinned/pending, not just visible rows.
+func (h *Home) originBaseRepo(origin string) string {
+	checkouts := h.checkoutsForOrigin(origin)
+	if len(checkouts) == 0 {
+		return ""
+	}
+	// checkoutsForOrigin gathers pinnedRepos via map iteration, so sort the fresh
+	// slice for a stable pick when an origin has multiple non-worktree checkouts.
+	sort.Strings(checkouts)
+	_, isWorktreeOf := h.originResolvers()
+	for _, repo := range checkouts {
+		if !isWorktreeOf(repo) {
+			return repo
+		}
+	}
+	return checkouts[0]
+}
+
 // drawerScopeRepo returns the repo the terminal drawer is scoped to: frozen to
 // drawerRepo while open (set when the drawer was opened), else the repo under
 // the cursor (used by createShell before the drawer opens).
@@ -4941,9 +4994,24 @@ func (h *Home) fetchBranchList(repoPath string) tea.Cmd {
 func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 	return func() tea.Msg {
 		provider := workspace.ResolveProvider(repoPath)
+		// For the built-in git provider, resolve to the main worktree: a new
+		// worktree is a sibling of the main repo, so its name must derive from the
+		// main repo — not from whichever linked worktree is currently selected,
+		// else names snowball (issue #168). Custom shell providers own their own
+		// naming and run relative to the selected repo, so leave them untouched.
+		var originKey string
+		if !provider.IsCustom() {
+			repoPath = git.GetMainWorktreePath(repoPath)
+			// The normalized main-clone path may not be a tracked gitInfoCache key
+			// (origin with only a worktree tracked), which would misgroup the
+			// Creating… phantom under a spurious local:<dir> header. Resolve the
+			// origin here (worker goroutine, blocking git is fine) so the handler
+			// can seed the cache.
+			originKey = git.GetOriginKey(repoPath)
+		}
 		workspaces, err := provider.List(repoPath)
 		defaultBranch := git.GetDefaultBranch(repoPath)
-		return workspaceListMsg{workspaces: workspaces, provider: provider, repoPath: repoPath, defaultBranch: defaultBranch, err: err}
+		return workspaceListMsg{workspaces: workspaces, provider: provider, repoPath: repoPath, defaultBranch: defaultBranch, originKey: originKey, err: err}
 	}
 }
 
@@ -5736,7 +5804,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.newDialog.Show()
 		return h, nil
 	case "new_worktree":
-		repoPath := h.resolveCurrentRepo()
+		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
 			h.setError(fmt.Errorf("no repo selected"))
 			return h, nil
