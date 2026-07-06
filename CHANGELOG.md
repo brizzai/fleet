@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-07-06
+
+### Added
+
+- Fleet can now auto-suspend idle sessions under memory pressure — freeing their memory (and the shared tmux server's buffers) so a big fleet can't OOM-crash all your sessions at once. Suspended sessions resume instantly on Enter with the conversation intact. Tune it in Settings › Behavior › "Idle-session suspend" (off/light/balanced/aggressive; default light).
+- Projects under `~/Documents`, `~/Desktop`, or `~/Downloads` now show a clear notice when macOS blocks tmux from reading them, with a one-hop `Ctrl+K → "Open Full Disk Access Settings"` fix instead of a cryptic "Operation not permitted".
+
+### Improved
+
+- Terminal drawer tabs are now labeled with the latest command each shell ran (e.g. `npm run dev`), the selected tab gets a highlighted background, and when the drawer is closed its 1–3 shells show inline in the panel's bottom border.
+- You can now press `w` on an origin header to create a worktree for that project — it bases the new worktree on the group's main clone, instead of failing with "no repo selected".
+
+### Fixed
+
+- Creating a new worktree from an existing worktree no longer snowballs the name (repo-a → repo-a-b → repo-a-b-c); new worktrees are now always named as siblings of the main repo.
+
 ## [2.14.0] - 2026-07-05
 
 ### Improved
@@ -331,7 +347,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.14.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.15.0...HEAD
+[2.15.0]: https://github.com/brizzai/fleet/releases/tag/v2.15.0
 [2.14.0]: https://github.com/brizzai/fleet/releases/tag/v2.14.0
 [2.13.0]: https://github.com/brizzai/fleet/releases/tag/v2.13.0
 [2.12.1]: https://github.com/brizzai/fleet/releases/tag/v2.12.1
