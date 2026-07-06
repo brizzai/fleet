@@ -208,6 +208,29 @@ func IsWorktree(repoPath string) bool {
 	return gitDirPath != commonDirPath
 }
 
+// GetMainWorktreePath returns the root of the repo's main worktree, given a path
+// inside any worktree (main or linked). New worktrees are always created as
+// siblings of the main worktree, so their name must derive from the main repo —
+// not from whichever linked worktree happens to be selected. Deriving from a
+// linked worktree snowballs the name on each hop (repo-a → repo-a-b → repo-a-b-c;
+// see issue #168). Returns repoPath unchanged on any error or when the main
+// worktree can't be confidently resolved (e.g. a bare repo).
+func GetMainWorktreePath(repoPath string) string {
+	out, err := gitOutput("-C", repoPath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return repoPath
+	}
+	commonDir := resolveGitDir(repoPath, string(out))
+	// For a standard (non-bare) repo the shared git dir is always
+	// "<main-worktree>/.git", whether repoPath is the main worktree or a linked
+	// one, so its parent is the main worktree root. Bail out to repoPath if the
+	// layout doesn't match rather than guessing.
+	if filepath.Base(commonDir) != ".git" {
+		return repoPath
+	}
+	return filepath.Dir(commonDir)
+}
+
 // revParseLayout fetches the branch name and worktree status in a single git
 // subprocess instead of the three (`rev-parse --abbrev-ref HEAD`, `--git-dir`,
 // `--git-common-dir`) it used to take. RefreshGitInfo runs this for every repo
