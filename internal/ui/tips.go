@@ -75,14 +75,14 @@ var tipRegistry = []Tip{
 		},
 	},
 	{
-		// First time fleet auto-suspends anything, explain the ◌ dot so it doesn't
-		// read as a crash. tipOnce: shows once, then never again.
+		// First time fleet auto-suspends anything, explain what happened so it
+		// doesn't read as a crash. tipOnce: shows once, then never again.
 		ID:       tipSessionsSuspendedID,
 		Policy:   tipOnce,
 		Priority: 90,
 		active:   func(h *Home) bool { return h.countSessionsByStatus(session.StatusSuspended) >= 1 },
 		text: func(h *Home) string {
-			return fmt.Sprintf("Fleet suspended %d idle session(s) (◌) to free memory — nothing is lost. "+
+			return fmt.Sprintf("Fleet suspended %d idle session(s) to free memory — nothing is lost. "+
 				"Press enter on one to resume. Tune this in Settings → Behavior → \"Idle-session suspend\".",
 				h.countSessionsByStatus(session.StatusSuspended))
 		},

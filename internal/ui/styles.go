@@ -498,7 +498,7 @@ func StatusSymbolRaw(status session.Status) string {
 	case session.StatusError:
 		return "✕"
 	case session.StatusSuspended:
-		return "◌"
+		return "·" // same dot as idle; the dim style + "suspended" label carry the distinction
 	case session.StatusIdle, session.StatusStarting:
 		return "·"
 	default:
