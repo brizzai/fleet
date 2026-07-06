@@ -13,7 +13,7 @@ func TestUpdateStatus_SuspendedShortCircuits(t *testing.T) {
 	debuglog.Init()
 	mock := &mockPane{dead: true} // dead pane → IsAlive()=false, IsPaneDead()=true
 	s := &Session{
-		ID:           "suspend-test",
+		ID:           "00000001-1710000000",
 		Title:        "suspended",
 		Status:       StatusSuspended,
 		paneCapturer: mock,
@@ -31,7 +31,7 @@ func TestUpdateStatus_SuspendedShortCircuits(t *testing.T) {
 // SessionEnd "dead" death-rattle) so resume starts from a clean slate.
 func TestUpdateHookStatus_IgnoredWhileSuspended(t *testing.T) {
 	debuglog.Init()
-	s := &Session{ID: "suspend-hook", Status: StatusSuspended}
+	s := &Session{ID: "00000002-1710000000", Status: StatusSuspended}
 	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "abc"}, false); changed {
 		t.Fatalf("hook was applied while suspended")
 	}

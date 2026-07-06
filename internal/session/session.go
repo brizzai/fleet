@@ -618,17 +618,30 @@ func (s *Session) RespawnClaude() error {
 // teardown half of Restart() with no recreate. Idempotent for an already-dead pane.
 func (s *Session) Suspend() error {
 	debuglog.Logger.Info("session suspend", "id", s.ID, "title", s.Title)
-	// Drop hook state first so the killed agent's SessionEnd ("dead") death-rattle
-	// can't be picked up and flip the row to error during/after teardown.
+	// Mark suspended BEFORE tearing down tmux. The status pipeline short-circuits
+	// on StatusSuspended, so a concurrent UpdateStatus can't flip the row to error
+	// via its liveness gates, and UpdateHookStatus won't store the killed agent's
+	// "dead" death-rattle, during teardown. Restore the prior status if the kill
+	// fails (the session is still alive, so it must not read as suspended).
+	oldStatus := s.GetStatus()
+	s.SetStatus(StatusSuspended)
 	s.clearHookState()
 	if s.tmuxSession.Exists() {
 		if err := s.tmuxSession.Kill(); err != nil {
+			s.SetStatus(oldStatus)
 			debuglog.Logger.Error("session suspend: kill failed", "id", s.ID, "title", s.Title, "err", err)
 			return err
 		}
 	}
-	s.SetStatus(StatusSuspended)
 	return nil
+}
+
+// GetClaudeSessionID returns the captured resume id (thread-safe). Empty until the
+// agent's first SessionStart hook records it.
+func (s *Session) GetClaudeSessionID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ClaudeSessionID
 }
 
 // clearHookState drops the previous Claude process's hook state — both the
