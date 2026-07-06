@@ -109,6 +109,16 @@ func (w *HookWatcher) Start() {
 			if filepath.Ext(event.Name) != ".json" {
 				continue
 			}
+			// A removed/renamed status file means the session's hook state was
+			// cleared (clearHookState runs on suspend/resume/restart). Drop the
+			// cached entry immediately so a stale status — e.g. the "dead"
+			// death-rattle a killed agent writes during suspend — can't be replayed
+			// once the session's status leaves the protected Suspended state and
+			// the worker reads the watcher again.
+			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				w.forget(event.Name)
+				continue
+			}
 			if event.Op&(fsnotify.Create|fsnotify.Write) == 0 {
 				continue
 			}
@@ -210,6 +220,25 @@ func (w *HookWatcher) processFile(filePath string) {
 	emitHookMetrics(prev, hookStatus)
 
 	// Notify listeners of the change (non-blocking).
+	select {
+	case w.onChange <- struct{}{}:
+	default:
+	}
+}
+
+// forget drops the cached status for a status file that was removed or renamed
+// out of the way, so a stale entry (e.g. a suspended session's "dead"
+// death-rattle) isn't served to the worker after the file is gone. Notifies
+// listeners only if something was actually purged.
+func (w *HookWatcher) forget(filePath string) {
+	instanceID := strings.TrimSuffix(filepath.Base(filePath), ".json")
+	w.mu.Lock()
+	_, existed := w.statuses[instanceID]
+	delete(w.statuses, instanceID)
+	w.mu.Unlock()
+	if !existed {
+		return
+	}
 	select {
 	case w.onChange <- struct{}{}:
 	default:
