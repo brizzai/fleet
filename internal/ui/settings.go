@@ -24,6 +24,7 @@ var (
 	enterModeSet        = []string{"attach", "split"}
 	defaultAgentSet     = []string{"claude", "codex", "opencode"}
 	telemetryModeSet    = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
+	suspendModeSet      = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
 )
 
 // settingsFocus tracks which pane (category rail or detail list) has the cursor.
@@ -674,6 +675,28 @@ func buildSettingsCategories() []settingsCategory {
 				valueW: func() int { return maxStrW([]string{"Claude", "Codex", "OpenCode"}) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.DefaultAgent = cycleString(d.cfg.GetDefaultAgent(), defaultAgentSet, dir)
+				},
+			},
+			{
+				// Auto-hibernate idle sessions under memory pressure to keep the
+				// machine (and the shared tmux server) from being OOM-killed.
+				// Off / Light (critical-pressure safety net) / Balanced / Aggressive.
+				label: "Idle-session suspend",
+				value: func(c *config.Config) string {
+					switch c.GetSessionSuspendMode() {
+					case config.SuspendOff:
+						return "Off"
+					case config.SuspendBalanced:
+						return "Balanced"
+					case config.SuspendAggressive:
+						return "Aggressive"
+					default:
+						return "Light"
+					}
+				},
+				valueW: func() int { return maxStrW([]string{"Off", "Light", "Balanced", "Aggressive"}) },
+				cycle: func(d *SettingsDialog, dir int) {
+					d.cfg.SessionSuspendMode = cycleString(d.cfg.GetSessionSuspendMode(), suspendModeSet, dir)
 				},
 			},
 		},

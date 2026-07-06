@@ -110,6 +110,13 @@ type (
 		id  string
 		err error
 	}
+	// sessionsSuspendedMsg reports that the sweep (auto=true) or a manual command
+	// (auto=false) just hibernated n idle sessions, so Update can rebuild the list
+	// and show a toast. Persistence + action-log happen at the suspend site.
+	sessionsSuspendedMsg struct {
+		n    int
+		auto bool
+	}
 	sessionRestartConfirmedMsg struct{ id string }
 	sessionCreateResultMsg     struct {
 		session *session.Session
@@ -236,6 +243,17 @@ type Home struct {
 	previewCacheTime map[string]time.Time
 	statusRRIndex    int       // round-robin index for status updates
 	lastHeavyCycleAt time.Time // wall-clock gate: heavy worker work runs at most every tickInterval
+	// lastSuspendSweepAt throttles the memory-pressure idle-suspend sweep so it
+	// runs on its own slow cadence inside the ~2s heavy pass.
+	lastSuspendSweepAt time.Time
+	// attachAfterResumeID: when a suspended session is resumed via Enter, the
+	// resume runs async; this holds its id so the sessionRestartMsg handler
+	// attaches once the tmux is live again. Empty otherwise.
+	attachAfterResumeID string
+	// attachedSessionID is the session the user is currently attached to (empty
+	// when detached). Guarded by workerMu; the memory-pressure sweep reads it to
+	// avoid hibernating the pane the user is sitting in. Set/cleared in attachSession.
+	attachedSessionID string
 
 	// Status-worker liveness stamps (unix-nano), written by statusWorkerCycle and
 	// read lock-free by the snapshot + the dev-only watchdog. lastWorkerCycleNano
@@ -805,6 +823,42 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.rebuildFlatItems()
+		// A resume-from-suspend requested an attach once the tmux was live again.
+		if h.attachAfterResumeID == msg.id {
+			h.attachAfterResumeID = ""
+			if msg.err != nil {
+				// Resume failed — return the row to Suspended so Enter can retry,
+				// instead of stranding it in Starting/Error (which Enter can't wake).
+				if s, ok := h.sessionByID[msg.id]; ok {
+					s.SetStatus(session.StatusSuspended)
+					if err := h.storage.UpdateStatus(s.ID, string(session.StatusSuspended)); err != nil {
+						debuglog.Logger.Error("storage: UpdateStatus after failed resume", "id", s.ID, "err", err)
+					}
+					h.rebuildFlatItems()
+				}
+				return h, nil
+			}
+			// Attach the session we actually resumed — the cursor may have moved
+			// during the async Restart, so attachSelected() (cursor-based) could
+			// drop the user into a different session.
+			return h, h.attachSessionByID(msg.id)
+		}
+
+	case sessionsSuspendedMsg:
+		// Persistence + action-log already happened at the suspend site (worker or
+		// manual cmd goroutine). Here we just refresh the list and confirm to the user.
+		h.rebuildFlatItems()
+		if msg.n > 0 {
+			noun := "session"
+			if msg.n > 1 {
+				noun = "sessions"
+			}
+			if msg.auto {
+				h.setInfo(fmt.Sprintf("Suspended %d idle %s to free memory · enter to resume", msg.n, noun))
+			} else {
+				h.setInfo(fmt.Sprintf("Suspended %d %s · enter to resume", msg.n, noun))
+			}
+		}
 
 	case sessionRestartConfirmedMsg:
 		if s, ok := h.sessionByID[msg.id]; ok {
@@ -2029,6 +2083,12 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			h.toggleRepoGroup()
 			return h, nil
 		}
+		// A suspended session has no live tmux — resume it (recreates tmux +
+		// `--resume`), then attach once it's up. Overrides split mode: there is no
+		// live preview to focus.
+		if s := h.selectedSession(); s != nil && s.GetStatus() == session.StatusSuspended {
+			return h, h.resumeSelected(s)
+		}
 		if h.cfg.GetEnterMode() == "split" {
 			return h, h.enterFocusMode()
 		}
@@ -2353,7 +2413,21 @@ func (h *Home) attachSelected() tea.Cmd {
 	if h.cursor < 0 || h.cursor >= len(h.flatItems) || h.flatItems[h.cursor].IsRepoHeader {
 		return nil
 	}
-	s := h.flatItems[h.cursor].Session
+	return h.attachSession(h.flatItems[h.cursor].Session)
+}
+
+// attachSessionByID attaches a specific session regardless of the cursor. Used by
+// resume-from-suspend, where the cursor may have moved during the async Restart —
+// attaching the cursor's row would drop the user into a session they didn't pick.
+func (h *Home) attachSessionByID(id string) tea.Cmd {
+	s, ok := h.sessionByID[id]
+	if !ok {
+		return nil
+	}
+	return h.attachSession(s)
+}
+
+func (h *Home) attachSession(s *session.Session) tea.Cmd {
 	if s == nil || !s.IsAlive() {
 		return nil
 	}
@@ -2365,12 +2439,21 @@ func (h *Home) attachSelected() tea.Cmd {
 	}
 
 	h.isAttaching.Store(true)
+	// Record the attached session so the memory-pressure sweep never hibernates
+	// the pane the user is sitting in (LastAccessedAt doesn't refresh mid-attach).
+	// Guarded by workerMu — the worker reads it.
+	h.workerMu.Lock()
+	h.attachedSessionID = s.ID
+	h.workerMu.Unlock()
 	attachStart := time.Now()
 
 	return tea.Exec(attachCmd{session: s.GetTmuxSession()}, func(err error) tea.Msg {
 		// CRITICAL: Clear isAttaching before returning the message.
 		// Prevents race where View() returns empty string after detach.
 		h.isAttaching.Store(false)
+		h.workerMu.Lock()
+		h.attachedSessionID = ""
+		h.workerMu.Unlock()
 		// Only record uptime when the attach actually entered the session
 		// and exited via a normal detach (Ctrl+Q). A non-nil err here means
 		// the attach failed before / during entry (tmux gone, etc.) — the
@@ -3175,6 +3258,251 @@ func (h *Home) restartSession(s *session.Session) tea.Cmd {
 			}
 		}
 		return sessionRestartMsg{id: id, err: err}
+	}
+}
+
+// resumeSelected wakes a suspended session: it recreates the tmux session and
+// resumes the conversation (Restart() → `--resume <ClaudeSessionID>`), then
+// attaches once the pane is live (via attachAfterResumeID in the sessionRestartMsg
+// handler). Optimistically shows StatusStarting so the ⏸ row clears immediately.
+func (h *Home) resumeSelected(s *session.Session) tea.Cmd {
+	h.actionLog.Add("resume session", s.Title, true)
+	analytics.Track(analytics.EventSessionRestarted, nil)
+	h.markSessionAccessed(s)
+	h.attachAfterResumeID = s.ID
+	s.SetStatus(session.StatusStarting)
+	h.rebuildFlatItems()
+	id := s.ID
+	title := s.Title
+	debuglog.Logger.Info("resuming suspended session", "id", id, "title", title)
+	return func() tea.Msg {
+		// Suspended tmux is gone, so this is always a full Restart (which resumes
+		// because ClaudeSessionID is set), never an in-place respawn.
+		err := s.Restart()
+		if err != nil {
+			debuglog.Logger.Error("resume (Restart) failed", "id", id, "err", err)
+		}
+		return sessionRestartMsg{id: id, err: err}
+	}
+}
+
+// Memory-pressure idle-suspend tunables.
+const (
+	// suspendSweepInterval throttles the sweep to its own slow cadence inside the
+	// ~2s heavy worker pass — probing pressure and shedding every 2s would suspend
+	// in bursts; ~20s lets pressure settle between batches.
+	suspendSweepInterval = 20 * time.Second
+	// suspendSweepBatch caps how many sessions one auto-sweep hibernates, so a
+	// fleet sheds gradually and re-checks pressure before shedding more.
+	suspendSweepBatch = 5
+	// suspendSwapCriticalMB: free swap below this is treated as critical even if
+	// kern.memorystatus_vm_pressure_level hasn't caught up (it lags swap thrash).
+	suspendSwapCriticalMB = 512
+)
+
+// maybeSuspendIdleSessions hibernates the most-idle sessions under memory pressure,
+// per the configured aggressiveness mode, so a full fleet can't OOM-kill the shared
+// tmux server. Runs on the worker goroutine (it shells out to sysctl). Only
+// StatusIdle sessions are ever suspended.
+func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
+	mode := h.cfg.GetSessionSuspendMode()
+	if mode == config.SuspendOff {
+		return
+	}
+	if !h.lastSuspendSweepAt.IsZero() && time.Since(h.lastSuspendSweepAt) < suspendSweepInterval {
+		return
+	}
+	h.lastSuspendSweepAt = time.Now()
+
+	// Never hibernate the session the user is currently attached to — its
+	// LastAccessedAt doesn't refresh mid-attach, so it would look idle and get
+	// killed out from under them, ejecting them into a dead pane.
+	h.workerMu.Lock()
+	attached := h.attachedSessionID
+	h.workerMu.Unlock()
+
+	// Gather idle candidates first (cheap, no I/O) so we can skip the sysctl probe
+	// entirely when there's nothing we could shed.
+	type cand struct {
+		s    *session.Session
+		idle time.Duration
+	}
+	var cands []cand
+	for _, s := range sessions {
+		if s.GetStatus() != session.StatusIdle || s.ID == attached {
+			continue
+		}
+		// No captured resume id → Restart() would launch a fresh claude with no
+		// --resume and silently discard the conversation. "Nothing is lost" only
+		// holds when we can actually resume it, so never auto-park these.
+		if s.GetClaudeSessionID() == "" {
+			continue
+		}
+		cands = append(cands, cand{s, s.IdleFor()})
+	}
+	if len(cands) == 0 {
+		return
+	}
+
+	level, swapFreeMB := perfwatch.MemoryPressure()
+	if swapFreeMB >= 0 && swapFreeMB < suspendSwapCriticalMB {
+		level = perfwatch.PressureCritical
+	}
+	minIdle, act := suspendIdleThreshold(mode, level)
+	if !act {
+		// Debug-only (FLEET_DEBUG): answers "why isn't auto-suspend firing?" —
+		// idle sessions exist but the current pressure/mode doesn't warrant action.
+		// Info would spam every ~20s; this stays quiet unless you're debugging.
+		debuglog.Logger.Debug("memory sweep: below threshold, no action",
+			"mode", mode, "pressure", level, "swapFreeMB", swapFreeMB, "idleCandidates", len(cands))
+		return
+	}
+
+	sort.Slice(cands, func(i, j int) bool { return cands[i].idle > cands[j].idle }) // most-idle first
+
+	n := 0
+	for _, c := range cands {
+		if n >= suspendSweepBatch || c.idle < minIdle {
+			break // sorted desc: once one is too fresh, so is everything after it
+		}
+		// Re-validate right before the irreversible kill: the user may have
+		// attached to or reactivated this session (Update thread) since we gathered
+		// candidates, so a stale snapshot must not kill live work or eject an attach.
+		h.workerMu.Lock()
+		attachedNow := h.attachedSessionID
+		h.workerMu.Unlock()
+		if c.s.GetStatus() != session.StatusIdle || c.s.ID == attachedNow {
+			continue
+		}
+		if err := c.s.Suspend(); err != nil { // Suspend() logs the per-session event
+			debuglog.Logger.Error("suspend idle session failed", "id", c.s.ID, "title", c.s.Title, "err", err)
+			continue
+		}
+		if err := h.storage.UpdateStatus(c.s.ID, string(session.StatusSuspended)); err != nil {
+			debuglog.Logger.Error("storage: UpdateStatus after suspend", "id", c.s.ID, "err", err)
+		}
+		h.actionLog.Add("suspend session", c.s.Title, true)
+		n++
+	}
+	if n > 0 {
+		// One Info summary per acting sweep — the "why" (mode + live pressure) trail,
+		// on top of the per-session `session suspend` lines from Suspend().
+		debuglog.Logger.Info("memory sweep: suspended idle sessions",
+			"count", n, "mode", mode, "pressure", level, "swapFreeMB", swapFreeMB, "minIdle", minIdle.String())
+		h.send(sessionsSuspendedMsg{n: n, auto: true})
+	} else {
+		// act==true but nothing was idle enough (e.g. balanced's 4h housekeeping
+		// with no session that old). Debug-only, so no ~20s Info churn.
+		debuglog.Logger.Debug("memory sweep: eligible but none idle enough",
+			"mode", mode, "pressure", level, "minIdle", minIdle.String(),
+			"idleCandidates", len(cands), "maxIdle", cands[0].idle.Round(time.Second).String())
+	}
+}
+
+// suspendIdleThreshold returns the minimum idle duration a StatusIdle session must
+// exceed to be auto-suspended in the given mode at the given memory-pressure level,
+// and whether any suspension should happen at all right now.
+func suspendIdleThreshold(mode string, level int) (minIdle time.Duration, act bool) {
+	warn := level >= perfwatch.PressureWarning
+	critical := level >= perfwatch.PressureCritical
+	// Every mode gates on memory pressure — nothing is suspended on a healthy
+	// machine. The mode picks how long-idle a session must be once pressure hits.
+	switch mode {
+	case config.SuspendLight:
+		if critical {
+			return 24 * time.Hour, true
+		}
+	case config.SuspendBalanced:
+		if warn {
+			return 4 * time.Hour, true
+		}
+	case config.SuspendAggressive:
+		if warn {
+			return 1 * time.Hour, true
+		}
+	}
+	return 0, false
+}
+
+// suspendIdleNow (manual palette command) hibernates every currently-idle session
+// immediately, ignoring the pressure/idle gates — the user explicitly asked to free
+// memory. Runs the tmux teardown off the Update loop.
+func (h *Home) suspendIdleNow() tea.Cmd {
+	var targets []*session.Session
+	for _, s := range h.sessions {
+		// Only idle, and only if resumable — parking a session with no captured
+		// ClaudeSessionID would lose its conversation on the next Restart.
+		if s.GetStatus() == session.StatusIdle && s.GetClaudeSessionID() != "" {
+			targets = append(targets, s)
+		}
+	}
+	if len(targets) == 0 {
+		h.setInfo("No idle sessions to suspend")
+		return nil
+	}
+	// Optimistically mark Suspended on the Update thread BEFORE the background
+	// teardown, so the status worker sees Suspended and short-circuits instead of
+	// racing tmux death into a spurious StatusError (and the ◌ shows immediately).
+	for _, s := range targets {
+		s.SetStatus(session.StatusSuspended)
+		if err := h.storage.UpdateStatus(s.ID, string(session.StatusSuspended)); err != nil {
+			debuglog.Logger.Error("storage: UpdateStatus (pre-suspend)", "id", s.ID, "err", err)
+		}
+	}
+	h.rebuildFlatItems()
+	return func() tea.Msg {
+		n := 0
+		for _, s := range targets {
+			if err := s.Suspend(); err != nil {
+				debuglog.Logger.Error("manual suspend failed", "id", s.ID, "title", s.Title, "err", err)
+				continue
+			}
+			h.actionLog.Add("suspend session", s.Title, true)
+			n++
+		}
+		return sessionsSuspendedMsg{n: n, auto: false}
+	}
+}
+
+// suspendSelected (manual palette command) hibernates the selected session if it's
+// at rest (idle or finished). Refuses running/starting sessions so an in-progress
+// turn is never silently killed.
+func (h *Home) suspendSelected() tea.Cmd {
+	s := h.selectedSession()
+	if s == nil {
+		return nil
+	}
+	switch s.GetStatus() {
+	case session.StatusIdle, session.StatusFinished:
+		// at rest — ok to park
+	case session.StatusSuspended:
+		h.setInfo("Session already suspended — enter to resume")
+		return nil
+	default:
+		h.setInfo("Only idle or finished sessions can be suspended")
+		return nil
+	}
+	if s.GetClaudeSessionID() == "" {
+		// No resume id yet → resuming would discard the conversation. Refuse rather
+		// than silently lose it.
+		h.setInfo("Can't suspend yet — no resumable session id captured")
+		return nil
+	}
+	// Optimistically mark Suspended on the Update thread before the teardown so the
+	// status worker short-circuits instead of racing tmux death into StatusError.
+	s.SetStatus(session.StatusSuspended)
+	if err := h.storage.UpdateStatus(s.ID, string(session.StatusSuspended)); err != nil {
+		debuglog.Logger.Error("storage: UpdateStatus (pre-suspend)", "id", s.ID, "err", err)
+	}
+	h.rebuildFlatItems()
+	id, title := s.ID, s.Title
+	return func() tea.Msg {
+		if err := s.Suspend(); err != nil {
+			debuglog.Logger.Error("manual suspend failed", "id", id, "title", title, "err", err)
+			return sessionsSuspendedMsg{n: 0, auto: false}
+		}
+		h.actionLog.Add("suspend session", title, true)
+		return sessionsSuspendedMsg{n: 1, auto: false}
 	}
 }
 
@@ -4668,6 +4996,12 @@ drainPriority:
 	}
 	h.statusRRIndex = next
 
+	// 5b. Memory-pressure idle-session sweep — hibernate the most-idle sessions
+	// when the system is under memory pressure, so a full fleet can't OOM-kill the
+	// shared tmux server. Self-throttled to a slow cadence; probes sysctl (blocking)
+	// which is why it lives here on the worker, not the Update loop.
+	h.maybeSuspendIdleSessions(sessions)
+
 	// 5. Git+PR refresh: fan out across all session repos in parallel,
 	// bounded to 4 concurrent goroutines so the subprocess load stays
 	// flat. Branch/dirty lands within the 2s tick; PR refresh respects
@@ -5465,6 +5799,11 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 	if isDoubleTap {
 		h.lastSlotTapSlot = -1
 		h.actionLog.Add("attach via slot", fmt.Sprintf("%d", slot), true)
+		// A suspended session has no live tmux — attachSelected() would no-op
+		// silently. Wake it the same way Enter does.
+		if s.GetStatus() == session.StatusSuspended {
+			return h, h.resumeSelected(s)
+		}
 		return h, h.attachSelected()
 	}
 	h.lastSlotTapSlot = slot
@@ -5799,6 +6138,8 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
 		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
 		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
+		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
+		{Kind: PaletteKindCommand, ID: "suspend_now", Name: "Suspend Idle Sessions Now"},
 		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
 		{Kind: PaletteKindCommand, ID: "expand_all", Name: "Expand All Repos"},
 		{Kind: PaletteKindCommand, ID: "collapse_all", Name: "Collapse All Repos"},
@@ -5978,6 +6319,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.confirmDeleteSelected()
 	case "restart":
 		return h, h.confirmRestartSelected()
+	case "suspend_session":
+		return h, h.suspendSelected()
+	case "suspend_now":
+		return h, h.suspendIdleNow()
 	case "rename":
 		return h, h.renameSelected()
 	case "editor":
@@ -6075,10 +6420,12 @@ func (h *Home) reloadAll() tea.Cmd {
 	var targets []target
 	for _, s := range h.sessions {
 		status := s.GetStatus()
-		// Skip active/healthy sessions — never kill running Claude work or idle sessions.
+		// Skip active/healthy sessions — never kill running Claude work or idle
+		// sessions. Suspended sessions are intentionally parked: reviving them
+		// here would defeat the memory relief, so leave them for lazy resume.
 		if status == session.StatusRunning || status == session.StatusWaiting ||
 			status == session.StatusStarting || status == session.StatusFinished ||
-			status == session.StatusIdle {
+			status == session.StatusIdle || status == session.StatusSuspended {
 			continue
 		}
 		targets = append(targets, target{session: s, title: s.Title})

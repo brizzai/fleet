@@ -174,6 +174,83 @@ func TestHookWatcherNotificationLatency(t *testing.T) {
 	}
 }
 
+// forget must drop the cached status so a stale entry (e.g. a suspended
+// session's "dead" death-rattle) isn't served after its status file is cleared.
+func TestHookWatcherForgetPurgesStatus(t *testing.T) {
+	dir := t.TempDir()
+	w, err := newHookWatcherWithDir(dir)
+	if err != nil {
+		t.Fatalf("newHookWatcherWithDir: %v", err)
+	}
+	defer w.Stop()
+
+	sf := &StatusFile{Status: "dead", Event: "SessionEnd", Timestamp: time.Now().Unix()}
+	if err := WriteStatusFile(dir, "gone-soon", sf); err != nil {
+		t.Fatalf("WriteStatusFile: %v", err)
+	}
+	w.processFile(dir + "/gone-soon.json")
+	if w.GetStatus("gone-soon") == nil {
+		t.Fatal("precondition: expected status to be cached")
+	}
+	// Drain the processFile notification so we can assert forget sends its own.
+	select {
+	case <-w.Changes():
+	default:
+	}
+
+	w.forget(dir + "/gone-soon.json")
+	if hs := w.GetStatus("gone-soon"); hs != nil {
+		t.Fatalf("forget did not purge cached status: %+v", hs)
+	}
+	select {
+	case <-w.Changes():
+	case <-time.After(time.Second):
+		t.Fatal("expected notification after a real purge")
+	}
+}
+
+// End-to-end regression: deleting a status file (as clearHookState does on
+// suspend/resume/restart) must purge the watcher's cache via the fsnotify
+// Remove path, so the worker never replays a resumed session's old "dead"
+// hook and flips the freshly-running row to error.
+func TestHookWatcherRemoveEventPurgesStatus(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewHookWatcher()
+	if err != nil {
+		t.Fatalf("NewHookWatcher: %v", err)
+	}
+	w.hooksDir = dir
+	go w.Start()
+	defer w.Stop()
+	time.Sleep(50 * time.Millisecond) // let fsnotify establish the watch
+
+	path := dir + "/purge-me.json"
+	sf := &StatusFile{Status: "dead", Event: "SessionEnd", Timestamp: time.Now().Unix()}
+	if err := WriteStatusFile(dir, "purge-me", sf); err != nil {
+		t.Fatalf("WriteStatusFile: %v", err)
+	}
+	waitFor(t, 2*time.Second, func() bool { return w.GetStatus("purge-me") != nil },
+		"status was never cached after write")
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	waitFor(t, 2*time.Second, func() bool { return w.GetStatus("purge-me") == nil },
+		"delete did not purge the cached status")
+}
+
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout after %v: %s", timeout, msg)
+}
+
 // newHookWatcherWithDir creates a HookWatcher pointing at a custom directory
 // (for testing without touching the real hooks dir). It loads existing files
 // but does NOT start the fsnotify event loop.

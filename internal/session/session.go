@@ -36,6 +36,11 @@ const (
 	StatusIdle     Status = "idle"
 	StatusError    Status = "error"
 	StatusStarting Status = "starting"
+	// StatusSuspended is a hibernated session: its agent process and tmux session
+	// have been intentionally torn down to free memory, but the conversation is
+	// preserved (ClaudeSessionID) and resumes on attach via Restart(). It is a
+	// resting state with no live process, so the status pipeline must not touch it.
+	StatusSuspended Status = "suspended"
 )
 
 // Session represents a managed Claude Code session.
@@ -308,6 +313,25 @@ func (s *Session) Acknowledge() {
 	}
 }
 
+// IdleFor reports how long the session has shown no sign of life — the time since
+// the most recent of: last hook event (agent), last pane-content change (output),
+// last user access, or creation. Used to pick the most-idle sessions for
+// memory-pressure hibernation. Cheap: reads in-memory timestamps only, no I/O.
+func (s *Session) IdleFor() time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	last := s.CreatedAt // floor: a session can't be more idle than its age
+	for _, t := range []time.Time{s.hookUpdatedAt, s.lastContentChangeAt, s.LastAccessedAt} {
+		if t.After(last) {
+			last = t
+		}
+	}
+	if last.IsZero() {
+		return 0
+	}
+	return time.Since(last)
+}
+
 // HookStatus holds decoded status from a hook status file.
 // Defined here to avoid import cycle with hooks package.
 type HookStatus struct {
@@ -329,6 +353,14 @@ type HookStatus struct {
 // (~500ms), which adopts it.
 func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	if hs == nil {
+		return false
+	}
+
+	// Ignore hooks while suspended. Killing the agent to hibernate fires a
+	// SessionEnd ("dead") a beat after clearHookState(); storing it would leave a
+	// stale dead hook that resurfaces the moment we resume. Resume goes through
+	// Restart() (→ StatusStarting), so genuine post-resume hooks are accepted again.
+	if s.GetStatus() == StatusSuspended {
 		return false
 	}
 
@@ -579,6 +611,39 @@ func (s *Session) RespawnClaude() error {
 	return nil
 }
 
+// Suspend hibernates the session to free memory: it tears down the agent process
+// and the whole tmux session (freeing the tmux server's pane buffers too), and
+// marks the session StatusSuspended. The conversation survives — ClaudeSessionID
+// is persisted, so a later Restart() resumes it via `--resume <id>`. This is the
+// teardown half of Restart() with no recreate. Idempotent for an already-dead pane.
+func (s *Session) Suspend() error {
+	debuglog.Logger.Info("session suspend", "id", s.ID, "title", s.Title)
+	// Mark suspended BEFORE tearing down tmux. The status pipeline short-circuits
+	// on StatusSuspended, so a concurrent UpdateStatus can't flip the row to error
+	// via its liveness gates, and UpdateHookStatus won't store the killed agent's
+	// "dead" death-rattle, during teardown. Restore the prior status if the kill
+	// fails (the session is still alive, so it must not read as suspended).
+	oldStatus := s.GetStatus()
+	s.SetStatus(StatusSuspended)
+	s.clearHookState()
+	if s.tmuxSession.Exists() {
+		if err := s.tmuxSession.Kill(); err != nil {
+			s.SetStatus(oldStatus)
+			debuglog.Logger.Error("session suspend: kill failed", "id", s.ID, "title", s.Title, "err", err)
+			return err
+		}
+	}
+	return nil
+}
+
+// GetClaudeSessionID returns the captured resume id (thread-safe). Empty until the
+// agent's first SessionStart hook records it.
+func (s *Session) GetClaudeSessionID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ClaudeSessionID
+}
+
 // clearHookState drops the previous Claude process's hook state — both the
 // in-memory cache and the on-disk status file at
 // ~/.config/fleet/hooks/<id>.json. Called before relaunching Claude so the
@@ -609,6 +674,14 @@ func (s *Session) clearHookState() {
 func (s *Session) UpdateStatus() {
 	log := debuglog.Logger.With("session", s.ID, "title", s.Title)
 	oldStatus := s.GetStatus()
+
+	// Suspended is a terminal resting state we entered on purpose (tmux killed to
+	// free memory). Its tmux is gone, so the liveness gates below would flip it to
+	// error and write a spurious crash dump every cycle. Leave it untouched until a
+	// resume (Restart) moves it to StatusStarting.
+	if oldStatus == StatusSuspended {
+		return
+	}
 
 	if !s.IsAlive() {
 		s.SetStatus(StatusError)

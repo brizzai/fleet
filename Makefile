@@ -8,7 +8,7 @@ build:
 	go build -v -ldflags "-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/fleet
 
 run:
-	go run ./cmd/fleet
+	FLEET_DEBUG=$${FLEET_DEBUG:-1} go run ./cmd/fleet
 
 clean:
 	rm -rf $(BUILD_DIR)

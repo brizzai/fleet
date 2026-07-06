@@ -618,7 +618,14 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
 		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
-		return fmt.Sprintf("   %s", selTitle().Render(row))
+		rendered := fmt.Sprintf("   %s", selTitle().Render(row))
+		// On the focused suspended row, spell out the resume affordance — this is
+		// exactly when Enter is actionable. Unselected rows rely on the dim dot
+		// + dimmed title (the row is width-truncated, so no room for a suffix).
+		if status == session.StatusSuspended {
+			rendered += "  " + DimStyle.Render("suspended · enter to resume")
+		}
+		return rendered
 	}
 
 	styledSymbol := StatusSymbol(status)
