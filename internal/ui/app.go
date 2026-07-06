@@ -3394,21 +3394,21 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 func suspendIdleThreshold(mode string, level int) (minIdle time.Duration, act bool) {
 	warn := level >= perfwatch.PressureWarning
 	critical := level >= perfwatch.PressureCritical
+	// Every mode gates on memory pressure — nothing is suspended on a healthy
+	// machine. The mode picks how long-idle a session must be once pressure hits.
 	switch mode {
 	case config.SuspendLight:
 		if critical {
-			return 2 * time.Hour, true
+			return 24 * time.Hour, true
 		}
 	case config.SuspendBalanced:
 		if warn {
-			return 45 * time.Minute, true
+			return 4 * time.Hour, true
 		}
-		return 4 * time.Hour, true // housekeeping even without pressure
 	case config.SuspendAggressive:
 		if warn {
-			return 10 * time.Minute, true
+			return 1 * time.Hour, true
 		}
-		return 20 * time.Minute, true
 	}
 	return 0, false
 }
