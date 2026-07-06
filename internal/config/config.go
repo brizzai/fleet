@@ -21,6 +21,17 @@ const (
 	TelemetryOff     = "off"
 )
 
+// Session-suspend modes control how aggressively fleet hibernates idle sessions
+// under system memory pressure (see GetSessionSuspendMode). Off disables it;
+// Light is a critical-pressure safety net; Balanced and Aggressive shed idle
+// sessions earlier. Default is Light.
+const (
+	SuspendOff        = "off"
+	SuspendLight      = "light"
+	SuspendBalanced   = "balanced"
+	SuspendAggressive = "aggressive"
+)
+
 // Config holds user-configurable settings.
 type Config struct {
 	TickIntervalSec      int    `json:"tick_interval_sec,omitempty"`
@@ -49,6 +60,10 @@ type Config struct {
 	Telemetry    *bool  `json:"telemetry,omitempty"`
 	DefaultAgent string `json:"default_agent,omitempty"` // "claude" or "codex"
 	DrawerHeight int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
+	// SessionSuspendMode controls auto-hibernation of idle sessions under memory
+	// pressure: "off", "light" (default), "balanced", or "aggressive". Read via
+	// GetSessionSuspendMode. See internal/ui suspend sweep.
+	SessionSuspendMode string `json:"session_suspend_mode,omitempty"`
 
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
@@ -463,6 +478,26 @@ func (c *Config) GetTelemetryMode() string {
 		return TelemetryMinimal
 	}
 	return TelemetryFull
+}
+
+// isValidSuspendMode reports whether mode is a documented session-suspend mode.
+func isValidSuspendMode(mode string) bool {
+	switch mode {
+	case SuspendOff, SuspendLight, SuspendBalanced, SuspendAggressive:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetSessionSuspendMode returns the idle-session suspend aggressiveness:
+// "off", "light", "balanced", or "aggressive". Defaults to "light" (a
+// critical-memory-pressure safety net) when unset or invalid.
+func (c *Config) GetSessionSuspendMode() string {
+	if isValidSuspendMode(c.SessionSuspendMode) {
+		return c.SessionSuspendMode
+	}
+	return SuspendLight
 }
 
 // TelemetryConfigured reports whether the user already has an explicit

@@ -92,12 +92,13 @@ var (
 			BorderForeground(ColorAccent).
 			Padding(1, 2)
 
-	StatusRunningStyle  = lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
-	StatusWaitingStyle  = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
-	StatusFinishedStyle = lipgloss.NewStyle().Foreground(ColorBlue).Bold(true)
-	StatusIdleStyle     = lipgloss.NewStyle().Foreground(ColorGray)
-	StatusErrorStyle    = lipgloss.NewStyle().Foreground(ColorRed).Bold(true)
-	StatusStartingStyle = lipgloss.NewStyle().Foreground(ColorAccent)
+	StatusRunningStyle   = lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
+	StatusWaitingStyle   = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
+	StatusFinishedStyle  = lipgloss.NewStyle().Foreground(ColorBlue).Bold(true)
+	StatusIdleStyle      = lipgloss.NewStyle().Foreground(ColorGray)
+	StatusErrorStyle     = lipgloss.NewStyle().Foreground(ColorRed).Bold(true)
+	StatusStartingStyle  = lipgloss.NewStyle().Foreground(ColorAccent)
+	StatusSuspendedStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
 
 	// Tool badge style.
 	ToolClaudeStyle = lipgloss.NewStyle().Foreground(ColorOrange)
@@ -193,6 +194,7 @@ func ApplyPalette(p Palette) {
 	StatusIdleStyle = lipgloss.NewStyle().Foreground(ColorGray)
 	StatusErrorStyle = lipgloss.NewStyle().Foreground(ColorRed).Bold(true)
 	StatusStartingStyle = lipgloss.NewStyle().Foreground(ColorAccent)
+	StatusSuspendedStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
 
 	ToolClaudeStyle = lipgloss.NewStyle().Foreground(ColorOrange)
 
@@ -495,6 +497,8 @@ func StatusSymbolRaw(status session.Status) string {
 		return "◐"
 	case session.StatusError:
 		return "✕"
+	case session.StatusSuspended:
+		return "◌"
 	case session.StatusIdle, session.StatusStarting:
 		return "·"
 	default:
@@ -517,6 +521,8 @@ func StatusStyle(status session.Status) lipgloss.Style {
 		return StatusErrorStyle
 	case session.StatusStarting:
 		return StatusStartingStyle
+	case session.StatusSuspended:
+		return StatusSuspendedStyle
 	default:
 		return StatusIdleStyle
 	}
@@ -529,6 +535,8 @@ func TitleStyleForStatus(status session.Status) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	case session.StatusError:
 		return lipgloss.NewStyle().Foreground(ColorText).Underline(true)
+	case session.StatusSuspended:
+		return lipgloss.NewStyle().Foreground(ColorTextDim)
 	default:
 		return lipgloss.NewStyle().Foreground(ColorText)
 	}
@@ -549,6 +557,8 @@ func StatusLabel(status session.Status) string {
 		return StatusErrorStyle.Render("error")
 	case session.StatusStarting:
 		return StatusStartingStyle.Render("starting")
+	case session.StatusSuspended:
+		return StatusSuspendedStyle.Render("suspended")
 	default:
 		return string(status)
 	}
