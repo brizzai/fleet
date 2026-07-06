@@ -646,7 +646,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.syncShellStream() // attach the live stream to the newly-focused shell
-		return h, nil
+		// Probe for a TCC-blocked folder against the now-live tmux server.
+		return h, h.probeTCCCmd(msg.sh.RepoPath)
 
 	case shellRestartMsg:
 		if msg.err != nil {
@@ -721,7 +722,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		parentSessionID := msg.parentClaudeSessionID
 		sourcePath := msg.sourcePath
 		destPath := msg.path
-		return h, tea.Batch(h.probeTCCCmd(destPath), func() tea.Msg {
+		return h, func() tea.Msg {
 			// Stage the parent's Claude transcript into the destination cwd's
 			// project dir so `claude --resume <id> --fork-session` finds it.
 			// Only needed when forking into a different cwd — same-cwd forks
@@ -735,12 +736,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return sessionCreateResultMsg{err: err}
 			}
 			return sessionCreateResultMsg{session: s}
-		})
+		}
 
 	case sessionCreateResultMsg:
 		return h.handleSessionCreateResult(msg)
 
 	case tccProbeResultMsg:
+		if !msg.determined {
+			// Inconclusive (no server yet / tmux error) — unlatch so a later create
+			// re-probes instead of caching a false "not blocked" for the whole launch.
+			delete(h.tccProbed, msg.root)
+			return h, nil
+		}
 		h.tccBlockedRoots[msg.root] = msg.blocked
 		if msg.blocked {
 			debuglog.Logger.Info("tcc: tmux blocked from protected folder", "root", msg.root)
@@ -2425,13 +2432,15 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	msg.agent = ag
-	return h, tea.Batch(h.probeTCCCmd(msg.path), h.startSessionCmd(msg))
+	return h, h.startSessionCmd(msg)
 }
 
 // tccProbeResultMsg carries the outcome of a lazy macOS-TCC access probe.
+// determined is false when the probe was inconclusive (no server / tmux error).
 type tccProbeResultMsg struct {
-	root    string
-	blocked bool
+	root       string
+	blocked    bool
+	determined bool
 }
 
 // protectedRoot reports whether path lives inside a macOS TCC-protected user
@@ -2448,9 +2457,18 @@ func protectedRoot(path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	// Resolve symlinks so a repo reached via a link into a protected folder is
+	// still caught. Best-effort — EvalSymlinks fails on a path that doesn't exist
+	// yet (e.g. a worktree mid-creation), so fall back to abs.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
 	for _, name := range []string{"Documents", "Desktop", "Downloads"} {
 		root := filepath.Join(home, name)
-		if abs == root || strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		// Case-insensitive compare: the default macOS APFS/HFS+ volume is
+		// case-insensitive, so ~/documents is the same folder as ~/Documents.
+		if strings.EqualFold(abs, root) ||
+			strings.HasPrefix(strings.ToLower(abs), strings.ToLower(root)+string(os.PathSeparator)) {
 			return root, true
 		}
 	}
@@ -2461,15 +2479,18 @@ func protectedRoot(path string) (string, bool) {
 // — whether tmux is blocked from reading a macOS-protected folder that path sits
 // under. Returns nil when path isn't under such a root or its root was already
 // probed. The probe is blocking I/O (a tmux run-shell), so it runs off the Update
-// goroutine and reports back via tccProbeResultMsg.
+// goroutine and reports back via tccProbeResultMsg. Scheduled from the session/
+// shell *result* handlers, after Start() has spun up the tmux server, so the
+// probe always runs against a live server (no cold-start race).
 func (h *Home) probeTCCCmd(path string) tea.Cmd {
 	root, ok := protectedRoot(path)
 	if !ok || h.tccProbed[root] {
 		return nil
 	}
-	h.tccProbed[root] = true // optimistic: don't double-probe while in flight
+	h.tccProbed[root] = true // guard against concurrent duplicate probes
 	return func() tea.Msg {
-		return tccProbeResultMsg{root: root, blocked: tmux.DirAccessBlocked(root)}
+		blocked, determined := tmux.DirAccessBlocked(root)
+		return tccProbeResultMsg{root: root, blocked: blocked, determined: determined}
 	}
 }
 
@@ -2509,14 +2530,6 @@ func (h *Home) firstTCCBlockedRoot() string {
 	}
 	sort.Strings(roots)
 	return roots[0]
-}
-
-// tildeHome shortens a home-relative absolute path to ~/… for display.
-func tildeHome(path string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(path, home+string(os.PathSeparator)) {
-		return "~" + path[len(home):]
-	}
-	return path
 }
 
 // startSessionCmd builds the tea.Cmd that creates and starts one session off
@@ -2609,7 +2622,9 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 		}
 	}
 
-	return h, h.fetchPreviewForSelected()
+	// Probe for a TCC-blocked folder now that Start() has spun up the tmux server
+	// (covers both new sessions and forks, which flow through here).
+	return h, tea.Batch(h.probeTCCCmd(s.ProjectPath), h.fetchPreviewForSelected())
 }
 
 func (h *Home) confirmDeleteSelected() tea.Cmd {

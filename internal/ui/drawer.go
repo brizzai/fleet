@@ -431,13 +431,13 @@ func (h *Home) createShell(command string) tea.Cmd {
 	}
 	name := h.nextShellName(repo, command)
 	h.actionLog.Add("new shell", name, true)
-	return tea.Batch(h.probeTCCCmd(repo), func() tea.Msg {
+	return func() tea.Msg {
 		sh := shell.New(name, repo, command)
 		if err := sh.Start(); err != nil {
 			return shellCreateResultMsg{err: err}
 		}
 		return shellCreateResultMsg{sh: sh}
-	})
+	}
 }
 
 // nextShellName derives a tab name: the command's first token, else

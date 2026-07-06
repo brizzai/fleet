@@ -58,7 +58,7 @@ var tipRegistry = []Tip{
 		text: func(h *Home) string {
 			return fmt.Sprintf("macOS blocks tmux from %s — sessions there fail with \"Operation not permitted\". "+
 				"Move the project outside it, or grant Full Disk Access to your terminal + tmux and run `tmux kill-server`. "+
-				"Press Ctrl+K → \"Open Full Disk Access Settings\".", tildeHome(h.firstTCCBlockedRoot()))
+				"Press Ctrl+K → \"Open Full Disk Access Settings\".", shortenPath(h.firstTCCBlockedRoot()))
 		},
 	},
 	{

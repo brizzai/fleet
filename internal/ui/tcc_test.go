@@ -21,6 +21,7 @@ func TestProtectedRoot(t *testing.T) {
 	}{
 		{"project under Documents", filepath.Join(docs, "work", "dog-scratch"), docs, true},
 		{"the root itself", docs, docs, true},
+		{"lowercase (case-insensitive volume)", filepath.Join(home, "documents", "proj"), docs, true},
 		{"Desktop child", filepath.Join(home, "Desktop", "x"), filepath.Join(home, "Desktop"), true},
 		{"Downloads child", filepath.Join(home, "Downloads", "y"), filepath.Join(home, "Downloads"), true},
 		{"unprotected code dir", filepath.Join(home, "code", "fleet"), "", false},
@@ -34,19 +35,6 @@ func TestProtectedRoot(t *testing.T) {
 				t.Errorf("protectedRoot(%q) = (%q, %v), want (%q, %v)", tt.path, root, ok, tt.wantRoot, tt.wantOK)
 			}
 		})
-	}
-}
-
-func TestTildeHome(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("UserHomeDir: %v", err)
-	}
-	if got := tildeHome(filepath.Join(home, "Documents")); got != "~/Documents" {
-		t.Errorf("tildeHome(home/Documents) = %q, want ~/Documents", got)
-	}
-	if got := tildeHome("/tmp/elsewhere"); got != "/tmp/elsewhere" {
-		t.Errorf("tildeHome(/tmp/elsewhere) = %q, want unchanged", got)
 	}
 }
 
