@@ -228,10 +228,12 @@ func (d *ReleaseNotesDialog) contentLines() []string {
 		installed := !devBuild && cmp == 0 && !r.Prerelease
 
 		if !devBuild && cmp > 0 && !newerEmitted {
+			// First newer release: the header separates it, so no divider here.
+			// (No sep reset needed — releases are newest-first, so this only fires
+			// on the first iteration, and sep is set true at the loop's end anyway.)
 			fit(lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("◆ NEWER — update to get these"))
 			raw("")
 			newerEmitted = true
-			sep = false // the header already separates the first newer release
 		} else if sep {
 			raw("")
 			raw(d.rule(inner))
