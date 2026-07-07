@@ -35,7 +35,8 @@ var goldenTests = []struct {
 	{"pane_finished_quoted_crashdump_whimsical.txt", StatusFinished, "idle prompt with embedded crash-dump example containing a whimsical activity line in scrollback (~30 lines from bottom)"},
 	{"pane_waiting_askuserquestion_checkbox_focus.txt", StatusWaiting, "AskUserQuestion dialog with focus on checkbox question header (no `❯ N.` cursor in numbered options)"},
 	{"pane_waiting_exitplanmode_approve.txt", StatusWaiting, "ExitPlanMode plan-approval menu — numbered options with `shift+tab to approve with this feedback` footer (no `Esc to cancel`)"},
-	{"finished_idle_background_agent.txt", StatusFinished, "idle prompt while a background agent runs (`✻ Waiting for 1 background agent to finish` in scrollback + active sub-agent footer)"},
+	{"finished_idle_background_agent.txt", StatusRunning, "lead parked (Stop) but a background sub-agent is still in-flight in the dock (`◯ databento-operator … 27m 30s · ↓ 93.8k tokens`) → running"},
+	{"pane_running_background_agents_multi.txt", StatusRunning, "three in-flight background Explore agents in the dock (`◯ Explore … · ↓ tokens`) while the lead is parked → running"},
 	{"pane_finished_compacting.txt", StatusFinished, "mid-`/compact` pane — reads finished from the prompt/queued-message `❯`s (pane detection can't see compaction; the PreCompact hook is what keeps this session running)"},
 }
 

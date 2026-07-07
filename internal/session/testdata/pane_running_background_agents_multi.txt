@@ -1,0 +1,57 @@
+  - [1mBenchmarks / Leaderboard (model & prompt-version comparison)[0m — CLAUDE.md calls this a headline capability ("identifies how different model/prompt versions impact performance"). Completely undocumented and genuinely hard to self-discover.
+  - [1mThe in-product AI assistant ("Agent")[0m — ironic gap: the feature that [3manswers[0m these doc questions has no page describing what it can do. Users literally ask an assistant "what can you do?".
+
+  [1mMedium[0m
+  - [1mLatency / Performance[0m — perf analysis pages, undocumented.
+  - [1mLabels / AI labeling[0m — powers custom-chart [38;5;153mgroup by label[39m, product areas, labeling rules; referenced obliquely but never explained.
+  - [1mNotifications & scheduled reports[0m (Slack digests, daily TL;DR) — I linked the per-chart digest to [38;5;153mintegrations/slack[39m, but the broader reporting system has no home.
+  - [1mInsights / Recommendations / Brainstorm[0m — the AI-guidance surfaces.
+
+  [1mProbably intentional / low priority[0m
+  - [1mFindings[0m — deliberately folded into Issues (there are [38;5;153mplatform/findings → platform[39m redirects), so a section in [38;5;153missues.md[39m beats a new page.
+  - [1mTraces, Events (reading), Session Review[0m — thinner; likely fine as subsections.
+  - Admin/settings pages (Members, Plan, Audit Logs, Blocklist, Webhooks) — real gaps but lower question-volume than the analytics pages.
+
+  My recommendation: [1mOverview[0m and [1mUsers & organizations[0m are the two I'd do first — they're the biggest holes, and the latter closes a loop the docs I just wrote open.
+
+  Want me to draft any of these? I'd suggest starting with those two (same house style, same corpus), or I can do the whole "highest value" tier.
+
+[38;5;246m✻[39m [38;5;246mCrunched for 1m 17s[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mlets go high+medium + - Admin/settings pages[39m
+
+  [38;5;231mmake sure to not doc anything that is only for super admin[39m
+
+  [38;5;231mlets go[39m
+
+[38;5;231m[49m⏺[39m I'm back in plan mode. Let me first read the existing plan file, then explore the product surface to scope this accurately — especially the super-admin vs. tenant-facing distinction, which is the key constraint here.
+
+  [38;5;246mRead [1m1[0m[38;5;246m file [39m
+
+[38;5;231m⏺[39m The existing plan covers the now-completed custom-dashboards/charts docs. This is a related but distinct follow-on task, so I'll build a fresh plan. First, exploration — the critical thing to get right is the [1msuper-admin vs. tenant-facing[0m access model, so I don't document anything super-admin-only. Launching three
+  focused Explore agents in parallel.
+
+[38;5;114m⏺[39m [1m3[0m background agents launched [38;5;246m(↓ to manage)[39m
+   [38;5;246m├[39m [1mMap analytics/platform pages[0m
+   [38;5;246m├[39m [1mMap AI assistant, labels, notifications[0m
+   [38;5;246m└[39m [1mClassify settings/admin access model[0m
+
+[38;5;231m⏺[39m Three exploration agents are running in parallel. While they map the surface and access model, let me read the other existing platform docs ([38;5;153missues.md[39m, [38;5;153muser-intents.md[39m, [38;5;153muser-journeys.md[39m) so the new docs match house style and cross-link cleanly.
+
+  [38;5;246mRead [1m1[0m[38;5;246m file [39m
+
+[38;5;231m⏺[39m Three agents are mapping the surface and — most importantly — the super-admin vs. tenant-facing access model. I have the house style down from [38;5;153msessions.md[39m and [38;5;153missues.md[39m. I'll continue planning once the exploration returns; the access classification is the gate for what I can include, so I'm waiting on those results
+  before drafting the plan.
+
+[38;5;246m✻[39m [38;5;246mWaiting for [1m3[0m[38;5;246m background agents to finish[39m
+
+[38;5;37m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[38;5;16m[48;5;37m custom-dashboard-docs-ai-agent [38;5;37m[49m──
+[39m❯ 
+[38;5;37m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [36m󰧑 Opus 4.8 (1M context)[38;5;246m [90m│[38;5;246m [32m█░░░░░░░░░[38;5;246m [90m│[38;5;246m [32m14%[38;5;246m [90m│[38;5;246m [35m󰍛 140.0k/1000k[38;5;246m [90m│[38;5;246m [33m BRZ-2280-custom-dash-doc[38;5;246m [90m│[38;5;246m [1m[37m  brizzai-BRZ-2280-custom-dash-doc[0m                                                                                                                                                                                          [38;5;114m]8;id=f5omfl;https://claude.ai/code/session_01D2Q2Ys97i9BZiXse5Kskmz\/rc[39m]8;;\
+  [38;5;73m⏸ plan mode on[38;5;246m (shift+tab to cycle) · ← for agents[39m
+
+[1m  ⏺ main[0m
+[38;5;246m  ◯ Explore[39m  [38;5;246mMap analytics/platform pages[39m                                                                                                                                                                                                                                                              [38;5;246m2m 49s · ↓ 78.1k tokens
+  ◯ Explore[39m  [38;5;246mMap AI assistant, labels, notifications[39m                                                                                                                                                                                                                                                  [38;5;246m2m 35s · ↓ 104.1k tokens
+  ◯ Explore[39m  [38;5;246mClassify settings/admin access model[39m                                                                                                                                                                                                                                                      [38;5;246m2m 22s · ↓ 65.6k tokens

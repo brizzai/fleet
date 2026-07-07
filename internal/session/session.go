@@ -1520,8 +1520,52 @@ func extractRecentLines(lines []string, n int) []string {
 	return result
 }
 
+// backgroundAgentGlyph marks an in-flight agent in Claude Code's background-agents
+// dock — the "◯ Explore  <desc>  2m 49s · ↓ 78.1k tokens" rows rendered below the
+// input box when the lead delegates to run_in_background agents.
+const backgroundAgentGlyph = "◯"
+
+// detectBackgroundAgentsRunning reports whether Claude Code's background-agents dock
+// shows at least one in-flight agent. Those agents are doing work even though the
+// lead's turn has ended (it fired Stop and is parked until they re-invoke it), so the
+// session is Running rather than finished/idle.
+//
+// The dock renders BELOW Claude's input box, so its rows are always the bottom-most
+// lines of the pane — a match here is the live dock, never quoted scrollback (which
+// sits above the input box, so it can only reach the upper 50-line window). A row
+// looks like:
+//
+//	"◯ Explore  Map analytics/platform pages   2m 49s · ↓ 78.1k tokens"
+//
+// Only the in-flight glyph (◯) is matched, so a completed agent (rendered with a
+// different glyph) does not keep the session pinned Running after its work ends. The
+// row lacks the "(…)" duration and ")" suffix isWhimsicalActivity requires, which is
+// why that check misses it — the "· ↓/↑ … tokens" trailer plus the glyph identifies it.
+func detectBackgroundAgentsRunning(recentLines []string) bool {
+	n := min(8, len(recentLines))
+	for _, line := range recentLines[:n] {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, backgroundAgentGlyph) {
+			continue
+		}
+		if strings.Contains(t, "tokens") &&
+			(strings.Contains(t, "· ↓") || strings.Contains(t, "· ↑")) {
+			return true
+		}
+	}
+	return false
+}
+
 // detectRunning checks for busy indicators, spinner chars, and whimsical activity patterns.
 func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
+	// Background-agents dock: the lead delegated to run_in_background agents and
+	// parked (it fired Stop), but those agents are still in-flight — the session is
+	// running. Checked first: it's specific and bottom-anchored (scrollback-safe).
+	if detectBackgroundAgentsRunning(recentLines) {
+		log.Debug("detectStatus: matched background-agents dock (in-flight)")
+		return StatusRunning
+	}
+
 	// Busy patterns only in bottom 5 lines — "ctrl+c to interrupt" always appears
 	// near the bottom. Checking all 50 lines false-positives on conversation text
 	// that discusses these patterns (meta-problem).
