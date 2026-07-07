@@ -222,10 +222,13 @@ func (d *ReleaseNotesDialog) contentLines() []string {
 		if !devBuild {
 			cmp = releasenotes.CompareVersions(r.Version, d.installed)
 		}
-		installed := !devBuild && cmp == 0
+		// Gate the INSTALLED marker on !Prerelease: NormalizeVersion strips the
+		// pre-release suffix, so a prerelease and its GA collapse to the same
+		// version — without this both would claim the badge.
+		installed := !devBuild && cmp == 0 && !r.Prerelease
 
 		if !devBuild && cmp > 0 && !newerEmitted {
-			raw(lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("◆ NEWER — update to get these"))
+			fit(lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("◆ NEWER — update to get these"))
 			raw("")
 			newerEmitted = true
 			sep = false // the header already separates the first newer release
@@ -256,12 +259,13 @@ func (d *ReleaseNotesDialog) appendRelease(out *[]string, r releasenotes.Release
 		left += "  " + lipgloss.NewStyle().Foreground(ColorYellow).Render("pre-release")
 	}
 	// Version left, date (+ relative age) right — a clean column down the right
-	// edge. This row is already padded to inner, so append it raw.
+	// edge. Truncate to inner so a very narrow terminal (right cluster wider than
+	// inner) can't wrap it to two rows and desync the scroll window.
 	right := DimStyle.Render(r.Date)
 	if a := releasenotes.Ago(r.Date); a != "" {
 		right += DimStyle.Render(fmt.Sprintf("  (%s)", a))
 	}
-	*out = append(*out, padLR(left, right, inner))
+	fit(padLR(left, right, inner))
 
 	if len(r.Sections) == 0 {
 		fit(DimStyle.Render("  (no notes)"))

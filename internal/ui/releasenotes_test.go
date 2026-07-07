@@ -50,16 +50,42 @@ func TestReleaseNotesInstalledAndNewerGrouping(t *testing.T) {
 }
 
 func TestReleaseNotesNoLineOverflows(t *testing.T) {
-	d := NewReleaseNotesDialog()
-	d.SetSize(90, 40)
-	d.Show("2.14.0")
-	d.SetData(sampleReleases(), nil)
+	// Very narrow widths exercise the overflow-prone rows (the "◆ NEWER" header
+	// and the padded version/date row); installed 2.13.0 puts 2.14/2.15 in the
+	// NEWER group so that header is emitted.
+	for _, w := range []int{28, 38, 60, 90, 200} {
+		d := NewReleaseNotesDialog()
+		d.SetSize(w, 40)
+		d.Show("2.13.0")
+		d.SetData(sampleReleases(), nil)
 
-	inner := d.innerWidth()
-	for _, line := range d.contentLines() {
-		if w := lipgloss.Width(line); w > inner {
-			t.Errorf("content line width %d exceeds inner width %d: %q", w, inner, strip(line))
+		inner := d.innerWidth()
+		for _, line := range d.contentLines() {
+			if lw := lipgloss.Width(line); lw > inner {
+				t.Errorf("width %d: content line width %d exceeds inner %d: %q", w, lw, inner, strip(line))
+			}
 		}
+	}
+}
+
+func TestReleaseNotesPrereleaseDoesNotDoubleBadge(t *testing.T) {
+	// A prerelease and its GA collapse to the same normalized version; only the
+	// GA should carry the INSTALLED badge.
+	rs := []releasenotes.Release{
+		{Version: "2.16.0", Date: "2026-07-10", Prerelease: false, Sections: []releasenotes.Section{{Title: "Added", Bullets: []string{"GA."}}}},
+		{Version: "2.16.0", Date: "2026-07-08", Prerelease: true, Sections: []releasenotes.Section{{Title: "Added", Bullets: []string{"Release candidate."}}}},
+	}
+	d := NewReleaseNotesDialog()
+	d.SetSize(100, 40)
+	d.Show("2.16.0")
+	d.SetData(rs, nil)
+
+	joined := strip(strings.Join(d.contentLines(), "\n"))
+	if n := strings.Count(joined, "INSTALLED"); n != 1 {
+		t.Errorf("expected exactly 1 INSTALLED badge (GA only), got %d\n%s", n, joined)
+	}
+	if !strings.Contains(joined, "pre-release") {
+		t.Errorf("the prerelease row should keep its pre-release tag\n%s", joined)
 	}
 }
 
