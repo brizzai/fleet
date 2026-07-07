@@ -93,6 +93,13 @@ type Config struct {
 	// condition-driven tips are not stored here — they reset in-memory.
 	SeenTips []string `json:"seen_tips,omitempty"`
 
+	// FeatureUsage counts how many times the user has invoked a feature that a
+	// contextual tip teaches (keyed by the tip's id). Once the count reaches the
+	// tip's learned threshold the tip retires for good — the user has clearly
+	// discovered the feature, so there's no point still teaching it. Counting
+	// stops at the threshold, so this map only grows to a small bound.
+	FeatureUsage map[string]int `json:"feature_usage,omitempty"`
+
 	// loadedFromDisk records whether Load read an existing config file. It is
 	// unexported (never serialized) and powers IsFirstRun: a brand-new install
 	// has no config.json, so this is the one signal that doesn't depend on the
@@ -135,6 +142,29 @@ func (c *Config) IsTipSeen(id string) bool {
 		}
 	}
 	return false
+}
+
+// FeatureUsageCount returns how many times the tip-taught feature keyed by id
+// has been used (0 if never).
+func (c *Config) FeatureUsageCount(id string) int {
+	return c.FeatureUsage[id]
+}
+
+// NoteFeatureUsed records one use of a tip-taught feature and persists it, but
+// only while the count is still below threshold. Once the tip is learned we
+// stop counting, so this writes to disk at most `threshold` times per feature
+// over the app's lifetime rather than on every keypress.
+func (c *Config) NoteFeatureUsed(id string, threshold int) {
+	if c.FeatureUsage[id] >= threshold {
+		return
+	}
+	if c.FeatureUsage == nil {
+		c.FeatureUsage = map[string]int{}
+	}
+	c.FeatureUsage[id]++
+	if err := c.Save(); err != nil {
+		debuglog.Logger.Error("config: save feature usage", "id", id, "err", err)
+	}
 }
 
 // IsAutoNameEnabled returns whether auto-naming is enabled (default: true).

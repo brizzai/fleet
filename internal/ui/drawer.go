@@ -155,6 +155,7 @@ func (h *Home) openDrawerTyping() tea.Cmd {
 		h.setError(fmt.Errorf("terminal too short for the drawer — resize taller"))
 		return nil
 	}
+	h.cfg.NoteFeatureUsed(tipDrawerID, tipLearnedThreshold) // retire the discovery tip once they know it
 	first := h.drawerMode == drawerHidden
 	if first {
 		h.drawerRepo = h.resolveCurrentRepo()
