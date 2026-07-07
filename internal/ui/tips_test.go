@@ -113,6 +113,50 @@ func TestOnceTip_RespectsSeenAndPersistsOnDismiss(t *testing.T) {
 	}
 }
 
+// TestOnceTip_RetiresAfterLearningFeature: a teaching tip stops showing once
+// the user has invoked its feature tipLearnedThreshold times — even though the
+// tip was never seen or dismissed. Also checks the counter caps at the
+// threshold (no unbounded growth / disk writes past "learned").
+func TestOnceTip_RetiresAfterLearningFeature(t *testing.T) {
+	// NoteFeatureUsed persists via config.Save — isolate HOME so it doesn't
+	// touch the real ~/.config/fleet/config.json.
+	t.Setenv("HOME", t.TempDir())
+
+	// Isolate the drawer tipOnce (also triggers on session presence).
+	cfg := &config.Config{SeenTips: []string{tipDrawerID}}
+	h := newTipHome(cfg, session.StatusRunning, session.StatusRunning, session.StatusRunning)
+
+	// Not yet learned → the command-palette tip shows.
+	h.refreshTips(true)
+	if h.activeTipID != tipCmdPaletteID {
+		t.Fatalf("before learning: want %q, got %q", tipCmdPaletteID, h.activeTipID)
+	}
+
+	// One use below the threshold still shows the tip.
+	for range tipLearnedThreshold - 1 {
+		cfg.NoteFeatureUsed(tipCmdPaletteID, tipLearnedThreshold)
+	}
+	h.activeTipID = ""
+	h.refreshTips(true)
+	if h.activeTipID != tipCmdPaletteID {
+		t.Fatalf("one use short of learned: tip should still show, got %q", h.activeTipID)
+	}
+
+	// The use that reaches the threshold retires the tip for good.
+	cfg.NoteFeatureUsed(tipCmdPaletteID, tipLearnedThreshold)
+	h.activeTipID = ""
+	h.refreshTips(true)
+	if h.activeTipID != "" {
+		t.Fatalf("learned tip should stay hidden, got %q", h.activeTipID)
+	}
+
+	// Counting stops at the threshold — further uses don't grow the counter.
+	cfg.NoteFeatureUsed(tipCmdPaletteID, tipLearnedThreshold)
+	if got := cfg.FeatureUsageCount(tipCmdPaletteID); got != tipLearnedThreshold {
+		t.Fatalf("counter should cap at %d, got %d", tipLearnedThreshold, got)
+	}
+}
+
 func TestTipPriority_FailedBeatsCmdPalette(t *testing.T) {
 	// Both conditions hold: 4 error sessions (>= cmdPaletteMinSessions too).
 	h := newTipHome(&config.Config{}, errStatuses(reloadFailedThreshold)...)

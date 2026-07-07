@@ -2267,6 +2267,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "ctrl+k":
 		h.commandPalette.Show(h.buildPaletteItems(), h.recentPaletteIDs)
+		h.cfg.NoteFeatureUsed(tipCmdPaletteID, tipLearnedThreshold) // retire the discovery tip once they know it
 		analytics.Track(analytics.EventCommandPalette, nil)
 		return h, nil
 	case "S":

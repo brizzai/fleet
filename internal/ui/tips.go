@@ -31,6 +31,12 @@ type Tip struct {
 	active func(h *Home) bool
 	// text builds the rendered message body (may interpolate live counts).
 	text func(h *Home) string
+	// LearnedKey names the feature this tip teaches. When set, the tip retires
+	// for good once the user has invoked that feature tipLearnedThreshold times
+	// (tracked in config.FeatureUsage) — they've clearly learned it, so there's
+	// no point still nudging them. Empty for tips that teach nothing "doable"
+	// (e.g. a problem notice), which never retire this way.
+	LearnedKey string
 }
 
 const (
@@ -45,6 +51,9 @@ const (
 	// tipOnceBudget is how long a tipOnce tip stays visible (since first shown)
 	// before it auto-dismisses itself and is marked seen.
 	tipOnceBudget = 45 * time.Second
+	// tipLearnedThreshold is how many times a user must invoke a tip's taught
+	// feature before we consider it learned and stop offering the tip.
+	tipLearnedThreshold = 5
 )
 
 // tipRegistry is the catalog of contextual tips. Add new tips here.
@@ -88,23 +97,32 @@ var tipRegistry = []Tip{
 		},
 	},
 	{
-		ID:       tipCmdPaletteID,
-		Policy:   tipOnce,
-		Priority: 10,
-		active:   func(h *Home) bool { return len(h.sessions) >= cmdPaletteMinSessions },
+		ID:         tipCmdPaletteID,
+		Policy:     tipOnce,
+		Priority:   10,
+		LearnedKey: tipCmdPaletteID,
+		active:     func(h *Home) bool { return len(h.sessions) >= cmdPaletteMinSessions },
 		text: func(h *Home) string {
 			return "Tip: press Ctrl+K to open the command palette — jump to any session, repo, or command."
 		},
 	},
 	{
-		ID:       tipDrawerID,
-		Policy:   tipOnce,
-		Priority: 8, // below the command-palette tip so it doesn't fight on first launch
-		active:   func(h *Home) bool { return len(h.sessions) >= 1 && len(h.shells) == 0 && h.drawerMode == drawerHidden },
+		ID:         tipDrawerID,
+		Policy:     tipOnce,
+		Priority:   8, // below the command-palette tip so it doesn't fight on first launch
+		LearnedKey: tipDrawerID,
+		active:     func(h *Home) bool { return len(h.sessions) >= 1 && len(h.shells) == 0 && h.drawerMode == drawerHidden },
 		text: func(h *Home) string {
 			return "Tip: press ` to open a terminal drawer — dev servers, logs, and scratch shells for the selected repo."
 		},
 	},
+}
+
+// tipLearned reports whether the user has invoked the tip's taught feature
+// enough times (tipLearnedThreshold) that the tip no longer needs to show.
+// Tips that teach nothing "doable" (LearnedKey == "") are never learned away.
+func (h *Home) tipLearned(t *Tip) bool {
+	return t.LearnedKey != "" && h.cfg.FeatureUsageCount(t.LearnedKey) >= tipLearnedThreshold
 }
 
 func findTip(id string) *Tip {
@@ -164,7 +182,7 @@ func (h *Home) refreshTips(tipVisible bool) {
 				continue
 			}
 		case tipOnce:
-			if h.cfg.IsTipSeen(t.ID) {
+			if h.cfg.IsTipSeen(t.ID) || h.tipLearned(t) {
 				continue
 			}
 		}
