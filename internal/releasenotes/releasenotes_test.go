@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestNormalizeVersion(t *testing.T) {
@@ -83,6 +84,31 @@ func TestParseBodyJoinsWrappedBullet(t *testing.T) {
 	want := []Section{{Title: "Added", Bullets: []string{"First line continuation line"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseBody() = %#v\nwant %#v", got, want)
+	}
+}
+
+func TestAgo(t *testing.T) {
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		days int
+		want string
+	}{
+		{0, "today"},
+		{1, "yesterday"},
+		{5, "5 days ago"},
+		{40, "1 month ago"},
+		{70, "2 months ago"},
+		{400, "1 year ago"},
+		{800, "2 years ago"},
+	}
+	for _, c := range cases {
+		then := now.AddDate(0, 0, -c.days)
+		if got := ago(then, now); got != c.want {
+			t.Errorf("ago(%d days) = %q, want %q", c.days, got, c.want)
+		}
+	}
+	if got := ago(now.Add(24*time.Hour), now); got != "today" {
+		t.Errorf("future date should read %q, got %q", "today", got)
 	}
 }
 

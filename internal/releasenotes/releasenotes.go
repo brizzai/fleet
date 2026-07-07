@@ -241,6 +241,41 @@ func ghToken() string {
 	return ""
 }
 
+// Ago returns a short, human "time ago" for a "2006-01-02" date string, e.g.
+// "3 days ago". Returns "" if the date can't be parsed.
+func Ago(date string) string {
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return ""
+	}
+	return ago(t, time.Now())
+}
+
+// ago is the testable core of Ago: how long before now the date was.
+func ago(then, now time.Time) string {
+	days := int(now.Sub(then).Hours() / 24)
+	switch {
+	case days <= 0:
+		return "today"
+	case days == 1:
+		return "yesterday"
+	case days < 30:
+		return fmt.Sprintf("%d days ago", days)
+	case days < 365:
+		m := days / 30
+		if m <= 1 {
+			return "1 month ago"
+		}
+		return fmt.Sprintf("%d months ago", m)
+	default:
+		y := days / 365
+		if y <= 1 {
+			return "1 year ago"
+		}
+		return fmt.Sprintf("%d years ago", y)
+	}
+}
+
 // NormalizeVersion strips a leading "v" and any git-describe suffix so build-time
 // version strings ("v2.15.0", "v2.15.0-3-gabc-dirty", "2.15.0") compare against
 // CHANGELOG-style "2.15.0". "dev" is returned unchanged.

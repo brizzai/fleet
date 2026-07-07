@@ -78,6 +78,22 @@ func TestReleaseNotesDevBuildHasNoInstalledMarker(t *testing.T) {
 	}
 }
 
+func TestRenderInlineMarkdown(t *testing.T) {
+	cases := map[string]string{
+		"plain text":                     "plain text",
+		"a `code` span":                  "a code span",
+		"press `` ` ``)":                 "press `)",               // double-backtick span holds a literal backtick
+		"press `` ` ``) then `Ctrl+T` x": "press `) then Ctrl+T x", // parser resyncs after the tricky span
+		"**bold** rest":                  "bold rest",
+		"unclosed `code":                 "unclosed `code", // no closer → literal
+	}
+	for in, want := range cases {
+		if got := strip(renderInlineMarkdown(in)); got != want {
+			t.Errorf("renderInlineMarkdown(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestReleaseNotesLoadingAndError(t *testing.T) {
 	d := NewReleaseNotesDialog()
 	d.SetSize(100, 40)
