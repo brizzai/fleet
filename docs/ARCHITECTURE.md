@@ -107,6 +107,8 @@ If no hook data exists for a session, `UpdateStatus()` falls back to capturing t
 
 **Critical rule:** Hooks are authoritative for "waiting" — pane detection never overrides it. This prevents false positives from menu selectors like "❯ 1. Yes, allow once".
 
+**Background agents:** a session that delegates to `run_in_background` agents fires its lead `Stop` hook and would read idle, so pane capture also detects the background-agents dock and reports `running`. Why this is pane-scraped rather than read from a "more first-party" source — and the signal-durability analysis behind it — is a decision record in [background-agent-detection.md](./background-agent-detection.md).
+
 ## Worker Cycle
 
 `statusWorkerCycle()` in `app.go` runs every ~2s in a background goroutine:

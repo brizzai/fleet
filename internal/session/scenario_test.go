@@ -808,23 +808,42 @@ func TestScenarioFinishedAutoResumeRunning(t *testing.T) {
 
 func TestScenarioFinishedNotHeldByBackgroundAgent(t *testing.T) {
 	// Regression: the main agent fired Stop (hook=finished) 24m ago and is idling
-	// on a background sub-agent that keeps redrawing the pane, so window_activity is
+	// while a background command keeps redrawing the pane, so window_activity is
 	// perpetually <3s. The unbounded activity hold pinned the prior `waiting` state
 	// forever (acknowledged → should be idle). Bounding the hold by hook age releases
-	// it once the finished hook is stale.
-	// Captured from snapshot 2026-06-02T17-50-06_apply-ariels-strategy-to-voo-w.
+	// it once the finished hook is stale. Uses a plain idle pane (no background-agents
+	// dock — that now reads as running, see TestScenarioBackgroundAgentsShowRunning);
+	// this isolates the activity-bridge mechanism from the dock signal.
 	runScenario(t, Scenario{
 		Name: "hook=finished (stale) + idle pane + fresh background activity → releases to idle",
 		Events: []ScenarioEvent{
 			{At: 0, Hook: "waiting", Pane: "permission prompt\n❯ 1. Yes\n  2. No\nEsc to cancel\n"},
-			// Parent Stop fired 24m ago; pane now idle; background agent keeps activity fresh.
+			// Parent Stop fired 24m ago; pane now idle; background command keeps activity fresh.
 			{At: 1 * time.Second, Hook: "finished", HookAge: 24 * time.Minute,
-				Pane: "@fixture:finished_idle_background_agent.txt", ActivityAge: 200 * time.Millisecond, Acknowledge: true},
+				Pane: "@fixture:pane_finished_idle_prompt.txt", ActivityAge: 200 * time.Millisecond, Acknowledge: true},
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusWaiting},
 			// Before the fix: activity <3s holds the stale `waiting`. After: hook stale → idle.
 			{At: 1 * time.Second, Expected: StatusIdle},
+		},
+	})
+}
+
+func TestScenarioBackgroundAgentsShowRunning(t *testing.T) {
+	// The lead delegated to run_in_background agents and fired Stop (hook=finished),
+	// but the background-agents dock shows in-flight agents — the session is doing
+	// work, so it must show Running, not idle/finished. applyHookFinished sees
+	// paneStatus=running (from the dock) and overrides the finished hook.
+	// Captured from snapshot 2026-07-07T15-28-42_custom-dashboard-docs-ai-agent.
+	runScenario(t, Scenario{
+		Name: "hook=finished + background-agents dock in-flight → running",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", HookAge: 2 * time.Minute,
+				Pane: "@fixture:pane_running_background_agents_multi.txt"},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
 		},
 	})
 }
@@ -839,10 +858,10 @@ func TestScenarioFinishedBridgesRecentHookThenReleases(t *testing.T) {
 			{At: 0, Hook: "running", Pane: "⠋ Working...\nesc to interrupt\n"},
 			// Recent finished hook + fresh activity + idle pane → hold (bridge the gap).
 			{At: 1 * time.Second, Hook: "finished", HookAge: 1 * time.Second,
-				Pane: "@fixture:finished_idle_background_agent.txt", ActivityAge: 200 * time.Millisecond},
+				Pane: "@fixture:pane_finished_idle_prompt.txt", ActivityAge: 200 * time.Millisecond},
 			// Same pane/activity but the finished hook is now stale → release.
 			{At: 2 * time.Second, Hook: "finished", HookAge: 10 * time.Second,
-				Pane: "@fixture:finished_idle_background_agent.txt", ActivityAge: 200 * time.Millisecond},
+				Pane: "@fixture:pane_finished_idle_prompt.txt", ActivityAge: 200 * time.Millisecond},
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusRunning},

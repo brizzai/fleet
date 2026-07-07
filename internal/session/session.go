@@ -1492,6 +1492,14 @@ func detectStatus(content string, log *slog.Logger) Status {
 	if s := detectWaiting(recentLines, recentContent, log); s != "" {
 		return s
 	}
+	// Background-agents dock is checked after detectWaiting: if a permission prompt
+	// renders alongside live dock rows, waiting (needs attention) must win over the
+	// running the dock would otherwise report. It runs before detectFinished so a
+	// parked lead with in-flight agents reads running rather than idle.
+	if detectBackgroundAgentsRunning(recentLines) {
+		log.Debug("detectStatus: matched background-agents dock (in-flight)")
+		return StatusRunning
+	}
 	if s := detectFinished(recentLines, recentContent, log); s != "" {
 		return s
 	}
@@ -1518,6 +1526,44 @@ func extractRecentLines(lines []string, n int) []string {
 		}
 	}
 	return result
+}
+
+// backgroundAgentGlyph marks an in-flight agent in Claude Code's background-agents
+// dock — the "◯ Explore  <desc>  2m 49s · ↓ 78.1k tokens" rows rendered below the
+// input box when the lead delegates to run_in_background agents.
+const backgroundAgentGlyph = "◯"
+
+// detectBackgroundAgentsRunning reports whether Claude Code's background-agents dock
+// shows at least one in-flight agent. Those agents are doing work even though the
+// lead's turn has ended (it fired Stop and is parked until they re-invoke it), so the
+// session is Running rather than finished/idle.
+//
+// Position is the only reliable discriminator. ANSI is stripped before detection, so a
+// dock row QUOTED in conversation text (e.g. a session discussing this feature — the
+// row is documented verbatim) is byte-identical to a live one; no textual anchor can
+// tell them apart. But the live dock always renders at the very bottom of the pane, so
+// its rows sit at recentLines[0..2]. A quoted row sits above the idle chrome (~5 lines:
+// PR line, status line, border, ❯, border), i.e. index ≥5. So we scan only the bottom
+// 3 lines — enough to catch the live dock (its rows are the pane's last lines) while
+// staying clear of quoted conversation text. A row looks like:
+//
+//	"◯ Explore  Map analytics/platform pages   2m 49s · ↓ 78.1k tokens"
+//
+// Only the in-flight glyph (◯) is matched, so a completed agent (rendered with a
+// different glyph) does not keep the session pinned Running after its work ends.
+func detectBackgroundAgentsRunning(recentLines []string) bool {
+	n := min(3, len(recentLines))
+	for _, line := range recentLines[:n] {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, backgroundAgentGlyph) {
+			continue
+		}
+		if strings.Contains(t, "tokens") &&
+			(strings.Contains(t, "· ↓") || strings.Contains(t, "· ↑")) {
+			return true
+		}
+	}
+	return false
 }
 
 // detectRunning checks for busy indicators, spinner chars, and whimsical activity patterns.
