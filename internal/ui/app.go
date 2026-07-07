@@ -30,6 +30,7 @@ import (
 	"github.com/brizzai/fleet/internal/naming"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/proc"
+	"github.com/brizzai/fleet/internal/releasenotes"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -210,6 +211,7 @@ type Home struct {
 	sessionCreateDialog   *SessionCreateDialog
 	consentDialog         *ConsentDialog
 	onboardingDialog      *OnboardingDialog
+	releaseNotes          *ReleaseNotesDialog
 
 	// launchpad is the first-run experience shown when the fleet is empty:
 	// recent repos mined from Claude Code history, ready to resume.
@@ -449,6 +451,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		sessionCreateDialog:    NewSessionCreateDialog(),
 		consentDialog:          NewConsentDialog(),
 		onboardingDialog:       NewOnboardingDialog(cfg),
+		releaseNotes:           NewReleaseNotesDialog(),
 		launchpad:              NewLaunchpad(),
 		bugReport:              NewBugReportDialog(),
 		previewCache:           make(map[string]string),
@@ -598,6 +601,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
+		h.releaseNotes.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
 		return h, nil
 
@@ -955,6 +959,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.fireStartupAnalytics(repoCount)
 		// First-run theme onboarding follows the consent prompt.
 		h.maybeShowOnboarding()
+		return h, nil
+
+	case releaseNotesLoadedMsg:
+		h.releaseNotes.SetData(msg.releases, msg.err)
 		return h, nil
 
 	case bugReportClosedMsg:
@@ -1559,6 +1567,7 @@ func (h *Home) modalOpen() bool {
 	return h.consentDialog.IsVisible() ||
 		h.onboardingDialog.IsVisible() ||
 		h.helpOverlay.IsVisible() ||
+		h.releaseNotes.IsVisible() ||
 		h.bugReport.IsVisible() ||
 		h.settingsDialog.IsVisible() ||
 		h.createWorkspaceDialog.IsVisible() ||
@@ -1583,6 +1592,9 @@ func (h *Home) renderBody() string {
 	}
 	if h.helpOverlay.IsVisible() {
 		return h.helpOverlay.View()
+	}
+	if h.releaseNotes.IsVisible() {
+		return h.releaseNotes.View()
 	}
 	if h.bugReport.IsVisible() {
 		return h.bugReport.View()
@@ -1846,6 +1858,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.helpOverlay.IsVisible():
 		overlay, cmd := h.helpOverlay.Update(msg)
 		h.helpOverlay = overlay
+		return cmd, true
+	case h.releaseNotes.IsVisible():
+		dialog, cmd := h.releaseNotes.Update(msg)
+		h.releaseNotes = dialog
 		return cmd, true
 	case h.consentDialog.IsVisible():
 		dialog, cmd := h.consentDialog.Update(msg)
@@ -6138,6 +6154,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "settings", Name: "Settings", Shortcut: "S"},
 		{Kind: PaletteKindCommand, ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
 		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
+		{Kind: PaletteKindCommand, ID: "release_notes", Name: "Release Notes"},
 		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
 		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
 		{Kind: PaletteKindCommand, ID: "suspend_now", Name: "Suspend Idle Sessions Now"},
@@ -6366,6 +6383,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "help":
 		h.helpOverlay.Show()
 		return h, nil
+	case "release_notes":
+		h.actionLog.Add("open release notes", "", true)
+		h.releaseNotes.Show(h.version)
+		return h, h.loadReleaseNotes()
 	case "reload_all":
 		analytics.Track(analytics.EventReloadAll, nil)
 		return h, h.reloadAll()
@@ -6410,6 +6431,21 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.beginQuit("command-palette")
 	}
 	return h, nil
+}
+
+// releaseNotesLoadedMsg carries the async result of loading the changelog.
+type releaseNotesLoadedMsg struct {
+	releases []releasenotes.Release
+	err      error
+}
+
+// loadReleaseNotes fetches (or reads the cached) GitHub releases off the Update
+// goroutine and delivers them via releaseNotesLoadedMsg.
+func (h *Home) loadReleaseNotes() tea.Cmd {
+	return func() tea.Msg {
+		rs, err := releasenotes.Load()
+		return releaseNotesLoadedMsg{releases: rs, err: err}
+	}
 }
 
 // reloadAll restarts all dead/error sessions concurrently.

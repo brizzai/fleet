@@ -22,6 +22,33 @@ skimming the release notes should grasp it at a glance:
 - If a change is genuinely large, link the PR rather than narrating every facet.
 - Prefer "what changed for the user" over "how it was built."
 
+## Voice — make it fun to read
+
+Fragments are rendered in-app by the Release Notes viewer (`Ctrl+K` → "Release
+Notes"), which formats `` `code` `` and `**bold**`. Write for someone skimming
+that dialog. The delight comes from **honest specificity, not marketing** —
+being vivid and true about what changed, never hype.
+
+- **Open with a bold headline.** Start each entry with a 2–4 word `**bold**`
+  hook, then the detail — so someone reading only the bold text gets the whole
+  release. e.g. `**Worktree names stop snowballing.** …`
+- **Lead with the payoff, in second person.** "You can now…", "Sessions now…" —
+  not "Added support for…".
+- **Name the pain you killed.** The wit is in being honest about the annoyance:
+  `…instead of a cryptic "Operation not permitted".`
+- **Numbers, not adjectives.** "~150ms instead of up to 2s" — never "much faster".
+- **`code`-format the concretes.** Keys, commands, paths: `` `Ctrl+K` ``,
+  `` `npm run dev` ``, `` `~/Documents` ``.
+- **One idea per bullet.** Split compound changes; scannability beats completeness.
+- **Ban hype words:** _seamless, powerful, delightful, robust, blazing_. A dry
+  wink is welcome; a sales pitch is not.
+
+Before → after (same fix, feature-first vs. reader-first):
+
+> ~~Creating a new worktree from an existing worktree no longer snowballs the name (repo-a → repo-a-b → repo-a-b-c).~~
+>
+> **Worktree names stop snowballing.** New worktrees are named as siblings of the main repo — a worktree-of-a-worktree is `repo-b`, not `repo-a-b-c`.
+
 ## Valid Types
 
 | Type | Section |
@@ -41,7 +68,7 @@ skimming the release notes should grasp it at a glance:
 ---
 type: improved
 ---
-Status updates now respond in ~150ms instead of up to 2s
+**Status keeps pace with your sessions.** Updates now land in ~150ms, down from up to 2s.
 ```
 
 `changelog/unreleased/fix-detach-stale.md`:
@@ -49,7 +76,7 @@ Status updates now respond in ~150ms instead of up to 2s
 ---
 type: fixed
 ---
-Status showing stale data immediately after detaching from a session
+**No more stale status after detaching.** The sidebar refreshes the moment you leave, instead of showing the last frame.
 ```
 
 ## Skip
