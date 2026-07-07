@@ -28,6 +28,7 @@ Use [conventional commits](https://www.conventionalcommits.org/). Version is aut
 ## Changelog
 - Each PR adds a fragment file: `changelog/unreleased/<name>.md` with `type:` frontmatter (added/improved/fixed/changed/removed)
 - **Keep fragments concise: 1–2 sentences, lead with the user-facing change.** No implementation detail, marketing tone, or exhaustive sub-points — a user skimming the release notes should grasp it at a glance. e.g. "Status updates now respond in ~150ms instead of up to 2s."
+- **Voice — fun via honest specificity, not hype.** Fragments render in-app (Ctrl+K → "Release Notes", which formats `` `code` `` + `**bold**`), so write for a reader: open each bullet with a **bold 2–4 word headline** so a release skims in one pass; write in second person ("You can now…", "Sessions now…"); name the annoyance you killed ("…instead of a cryptic 'Operation not permitted'"); numbers over adjectives ("~150ms instead of 2s"); `code`-format keys/commands/paths (`Ctrl+K`, `~/Documents`); one idea per bullet; ban hype words (seamless, powerful, delightful, blazing). Full guide + examples: `changelog/README.md`.
 - CI checks for fragment presence; comment `/no-changelog` to skip
 - At release time, fragments are merged into CHANGELOG.md and deleted
 
