@@ -1,0 +1,11 @@
+⏺ The background-agents dock row format is documented as:
+
+  ◯ Explore  Map analytics/platform pages   2m 49s · ↓ 78.1k tokens
+
+  That's how fleet detects that background agents are still running.
+
+────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────
+  󰧑 Opus 4.8 (1M context) │ ░░░░░░░░░░ │ 14% │ BRZ-2280-custom-dash-doc
+  ⏵⏵ auto mode on (shift+tab to cycle)

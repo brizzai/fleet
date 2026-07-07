@@ -1492,6 +1492,14 @@ func detectStatus(content string, log *slog.Logger) Status {
 	if s := detectWaiting(recentLines, recentContent, log); s != "" {
 		return s
 	}
+	// Background-agents dock is checked after detectWaiting: if a permission prompt
+	// renders alongside live dock rows, waiting (needs attention) must win over the
+	// running the dock would otherwise report. It runs before detectFinished so a
+	// parked lead with in-flight agents reads running rather than idle.
+	if detectBackgroundAgentsRunning(recentLines) {
+		log.Debug("detectStatus: matched background-agents dock (in-flight)")
+		return StatusRunning
+	}
 	if s := detectFinished(recentLines, recentContent, log); s != "" {
 		return s
 	}
@@ -1530,19 +1538,21 @@ const backgroundAgentGlyph = "◯"
 // lead's turn has ended (it fired Stop and is parked until they re-invoke it), so the
 // session is Running rather than finished/idle.
 //
-// The dock renders BELOW Claude's input box, so its rows are always the bottom-most
-// lines of the pane — a match here is the live dock, never quoted scrollback (which
-// sits above the input box, so it can only reach the upper 50-line window). A row
-// looks like:
+// Position is the only reliable discriminator. ANSI is stripped before detection, so a
+// dock row QUOTED in conversation text (e.g. a session discussing this feature — the
+// row is documented verbatim) is byte-identical to a live one; no textual anchor can
+// tell them apart. But the live dock always renders at the very bottom of the pane, so
+// its rows sit at recentLines[0..2]. A quoted row sits above the idle chrome (~5 lines:
+// PR line, status line, border, ❯, border), i.e. index ≥5. So we scan only the bottom
+// 3 lines — enough to catch the live dock (its rows are the pane's last lines) while
+// staying clear of quoted conversation text. A row looks like:
 //
 //	"◯ Explore  Map analytics/platform pages   2m 49s · ↓ 78.1k tokens"
 //
 // Only the in-flight glyph (◯) is matched, so a completed agent (rendered with a
-// different glyph) does not keep the session pinned Running after its work ends. The
-// row lacks the "(…)" duration and ")" suffix isWhimsicalActivity requires, which is
-// why that check misses it — the "· ↓/↑ … tokens" trailer plus the glyph identifies it.
+// different glyph) does not keep the session pinned Running after its work ends.
 func detectBackgroundAgentsRunning(recentLines []string) bool {
-	n := min(8, len(recentLines))
+	n := min(3, len(recentLines))
 	for _, line := range recentLines[:n] {
 		t := strings.TrimSpace(line)
 		if !strings.HasPrefix(t, backgroundAgentGlyph) {
@@ -1558,14 +1568,6 @@ func detectBackgroundAgentsRunning(recentLines []string) bool {
 
 // detectRunning checks for busy indicators, spinner chars, and whimsical activity patterns.
 func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
-	// Background-agents dock: the lead delegated to run_in_background agents and
-	// parked (it fired Stop), but those agents are still in-flight — the session is
-	// running. Checked first: it's specific and bottom-anchored (scrollback-safe).
-	if detectBackgroundAgentsRunning(recentLines) {
-		log.Debug("detectStatus: matched background-agents dock (in-flight)")
-		return StatusRunning
-	}
-
 	// Busy patterns only in bottom 5 lines — "ctrl+c to interrupt" always appears
 	// near the bottom. Checking all 50 lines false-positives on conversation text
 	// that discusses these patterns (meta-problem).

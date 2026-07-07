@@ -37,6 +37,8 @@ var goldenTests = []struct {
 	{"pane_waiting_exitplanmode_approve.txt", StatusWaiting, "ExitPlanMode plan-approval menu — numbered options with `shift+tab to approve with this feedback` footer (no `Esc to cancel`)"},
 	{"finished_idle_background_agent.txt", StatusRunning, "lead parked (Stop) but a background sub-agent is still in-flight in the dock (`◯ databento-operator … 27m 30s · ↓ 93.8k tokens`) → running"},
 	{"pane_running_background_agents_multi.txt", StatusRunning, "three in-flight background Explore agents in the dock (`◯ Explore … · ↓ tokens`) while the lead is parked → running"},
+	{"pane_finished_quoted_dock_row.txt", StatusFinished, "idle pane whose conversation quotes a dock row verbatim (`◯ Explore … · ↓ tokens`) above the chrome — must NOT read as running (position guard: dock only scanned in bottom 3 lines)"},
+	{"pane_waiting_permission_with_dock.txt", StatusWaiting, "permission menu with live dock rows below it — waiting must win over the dock's running (detectWaiting precedes the dock check)"},
 	{"pane_finished_compacting.txt", StatusFinished, "mid-`/compact` pane — reads finished from the prompt/queued-message `❯`s (pane detection can't see compaction; the PreCompact hook is what keeps this session running)"},
 }
 
