@@ -36,6 +36,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "u", Desc: "Undo delete", Section: "session"},
 	{Key: "r", BarKey: "r", BarDesc: "Restart", Desc: "Restart session", Section: "session"},
 	{Key: "R", Desc: "Rename session", Section: "session"},
+	{Key: "m", Desc: "Mark session as unread (idle → finished)", Section: "session"},
 	{Key: "e", Desc: "Open in editor", Section: "session"},
 	{Key: "p", BarKey: "p", BarDesc: "PR", Desc: "Open PR in browser", Section: "session"},
 	{Key: "Y", BarKey: "Y", BarDesc: "Approve", Desc: "Quick approve permission", Section: "session"},

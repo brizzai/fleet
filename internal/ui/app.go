@@ -2198,6 +2198,12 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.confirmRestartSelected()
 	case "R":
 		return h, h.renameSelected()
+	case "m":
+		if s := h.selectedSession(); s != nil {
+			h.actionLog.Add("mark unread", s.Title, true)
+		}
+		h.markUnreadSelected()
+		return h, nil
 	case "e":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("open editor", fmt.Sprintf("%q at %s", h.cfg.GetEditor(), s.ProjectPath), true)
@@ -6159,6 +6165,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
 		{Kind: PaletteKindCommand, ID: "suspend_now", Name: "Suspend Idle Sessions Now"},
 		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
+		{Kind: PaletteKindCommand, ID: "mark_unread", Name: "Mark as Unread", Shortcut: "m"},
 		{Kind: PaletteKindCommand, ID: "expand_all", Name: "Expand All Repos"},
 		{Kind: PaletteKindCommand, ID: "collapse_all", Name: "Collapse All Repos"},
 		{Kind: PaletteKindCommand, ID: "quit", Name: "Quit", Shortcut: "⌃C"},
@@ -6397,6 +6404,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventMarkAllRead, nil)
 		h.markAllAsRead()
 		return h, nil
+	case "mark_unread":
+		h.markUnreadSelected()
+		return h, nil
 	case "expand_all":
 		for _, key := range h.allExpandKeys() {
 			h.setExpanded(key, true)
@@ -6531,6 +6541,37 @@ func (h *Home) markAllAsRead() {
 	}
 	h.rebuildFlatItems()
 	h.setInfo(fmt.Sprintf("Marked %d sessions as read", count))
+}
+
+// markUnreadSelected flags the selected idle session as unread (Idle → Finished),
+// the single-session inverse of markAllAsRead.
+func (h *Home) markUnreadSelected() {
+	s := h.selectedSession()
+	if s == nil {
+		return
+	}
+	if s.GetStatus() != session.StatusIdle {
+		h.setInfo("Only idle sessions can be marked unread")
+		return
+	}
+	// A session that never fired a hook (e.g. a freshly created Codex/OpenCode
+	// session sitting at its prompt) would be flipped straight back to idle by the
+	// worker's no-hook path, so the mark wouldn't stick. Only sessions with hook
+	// state settle to Finished from Acknowledged=false.
+	if s.GetHookStatus() == "" {
+		h.setInfo("Session hasn't run yet — nothing to mark unread")
+		return
+	}
+	analytics.Track(analytics.EventMarkUnread, nil)
+	s.MarkUnread()
+	if err := h.storage.UpdateStatus(s.ID, string(session.StatusFinished)); err != nil {
+		debuglog.Logger.Error("storage: UpdateStatus", "id", s.ID, "err", err)
+	}
+	if err := h.storage.SetAcknowledged(s.ID, false); err != nil {
+		debuglog.Logger.Error("storage: SetAcknowledged", "id", s.ID, "err", err)
+	}
+	h.rebuildFlatItems()
+	h.setInfo("Marked as unread")
 }
 
 // ensureExactHeight pads or truncates content to exactly n lines.

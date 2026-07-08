@@ -313,6 +313,17 @@ func (s *Session) Acknowledge() {
 	}
 }
 
+// MarkUnread flags a session as needing attention again (Idle → Finished),
+// the inverse of Acknowledge. Only meaningful for a session at rest.
+func (s *Session) MarkUnread() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Acknowledged = false
+	if s.Status == StatusIdle {
+		s.Status = StatusFinished
+	}
+}
+
 // IdleFor reports how long the session has shown no sign of life — the time since
 // the most recent of: last hook event (agent), last pane-content change (output),
 // last user access, or creation. Used to pick the most-idle sessions for

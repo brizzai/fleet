@@ -55,6 +55,7 @@ const (
 	// Bulk actions.
 	EventReloadAll   = "reload_all"
 	EventMarkAllRead = "mark_all_read"
+	EventMarkUnread  = "mark_unread"
 
 	// Claude / hook signals (engagement).
 	EventClaudePromptSubmitted  = "claude_prompt_submitted"
