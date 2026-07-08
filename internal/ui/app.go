@@ -228,7 +228,7 @@ type Home struct {
 	cachedReleases     []releasenotes.Release
 	hasUnseenWhatsNew  bool
 	whatsNewFrame      int  // shimmer animation frame
-	whatsNewShimmering bool // whether the ~80ms shimmer loop is currently armed
+	whatsNewShimmering bool // whether the ~60ms shimmer loop is currently armed
 
 	// launchpad is the first-run experience shown when the fleet is empty:
 	// recent repos mined from Claude Code history, ready to resume.
@@ -4544,6 +4544,12 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	// accurate for instances left running for days without a restart.
 	analytics.Heartbeat()
 
+	// Age out the What's New badge against its 7-day window: recompute each tick
+	// so a highlighted release that crosses the boundary while fleet keeps
+	// running flips hasUnseenWhatsNew back to false. Without this the badge (and
+	// its 60ms shimmer loop) would never retire on a long-lived instance — the
+	// verdict is otherwise only sampled at load time (Init / explicit opens).
+	h.recomputeWhatsNew()
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	// Re-arm the badge shimmer if it should be running but isn't (e.g. it
 	// stopped while a modal was open, and the modal has since closed).
