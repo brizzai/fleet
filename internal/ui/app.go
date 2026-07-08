@@ -6554,6 +6554,14 @@ func (h *Home) markUnreadSelected() {
 		h.setInfo("Only idle sessions can be marked unread")
 		return
 	}
+	// A session that never fired a hook (e.g. a freshly created Codex/OpenCode
+	// session sitting at its prompt) would be flipped straight back to idle by the
+	// worker's no-hook path, so the mark wouldn't stick. Only sessions with hook
+	// state settle to Finished from Acknowledged=false.
+	if s.GetHookStatus() == "" {
+		h.setInfo("Session hasn't run yet — nothing to mark unread")
+		return
+	}
 	analytics.Track(analytics.EventMarkUnread, nil)
 	s.MarkUnread()
 	if err := h.storage.UpdateStatus(s.ID, string(session.StatusFinished)); err != nil {
