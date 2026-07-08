@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-07-08
+
+### Highlights
+
+- **Yes, this is What's New telling you about What's New.** The shimmering `✦ What's New` badge (top-right) lights up when a release has highlights worth your time — press `W` to read them, capped to the last 7 days. Open it once and it quietly retires until the next release. Fittingly, its very first highlight is itself.
+
+### Added
+
+- **Mark as unread** — Press `m` (or `Ctrl+K` → "Mark as Unread") to push an idle session back to Finished, re-flagging it for attention. The inverse of "Mark All as Read".
+- A new "Release Notes" command in the Ctrl+K palette opens a scrollable changelog of every release — marking the version you're running and grouping newer releases you can update to.
+- **Yes, this is What's New telling you about What's New.** The shimmering `✦ What's New` badge (top-right) lights up when a release has highlights worth your time — press `W` to read them, capped to the last 7 days. Open it once and it quietly retires until the next release. Fittingly, its very first highlight is itself.
+
+### Improved
+
+- Discovery tips now stop appearing once you've clearly learned the feature — e.g. the command-palette hint retires after you've opened `Ctrl+K` a handful of times.
+
+### Fixed
+
+- Sessions that delegate to background agents now show as Running while those agents work, instead of appearing idle.
+
 ## [2.15.0] - 2026-07-06
 
 ### Added
@@ -347,7 +367,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.15.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.16.0...HEAD
+[2.16.0]: https://github.com/brizzai/fleet/releases/tag/v2.16.0
 [2.15.0]: https://github.com/brizzai/fleet/releases/tag/v2.15.0
 [2.14.0]: https://github.com/brizzai/fleet/releases/tag/v2.14.0
 [2.13.0]: https://github.com/brizzai/fleet/releases/tag/v2.13.0
