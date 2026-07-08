@@ -19,7 +19,7 @@ file in `changelog/unreleased/`; at release time (`/ship`) they're merged into
 
 ### If argument is "skip", "no-changelog", or "none"
 Comment `/no-changelog` on the PR and stop:
-```
+```bash
 gh pr comment --body "/no-changelog"
 ```
 
