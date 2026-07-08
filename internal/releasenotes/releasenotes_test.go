@@ -112,6 +112,47 @@ func TestAgo(t *testing.T) {
 	}
 }
 
+func TestWithinLastDays(t *testing.T) {
+	day := func(offset int) string {
+		return time.Now().AddDate(0, 0, offset).Format("2006-01-02")
+	}
+	cases := []struct {
+		date string
+		n    int
+		want bool
+	}{
+		{day(0), 7, true},    // today
+		{day(-3), 7, true},   // 3 days ago, within 7
+		{day(-7), 7, false},  // exactly 7 days ago, past the window
+		{day(-30), 7, false}, // long ago
+		{day(1), 7, true},    // slight clock skew (tomorrow) tolerated
+		{"not-a-date", 7, false},
+	}
+	for _, c := range cases {
+		if got := WithinLastDays(c.date, c.n); got != c.want {
+			t.Errorf("WithinLastDays(%q, %d) = %v, want %v", c.date, c.n, got, c.want)
+		}
+	}
+}
+
+func TestParseBodyHighlightsSection(t *testing.T) {
+	// The What's New reel relies on a "### Highlights" block parsing like any
+	// other section — parseBody is title-agnostic, so this guards that.
+	body := "---\n\n" +
+		"### Highlights\n\n" +
+		"- **Big thing.** You'll like it.\n\n" +
+		"### Added\n\n" +
+		"- **Big thing.** You'll like it.\n"
+	got := parseBody(body)
+	want := []Section{
+		{Title: "Highlights", Bullets: []string{"**Big thing.** You'll like it."}},
+		{Title: "Added", Bullets: []string{"**Big thing.** You'll like it."}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseBody() = %#v\nwant %#v", got, want)
+	}
+}
+
 func TestNormalizeReleasesSortsAndDropsDrafts(t *testing.T) {
 	fixture := `[
 		{"tag_name":"v2.14.0","name":"v2.14.0","published_at":"2026-07-05T10:00:00Z","body":"---\n### Improved\n- Faster quit.","prerelease":false,"draft":false,"html_url":"https://x/2.14.0"},

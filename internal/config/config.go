@@ -88,6 +88,13 @@ type Config struct {
 	// skipped). When false, the TUI shows it after the consent prompt.
 	DisplayOnboardingSeen bool `json:"display_onboarding_seen,omitempty"`
 
+	// ReleaseNotesSeenVersion is the newest release version the user has viewed
+	// in the "What's New" reel (normalized, e.g. "2.15.0"). The top-right
+	// What's New badge shows only while a newer highlighted release exists; on a
+	// fresh install it's seeded to the running version so pre-existing releases
+	// don't nag. See GetReleaseNotesSeenVersion / MarkReleaseNotesSeen.
+	ReleaseNotesSeenVersion string `json:"release_notes_seen_version,omitempty"`
+
 	// SeenTips records IDs of one-time (tipOnce) contextual tips the user has
 	// dismissed or that have timed out, so they never reappear. Recurring,
 	// condition-driven tips are not stored here — they reset in-memory.
@@ -131,6 +138,24 @@ func (c *Config) GetDefaultAgent() string {
 		return "opencode"
 	default:
 		return "claude"
+	}
+}
+
+// GetReleaseNotesSeenVersion returns the newest release version the user has
+// viewed in the What's New reel ("" if never).
+func (c *Config) GetReleaseNotesSeenVersion() string {
+	return c.ReleaseNotesSeenVersion
+}
+
+// MarkReleaseNotesSeen records the newest release version the user has viewed
+// and persists it, so the What's New badge clears until a newer release ships.
+func (c *Config) MarkReleaseNotesSeen(version string) {
+	if version == "" || version == c.ReleaseNotesSeenVersion {
+		return
+	}
+	c.ReleaseNotesSeenVersion = version
+	if err := c.Save(); err != nil {
+		debuglog.Logger.Error("config: save release notes seen", "version", version, "err", err)
 	}
 }
 

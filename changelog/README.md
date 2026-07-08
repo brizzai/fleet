@@ -61,6 +61,25 @@ Before → after (same fix, feature-first vs. reader-first):
 | `deprecated` | ### Deprecated |
 | `security` | ### Security |
 
+## Highlights (What's New)
+
+Add `highlight: true` to a fragment's frontmatter to also surface it in the
+in-app **What's New** reel (the animated top-right badge, `W` or `Ctrl+K` →
+"What's New") — a curated feed of the release's most notable changes:
+
+```yaml
+---
+type: added
+highlight: true
+---
+**Live terminal drawer.** The `` ` `` drawer now streams shell output live.
+```
+
+The item still appears in its normal section (Added/Fixed/…); the flag only
+*also* copies it into a `### Highlights` block at the top of the release. Reserve
+it for changes a user would be glad to discover — **most fragments are not
+highlights**. No flag (or `highlight: false`) means changelog-only, as before.
+
 ## Examples
 
 `changelog/unreleased/faster-status.md`:

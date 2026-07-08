@@ -42,6 +42,7 @@ const (
 	tickInterval           = 2 * time.Second
 	activeStatusInterval   = 500 * time.Millisecond // fast pane re-check for active sessions
 	previewTickInterval    = 500 * time.Millisecond
+	whatsNewTickInterval   = 60 * time.Millisecond // shimmer cadence for the What's New badge
 	previewCacheTTL        = 500 * time.Millisecond
 	layoutBreakpointSingle = 50
 	layoutBreakpointDual   = 80
@@ -140,6 +141,7 @@ type (
 	openPRMsg            struct{ err error }
 	quickApproveMsg      struct{ err error }
 	spinnerTickMsg       struct{}
+	whatsNewTickMsg      struct{}
 	previewTickMsg       time.Time
 	focusTickMsg         time.Time
 	slotAssignTimeoutMsg struct{}
@@ -180,6 +182,13 @@ func spinnerTickCmd() tea.Msg {
 	return spinnerTickMsg{}
 }
 
+// whatsNewTickCmd paces the What's New badge shimmer. Self-rescheduled only
+// while the badge is visible (see the whatsNewTickMsg handler), so it burns no
+// CPU when the badge is hidden.
+func whatsNewTickCmd() tea.Cmd {
+	return tea.Tick(whatsNewTickInterval, func(time.Time) tea.Msg { return whatsNewTickMsg{} })
+}
+
 // Home is the main Bubble Tea model.
 type Home struct {
 	width  int
@@ -212,6 +221,14 @@ type Home struct {
 	consentDialog         *ConsentDialog
 	onboardingDialog      *OnboardingDialog
 	releaseNotes          *ReleaseNotesDialog
+
+	// What's New badge: an animated top-right indicator shown while an unseen
+	// highlighted release exists. cachedReleases is loaded once at startup so
+	// the badge can be computed without opening the dialog.
+	cachedReleases     []releasenotes.Release
+	hasUnseenWhatsNew  bool
+	whatsNewFrame      int  // shimmer animation frame
+	whatsNewShimmering bool // whether the ~60ms shimmer loop is currently armed
 
 	// launchpad is the first-run experience shown when the fleet is empty:
 	// recent repos mined from Claude Code history, ready to resume.
@@ -470,6 +487,11 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		startTime:              time.Now(),
 	}
 	h.drawerHeight = cfg.GetDrawerHeight()
+	// Seed the What's New "seen" version on first run so a fresh install doesn't
+	// light up the badge for releases that predate it.
+	if cfg.GetReleaseNotesSeenVersion() == "" {
+		cfg.MarkReleaseNotesSeen(releasenotes.NormalizeVersion(version))
+	}
 	emptyCache := make(map[string]*git.RepoInfo)
 	h.gitInfoCache.Store(&emptyCache)
 	return h
@@ -481,6 +503,7 @@ func (h *Home) Init() tea.Cmd {
 		h.loadSessions,
 		h.tick(),
 		h.previewTick(),
+		h.loadReleaseNotes(), // compute the What's New badge without opening the dialog
 	)
 }
 
@@ -963,7 +986,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case releaseNotesLoadedMsg:
 		h.releaseNotes.SetData(msg.releases, msg.err)
-		return h, nil
+		if msg.err == nil {
+			h.cachedReleases = msg.releases
+			h.recomputeWhatsNew()
+		}
+		return h, h.ensureWhatsNewShimmer()
 
 	case bugReportClosedMsg:
 		return h, nil
@@ -1255,6 +1282,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case whatsNewTickMsg:
+		// Advance the badge shimmer; stop the loop (and stop burning CPU) the
+		// moment the badge is hidden or a modal takes the screen.
+		if !h.hasUnseenWhatsNew || h.modalOpen() {
+			h.whatsNewShimmering = false
+			return h, nil
+		}
+		h.whatsNewFrame++
+		return h, whatsNewTickCmd()
+
 	case gitInfoUpdateMsg:
 		// Workers push per-repo refresh results here. Update is the sole
 		// writer of gitInfoCache and goes through writeGitInfo's COW so
@@ -1498,6 +1535,13 @@ func (h *Home) View() tea.View {
 		return h.chrome(RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame))
 	}
 	base := h.renderBody()
+	// Animated "What's New" badge, top-right of the header row. Only when there
+	// are unseen highlights and no modal owns the screen (a modal makes
+	// renderBody return its own full-screen view).
+	if h.hasUnseenWhatsNew && !h.modalOpen() {
+		badge := renderWhatsNewBadge(h.whatsNewFrame)
+		base = overlayAt(badge, base, h.width-lipgloss.Width(badge)-1, 0)
+	}
 	// Command palette is a true overlay: render it on top of the main UI so
 	// the sidebar/preview stay visible behind the dialog box. The base is
 	// dimmed first so the palette visually lifts above the content.
@@ -2296,6 +2340,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
+	case "W":
+		return h.openReleaseNotes(true)
 	case "X":
 		h.dismissActiveTip()
 		return h, nil
@@ -4498,8 +4544,16 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	// accurate for instances left running for days without a restart.
 	analytics.Heartbeat()
 
+	// Age out the What's New badge against its 7-day window: recompute each tick
+	// so a highlighted release that crosses the boundary while fleet keeps
+	// running flips hasUnseenWhatsNew back to false. Without this the badge (and
+	// its 60ms shimmer loop) would never retire on a long-lived instance — the
+	// verdict is otherwise only sampled at load time (Init / explicit opens).
+	h.recomputeWhatsNew()
 	// Preview is now handled by the faster previewTick, no need to fetch here.
-	return h, h.tick()
+	// Re-arm the badge shimmer if it should be running but isn't (e.g. it
+	// stopped while a modal was open, and the modal has since closed).
+	return h, tea.Batch(h.tick(), h.ensureWhatsNewShimmer())
 }
 
 // bootstrapRepoSet returns the union of repo roots derived from sessions and
@@ -6160,6 +6214,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "settings", Name: "Settings", Shortcut: "S"},
 		{Kind: PaletteKindCommand, ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
 		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
+		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "W"},
 		{Kind: PaletteKindCommand, ID: "release_notes", Name: "Release Notes"},
 		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
 		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
@@ -6390,10 +6445,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "help":
 		h.helpOverlay.Show()
 		return h, nil
+	case "whats_new":
+		return h.openReleaseNotes(true)
 	case "release_notes":
-		h.actionLog.Add("open release notes", "", true)
-		h.releaseNotes.Show(h.version)
-		return h, h.loadReleaseNotes()
+		return h.openReleaseNotes(false)
 	case "reload_all":
 		analytics.Track(analytics.EventReloadAll, nil)
 		return h, h.reloadAll()
@@ -6456,6 +6511,58 @@ func (h *Home) loadReleaseNotes() tea.Cmd {
 		rs, err := releasenotes.Load()
 		return releaseNotesLoadedMsg{releases: rs, err: err}
 	}
+}
+
+// openReleaseNotes opens the changelog dialog (full or the What's New reel) and
+// marks everything through the newest release as seen so the badge clears. Wired
+// to both the `W` key and the palette commands.
+func (h *Home) openReleaseNotes(whatsNew bool) (tea.Model, tea.Cmd) {
+	h.actionLog.Add("open release notes", "", true)
+	if whatsNew {
+		h.releaseNotes.ShowWhatsNew(h.version, h.cfg.GetReleaseNotesSeenVersion())
+	} else {
+		h.releaseNotes.Show(h.version)
+	}
+	if v := h.newestKnownVersion(); v != "" {
+		h.cfg.MarkReleaseNotesSeen(v)
+	}
+	h.hasUnseenWhatsNew = false
+	h.whatsNewShimmering = false
+	return h, h.loadReleaseNotes()
+}
+
+// newestKnownVersion returns the version of the newest cached release ("" if
+// none loaded). cachedReleases is sorted newest-first.
+func (h *Home) newestKnownVersion() string {
+	if len(h.cachedReleases) > 0 {
+		return h.cachedReleases[0].Version
+	}
+	return ""
+}
+
+// recomputeWhatsNew refreshes hasUnseenWhatsNew from the cached releases and the
+// stored seen version. Shares isUnseenHighlight with the dialog so the badge and
+// the reel always agree on what counts.
+func (h *Home) recomputeWhatsNew() {
+	seen := releasenotes.NormalizeVersion(h.cfg.GetReleaseNotesSeenVersion())
+	h.hasUnseenWhatsNew = false
+	for _, r := range h.cachedReleases {
+		if isUnseenHighlight(r, seen) {
+			h.hasUnseenWhatsNew = true
+			return
+		}
+	}
+}
+
+// ensureWhatsNewShimmer starts the badge shimmer loop if the badge is visible
+// and the loop isn't already running; returns nil otherwise. Safe to call every
+// tick — the whatsNewShimmering latch keeps only one loop alive.
+func (h *Home) ensureWhatsNewShimmer() tea.Cmd {
+	if h.hasUnseenWhatsNew && !h.whatsNewShimmering {
+		h.whatsNewShimmering = true
+		return whatsNewTickCmd()
+	}
+	return nil
 }
 
 // reloadAll restarts all dead/error sessions concurrently.
