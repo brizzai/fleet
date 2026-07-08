@@ -169,16 +169,28 @@ jobs:
             declare -A ENTRIES
             TYPE_ORDER="added improved changed fixed removed deprecated security"
 
+            # HIGHLIGHTS collects fragments marked `highlight: true` — these also
+            # render in their normal type section below; the duplicate feeds the
+            # curated in-app "What's New" reel.
+            HIGHLIGHTS=""
             for f in "${FRAGMENTS[@]}"; do
               TYPE=$(awk '/^type:/{print $2; exit}' "$f")
+              HL=$(awk '/^highlight:/{print $2; exit}' "$f")
               BODY=$(awk 'BEGIN{skip=1} /^---$/{if(skip){skip=0; next} else {found=1; next}} found{print}' "$f" | sed '/^$/d')
               if [ -n "$TYPE" ] && [ -n "$BODY" ]; then
                 ENTRIES[$TYPE]+="- ${BODY}"$'\n'
+                if [ "$HL" = "true" ]; then
+                  HIGHLIGHTS+="- ${BODY}"$'\n'
+                fi
               fi
             done
 
-            # Build the release section content and write to temp file
+            # Build the release section content and write to temp file. The
+            # curated Highlights block leads the release.
             SECTION_FILE=$(mktemp)
+            if [ -n "$HIGHLIGHTS" ]; then
+              printf '\n### Highlights\n\n%s' "$HIGHLIGHTS" >> "$SECTION_FILE"
+            fi
             for TYPE in $TYPE_ORDER; do
               if [ -n "${ENTRIES[$TYPE]}" ]; then
                 # Capitalize type name for section header

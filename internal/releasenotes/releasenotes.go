@@ -251,6 +251,18 @@ func Ago(date string) string {
 	return ago(t, time.Now())
 }
 
+// WithinLastDays reports whether a "2006-01-02" date is within the last n days
+// (inclusive of today, forgiving of small clock skew). Unparseable or future
+// dates beyond a day return false. Used to cap the What's New reel.
+func WithinLastDays(date string, n int) bool {
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return false
+	}
+	days := int(time.Since(t).Hours() / 24)
+	return days >= -1 && days < n
+}
+
 // ago is the testable core of Ago: how long before now the date was.
 func ago(then, now time.Time) string {
 	days := int(now.Sub(then).Hours() / 24)

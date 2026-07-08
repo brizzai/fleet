@@ -23,15 +23,25 @@ type ReleaseNotesDialog struct {
 	releases  []releasenotes.Release
 	loading   bool
 	err       error
+
+	// whatsNew scopes the dialog to the curated "What's New" reel: only the
+	// Highlights of releases newer than seenVersion within the last 7 days.
+	// When false the dialog is the full changelog.
+	whatsNew    bool
+	seenVersion string // normalized; releases at or below this are already seen
 }
+
+// whatsNewWindowDays caps the What's New reel: highlights older than this never
+// surface, even if unseen.
+const whatsNewWindowDays = 7
 
 // NewReleaseNotesDialog creates an empty release-notes dialog.
 func NewReleaseNotesDialog() *ReleaseNotesDialog {
 	return &ReleaseNotesDialog{}
 }
 
-// Show opens the dialog in its loading state; installedVersion is the running
-// build's version (raw — it's normalized here for matching).
+// Show opens the full changelog in its loading state; installedVersion is the
+// running build's version (raw — it's normalized here for matching).
 func (d *ReleaseNotesDialog) Show(installedVersion string) {
 	d.visible = true
 	d.loading = true
@@ -39,6 +49,17 @@ func (d *ReleaseNotesDialog) Show(installedVersion string) {
 	d.releases = nil
 	d.scroll = 0
 	d.installed = releasenotes.NormalizeVersion(installedVersion)
+	d.whatsNew = false
+	d.seenVersion = ""
+}
+
+// ShowWhatsNew opens the dialog scoped to the What's New reel: only highlights
+// of releases newer than seenVersion within the last 7 days. seenVersion is
+// normalized here.
+func (d *ReleaseNotesDialog) ShowWhatsNew(installedVersion, seenVersion string) {
+	d.Show(installedVersion)
+	d.whatsNew = true
+	d.seenVersion = releasenotes.NormalizeVersion(seenVersion)
 }
 
 // SetData installs the loaded releases (or the load error) and stops loading.
@@ -143,10 +164,10 @@ func (d *ReleaseNotesDialog) pageStep() int {
 // View renders the dialog centered over the screen.
 func (d *ReleaseNotesDialog) View() string {
 	if d.loading {
-		return d.box(TitleStyle.Render("Release Notes") + "\n\n" + DimStyle.Render("Loading release notes…"))
+		return d.box(TitleStyle.Render(d.heading()) + "\n\n" + DimStyle.Render("Loading release notes…"))
 	}
 	if d.err != nil {
-		msg := TitleStyle.Render("Release Notes") + "\n\n" +
+		msg := TitleStyle.Render(d.heading()) + "\n\n" +
 			ErrorStyle.Render("Couldn't load release notes.") + "\n" +
 			DimStyle.Render(ansi.Truncate(d.err.Error(), d.innerWidth(), "…"))
 		return d.box(msg)
@@ -167,13 +188,24 @@ func (d *ReleaseNotesDialog) View() string {
 	return d.box(strings.Join(lines, "\n"))
 }
 
-// titleRow is the header: "Release Notes" on the left, release count on the right.
+// heading is the dialog title, which flips with the mode.
+func (d *ReleaseNotesDialog) heading() string {
+	if d.whatsNew {
+		return "What's New"
+	}
+	return "Release Notes"
+}
+
+// titleRow is the header: the mode heading on the left, release count on the
+// right (only in the full changelog — the What's New reel is already scoped).
 func (d *ReleaseNotesDialog) titleRow(inner int) string {
 	right := ""
-	if n := len(d.releases); n > 0 {
-		right = DimStyle.Render(fmt.Sprintf("%d releases", n))
+	if !d.whatsNew {
+		if n := len(d.releases); n > 0 {
+			right = DimStyle.Render(fmt.Sprintf("%d releases", n))
+		}
 	}
-	return padLR(TitleStyle.Render("Release Notes"), right, inner)
+	return padLR(TitleStyle.Render(d.heading()), right, inner)
 }
 
 // rule renders a full-width dim horizontal divider.
@@ -200,6 +232,9 @@ func (d *ReleaseNotesDialog) box(content string) string {
 // Version-header and divider rows are pre-fit to innerWidth; every other line is
 // truncated to it, so no line ever wraps and throws off the scroll math.
 func (d *ReleaseNotesDialog) contentLines() []string {
+	if d.whatsNew {
+		return d.whatsNewLines()
+	}
 	inner := d.innerWidth()
 	if len(d.releases) == 0 {
 		return []string{DimStyle.Render("No releases found.")}
@@ -276,6 +311,13 @@ func (d *ReleaseNotesDialog) appendRelease(out *[]string, r releasenotes.Release
 	textWidth := max(8, inner-4) // "  • " / "    " indent
 	dot := lipgloss.NewStyle().Foreground(ColorAccent).Render("•")
 	for _, sec := range r.Sections {
+		// The curated "Highlights" block is a deliberate duplicate of items in
+		// the type sections: the What's New reel shows only it; the full
+		// changelog shows everything else and hides it.
+		isHighlights := strings.EqualFold(strings.TrimSpace(sec.Title), "highlights")
+		if d.whatsNew != isHighlights {
+			continue
+		}
 		if sec.Title != "" {
 			fit("  " + sectionTitleStyle(sec.Title).Render(sec.Title))
 		}
@@ -292,6 +334,53 @@ func (d *ReleaseNotesDialog) appendRelease(out *[]string, r releasenotes.Release
 			}
 		}
 	}
+}
+
+// whatsNewLines renders the curated reel: the Highlights of every unseen
+// release within the window, newest-first. appendRelease (in What's New mode)
+// emits only each release's Highlights section, so this just filters and spaces.
+func (d *ReleaseNotesDialog) whatsNewLines() []string {
+	inner := d.innerWidth()
+	var out []string
+	sep := false
+	for _, r := range d.releases {
+		if !isUnseenHighlight(r, d.seenVersion) {
+			continue
+		}
+		if sep {
+			out = append(out, "", d.rule(inner), "")
+		}
+		d.appendRelease(&out, r, false, inner)
+		sep = true
+	}
+	if len(out) == 0 {
+		return []string{DimStyle.Render("✨ You're all caught up — no new highlights in the last 7 days.")}
+	}
+	return out
+}
+
+// hasHighlights reports whether a release carries a non-empty "Highlights"
+// section (the curated subset the What's New reel shows).
+func hasHighlights(r releasenotes.Release) bool {
+	for _, s := range r.Sections {
+		if strings.EqualFold(strings.TrimSpace(s.Title), "highlights") && len(s.Bullets) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnseenHighlight reports whether a release qualifies for the What's New reel:
+// within the window, newer than seenVersion, and carrying highlights. Shared by
+// the dialog's content filter and the top-right badge so they never disagree.
+func isUnseenHighlight(r releasenotes.Release, seenVersion string) bool {
+	if !releasenotes.WithinLastDays(r.Date, whatsNewWindowDays) {
+		return false
+	}
+	if seenVersion != "" && releasenotes.CompareVersions(r.Version, seenVersion) <= 0 {
+		return false
+	}
+	return hasHighlights(r)
 }
 
 // renderInlineMarkdown styles a subset of inline markdown found in changelog
@@ -399,6 +488,8 @@ func padLR(left, right string, width int) string {
 func sectionTitleStyle(title string) lipgloss.Style {
 	c := ColorTextDim
 	switch strings.ToLower(strings.TrimSpace(title)) {
+	case "highlights":
+		c = ColorAccent
 	case "added":
 		c = ColorGreen
 	case "improved":
