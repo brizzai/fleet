@@ -487,9 +487,13 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		startTime:              time.Now(),
 	}
 	h.drawerHeight = cfg.GetDrawerHeight()
-	// Seed the What's New "seen" version on first run so a fresh install doesn't
-	// light up the badge for releases that predate it.
-	if cfg.GetReleaseNotesSeenVersion() == "" {
+	// Seed the What's New "seen" version only on a genuinely fresh install, so a
+	// brand-new install doesn't light up the badge for releases that predate it.
+	// An existing user meeting this feature for the first time also has an empty
+	// seen version, but IsFirstRun is false for them — so they still get the
+	// current release's highlights (including What's New's own announcement)
+	// instead of being silently stamped as caught-up.
+	if cfg.IsFirstRun() && cfg.GetReleaseNotesSeenVersion() == "" {
 		cfg.MarkReleaseNotesSeen(releasenotes.NormalizeVersion(version))
 	}
 	emptyCache := make(map[string]*git.RepoInfo)

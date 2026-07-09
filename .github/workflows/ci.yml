@@ -7,10 +7,10 @@ on:
     branches: [master]
 
 env:
-  # Pinned to 1.26.4: 1.26.3 has stdlib vulns GO-2026-5037/5039 (govulncheck).
-  # Exact pin so setup-go pulls 1.26.4 from go.dev until the actions manifest
+  # Pinned to 1.26.5: 1.26.4 has stdlib vuln GO-2026-5856 (crypto/tls, govulncheck).
+  # Exact pin so setup-go pulls 1.26.5 from go.dev until the actions manifest
   # lists it; revert to floating "1.26" once it does.
-  GO_VERSION: "1.26.4"
+  GO_VERSION: "1.26.5"
 
 permissions:
   contents: read
