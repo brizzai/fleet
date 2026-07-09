@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-07-09
+
+### Improved
+
+- **Re-viewable now.** Reopening What's New shows the recent highlights again instead of "you're all caught up". The badge spells the key `Shift+W` (so it's not read as lowercase `w`), and `Tab` flips between the highlights reel and the full release notes.
+
 ## [2.16.1] - 2026-07-09
 
 ### Highlights
@@ -377,7 +383,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.16.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.17.0...HEAD
+[2.17.0]: https://github.com/brizzai/fleet/releases/tag/v2.17.0
 [2.16.1]: https://github.com/brizzai/fleet/releases/tag/v2.16.1
 [2.16.0]: https://github.com/brizzai/fleet/releases/tag/v2.16.0
 [2.15.0]: https://github.com/brizzai/fleet/releases/tag/v2.15.0
