@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-07-09
+
+### Changed
+
+- **Analytics moved in-house** — usage telemetry now goes to fleet's own endpoint instead of Mixpanel. The opt-in prompt, `minimal`/`off` modes, and the `FLEET_TELEMETRY_DISABLED`/`DO_NOT_TRACK` kill-switches all work exactly as before.
+- **Anonymous telemetry captures more shape** — with telemetry on, session events now record which agent ran (Claude/Codex/OpenCode), and fleet reports auto-update health and coarse tmux/git/gh failure counts (no paths, args, or repo names). Minimal and off modes send nothing new.
+
 ## [2.17.0] - 2026-07-09
 
 ### Improved
@@ -383,7 +390,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.17.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.18.0...HEAD
+[2.18.0]: https://github.com/brizzai/fleet/releases/tag/v2.18.0
 [2.17.0]: https://github.com/brizzai/fleet/releases/tag/v2.17.0
 [2.16.1]: https://github.com/brizzai/fleet/releases/tag/v2.16.1
 [2.16.0]: https://github.com/brizzai/fleet/releases/tag/v2.16.0
