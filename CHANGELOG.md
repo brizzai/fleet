@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.1] - 2026-07-09
+
+### Highlights
+
+- **What's New, now actually visible.** If you updated *into* the release that introduced this reel, its own debut got marked read before you ever saw it — so `W` just said "nothing new". Existing installs now light up the `✦ What's New` badge for the release you updated to, instead of only fresh installs. (Fittingly, this highlight is that fix — saying hello.)
+
+### Fixed
+
+- **What's New, now actually visible.** If you updated *into* the release that introduced this reel, its own debut got marked read before you ever saw it — so `W` just said "nothing new". Existing installs now light up the `✦ What's New` badge for the release you updated to, instead of only fresh installs. (Fittingly, this highlight is that fix — saying hello.)
+
 ## [2.16.0] - 2026-07-08
 
 ### Highlights
@@ -367,7 +377,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.16.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.16.1...HEAD
+[2.16.1]: https://github.com/brizzai/fleet/releases/tag/v2.16.1
 [2.16.0]: https://github.com/brizzai/fleet/releases/tag/v2.16.0
 [2.15.0]: https://github.com/brizzai/fleet/releases/tag/v2.15.0
 [2.14.0]: https://github.com/brizzai/fleet/releases/tag/v2.14.0
