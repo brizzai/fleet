@@ -51,6 +51,57 @@ func TestHomeInitializes(t *testing.T) {
 	}
 }
 
+// TestNewHomeSeedsReleaseNotesOnlyOnFirstRun guards the whats-new-failed
+// regression: NewHome must seed the "seen" version only on a genuinely fresh
+// install. An existing user meeting What's New for the first time also has an
+// empty seen version, but stamping them as caught-up hid the very release that
+// introduced the feature.
+func TestNewHomeSeedsReleaseNotesOnlyOnFirstRun(t *testing.T) {
+	newStorage := func(t *testing.T) *session.StateDB {
+		t.Helper()
+		db, err := session.Open(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+
+	t.Run("existing user is not seeded", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if err := os.MkdirAll(filepath.Dir(config.DefaultConfigPath()), 0700); err != nil {
+			t.Fatalf("mkdir config dir: %v", err)
+		}
+		if err := os.WriteFile(config.DefaultConfigPath(), []byte(`{"tick_interval_sec":2}`), 0600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg := config.Load()
+		if cfg.IsFirstRun() {
+			t.Fatal("precondition: a loaded config file should not report IsFirstRun")
+		}
+
+		NewHome(newStorage(t), cfg, "2.16.1", analytics.Identity{})
+
+		if got := cfg.GetReleaseNotesSeenVersion(); got != "" {
+			t.Errorf("existing user was seeded to %q; want empty so the new release's highlights still show", got)
+		}
+	})
+
+	t.Run("fresh install is seeded to running version", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		cfg := config.Load()
+		if !cfg.IsFirstRun() {
+			t.Fatal("precondition: no config file should report IsFirstRun")
+		}
+
+		NewHome(newStorage(t), cfg, "2.16.1", analytics.Identity{})
+
+		if got := cfg.GetReleaseNotesSeenVersion(); got != "2.16.1" {
+			t.Errorf("fresh install seeded to %q; want %q", got, "2.16.1")
+		}
+	})
+}
+
 // TestViewGitInfoCacheRace guards against the "concurrent map read and map write"
 // fatal that happens if View() reads h.gitInfoCache while the status worker writes
 // it. Run with `go test -race` — pre-fix this trips the race detector reliably.
