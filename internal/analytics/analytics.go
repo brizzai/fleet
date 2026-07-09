@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -262,7 +263,12 @@ func (c *Client) post(item ingestItem) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	// Drain the body before closing so net/http can reuse the keep-alive
+	// connection instead of opening a fresh TLS handshake per event.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("ingest returned %d", resp.StatusCode)
 	}
