@@ -24,11 +24,11 @@ type ReleaseNotesDialog struct {
 	loading   bool
 	err       error
 
-	// whatsNew scopes the dialog to the curated "What's New" reel: only the
-	// Highlights of releases newer than seenVersion within the last 7 days.
-	// When false the dialog is the full changelog.
-	whatsNew    bool
-	seenVersion string // normalized; releases at or below this are already seen
+	// whatsNew scopes the dialog to the curated "What's New" reel: the Highlights
+	// of releases within the last 7 days. It's re-viewable regardless of whether
+	// they've been seen — the top-right badge owns the "unseen" cue. When false
+	// the dialog is the full changelog.
+	whatsNew bool
 }
 
 // whatsNewWindowDays caps the What's New reel: highlights older than this never
@@ -50,16 +50,14 @@ func (d *ReleaseNotesDialog) Show(installedVersion string) {
 	d.scroll = 0
 	d.installed = releasenotes.NormalizeVersion(installedVersion)
 	d.whatsNew = false
-	d.seenVersion = ""
 }
 
-// ShowWhatsNew opens the dialog scoped to the What's New reel: only highlights
-// of releases newer than seenVersion within the last 7 days. seenVersion is
-// normalized here.
-func (d *ReleaseNotesDialog) ShowWhatsNew(installedVersion, seenVersion string) {
+// ShowWhatsNew opens the dialog scoped to the What's New reel: the highlights of
+// releases within the last 7 days. It's re-viewable regardless of the seen
+// version — the top-right badge owns the "unseen" signal.
+func (d *ReleaseNotesDialog) ShowWhatsNew(installedVersion string) {
 	d.Show(installedVersion)
 	d.whatsNew = true
-	d.seenVersion = releasenotes.NormalizeVersion(seenVersion)
 }
 
 // SetData installs the loaded releases (or the load error) and stops loading.
@@ -97,6 +95,13 @@ func (d *ReleaseNotesDialog) Update(msg tea.Msg) (*ReleaseNotesDialog, tea.Cmd) 
 	switch key.String() {
 	case "esc", "q":
 		d.Hide()
+		return d, nil
+	case "tab", "shift+tab":
+		// Toggle between the What's New reel and the full changelog. A pure view
+		// switch — "seen" was already recorded when the dialog opened — so just
+		// flip the mode and reset scroll for the different content.
+		d.whatsNew = !d.whatsNew
+		d.scroll = 0
 		return d, nil
 	case "up", "k":
 		d.scroll--
@@ -180,11 +185,18 @@ func (d *ReleaseNotesDialog) View() string {
 
 	// Header, then the always-present "above" slot (blank at the top, so it also
 	// serves as the gap under the rule), the content window, the "below" slot,
-	// and the footer hint.
+	// and the footer hint. The hint's middle segment toggles the two views with
+	// Tab, naming whichever view you'd switch to. Truncated to inner width so it
+	// stays one line (scrollGeometry budgets rnFooterLines = 2 = blank + hint).
+	toggle := "tab what's new"
+	if d.whatsNew {
+		toggle = "tab all release notes"
+	}
+	hint := ansi.Truncate("↑↓ scroll · "+toggle+" · esc close", inner, "…")
 	lines := []string{d.titleRow(inner), d.rule(inner), indicator(above, "above")}
 	lines = append(lines, content[scroll:scroll+visible]...)
 	lines = append(lines, indicator(below, "below"))
-	lines = append(lines, "", DimStyle.Render("↑↓ scroll · esc close"))
+	lines = append(lines, "", DimStyle.Render(hint))
 	return d.box(strings.Join(lines, "\n"))
 }
 
@@ -336,15 +348,17 @@ func (d *ReleaseNotesDialog) appendRelease(out *[]string, r releasenotes.Release
 	}
 }
 
-// whatsNewLines renders the curated reel: the Highlights of every unseen
-// release within the window, newest-first. appendRelease (in What's New mode)
-// emits only each release's Highlights section, so this just filters and spaces.
+// whatsNewLines renders the curated reel: the Highlights of every release within
+// the window, newest-first. It filters by the window only (not the seen
+// version), so the reel stays re-viewable after the badge is dismissed.
+// appendRelease (in What's New mode) emits only each release's Highlights
+// section, so this just filters and spaces.
 func (d *ReleaseNotesDialog) whatsNewLines() []string {
 	inner := d.innerWidth()
 	var out []string
 	sep := false
 	for _, r := range d.releases {
-		if !isUnseenHighlight(r, d.seenVersion) {
+		if !isRecentHighlight(r) {
 			continue
 		}
 		if sep {
@@ -354,7 +368,7 @@ func (d *ReleaseNotesDialog) whatsNewLines() []string {
 		sep = true
 	}
 	if len(out) == 0 {
-		return []string{DimStyle.Render("✨ You're all caught up — no new highlights in the last 7 days.")}
+		return []string{DimStyle.Render("✨ No release highlights in the last 7 days — press Tab for all release notes.")}
 	}
 	return out
 }
@@ -370,17 +384,21 @@ func hasHighlights(r releasenotes.Release) bool {
 	return false
 }
 
-// isUnseenHighlight reports whether a release qualifies for the What's New reel:
-// within the window, newer than seenVersion, and carrying highlights. Shared by
-// the dialog's content filter and the top-right badge so they never disagree.
+// isRecentHighlight reports whether a release belongs in the What's New reel:
+// it carries highlights and falls within the window. Unlike isUnseenHighlight it
+// ignores the seen version, so the reel stays re-viewable after the badge (which
+// owns the "unseen" signal) has been dismissed.
+func isRecentHighlight(r releasenotes.Release) bool {
+	return releasenotes.WithinLastDays(r.Date, whatsNewWindowDays) && hasHighlights(r)
+}
+
+// isUnseenHighlight reports whether a release should light the top-right badge:
+// a recent highlight (isRecentHighlight) that is also newer than seenVersion.
 func isUnseenHighlight(r releasenotes.Release, seenVersion string) bool {
-	if !releasenotes.WithinLastDays(r.Date, whatsNewWindowDays) {
+	if !isRecentHighlight(r) {
 		return false
 	}
-	if seenVersion != "" && releasenotes.CompareVersions(r.Version, seenVersion) <= 0 {
-		return false
-	}
-	return hasHighlights(r)
+	return seenVersion == "" || releasenotes.CompareVersions(r.Version, seenVersion) > 0
 }
 
 // renderInlineMarkdown styles a subset of inline markdown found in changelog

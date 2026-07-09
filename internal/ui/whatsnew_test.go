@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/releasenotes"
 	"github.com/charmbracelet/x/ansi"
@@ -12,8 +13,8 @@ import (
 
 func TestRenderWhatsNewBadge(t *testing.T) {
 	// The visible text (ANSI stripped) is stable regardless of frame — the
-	// rainbow label plus the "· press W" key hint.
-	const wantText = whatsNewText + " · press W"
+	// rainbow label plus the "· press Shift+W" key hint.
+	const wantText = whatsNewText + " · press Shift+W"
 	for _, frame := range []int{0, 1, 7, 13, 100} {
 		got := ansi.Strip(renderWhatsNewBadge(frame))
 		if got != wantText {
@@ -51,17 +52,19 @@ func TestReleaseNotesWhatsNewReel(t *testing.T) {
 		},
 	}
 
-	render := func(seen string) string {
+	reelFor := func(r releasenotes.Release) string {
 		d := NewReleaseNotesDialog()
 		d.SetSize(90, 30)
-		d.ShowWhatsNew("2.16.0", seen)
-		d.SetData([]releasenotes.Release{fresh}, nil)
+		d.ShowWhatsNew("2.16.0")
+		d.SetData([]releasenotes.Release{r}, nil)
 		return ansi.Strip(d.View())
 	}
 
-	// Unseen: the reel shows the Highlights bullet, titles as "What's New", and
-	// does NOT leak the non-highlight "Fixed" bullet.
-	out := render("2.15.0")
+	// A recent highlighted release: the reel shows the Highlights bullet, titles
+	// as "What's New", and does NOT leak the non-highlight "Fixed" bullet. This
+	// holds regardless of any seen version — the reel is re-viewable; the badge
+	// (not the reel) tracks "seen".
+	out := reelFor(fresh)
 	if !strings.Contains(out, "What's New") {
 		t.Error("reel should be titled What's New")
 	}
@@ -72,13 +75,54 @@ func TestReleaseNotesWhatsNewReel(t *testing.T) {
 		t.Errorf("reel should NOT show non-highlight bullets, got:\n%s", out)
 	}
 
-	// Already seen: empty state, no highlight bullet.
-	caughtUp := render("2.16.0")
-	if !strings.Contains(caughtUp, "caught up") {
-		t.Errorf("seen reel should show the caught-up empty state, got:\n%s", caughtUp)
+	// A release older than the 7-day window drops out, leaving the empty state.
+	old := fresh
+	old.Date = "2000-01-01"
+	caughtUp := reelFor(old)
+	if !strings.Contains(caughtUp, "in the last 7 days") {
+		t.Errorf("out-of-window reel should show the empty state, got:\n%s", caughtUp)
 	}
 	if strings.Contains(caughtUp, "Shiny thing.") {
-		t.Error("seen reel should not show the highlight bullet")
+		t.Error("out-of-window reel should not show the highlight bullet")
+	}
+}
+
+func TestReleaseNotesTabToggle(t *testing.T) {
+	rel := releasenotes.Release{
+		Version: "2.16.0",
+		Date:    time.Now().Format("2006-01-02"),
+		Sections: []releasenotes.Section{
+			{Title: "Highlights", Bullets: []string{"**Reel bullet.** Shown in the reel."}},
+			{Title: "Fixed", Bullets: []string{"**Full-only fix.** Only in full notes."}},
+		},
+	}
+	d := NewReleaseNotesDialog()
+	d.SetSize(90, 30)
+	d.ShowWhatsNew("2.16.0")
+	d.SetData([]releasenotes.Release{rel}, nil)
+	tab := tea.KeyPressMsg{Code: tea.KeyTab}
+
+	// Starts on the reel: the highlight shows, the non-highlight is hidden.
+	out := ansi.Strip(d.View())
+	if !strings.Contains(out, "What's New") || !strings.Contains(out, "Reel bullet.") {
+		t.Errorf("expected the What's New reel with the highlight, got:\n%s", out)
+	}
+	if strings.Contains(out, "Full-only fix.") {
+		t.Errorf("reel should hide non-highlight bullets, got:\n%s", out)
+	}
+
+	// Tab -> full Release Notes: title flips and the non-highlight bullet appears.
+	d.Update(tab)
+	out = ansi.Strip(d.View())
+	if !strings.Contains(out, "Release Notes") || !strings.Contains(out, "Full-only fix.") {
+		t.Errorf("after Tab expected full Release Notes with the fix, got:\n%s", out)
+	}
+
+	// Tab again -> back to the reel.
+	d.Update(tab)
+	out = ansi.Strip(d.View())
+	if !strings.Contains(out, "What's New") || !strings.Contains(out, "Reel bullet.") {
+		t.Errorf("second Tab should return to the reel, got:\n%s", out)
 	}
 }
 

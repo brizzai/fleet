@@ -70,8 +70,10 @@ func renderWhatsNewBadge(frame int) string {
 			Bold(true).
 			Render(string(r)))
 	}
-	// Trailing "press W" hint: "press" dimmed, the key itself styled like the
-	// footer bar's keybindings (accent + bold) so it's unmistakably a keybind.
-	b.WriteString(DimStyle.Render(" · press ") + HelpKeyStyle.Render("W"))
+	// Trailing "press Shift+W" hint: "press" dimmed, the key itself styled like
+	// the footer bar's keybindings (accent + bold) so it's unmistakably a
+	// keybind. Spelled "Shift+W" (not bare "W") so it isn't misread as lowercase
+	// w, which opens the worktree dialog.
+	b.WriteString(DimStyle.Render(" · press ") + HelpKeyStyle.Render("Shift+W"))
 	return b.String()
 }

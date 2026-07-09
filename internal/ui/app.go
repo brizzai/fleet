@@ -6218,7 +6218,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "settings", Name: "Settings", Shortcut: "S"},
 		{Kind: PaletteKindCommand, ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
 		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
-		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "W"},
+		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "Shift+W"},
 		{Kind: PaletteKindCommand, ID: "release_notes", Name: "Release Notes"},
 		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
 		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
@@ -6523,7 +6523,7 @@ func (h *Home) loadReleaseNotes() tea.Cmd {
 func (h *Home) openReleaseNotes(whatsNew bool) (tea.Model, tea.Cmd) {
 	h.actionLog.Add("open release notes", "", true)
 	if whatsNew {
-		h.releaseNotes.ShowWhatsNew(h.version, h.cfg.GetReleaseNotesSeenVersion())
+		h.releaseNotes.ShowWhatsNew(h.version)
 	} else {
 		h.releaseNotes.Show(h.version)
 	}
