@@ -9,10 +9,39 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/debuglog"
 )
+
+// gh failures are polled — the status worker refetches PRs every ~60s per repo,
+// so a persistent timeout or rate-limit would otherwise emit an analytics event
+// on every poll for every repo. trackGHFailure coarsens that to at most one
+// event per ghFailTrackInterval across the whole process: enough to surface
+// "gh is unhealthy" without flooding the endpoint. reason is a low-cardinality
+// label ("timeout" / "rate_limit"), never command args or paths.
+const ghFailTrackInterval = 10 * time.Minute
+
+var (
+	ghFailMu   sync.Mutex
+	ghFailLast time.Time
+)
+
+func trackGHFailure(reason string) {
+	ghFailMu.Lock()
+	if !ghFailLast.IsZero() && time.Since(ghFailLast) < ghFailTrackInterval {
+		ghFailMu.Unlock()
+		return
+	}
+	ghFailLast = time.Now()
+	ghFailMu.Unlock()
+	analytics.Track(analytics.EventGhCommandFailure, map[string]interface{}{
+		"command": "pr_view",
+		"reason":  reason,
+	})
+}
 
 // ghTimeout bounds every gh subprocess. gh makes network calls to GitHub, so a
 // hung request (network stall, API hang, blocked auth refresh) must not freeze
@@ -109,11 +138,13 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 		// through to (nil, nil) and let RefreshPRInfo clear a real PR's badge.
 		if ctx.Err() == context.DeadlineExceeded {
 			debuglog.Logger.Debug("PR fetch: timed out", "path", repoPath, "branch", branch)
+			trackGHFailure("timeout")
 			return nil, fmt.Errorf("gh pr view timed out: %w", ctx.Err())
 		}
 		stderrStr := strings.TrimSpace(stderr.String())
 		if rlErr := classifyGHError(stderrStr); rlErr != nil {
 			debuglog.Logger.Debug("PR fetch: rate-limited", "path", repoPath, "branch", branch, "stderr", stderrStr)
+			trackGHFailure("rate_limit")
 			return nil, rlErr
 		}
 		// Most common case: gh exits 1 when no PR exists for the branch. Log

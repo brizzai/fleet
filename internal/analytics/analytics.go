@@ -601,7 +601,7 @@ func osVersion() string {
 // counts. In minimal mode it emits only an anonymous app_started (version +
 // mode), with no people profile and no counts — the leanest launch signal that
 // still marks the device active today.
-func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMode string, autoName, copyClaudeSettings bool) {
+func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMode, defaultAgent string, autoName, copyClaudeSettings bool) {
 	c := current()
 	if c == nil || c.disabled {
 		return
@@ -615,6 +615,7 @@ func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMo
 	SetUserProperties(map[string]interface{}{
 		"theme":                theme,
 		"enter_mode":           enterMode,
+		"default_agent":        defaultAgent,
 		"auto_name_sessions":   autoName,
 		"copy_claude_settings": copyClaudeSettings,
 	})

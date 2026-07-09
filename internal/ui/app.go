@@ -747,6 +747,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ag == "" {
 			ag = agent.Parse(h.cfg.GetDefaultAgent())
 		}
+		analytics.Track(analytics.EventForkSession, map[string]interface{}{"agent": string(ag)})
 		if ag == agent.Codex {
 			if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), msg.path); err != nil {
 				debuglog.Logger.Error("codex dir trust seeding failed", "path", msg.path, "err", err)
@@ -1179,6 +1180,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.err != nil {
 			h.setError(fmt.Errorf("workspace create failed: %w", msg.err))
+			analytics.Track(analytics.EventGitCommandFailure, map[string]interface{}{"command": "worktree_create"})
 			h.clearPendingFork()
 			h.rebuildFlatItems()
 			// Clamp cursor if it was on the removed phantom.
@@ -2158,7 +2160,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("attach session", s.Title, true)
-			analytics.Track(analytics.EventSessionAttached, nil)
+			analytics.Track(analytics.EventSessionAttached, map[string]interface{}{"agent": string(s.Agent)})
 			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstAttach) {
 				analytics.Track(analytics.EventOnboardingFirstAttach, map[string]interface{}{
 					"seconds_since_install": int(analytics.SecondsSinceInstall()),
@@ -2731,6 +2733,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	return func() tea.Msg {
 		if err := s.Start(); err != nil {
 			debuglog.Logger.Error("session Start() failed", "title", msg.title, "path", msg.path, "err", err)
+			analytics.Track(analytics.EventTmuxCommandFailure, map[string]interface{}{"command": "new_session"})
 			return sessionCreateResultMsg{err: err}
 		}
 		return sessionCreateResultMsg{session: s}
@@ -2767,7 +2770,7 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 		return h, nil
 	}
 
-	analytics.Track(analytics.EventSessionCreated, nil)
+	analytics.Track(analytics.EventSessionCreated, map[string]interface{}{"agent": string(msg.session.Agent)})
 	if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstSession) {
 		analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{
 			"seconds_since_install": int(analytics.SecondsSinceInstall()),
@@ -4427,6 +4430,7 @@ func (h *Home) handleWorktreeDestroyResult(msg deleteCleanupDoneMsg) {
 		}
 	}
 	h.failedWorktreeRemovals[msg.repoPath] = true
+	analytics.Track(analytics.EventGitCommandFailure, map[string]interface{}{"command": "worktree_remove"})
 	h.rebuildFlatItems()
 
 	name := filepath.Base(msg.repoPath)
@@ -6348,7 +6352,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "attach":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("attach session", s.Title, true)
-			analytics.Track(analytics.EventSessionAttached, nil)
+			analytics.Track(analytics.EventSessionAttached, map[string]interface{}{"agent": string(s.Agent)})
 			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstAttach) {
 				analytics.Track(analytics.EventOnboardingFirstAttach, map[string]interface{}{
 					"seconds_since_install": int(analytics.SecondsSinceInstall()),
