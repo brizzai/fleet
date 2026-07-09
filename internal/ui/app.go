@@ -6545,8 +6545,9 @@ func (h *Home) newestKnownVersion() string {
 }
 
 // recomputeWhatsNew refreshes hasUnseenWhatsNew from the cached releases and the
-// stored seen version. Shares isUnseenHighlight with the dialog so the badge and
-// the reel always agree on what counts.
+// stored seen version, using isUnseenHighlight — the seen-aware, badge-only
+// predicate. The reel filters by isRecentHighlight (window only) instead, so the
+// badge clears once seen while the reel stays re-viewable.
 func (h *Home) recomputeWhatsNew() {
 	seen := releasenotes.NormalizeVersion(h.cfg.GetReleaseNotesSeenVersion())
 	h.hasUnseenWhatsNew = false
