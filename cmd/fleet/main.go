@@ -118,6 +118,23 @@ func runTUI() {
 	if cfg.IsAutoUpdateEnabled() && version != "dev" && update.ShouldCheck() {
 		debuglog.Logger.Info("checking for updates", "current", version)
 		newVer, err := update.Update(version)
+		// Record update health for analytics. The updater runs before
+		// analytics.Init (which waits on the consent prompt inside the TUI) and
+		// re-execs on a successful update, so these events can't be sent now —
+		// QueuePending parks them for FlushPending to emit after Init. Full mode
+		// only: update health is a full-telemetry signal, like the launch snapshot.
+		if cfg.GetTelemetryMode() == config.TelemetryFull && !analytics.IsOptedOutByEnv() {
+			analytics.QueuePending(analytics.EventUpdateCheck, map[string]any{
+				"updated": err == nil && newVer != "",
+				"error":   err != nil,
+			})
+			if err == nil && newVer != "" {
+				analytics.QueuePending(analytics.EventUpdateApplied, map[string]any{
+					"from": version,
+					"to":   newVer,
+				})
+			}
+		}
 		if err != nil {
 			debuglog.Logger.Error("auto-update failed", "err", err)
 		} else if newVer != "" {
