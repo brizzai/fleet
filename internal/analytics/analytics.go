@@ -1,20 +1,24 @@
-// Package analytics ships usage events to Mixpanel. Identity may include the
-// user's git name/email when telemetry is enabled — see DiscoverIdentity and
+// Package analytics ships usage events to fleet's own ingestion endpoint (a
+// small Next.js + Postgres service). Identity may include the user's git
+// name/email when telemetry is enabled — see DiscoverIdentity and
 // internal/ui/consent.go for exactly what gets sent. The public surface
 // (Init, Track, Gauge, Distribution, SetUserProperties, Shutdown) is
 // intentionally backend-agnostic so call sites in app.go / settings.go /
 // hooks / chrome don't need to change when the backend does.
 //
-// Backend: github.com/mixpanel/mixpanel-go's ApiClient. Mixpanel's Track is
-// a blocking HTTP call, which is unacceptable inside the Bubble Tea Update()
+// Backend: an HTTP POST of a small JSON batch to ingestURL. The POST is a
+// blocking network call, which is unacceptable inside the Bubble Tea Update()
 // loop — so this package buffers events on a channel and ships them from a
 // single worker goroutine. Track/Gauge/Distribution return immediately.
 package analytics
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +28,6 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
-	"github.com/mixpanel/mixpanel-go"
 )
 
 // Telemetry modes, mirroring config.Telemetry{Full,Minimal,Off}. Kept as
@@ -36,11 +39,19 @@ const (
 )
 
 const (
-	mixpanelToken = "89fa427751dcb749b67d524d1dbc9f98"
+	// defaultIngestURL is fleet's analytics ingestion endpoint. Overridable
+	// via FLEET_ANALYTICS_URL for local testing against a dev deployment.
+	defaultIngestURL = "https://fleet-analytics-beryl.vercel.app/api/events"
+
+	// ingestToken is sent as the x-fleet-token header. Like the Mixpanel
+	// project token it replaces, it's embedded in the (public) binary: it only
+	// authorizes event ingestion — never data reads — so the worst it unlocks
+	// is someone POSTing junk events.
+	ingestToken = "ac5058d5201279372cff69cae5b09979b130623a6904fda46f6d21e24dce5d26"
 
 	// queueSize is how many events we buffer before dropping. The TUI emits
-	// at most a few events per second; this gives ~minutes of slack if
-	// Mixpanel is slow before we start losing events.
+	// at most a few events per second; this gives ~minutes of slack if the
+	// endpoint is slow before we start losing events.
 	queueSize = 256
 
 	// shutdownTimeout caps how long Shutdown blocks waiting for the worker to
@@ -54,19 +65,20 @@ var (
 	globalMu sync.Mutex
 )
 
-// Client wraps the Mixpanel ApiClient with a queued worker.
+// Client posts events to the ingestion endpoint from a queued worker.
 //
 // deviceID and distinctID are kept separate on purpose: deviceID is always the
 // anonymous SHA256 of the hardware UUID (what DeviceID() exposes externally),
-// while distinctID is the value sent to Mixpanel as the per-event identifier
-// — usually the git user.email, with the device hash as a fallback. Logging
-// distinctID would leak email; logging deviceID is safe.
+// while distinctID is the per-event identifier sent to the endpoint — usually
+// the git user.email, with the device hash as a fallback. Logging distinctID
+// would leak email; logging deviceID is safe.
 type Client struct {
-	mp         *mixpanel.ApiClient
+	httpClient *http.Client
+	ingestURL  string
 	deviceID   string
 	distinctID string
 	version    string
-	queue      chan job
+	queue      chan ingestItem
 	wg         sync.WaitGroup
 	disabled   bool
 	// mode is the resolved telemetry mode this client runs in
@@ -111,21 +123,27 @@ func DiscoverIdentity() Identity {
 	}
 }
 
-// job represents one piece of work for the worker — either a Track event or a
-// PeopleSet update. Exactly one of `event` and `people` is non-nil.
-type job struct {
-	event  *mixpanel.Event
-	people *mixpanel.PeopleProperties
+// ingestItem is one record for the worker to POST — either an event or a
+// profile (people) update, distinguished by Kind. It serializes directly to
+// the endpoint's batch contract.
+type ingestItem struct {
+	Kind       string         `json:"kind"` // "event" | "profile"
+	Event      string         `json:"event,omitempty"`
+	DistinctID string         `json:"distinct_id"`
+	DeviceID   string         `json:"device_id,omitempty"`
+	Mode       string         `json:"mode,omitempty"`
+	Version    string         `json:"version,omitempty"`
+	TS         string         `json:"ts,omitempty"`
+	Props      map[string]any `json:"props,omitempty"`
 }
 
-// Init wires up the Mixpanel client and starts the worker goroutine using a
-// pre-resolved Identity. Pass the result of DiscoverIdentity() (called before
-// the TUI starts) so no blocking I/O happens here. Safe to call once;
-// subsequent calls are no-ops. mode is one of ModeFull/ModeMinimal/ModeOff.
-// ModeOff (or an env opt-out) creates a "disabled" client and all helper calls
-// become no-ops. ModeMinimal creates an anonymous client that sends only the
-// DAU signals (app_started + app_active) with no git name/email and no people
-// profile.
+// Init wires up the client and starts the worker goroutine using a pre-resolved
+// Identity. Pass the result of DiscoverIdentity() (called before the TUI
+// starts) so no blocking I/O happens here. Safe to call once; subsequent calls
+// are no-ops. mode is one of ModeFull/ModeMinimal/ModeOff. ModeOff (or an env
+// opt-out) creates a "disabled" client and all helper calls become no-ops.
+// ModeMinimal creates an anonymous client that sends only the DAU signals
+// (app_started + app_active) with no git name/email and no people profile.
 func Init(mode string, version string, identity Identity) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
@@ -142,23 +160,27 @@ func Init(mode string, version string, identity Identity) {
 
 	minimal := mode == ModeMinimal
 
-	// Mixpanel distinct_id: in full mode prefer git email (one Mixpanel user
-	// across all of the person's machines); in minimal mode always use the
-	// anonymous device hash so no identity leaves the machine.
+	// distinct_id: in full mode prefer git email (one user across all of the
+	// person's machines); in minimal mode always use the anonymous device hash
+	// so no identity leaves the machine.
 	distinctID := identity.DeviceID
 	if !minimal && identity.GitEmail != "" {
 		distinctID = identity.GitEmail
 	}
 
-	mp := mixpanel.NewApiClient(mixpanelToken)
+	ingestURL := defaultIngestURL
+	if v := strings.TrimSpace(os.Getenv("FLEET_ANALYTICS_URL")); v != "" {
+		ingestURL = v
+	}
 
 	c := &Client{
-		mp:         mp,
+		httpClient: &http.Client{},
+		ingestURL:  ingestURL,
 		deviceID:   identity.DeviceID,
 		distinctID: distinctID,
 		version:    version,
 		mode:       mode,
-		queue:      make(chan job, queueSize),
+		queue:      make(chan ingestItem, queueSize),
 	}
 	c.wg.Add(1)
 	go c.worker()
@@ -167,8 +189,8 @@ func Init(mode string, version string, identity Identity) {
 
 	// Minimal mode ships no people profile at all — only anonymous events.
 	if !minimal {
-		// Set baseline people properties so Mixpanel sees this device/install
-		// even before the first explicit SetUserProperties call.
+		// Set baseline profile properties so the endpoint sees this
+		// device/install even before the first explicit SetUserProperties call.
 		people := map[string]any{
 			"app_version":  version,
 			"os_version":   identity.OSVersion,
@@ -181,7 +203,7 @@ func Init(mode string, version string, identity Identity) {
 		if identity.GitEmail != "" {
 			people["$email"] = identity.GitEmail
 		}
-		enqueuePeople(c, people)
+		enqueueProfile(c, people)
 	}
 
 	// Log the mode and only whether git identity was present, never the value
@@ -208,36 +230,53 @@ func readGitIdentity() (name, email string) {
 	return name, email
 }
 
-// worker drains the job queue and ships events to Mixpanel one at a time.
-// Each call gets a 5s timeout so a hung Mixpanel endpoint can't permanently
+// worker drains the queue and POSTs each item to the ingestion endpoint one at
+// a time. Each request gets a 5s timeout so a hung endpoint can't permanently
 // stall the worker.
 func (c *Client) worker() {
 	defer c.wg.Done()
-	for j := range c.queue {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		switch {
-		case j.event != nil:
-			if err := c.mp.Track(ctx, []*mixpanel.Event{j.event}); err != nil {
-				debuglog.Logger.Debug("mixpanel track failed", "err", err)
-			}
-		case j.people != nil:
-			if err := c.mp.PeopleSet(ctx, []*mixpanel.PeopleProperties{j.people}); err != nil {
-				debuglog.Logger.Debug("mixpanel people_set failed", "err", err)
-			}
+	for item := range c.queue {
+		if err := c.post(item); err != nil {
+			debuglog.Logger.Debug("analytics post failed", "err", err)
 		}
-		cancel()
 	}
 }
 
-// Track enqueues a Mixpanel event with the given properties. No-op in minimal
-// mode, which only ships the anonymous DAU signals (see Heartbeat / trackRaw).
+// post sends a single-item batch to the ingestion endpoint. The endpoint's
+// contract is {"batch":[item]}; sending one per request keeps the worker
+// simple, and fleet emits few enough events that batching isn't worth it.
+func (c *Client) post(item ingestItem) error {
+	body, err := json.Marshal(map[string][]ingestItem{"batch": {item}})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.ingestURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-fleet-token", ingestToken)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("ingest returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// Track enqueues an event with the given properties. No-op in minimal mode,
+// which only ships the anonymous DAU signals (see Heartbeat / trackRaw).
 func Track(eventType string, properties map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
-	event := c.mp.NewEvent(eventType, c.distinctID, sanitizeProperties(properties))
-	enqueueEvent(c, event)
+	enqueue(c, newEvent(c, eventType, sanitizeProperties(properties)))
 }
 
 // trackRaw enqueues an event bypassing the minimal-mode gate. Reserved for the
@@ -247,8 +286,7 @@ func trackRaw(c *Client, eventType string, properties map[string]any) {
 	if c == nil || c.disabled {
 		return
 	}
-	event := c.mp.NewEvent(eventType, c.distinctID, properties)
-	enqueueEvent(c, event)
+	enqueue(c, newEvent(c, eventType, properties))
 }
 
 // Heartbeat records that this device is active today, at most once per calendar
@@ -274,40 +312,38 @@ func Heartbeat() {
 }
 
 // Gauge records a point-in-time value as an event with a numeric `value`
-// property. Mixpanel doesn't have native gauges; this convention lets you
-// chart averages or maxes by event name.
+// property. There's no native gauge type; this convention lets you chart
+// averages or maxes by event name.
 func Gauge(name string, value float64, properties map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	props := mergeValue(properties, value)
-	event := c.mp.NewEvent(name, c.distinctID, props)
-	enqueueEvent(c, event)
+	enqueue(c, newEvent(c, name, props))
 }
 
 // Distribution records a sampled value as an event with a numeric `value`
-// property. Same Mixpanel-side semantics as Gauge — the distinction is for
-// the caller's intent only.
+// property. Same semantics as Gauge — the distinction is for the caller's
+// intent only.
 func Distribution(name string, sample float64, properties map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
 	props := mergeValue(properties, sample)
-	event := c.mp.NewEvent(name, c.distinctID, props)
-	enqueueEvent(c, event)
+	enqueue(c, newEvent(c, name, props))
 }
 
-// SetUserProperties enqueues a Mixpanel /engage update on this device's
-// people profile. Mixpanel automatically retains the latest value per
-// property, so repeated calls during a session are fine.
+// SetUserProperties enqueues a profile update for this device. The endpoint
+// merges props into the existing profile (latest value per key wins), so
+// repeated calls during a session are fine.
 func SetUserProperties(props map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
-	enqueuePeople(c, sanitizeProperties(props))
+	enqueueProfile(c, sanitizeProperties(props))
 }
 
 // SyncEnabled reconciles the live client with the user's current telemetry
@@ -377,33 +413,49 @@ func current() *Client {
 	return global
 }
 
-// enqueueEvent pushes an event onto the worker queue without blocking. If the
-// queue is full, the event is dropped — fleet emits few enough events that
-// this should never happen in practice, but the non-blocking guarantee is
-// what keeps Track safe to call from the Bubble Tea Update() loop.
+// newEvent builds an event item stamped with the client's identity and the
+// current time (the endpoint records it as client_ts).
+func newEvent(c *Client, eventType string, props map[string]any) ingestItem {
+	return ingestItem{
+		Kind:       "event",
+		Event:      eventType,
+		DistinctID: c.distinctID,
+		DeviceID:   c.deviceID,
+		Mode:       c.mode,
+		Version:    c.version,
+		TS:         time.Now().Format(time.RFC3339),
+		Props:      props,
+	}
+}
+
+// enqueue pushes an item onto the worker queue without blocking. If the queue
+// is full, the item is dropped — fleet emits few enough events that this
+// should never happen in practice, but the non-blocking guarantee is what
+// keeps Track safe to call from the Bubble Tea Update() loop.
 //
 // The recover handles a narrow Shutdown race: between current() returning a
 // non-nil *Client and reaching the channel send below, Shutdown can close
 // c.queue from another goroutine (hook watcher, chrome client, etc.). A
 // closed channel makes `case c.queue <- …` selectable and panics. Analytics
-// is best-effort, so we'd rather drop the event than crash the TUI.
-func enqueueEvent(c *Client, event *mixpanel.Event) {
+// is best-effort, so we'd rather drop the item than crash the TUI.
+func enqueue(c *Client, item ingestItem) {
 	defer func() { _ = recover() }()
 	select {
-	case c.queue <- job{event: event}:
+	case c.queue <- item:
 	default:
-		debuglog.Logger.Debug("analytics queue full, dropping event", "event", event.Name)
+		debuglog.Logger.Debug("analytics queue full, dropping item", "kind", item.Kind, "event", item.Event)
 	}
 }
 
-func enqueuePeople(c *Client, props map[string]any) {
-	defer func() { _ = recover() }()
-	people := mixpanel.NewPeopleProperties(c.distinctID, props)
-	select {
-	case c.queue <- job{people: people}:
-	default:
-		debuglog.Logger.Debug("analytics queue full, dropping people_set")
-	}
+// enqueueProfile queues a profile (people) update keyed on this device's
+// distinct_id.
+func enqueueProfile(c *Client, props map[string]any) {
+	enqueue(c, ingestItem{
+		Kind:       "profile",
+		DistinctID: c.distinctID,
+		DeviceID:   c.deviceID,
+		Props:      props,
+	})
 }
 
 // mergeValue returns a copy of `properties` with a "value" key added. We
@@ -421,8 +473,8 @@ func mergeValue(properties map[string]interface{}, value float64) map[string]any
 }
 
 // sanitizeProperties returns a copy of `properties` with PII-blocked keys
-// dropped. Returns nil for nil/empty input so the Mixpanel SDK sees a clean
-// payload. We don't mutate the caller's map.
+// dropped. Returns nil for nil/empty input so the payload stays clean. We
+// don't mutate the caller's map.
 func sanitizeProperties(properties map[string]interface{}) map[string]any {
 	if len(properties) == 0 {
 		return nil
