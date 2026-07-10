@@ -248,6 +248,51 @@ func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool fu
 	return ""
 }
 
+// EnsureExtendedKeys turns on tmux extended-keys reporting so modified keys —
+// most visibly Shift+Enter — reach the agent inside the pane instead of
+// collapsing to a bare Enter. With extended-keys off (tmux's default) Shift+Enter
+// and plain Enter are the same byte (\r), so Claude Code can't tell them apart and
+// submits the message instead of inserting a newline.
+//
+// Both halves matter: `extended-keys on` makes tmux forward the CSI-u encoding an
+// app requests (Claude requests it), and advertising `extkeys` in
+// terminal-features tells tmux the outer terminal can carry those sequences.
+// extended-keys and terminal-features are server options (global to the tmux
+// server fleet shares, as it runs no dedicated socket); we set extended-keys only
+// when it isn't already on/always — leaving a user's explicit choice untouched —
+// and append the extkeys feature only when absent (no duplicate entries). Set
+// FLEET_NO_EXTENDED_KEYS to opt out entirely — e.g. a terminal whose Shift+Enter
+// you've bound differently, or a remote tmux you don't want reconfigured.
+//
+// Note: the outer terminal must itself emit a distinct Shift+Enter (Claude's
+// /terminal-setup configures this for iTerm2/VS Code; Ghostty/kitty bind it to
+// CSI-u \x1b[13;2u). Enabling extended-keys here is necessary but, without that,
+// not sufficient.
+//
+// Re-checks the live server each call rather than caching, like EnsureCopyCommand:
+// cheap (one show-options), and a server created fresh after a restart still gets
+// configured. Called from Start (server guaranteed up) + the startup bootstrap.
+// Best-effort; a no-server attempt just returns.
+func EnsureExtendedKeys() {
+	if envIsTruthy("FLEET_NO_EXTENDED_KEYS") {
+		return
+	}
+	out, err := exec.Command("tmux", "show-options", "-sv", "extended-keys").Output()
+	if err != nil {
+		return // No server yet (or tmux error) — retry on a later call.
+	}
+	// Respect an explicit on/always; set on for the default (off) or anything else.
+	if v := strings.TrimSpace(string(out)); v != "on" && v != "always" {
+		_ = exec.Command("tmux", "set-option", "-s", "extended-keys", "on").Run()
+	}
+	// Advertise extkeys for xterm-like outer terminals, once (terminal-features is
+	// additive, so guard against piling up duplicate entries across calls).
+	feat, err := exec.Command("tmux", "show-options", "-sv", "terminal-features").Output()
+	if err == nil && !strings.Contains(string(feat), "extkeys") {
+		_ = exec.Command("tmux", "set-option", "-sa", "terminal-features", "xterm*:extkeys").Run()
+	}
+}
+
 // envIsTruthy reports whether the named env var is set to a common truthy value.
 func envIsTruthy(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
@@ -354,6 +399,9 @@ func (s *Session) Start(command string, env ...string) error {
 
 	// Route copy-mode selections to the macOS clipboard (server exists now).
 	EnsureCopyCommand()
+	// Forward extended keys (Shift+Enter et al.) into the pane instead of
+	// collapsing them to plain Enter.
+	EnsureExtendedKeys()
 
 	// Batch set options.
 	// remain-on-exit keeps the dead pane around so the crash dump can read
