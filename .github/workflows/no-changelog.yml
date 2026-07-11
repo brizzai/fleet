@@ -42,7 +42,7 @@ jobs:
           HEAD_SHA=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} \
             --json headRefOid --jq '.headRefOid')
           RUN_ID=$(gh run list --repo ${{ github.repository }} --workflow=changelog-check.yml \
-            --commit "$HEAD_SHA" --status failure --limit 1 --json databaseId --jq '.[0].databaseId')
+            --commit "$HEAD_SHA" --status failure --limit 1 --json databaseId --jq '.[0].databaseId // empty')
           if [[ -n "$RUN_ID" ]]; then
             gh run rerun "$RUN_ID" --repo ${{ github.repository }}
           fi
