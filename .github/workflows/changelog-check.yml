@@ -18,7 +18,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Skip if labelled
+        id: label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Read labels live: /no-changelog labels with GITHUB_TOKEN, which fires no
+          # `labeled` event, so the payload the job-level `if` sees can be stale.
+          LABELS=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" --json labels --jq '.labels[].name')
+          if grep -qxE 'no-changelog|autorelease' <<<"$LABELS"; then
+            echo "✅ Skipped by label"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check for changelog fragment
+        if: steps.label.outputs.skip != 'true'
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"

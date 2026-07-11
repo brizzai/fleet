@@ -5,6 +5,7 @@ on:
     types: [created]
 
 permissions:
+  actions: write
   pull-requests: write
   issues: write
 
@@ -31,3 +32,17 @@ jobs:
         run: |
           gh pr edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "no-changelog"
           gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions -f content="+1"
+
+      - name: Re-run the changelog check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Labelling with GITHUB_TOKEN fires no `labeled` event, so the already-failed
+          # run must be re-run explicitly; it re-reads the label live and passes.
+          HEAD_SHA=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} \
+            --json headRefOid --jq '.headRefOid')
+          RUN_ID=$(gh run list --repo ${{ github.repository }} --workflow=changelog-check.yml \
+            --commit "$HEAD_SHA" --status failure --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [[ -n "$RUN_ID" ]]; then
+            gh run rerun "$RUN_ID" --repo ${{ github.repository }}
+          fi
