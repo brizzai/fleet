@@ -87,11 +87,11 @@ fleet
 
 ### Claude Code, Codex, or OpenCode — per session
 
-Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run Claude, Codex, and OpenCode sessions side by side in the same repo. Status, resume, and auto-naming work identically across all three — driven by each agent's own hooks, not terminal scraping.
+Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run Claude, Codex, and OpenCode sessions side by side in the same repo. Status, resume, and auto-naming work identically across all three — driven by each agent's own hook events, with pane heuristics filling the rare states that fire no hook.
 
 ### Real-Time Status
 
-Every agent's state, always visible. Hook-based detection for Claude Code, Codex, and OpenCode — no polling, no delay.
+Every agent's state, always visible. Hooks are the source of truth — the agent reports its own state the instant it changes; pane heuristics cover only the prompts that fire no hook.
 
 `● running` &nbsp; `◐ waiting` &nbsp; `● finished` &nbsp; `○ idle` &nbsp; `✕ error`
 
