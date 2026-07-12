@@ -37,9 +37,9 @@
 
 Your agents are coding. fleet keeps you in control.
 
-- 👀 **See** — real-time status across every repo
-- ⚡ **Act** — jump, approve, repeat
-- 🚀 **Ship** — PRs, branches, worktrees — all visible
+- 👀 **See** — every session's live status in one sidebar: running, waiting for you, finished
+- ⚡ **Act** — **`Space`** jumps to the agent that needs you, **`Enter`** drops you in to approve or steer
+- 🚀 **Ship** — branch, dirty state, and full PR status (CI, reviews, threads) on every repo header
 
 ## Install
 
@@ -95,9 +95,9 @@ Every agent's state, always visible. Hook-based detection for Claude Code, Codex
 
 `● running` &nbsp; `◐ waiting` &nbsp; `● finished` &nbsp; `○ idle` &nbsp; `✕ error`
 
-### Jump + Approve
+### Jump In, Direct, Jump Out
 
-**`Space`** jumps to the next session that needs attention. **`Y`** approves the prompt without attaching. Two keys, done. Cycle through a dozen waiting agents in seconds.
+**`Space`** jumps to the next session that needs attention. **`Enter`** drops you in — read what the agent is asking, approve, or type a course correction. **`Ctrl+Q`** detaches, and you're on to the next one. Already trust the prompt? **`Y`** approves without attaching.
 
 ### Git-Native Sessions
 
