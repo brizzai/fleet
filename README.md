@@ -5,9 +5,14 @@
     <strong>Run 10 coding agents. Stay sane.</strong>
   </p>
   <p align="center">
-    A terminal cockpit for orchestrating Claude Code &amp; Codex sessions in parallel.
+    A terminal cockpit for orchestrating Claude Code, Codex &amp; OpenCode sessions in parallel.
     <br />
     See which agents need you. Jump in, direct, jump out.
+  </p>
+  <p align="center">
+    <a href="https://brizzai.github.io/fleet/">Website</a>
+    &middot;
+    <a href="https://brizzai.github.io/fleet/docs/">Docs</a>
   </p>
   <p align="center">
     <a href="https://goreportcard.com/report/github.com/brizzai/fleet"><img src="https://goreportcard.com/badge/github.com/brizzai/fleet" alt="Go Report Card"></a>
@@ -32,9 +37,9 @@
 
 Your agents are coding. fleet keeps you in control.
 
-- 👀 **See** — real-time status across every repo
-- ⚡ **Act** — jump, approve, repeat
-- 🚀 **Ship** — PRs, branches, worktrees — all visible
+- 👀 **See** — every session's live status in one sidebar: running, waiting for you, finished
+- ⚡ **Act** — **`Space`** jumps to the agent that needs you, **`Enter`** drops you in to approve or steer
+- 🚀 **Ship** — branch, dirty state, and full PR status (CI, reviews, threads) on every repo header
 
 ## Install
 
@@ -64,7 +69,7 @@ Requires Go 1.26+.
 
 - macOS
 - [tmux](https://github.com/tmux/tmux) (`brew install tmux`)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or [Codex](https://developers.openai.com/codex) — at least one
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex), or [OpenCode](https://opencode.ai) — at least one
 
 ## Quick Start
 
@@ -73,26 +78,26 @@ Requires Go 1.26+.
 fleet
 
 # 'a' — new session in current repo (default agent)
-# 'A' — new session, pick the agent (Claude Code / Codex)
+# 'A' — new session, pick the agent (Claude Code / Codex / OpenCode)
 # 'n' — new session at any path (autocomplete)
 # '?' — all keybindings
 ```
 
 ## Features
 
-### Claude Code or Codex — per session
+### Claude Code, Codex, or OpenCode — per session
 
-Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run a Claude session and a Codex session side by side in the same repo. Status, resume, and auto-naming work identically for both — all driven by each agent's hooks, not terminal scraping.
+Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run Claude, Codex, and OpenCode sessions side by side in the same repo. Status, resume, and auto-naming work identically across all three — driven by each agent's own hook events, with pane heuristics filling the rare states that fire no hook.
 
 ### Real-Time Status
 
-Every agent's state, always visible. Hook-based detection for both Claude Code and Codex — no polling, no delay.
+Every agent's state, always visible. Hooks are the source of truth — the agent reports its own state the instant it changes; pane heuristics cover only the prompts that fire no hook.
 
 `● running` &nbsp; `◐ waiting` &nbsp; `● finished` &nbsp; `○ idle` &nbsp; `✕ error`
 
-### Jump + Approve
+### Jump In, Direct, Jump Out
 
-**`Space`** jumps to the next session that needs attention. **`Y`** approves the prompt without attaching. Two keys, done. Cycle through a dozen waiting agents in seconds.
+**`Space`** jumps to the next session that needs attention. **`Enter`** drops you in — read what the agent is asking, approve, or type a course correction. **`Ctrl+Q`** detaches, and you're on to the next one. Already trust the prompt? **`Y`** approves without attaching.
 
 ### Git-Native Sessions
 
@@ -108,14 +113,15 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 ### Terminal drawer
 
-**`` ` ``** opens a live terminal drawer — real shells (dev servers, log tails, scratch commands) scoped to the current repo or worktree, rendered through a true terminal emulator so streaming output, colors, and full-screen tools (vim, htop, lazygit) just work. New/close tabs with **`Ctrl+T`** / **`Ctrl+W`**, switch with **`Ctrl+PgUp/PgDn`**, **`Ctrl+G`** for full-screen attach.
+**`` ` ``** opens a live terminal drawer — real shells (dev servers, log tails, scratch commands) scoped to the current repo or worktree, rendered through a true terminal emulator so streaming output, colors, and full-screen tools (vim, htop, lazygit) just work. New/close tabs with **`Ctrl+T`** / **`Ctrl+W`**, switch with **`PgUp`/`PgDn`**, **`Ctrl+G`** for full-screen attach.
 
 ### And more
 
-- **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume`)
+- **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume` / `opencode --session`)
+- **Idle-session suspend** — when memory runs low, fleet hibernates your most-idle sessions (each resumed agent holds ~400MB) and brings them back right where they were on **`Enter`**
 - **Full terminal attach** — **`Enter`** for full PTY, **`Tab`** for split mode (beta), **`Ctrl+Q`** to detach
 - **Auto-naming** — sessions title themselves from your prompt
-- **5 themes** — tokyo-night, catppuccin-mocha, rose-pine, nord, gruvbox (**`S`** to switch)
+- **6 themes** — fleet-pink (default), tokyo-night, catppuccin-mocha, rose-pine, nord, gruvbox (**`S`** to switch)
 - **Chrome tab control** — **`p`** opens PR in Chrome, reuses existing tab
 - **Bug reports** — **`!`** captures diagnostics and opens a pre-filled GitHub issue
 
@@ -123,27 +129,27 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 There are a dozen multi-agent session managers now. Most try to support every AI CLI under the sun by shimming keystrokes and scraping terminal output — broad support, shallow understanding of any one agent.
 
-fleet goes the other way: **deep integration with the agents that expose real hooks — Claude Code and Codex.** Every feature is built on how those agents actually work — hook events, conversation resume, session IDs, prompt structure — not a generic "send keystrokes and hope" layer. Pick the agent per session (**`A`**), or set a default and fire with **`a`**.
+fleet goes the other way: **deep integration with the agents that expose real hooks — Claude Code, Codex, and OpenCode.** Every feature is built on how those agents actually work — hook events, conversation resume, session IDs, prompt structure — not a generic "send keystrokes and hope" layer. Pick the agent per session (**`A`**), or set a default and fire with **`a`**.
 
 ### vs. the alternatives
 
 |                                     | fleet | claude-squad | ccmanager | agent-deck |
 |-------------------------------------|:----------:|:------------:|:---------:|:----------:|
-| **Status detection**                | ✅ Hooks (real-time) | ✅ Pane scraping | ✅ Pane scraping | ✅ Hooks |
+| **Status detection**                | ✅ Hooks (real-time) | ⚠️ Pane scraping | ⚠️ Pane scraping | ✅ Hooks |
 | **PR state** (CI + reviews + threads) | ✅ | — | — | — |
 | **Smart session naming**            | ✅ | — | — | — |
 | **Fork conversation**              | ✅ | — | — | ✅ |
 | **Open PR in browser**             | ✅ | — | — | — |
 | **Session resume**                  | ✅ | — | — | ✅ |
 | **Git worktrees**                   | ✅ | ✅ | ✅ | ✅ |
-| **Hook-based multi-agent**          | ✅ Claude + Codex | — | — | — |
+| **Hook-based multi-agent**          | ✅ Claude + Codex + OpenCode | — | — | — |
 | **Many agents** (Gemini, Aider…)    | — | ✅ | ✅ | ✅ |
 | **Linux**                           | — | ✅ | ✅ | ✅ |
 | **No tmux dependency**              | — | — | ✅ | — |
 
-**The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code and Codex, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
+**The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code, Codex, and OpenCode, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
 
-If you drive Claude Code, Codex, or both and want the tightest integration, this is it.
+If you drive Claude Code, Codex, or OpenCode and want the tightest integration, this is it.
 
 ## Keybindings
 
@@ -155,7 +161,7 @@ If you drive Claude Code, Codex, or both and want the tightest integration, this
 | `Tab` | Focus/unfocus preview (split mode, beta) |
 | `Space` | Jump to next waiting/finished session |
 | `a` | New session (current repo, default agent) |
-| `A` | New session (pick agent: Claude Code / Codex) |
+| `A` | New session (pick agent: Claude Code / Codex / OpenCode) |
 | `n` | New session (any path, autocomplete) |
 | `w` | New worktree session |
 | `Y` | Quick approve waiting prompt |
@@ -167,10 +173,14 @@ If you drive Claude Code, Codex, or both and want the tightest integration, this
 | `e` | Open in editor |
 | `p` | Open PR in browser |
 | `/` | Filter sessions |
+| `` ` `` | Toggle terminal drawer |
+| `Ctrl+K` | Command palette |
 | `S` | Settings |
 | `!` | Bug report / diagnostics |
 | `?` | Help |
-| `q` | Quit |
+| `Ctrl+C` | Quit |
+
+The full keymap (session slots, undo delete, drawer chords) lives in the in-app help — press `?`.
 
 ## Contributing
 
