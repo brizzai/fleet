@@ -21,6 +21,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "PgUp", Desc: "Page up", Section: "nav"},
 
 	// Session actions.
+	{Key: ".", BarKey: ".", BarDesc: "Menu", Desc: "Context menu for the selected row", Section: "session"},
 	{Key: "Enter", BarKey: "⏎", BarDesc: "Open", Desc: "Attach / toggle group", Section: "session"},
 	{Key: "Tab", BarKey: "⇥", BarDesc: "Focus", Desc: "Focus preview / attach (swap)", Section: "session"},
 	{Key: "Space", BarKey: "␣", BarDesc: "Jump", Desc: "Jump to next waiting/finished", Section: "session"},
@@ -111,27 +112,32 @@ func HelpBarBindings() (context, global []struct{ Key, Desc string }) {
 // split mode handleKey swaps Enter↔Tab, so the session footer needs to
 // follow suit or it points users at the wrong action.
 func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []struct{ Key, Desc string }) {
+	// Each list stays at 6 keys — the footer doesn't truncate, so a longer one
+	// would bleed past a narrow terminal. `.` earns its slot by being the gateway
+	// to every other action on the row, so it displaces the one key it most
+	// cheaply replaces (Restart / PR are both one keystroke away inside the menu).
+	// `.` is omitted from the empty context, where it has nothing to act on.
 	switch ctx {
 	case BarContextSession:
 		if enterMode == "split" {
 			context = []struct{ Key, Desc string }{
 				{"⇥", "Attach"}, {"⏎", "Focus"}, {"␣", "Jump"},
-				{"Y", "Approve"}, {"d", "Del"}, {"p", "PR"},
+				{"Y", "Approve"}, {"d", "Del"}, {".", "Menu"},
 			}
 		} else {
 			context = []struct{ Key, Desc string }{
 				{"⏎", "Attach"}, {"␣", "Jump"}, {"Y", "Approve"},
-				{"d", "Del"}, {"r", "Restart"}, {"p", "PR"},
+				{"d", "Del"}, {"p", "PR"}, {".", "Menu"},
 			}
 		}
 	case BarContextCheckout:
 		context = []struct{ Key, Desc string }{
 			{"⏎", "Expand"}, {"d", "Del"}, {"w", "Wktree"},
-			{"F", "Fork"}, {"b", "Branch"},
+			{"F", "Fork"}, {"b", "Branch"}, {".", "Menu"},
 		}
 	case BarContextOrigin:
 		context = []struct{ Key, Desc string }{
-			{"⏎", "Expand"}, {"d", "Forget"}, {"w", "Wktree"},
+			{"⏎", "Expand"}, {"d", "Forget"}, {"w", "Wktree"}, {".", "Menu"},
 		}
 	default: // empty
 		context = []struct{ Key, Desc string }{

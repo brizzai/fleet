@@ -217,10 +217,14 @@ type Home struct {
 	createWorkspaceDialog *CreateWorkspaceDialog
 	branchDialog          *BranchCheckoutDialog
 	commandPalette        *CommandPaletteDialog
-	sessionCreateDialog   *SessionCreateDialog
-	consentDialog         *ConsentDialog
-	onboardingDialog      *OnboardingDialog
-	releaseNotes          *ReleaseNotesDialog
+	contextMenu           *ContextMenuDialog
+	// The row the open context menu was built for. Its entries resolve their
+	// subject from h.cursor, which an async rebuild can move — see contextMenuTarget.
+	contextMenuTarget   contextMenuTarget
+	sessionCreateDialog *SessionCreateDialog
+	consentDialog       *ConsentDialog
+	onboardingDialog    *OnboardingDialog
+	releaseNotes        *ReleaseNotesDialog
 
 	// What's New badge: an animated top-right indicator shown while an unseen
 	// highlighted release exists. cachedReleases is loaded once at startup so
@@ -465,6 +469,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		createWorkspaceDialog:  NewCreateWorkspaceDialog(),
 		branchDialog:           NewBranchCheckoutDialog(),
 		commandPalette:         NewCommandPaletteDialog(),
+		contextMenu:            NewContextMenuDialog(),
 		sessionCreateDialog:    NewSessionCreateDialog(),
 		consentDialog:          NewConsentDialog(),
 		onboardingDialog:       NewOnboardingDialog(cfg),
@@ -624,12 +629,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.createWorkspaceDialog.SetSize(msg.Width, msg.Height)
 		h.branchDialog.SetSize(msg.Width, msg.Height)
 		h.commandPalette.SetSize(msg.Width, msg.Height)
+		h.contextMenu.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
 		h.releaseNotes.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
+		// The dropdown is pinned to a sidebar row, and a resize moves that row
+		// (syncViewport may also re-scroll). Re-anchor so it doesn't strand.
+		if h.contextMenu.IsVisible() {
+			h.contextMenu.SetAnchor(h.contextMenuAnchor())
+		}
 		return h, nil
 
 	case tea.KeyPressMsg:
@@ -900,6 +911,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case commandPaletteMsg:
 		return h.dispatchPaletteSelection(msg)
+
+	case contextMenuMsg:
+		// Put the cursor back on the row the menu was opened for before dispatching —
+		// an async rebuild may have moved it while the menu was up, and every handler
+		// resolves its subject from the cursor.
+		if !h.focusContextMenuTarget() {
+			h.setInfo("That row is gone — nothing to act on")
+			return h, nil
+		}
+		h.actionLog.Add("context menu: "+msg.id, "", true)
+		return h.dispatchCommand(msg.id)
 
 	case reloadAllResultMsg:
 		for _, s := range h.sessions {
@@ -1558,6 +1580,13 @@ func (h *Home) View() tea.View {
 		y := (h.height - lipgloss.Height(pv)) / 2
 		base = overlayAt(pv, base, x, y)
 	}
+	// Context menu: a dropdown pinned to the cursor's sidebar row. Deliberately
+	// no dimBackdrop — it's a small box sitting beside the row it acts on, and
+	// dimming the whole app for it would read as a modal takeover.
+	if mv := h.contextMenu.View(); mv != "" {
+		x, y := h.contextMenu.Position(lipgloss.Width(mv), lipgloss.Height(mv))
+		base = overlayAt(mv, base, x, y)
+	}
 	// Contextual tip box — suppressed while a modal owns the screen so a sticky
 	// tip never paints over a dialog.
 	tip := ""
@@ -1628,6 +1657,7 @@ func (h *Home) modalOpen() bool {
 		h.confirmDialog.IsVisible() ||
 		h.renameDialog.IsVisible() ||
 		h.commandPalette.IsVisible() ||
+		h.contextMenu.IsVisible() ||
 		h.launchpadActive()
 }
 
@@ -1955,6 +1985,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		dialog, cmd := h.commandPalette.Update(msg)
 		h.commandPalette = dialog
 		return cmd, true
+	case h.contextMenu.IsVisible():
+		dialog, cmd := h.contextMenu.Update(msg)
+		h.contextMenu = dialog
+		return cmd, true
 	case h.sessionCreateDialog.IsVisible():
 		dialog, cmd := h.sessionCreateDialog.Update(msg)
 		h.sessionCreateDialog = dialog
@@ -2229,19 +2263,22 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.forkSelected()
 	case "F":
 		return h, h.forkToWorktreeSelected()
+	case ".":
+		// Context menu for the row under the cursor. No items means there's nothing
+		// actionable there (spacer, pending workspace, empty fleet) — stay silent
+		// rather than pop an empty box.
+		title, items := h.buildContextMenuItems()
+		if len(items) == 0 {
+			return h, nil
+		}
+		// Remember which row this menu speaks for, so the pick can't land on a
+		// different one if an async rebuild moves the cursor meanwhile.
+		h.contextMenuTarget = h.targetForCursor()
+		h.contextMenu.SetAnchor(h.contextMenuAnchor())
+		h.contextMenu.Show(title, items)
+		return h, nil
 	case "d":
-		// On a repo/worktree header, delete acts on the container (§ confirmDeleteHeader).
-		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
-			item := h.flatItems[h.cursor]
-			if item.IsOriginHeader {
-				return h, h.confirmDeleteOrigin(item)
-			}
-			return h, h.confirmDeleteHeader(item)
-		}
-		if s := h.selectedSession(); s != nil {
-			h.actionLog.Add("delete session", s.Title, true)
-		}
-		return h, h.confirmDeleteSelected()
+		return h, h.deleteAtCursor()
 	case "u":
 		return h.undoDelete()
 	case "r":
@@ -2811,6 +2848,24 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 	// Probe for a TCC-blocked folder now that Start() has spun up the tmux server
 	// (covers both new sessions and forks, which flow through here).
 	return h, tea.Batch(h.probeTCCCmd(s.ProjectPath), h.fetchPreviewForSelected())
+}
+
+// deleteAtCursor runs the delete whose scope follows the cursor: an origin
+// header forgets the whole group, any other header acts on the container
+// (§ confirmDeleteHeader), and a session row deletes just that session. Shared by
+// the `d` key and the context menu's delete entry so the two can't drift.
+func (h *Home) deleteAtCursor() tea.Cmd {
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
+		item := h.flatItems[h.cursor]
+		if item.IsOriginHeader {
+			return h.confirmDeleteOrigin(item)
+		}
+		return h.confirmDeleteHeader(item)
+	}
+	if s := h.selectedSession(); s != nil {
+		h.actionLog.Add("delete session", s.Title, true)
+	}
+	return h.confirmDeleteSelected()
 }
 
 func (h *Home) confirmDeleteSelected() tea.Cmd {
@@ -6030,6 +6085,26 @@ func (h *Home) sidebarListHeight() int {
 	return contentHeight
 }
 
+// contextMenuAnchor returns where the context-menu dropdown should hang: its
+// left edge, the screen row of the sidebar cursor, and the first row it must stay
+// clear of (the top of the footer).
+//
+// The sidebar's first content row is always y=2: renderBody spends row 0 on the
+// header and row 1 on the panel's top border, in every layout mode. RenderSidebar
+// then spends one more row on a "… N more above" indicator whenever it's scrolled.
+func (h *Home) contextMenuAnchor() (int, int, int) {
+	const (
+		sidebarContentTop = 2 // header row + panel top border
+		indent            = 3 // nudge the box into the sidebar, off the border
+	)
+	above := 0
+	if h.viewOffset > 0 {
+		above = 1
+	}
+	rowY := sidebarContentTop + above + (h.cursor - h.viewOffset)
+	return indent, rowY, h.height - h.footerHeight()
+}
+
 // footerHeight returns the number of rows reserved at the bottom of the screen
 // below the panel area. The default help bar takes 1 row, but focus mode and
 // the filter overlay both render a border-rule plus a content line — 2 rows.
@@ -6198,6 +6273,258 @@ func (h *Home) setInfo(msg string) {
 	h.toasts.Add(ToastInfo, msg)
 }
 
+// contextMenuTarget identifies the sidebar row a context menu was opened on.
+//
+// The menu's entries all resolve their subject from h.cursor at dispatch time, so
+// the cursor must still be on that row when the pick lands. Keys can't move it
+// (routeToModal feeds them to the menu), but *messages* can: handleSessionCreate
+// and the workspace-create handler both auto-select the row they just made, and
+// rebuildFlatItems runs on the tick. Since workspace creation is non-blocking by
+// design, a session created while the menu is open would slide the cursor onto a
+// different row — and `d` would then confirm deleting a session the menu never
+// named. Capturing the row's identity lets dispatch re-find it (§ focusContextMenuTarget).
+type contextMenuTarget struct {
+	sessionID string // session rows
+	repoPath  string // checkout headers
+	originKey string // origin headers
+}
+
+// find returns the index of the target's row in items, or -1 if it's gone.
+func (t contextMenuTarget) find(items []SidebarItem) int {
+	for i, item := range items {
+		switch {
+		case t.sessionID != "":
+			if item.Session != nil && item.Session.ID == t.sessionID {
+				return i
+			}
+		case t.repoPath != "":
+			if item.IsCheckoutHeader && item.RepoPath == t.repoPath {
+				return i
+			}
+		case t.originKey != "":
+			if item.IsOriginHeader && item.OriginKey == t.originKey {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// targetForCursor captures the identity of the row under the cursor.
+func (h *Home) targetForCursor() contextMenuTarget {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return contextMenuTarget{}
+	}
+	item := h.flatItems[h.cursor]
+	switch {
+	case item.IsOriginHeader:
+		return contextMenuTarget{originKey: item.OriginKey}
+	case item.IsCheckoutHeader:
+		return contextMenuTarget{repoPath: item.RepoPath}
+	case item.Session != nil:
+		return contextMenuTarget{sessionID: item.Session.ID}
+	}
+	return contextMenuTarget{}
+}
+
+// focusContextMenuTarget re-points the cursor at the row the menu was opened on,
+// so a pick always acts on the row the menu's title named — even if an async
+// rebuild moved the cursor while the menu was up. Reports false when the row is
+// gone (deleted from under the menu), in which case the caller must not dispatch.
+func (h *Home) focusContextMenuTarget() bool {
+	idx := h.contextMenuTarget.find(h.flatItems)
+	if idx < 0 {
+		return false
+	}
+	if idx != h.cursor {
+		h.cursor = idx
+		h.syncViewport()
+	}
+	return true
+}
+
+// buildContextMenuItems returns the title and action rows for the row under the
+// cursor. Every ID is a dispatchCommand id, so the menu adds no behavior of its
+// own — it only decides what applies here and what's currently reachable.
+//
+// Disabled rows still ship: they carry a Note saying why, so the menu teaches the
+// action exists (e.g. fork-to-worktree is Claude-only) instead of hiding it.
+// Returns no items for BarContextEmpty, which makes `.` a no-op on spacers,
+// pending rows, and an empty fleet.
+func (h *Home) buildContextMenuItems() (string, []ContextMenuItem) {
+	switch h.cursorBarContext() {
+	case BarContextSession:
+		return h.sessionContextMenu()
+	case BarContextCheckout:
+		return h.checkoutContextMenu()
+	case BarContextOrigin:
+		return h.originContextMenu()
+	default:
+		return "", nil
+	}
+}
+
+// hasPRForCursor reports whether the cursor's repo has a PR URL cached, which is
+// the same condition openPRInBrowser enforces.
+func (h *Home) hasPRForCursor() bool {
+	repo := h.resolveCurrentRepo()
+	if repo == "" {
+		return false
+	}
+	info := h.gitInfo()[repo]
+	return info != nil && info.PR != nil && info.PR.URL != ""
+}
+
+func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
+	s := h.selectedSession()
+	if s == nil {
+		return "", nil
+	}
+	status := s.GetStatus()
+	resumable := s.GetClaudeSessionID() != ""
+
+	// In split mode handleKey swaps Enter↔Tab, so the menu has to follow or it
+	// would print the wrong key next to the action.
+	enterKey, tabKey := "⏎", "⇥"
+	if h.cfg.GetEnterMode() == "split" {
+		enterKey, tabKey = "⇥", "⏎"
+	}
+
+	// A suspended session has no tmux to attach to — it has to be restarted with
+	// --resume first, so the primary action changes shape.
+	//
+	// Its shortcut is a literal Enter, NOT enterKey: handleKey's suspended check
+	// sits inside `case "enter"` *above* the split-mode branch (it "overrides split
+	// mode"), so Enter resumes in both modes. Advertising ⇥ in split mode would
+	// point at `attachSelected()`, which has no live tmux to attach to.
+	open := ContextMenuItem{ID: "attach", Label: "Attach", Shortcut: enterKey, Enabled: true}
+	if status == session.StatusSuspended {
+		open = ContextMenuItem{ID: "resume", Label: "Resume Session", Shortcut: "⏎", Enabled: true}
+	}
+
+	// Every guard below is a conjunction, so the dim note has to switch on which
+	// clause actually failed. A note that names the wrong reason is worse than
+	// none — it contradicts the status the sidebar is showing right next to it.
+	approve := ContextMenuItem{ID: "approve", Label: "Quick Approve", Shortcut: "Y", Key: "Y"}
+	switch {
+	case status != session.StatusWaiting:
+		approve.Note = "not waiting"
+	case !s.IsAlive():
+		approve.Note = "session not running"
+	default:
+		approve.Enabled = true
+	}
+
+	unread := ContextMenuItem{ID: "mark_unread", Label: "Mark as Unread", Shortcut: "m", Key: "m"}
+	switch {
+	case status != session.StatusIdle:
+		unread.Note = "idle only"
+	case s.GetHookStatus() == "":
+		unread.Note = "hasn't run yet"
+	default:
+		unread.Enabled = true
+	}
+
+	forkWorktree := ContextMenuItem{ID: "fork_worktree", Label: "Fork to Worktree", Shortcut: "F", Key: "F"}
+	switch {
+	case s.Agent != agent.Claude:
+		forkWorktree.Note = "Claude only"
+	case !resumable:
+		forkWorktree.Note = "no session id yet" // same reason the `fork` row gives
+	default:
+		forkWorktree.Enabled = true
+	}
+
+	suspend := ContextMenuItem{ID: "suspend_session", Label: "Suspend Session"}
+	switch {
+	case status == session.StatusSuspended:
+		suspend.Note = "already suspended"
+	case status != session.StatusIdle && status != session.StatusFinished:
+		suspend.Note = "idle or finished only"
+	case !resumable:
+		suspend.Note = "no session id yet"
+	default:
+		suspend.Enabled = true
+	}
+
+	items := []ContextMenuItem{
+		open,
+		{ID: "focus", Label: "Focus Preview", Shortcut: tabKey, Key: "tab", Enabled: true},
+		approve,
+		{ID: "restart", Label: "Restart", Shortcut: "r", Key: "r", Enabled: true},
+		{ID: "rename", Label: "Rename", Shortcut: "R", Key: "R", Enabled: true},
+		unread,
+		{ID: "editor", Label: "Open in Editor", Shortcut: "e", Key: "e", Enabled: true},
+		{
+			ID: "open_pr", Label: "Open PR", Shortcut: "p", Key: "p",
+			Enabled: h.hasPRForCursor(),
+			Note:    "no PR",
+		},
+		{
+			ID: "fork", Label: "Fork Session", Shortcut: "f", Key: "f",
+			Enabled: resumable,
+			Note:    "no session id yet",
+		},
+		forkWorktree,
+		suspend,
+		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
+		{ID: "delete_at_cursor", Label: "Delete Session", Shortcut: "d", Key: "d", Enabled: true},
+	}
+	return "session: " + s.Title, items
+}
+
+func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
+	item := h.flatItems[h.cursor]
+	repo := item.RepoPath
+
+	expand := "Expand"
+	if item.Expanded {
+		expand = "Collapse"
+	}
+
+	// The delete label has to name what actually happens, which is the same
+	// three-way branch confirmDeleteHeader takes. The title names the same kind,
+	// so the menu can't call a row a repo while offering to remove a worktree.
+	kind, deleteLabel := "repo", "Forget Repo"
+	switch {
+	case h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo]:
+		kind, deleteLabel = "worktree", "Remove Worktree"
+	case h.countSessionsForRepo(repo) == 0:
+		deleteLabel = "Unpin Repo"
+	}
+
+	items := []ContextMenuItem{
+		{ID: "toggle_group", Label: expand, Shortcut: "⏎", Enabled: true},
+		{ID: "new_session", Label: "New Session", Shortcut: "a", Key: "a", Enabled: true},
+		{ID: "new_session_pick", Label: "New Session (Pick Agent)", Shortcut: "A", Key: "A", Enabled: true},
+		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
+		{ID: "branch", Label: "Switch Branch", Shortcut: "b", Key: "b", Enabled: true},
+		{
+			ID: "open_pr", Label: "Open PR", Shortcut: "p", Key: "p",
+			Enabled: h.hasPRForCursor(),
+			Note:    "no PR",
+		},
+		{ID: "delete_at_cursor", Label: deleteLabel, Shortcut: "d", Key: "d", Enabled: true},
+	}
+	return kind + ": " + filepath.Base(repo), items
+}
+
+func (h *Home) originContextMenu() (string, []ContextMenuItem) {
+	item := h.flatItems[h.cursor]
+
+	expand := "Expand"
+	if item.Expanded {
+		expand = "Collapse"
+	}
+
+	items := []ContextMenuItem{
+		{ID: "toggle_group", Label: expand, Shortcut: "⏎", Enabled: true},
+		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
+		{ID: "delete_at_cursor", Label: "Forget Origin Group", Shortcut: "d", Key: "d", Enabled: true},
+	}
+	return "origin: " + item.OriginLabel, items
+}
+
 // buildPaletteItems returns all palette rows: built-in commands plus every
 // repo/worktree currently in the sidebar (matched by name, branch, or path).
 func (h *Home) buildPaletteItems() []PaletteItem {
@@ -6211,7 +6538,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
 		{Kind: PaletteKindCommand, ID: "fork_worktree", Name: "Fork to Worktree", Shortcut: "F"},
-		{Kind: PaletteKindCommand, ID: "delete", Name: "Delete Session", Shortcut: "d"},
+		{Kind: PaletteKindCommand, ID: "delete", Name: "Delete (session / repo / worktree)", Shortcut: "d"},
 		{Kind: PaletteKindCommand, ID: "restart", Name: "Restart Session", Shortcut: "r"},
 		{Kind: PaletteKindCommand, ID: "rename", Name: "Rename Session", Shortcut: "R"},
 		{Kind: PaletteKindCommand, ID: "editor", Name: "Open in Editor", Shortcut: "e"},
@@ -6400,11 +6727,22 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.forkSelected()
 	case "fork_worktree":
 		return h, h.forkToWorktreeSelected()
-	case "delete":
-		if s := h.selectedSession(); s != nil {
-			h.actionLog.Add("delete session", s.Title, true)
+	case "delete", "delete_at_cursor":
+		// One delete, scope follows the cursor — the same code the `d` key runs.
+		// Keeping a second, header-blind delete here would silently miss any future
+		// guard added to deleteAtCursor (and no-op outright on a header).
+		return h, h.deleteAtCursor()
+	case "toggle_group":
+		h.toggleRepoGroup()
+		return h, nil
+	case "resume":
+		// A suspended session's tmux is gone, so "attach" would fail — it has to be
+		// restarted with --resume first.
+		s := h.selectedSession()
+		if s == nil {
+			return h, nil
 		}
-		return h, h.confirmDeleteSelected()
+		return h, h.resumeSelected(s)
 	case "restart":
 		return h, h.confirmRestartSelected()
 	case "suspend_session":
