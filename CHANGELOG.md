@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-07-12
+
+### Changed
+
+- **Telemetry backend.** Usage analytics moved to PostHog. Your telemetry mode (`full` / `minimal` / `off`) and the `FLEET_TELEMETRY_DISABLED` / `DO_NOT_TRACK` opt-outs behave exactly as before — nothing changes in what you control.
+
+### Fixed
+
+- **Hooks survive running from source.** Launching fleet with `go run` baked a throwaway build path into `~/.claude/settings.json`, and Go deletes that binary on exit — so every hook afterward failed with "No such file or directory" and session status silently stopped updating. `make run` now execs a real build, and fleet won't write a `go run` path into your hooks even if you launch one by hand.
+
 ## [2.19.0] - 2026-07-12
 
 ### Highlights
@@ -400,7 +410,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.19.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.20.0...HEAD
+[2.20.0]: https://github.com/brizzai/fleet/releases/tag/v2.20.0
 [2.19.0]: https://github.com/brizzai/fleet/releases/tag/v2.19.0
 [2.18.0]: https://github.com/brizzai/fleet/releases/tag/v2.18.0
 [2.17.0]: https://github.com/brizzai/fleet/releases/tag/v2.17.0
