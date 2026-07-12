@@ -134,6 +134,43 @@ func TestContextMenuStateGuardsMatchHandlers(t *testing.T) {
 	}
 }
 
+// The title names the row's kind, not just its name — "fleet" alone doesn't say
+// whether `d` will forget a repo or remove a worktree. The worktree/repo split
+// must agree with the delete label, since they come from the same branch.
+func TestContextMenuTitleNamesTheRowKind(t *testing.T) {
+	const repo = "/tmp/cm-title"
+
+	s := session.NewSession("my-session", "/tmp/cm-title")
+	if title, _ := menuHome(sessionRow(s), s).buildContextMenuItems(); title != "session: my-session" {
+		t.Errorf("session title = %q, want %q", title, "session: my-session")
+	}
+
+	checkout := SidebarItem{IsRepoHeader: true, IsCheckoutHeader: true, RepoPath: repo}
+
+	// Plain repo.
+	h := menuHome(checkout, session.NewSession("s", repo))
+	h.setGitInfo(map[string]*git.RepoInfo{repo: {IsWorktreeRepo: false}})
+	if title, _ := h.buildContextMenuItems(); title != "repo: cm-title" {
+		t.Errorf("repo title = %q, want %q", title, "repo: cm-title")
+	}
+
+	// Worktree — title and delete label must agree.
+	h = menuHome(checkout)
+	h.setGitInfo(map[string]*git.RepoInfo{repo: {IsWorktreeRepo: true}})
+	title, items := h.buildContextMenuItems()
+	if title != "worktree: cm-title" {
+		t.Errorf("worktree title = %q, want %q", title, "worktree: cm-title")
+	}
+	if it, _ := findItem(items, "delete_at_cursor"); it.Label != "Remove Worktree" {
+		t.Errorf("title says worktree but delete says %q", it.Label)
+	}
+
+	origin := SidebarItem{IsRepoHeader: true, IsOriginHeader: true, OriginKey: "github.com/acme/x", OriginLabel: "acme/x"}
+	if title, _ := menuHome(origin).buildContextMenuItems(); title != "origin: acme/x" {
+		t.Errorf("origin title = %q, want %q", title, "origin: acme/x")
+	}
+}
+
 // A dim row's note is the only thing telling the user why the action is off, so
 // it has to name the reason the handler actually refuses for — not a plausible
 // one. mark_unread refuses for two different reasons.
@@ -251,10 +288,7 @@ func TestContextMenuOriginRow(t *testing.T) {
 	item := SidebarItem{IsRepoHeader: true, IsOriginHeader: true, OriginKey: "github.com/acme/x", OriginLabel: "acme/x"}
 	h := menuHome(item)
 
-	title, items := h.buildContextMenuItems()
-	if title != "acme/x" {
-		t.Errorf("title = %q, want %q", title, "acme/x")
-	}
+	_, items := h.buildContextMenuItems()
 	want := []string{"toggle_group", "new_worktree", "delete_at_cursor"}
 	got := ids(items)
 	if len(got) != len(want) {

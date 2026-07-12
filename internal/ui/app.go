@@ -6360,7 +6360,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
 		{ID: "delete_at_cursor", Label: "Delete Session", Shortcut: "d", Key: "d", Enabled: true},
 	}
-	return s.Title, items
+	return "session: " + s.Title, items
 }
 
 func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
@@ -6373,11 +6373,12 @@ func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
 	}
 
 	// The delete label has to name what actually happens, which is the same
-	// three-way branch confirmDeleteHeader takes.
-	deleteLabel := "Forget Repo"
+	// three-way branch confirmDeleteHeader takes. The title names the same kind,
+	// so the menu can't call a row a repo while offering to remove a worktree.
+	kind, deleteLabel := "repo", "Forget Repo"
 	switch {
 	case h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo]:
-		deleteLabel = "Remove Worktree"
+		kind, deleteLabel = "worktree", "Remove Worktree"
 	case h.countSessionsForRepo(repo) == 0:
 		deleteLabel = "Unpin Repo"
 	}
@@ -6395,7 +6396,7 @@ func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
 		},
 		{ID: "delete_at_cursor", Label: deleteLabel, Shortcut: "d", Key: "d", Enabled: true},
 	}
-	return filepath.Base(repo), items
+	return kind + ": " + filepath.Base(repo), items
 }
 
 func (h *Home) originContextMenu() (string, []ContextMenuItem) {
@@ -6411,7 +6412,7 @@ func (h *Home) originContextMenu() (string, []ContextMenuItem) {
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
 		{ID: "delete_at_cursor", Label: "Forget Origin Group", Shortcut: "d", Key: "d", Enabled: true},
 	}
-	return item.OriginLabel, items
+	return "origin: " + item.OriginLabel, items
 }
 
 // buildPaletteItems returns all palette rows: built-in commands plus every
