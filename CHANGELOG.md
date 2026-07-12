@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-07-12
+
+### Highlights
+
+- **Press `.` for the menu.** A context menu opens on the row under your cursor with exactly the actions that apply to it — sessions, worktrees, repos, and origins each get their own list. Actions that can't run right now stay visible and dimmed with the reason, and every entry shows its keybinding.
+
+### Added
+
+- **Press `.` for the menu.** A context menu opens on the row under your cursor with exactly the actions that apply to it — sessions, worktrees, repos, and origins each get their own list. Actions that can't run right now stay visible and dimmed with the reason, and every entry shows its keybinding.
+
 ## [2.18.0] - 2026-07-09
 
 ### Changed
@@ -390,7 +400,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.18.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.19.0...HEAD
+[2.19.0]: https://github.com/brizzai/fleet/releases/tag/v2.19.0
 [2.18.0]: https://github.com/brizzai/fleet/releases/tag/v2.18.0
 [2.17.0]: https://github.com/brizzai/fleet/releases/tag/v2.17.0
 [2.16.1]: https://github.com/brizzai/fleet/releases/tag/v2.16.1
