@@ -29,9 +29,52 @@ func TestIsFleetHook(t *testing.T) {
 	}
 }
 
+func TestIsGoRunBinary(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"go run temp binary", "/private/var/folders/k3/T/go-build2026166274/b001/exe/fleet", true},
+		{"installed binary", "/Users/dev/.local/bin/fleet", false},
+		{"repo build output", "/Users/dev/code/fleet/build/fleet", false},
+		{"exe dir outside a go-build tree", "/opt/tools/exe/fleet", false},
+		// A distant go-build* ancestor is not a go run temp: only the exact
+		// go-build<rand>/b<N>/exe layout is. Walking every ancestor got this wrong.
+		{"go-build prefix on a far ancestor", "/Users/dev/go-build-tools/dist/exe/fleet", false},
+		{"non-numeric build step dir", "/tmp/go-build123/bee/exe/fleet", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isGoRunBinary(c.path); got != c.want {
+				t.Errorf("isGoRunBinary(%q) = %v, want %v", c.path, got, c.want)
+			}
+		})
+	}
+}
+
 func TestGetHookCommandHasMarker(t *testing.T) {
 	if cmd := GetHookCommand(); !strings.Contains(cmd, fleetHookArg) {
 		t.Errorf("GetHookCommand() = %q, want it to contain the marker %q", cmd, fleetHookArg)
+	}
+}
+
+// Claude runs the hook command through a shell, and a dev build's path is the
+// repo checkout — which may contain spaces. Unquoted, the shell would split it
+// and every hook would fail silently.
+func TestShellQuote(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"/usr/local/bin/fleet", `'/usr/local/bin/fleet'`},
+		{"/Users/dev/My Projects/fleet/build/fleet", `'/Users/dev/My Projects/fleet/build/fleet'`},
+		{"/tmp/it's/fleet", `'/tmp/it'\''s/fleet'`},
+	}
+	for _, c := range cases {
+		if got := shellQuote(c.in); got != c.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

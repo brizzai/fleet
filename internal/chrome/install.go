@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/hooks"
 )
 
 const (
@@ -66,23 +67,16 @@ func nmhManifestDirs() []string {
 
 // InstallNativeMessagingHost writes the NMH manifest JSON into every applicable
 // Chrome-family NativeMessagingHosts dir so Chrome/Chromium can find the host.
-// Uses os.Executable() + EvalSymlinks for a stable binary path (same pattern as
-// hooks.GetHookCommand). Returns true if any manifest was written or updated.
+// Returns true if any manifest was written or updated.
+//
+// The binary path comes from hooks.FleetBinaryPath, which resolves symlinks and
+// — critically — refuses to hand back a `go run` temp path. The manifest outlives
+// this process, so a temp path would leave Chrome unable to spawn the host.
 func InstallNativeMessagingHost() bool {
 	log := debuglog.Logger
 
-	exe, err := os.Executable()
-	if err != nil {
-		log.Warn("chrome: cannot resolve executable path", "err", err)
-		return false
-	}
-	resolved, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		resolved = exe
-	}
-
 	// The native host command is the binary itself with "chrome-host" subcommand.
-	hostPath := resolved
+	hostPath := hooks.FleetBinaryPath()
 
 	manifest := nmhManifest{
 		Name:        nmhName,

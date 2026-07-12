@@ -111,7 +111,7 @@ func InjectOpenCodePlugin(configDir string) (bool, error) {
 	pluginDir := filepath.Join(configDir, "plugin")
 	pluginPath := filepath.Join(pluginDir, openCodePluginName)
 
-	binLiteral, err := json.Marshal(fleetBinaryPath())
+	binLiteral, err := json.Marshal(FleetBinaryPath())
 	if err != nil {
 		return false, fmt.Errorf("marshal fleet path: %w", err)
 	}
