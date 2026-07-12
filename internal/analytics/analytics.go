@@ -1,25 +1,20 @@
-// Package analytics ships usage events to fleet's own ingestion endpoint (a
-// small Next.js + Postgres service). Identity may include the user's git
-// name/email when telemetry is enabled — see DiscoverIdentity and
+// Package analytics ships usage events to PostHog. Identity may include the
+// user's git name/email when telemetry is enabled — see DiscoverIdentity and
 // internal/ui/consent.go for exactly what gets sent. The public surface
-// (Init, Track, Gauge, Distribution, SetUserProperties, Shutdown) is
-// intentionally backend-agnostic so call sites in app.go / settings.go /
+// (Init, Track, Gauge, Distribution, SetUserProperties, Heartbeat, Shutdown)
+// is intentionally backend-agnostic so call sites in app.go / settings.go /
 // hooks / chrome don't need to change when the backend does.
 //
-// Backend: an HTTP POST of a small JSON batch to ingestURL. The POST is a
-// blocking network call, which is unacceptable inside the Bubble Tea Update()
-// loop — so this package buffers events on a channel and ships them from a
-// single worker goroutine. Track/Gauge/Distribution return immediately.
+// Backend: the posthog-go SDK, which owns its own batching/flush worker —
+// Enqueue is non-blocking and safe to call from the Bubble Tea Update() loop.
+// A thin Client wraps it to enforce the telemetry modes (full/minimal/off),
+// strip PII, and keep anonymous (minimal-mode) events profile-less.
 package analytics
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +24,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/posthog/posthog-go"
 )
 
 // Telemetry modes, mirroring config.Telemetry{Full,Minimal,Off}. Kept as
@@ -40,55 +36,73 @@ const (
 )
 
 const (
-	// defaultIngestURL is fleet's analytics ingestion endpoint. Overridable
-	// via FLEET_ANALYTICS_URL for local testing against a dev deployment.
-	defaultIngestURL = "https://fleet-analytics-beryl.vercel.app/api/events"
+	// defaultPostHogHost is fleet's PostHog ingest host — the project lives in
+	// the US region. Overridable via FLEET_POSTHOG_HOST for local testing.
+	defaultPostHogHost = "https://us.i.posthog.com"
 
-	// ingestToken is sent as the x-fleet-token header. Like the Mixpanel
-	// project token it replaces, it's embedded in the (public) binary: it only
-	// authorizes event ingestion — never data reads — so the worst it unlocks
-	// is someone POSTing junk events.
-	ingestToken = "ac5058d5201279372cff69cae5b09979b130623a6904fda46f6d21e24dce5d26"
+	// flushInterval is how often the SDK ships a batch. fleet emits few events;
+	// a short interval keeps dashboards fresh and Close() quick on quit.
+	flushInterval = 5 * time.Second
 
-	// queueSize is how many events we buffer before dropping. The TUI emits
-	// at most a few events per second; this gives ~minutes of slack if the
-	// endpoint is slow before we start losing events.
-	queueSize = 256
-
-	// shutdownTimeout caps how long Shutdown blocks waiting for the worker to
-	// drain the queue. Kept short so quitting fleet exits promptly; on a slow
-	// or unreachable network any events still queued past this are dropped.
+	// shutdownTimeout caps how long the SDK's Close blocks draining the queue,
+	// so quitting fleet stays prompt. Any events still queued past this are
+	// dropped on a slow/unreachable network.
 	shutdownTimeout = 500 * time.Millisecond
 )
+
+// projectAPIKey is PostHog's project (capture) API key, embedded in the
+// (public) binary. Like the ingest token it replaces, a project key is
+// write-only — it authorizes event capture, never data reads — so the worst it
+// unlocks is someone POSTing junk events. Overridable via FLEET_POSTHOG_KEY.
+// (The secret *personal* API key, used only for reading data / scripting
+// dashboards, is never embedded here.) A var rather than a const so the
+// disabled-until-configured guard stays testable.
+var projectAPIKey = "phc_zHpJfaeu7J42KWQZ9J5CDWuR76T7nK45mzWNghzXfsHx"
 
 var (
 	global   *Client
 	globalMu sync.Mutex
 )
 
-// Client posts events to the ingestion endpoint from a queued worker.
+// sink is the subset of posthog.Client that Client depends on. Abstracted so
+// tests can inject a fake and assert mode-gating without a network round-trip;
+// *posthog.client satisfies it in production via newSink.
+type sink interface {
+	Enqueue(posthog.Message) error
+	Close() error
+}
+
+// newSink builds the production PostHog client. Overridden in tests.
+var newSink = func(key, host string) (sink, error) {
+	return posthog.NewWithConfig(key, posthog.Config{
+		Endpoint:        host,
+		Interval:        flushInterval,
+		ShutdownTimeout: shutdownTimeout,
+		Logger:          phLogger{},
+	})
+}
+
+// Client wraps the PostHog SDK, enforcing the telemetry mode on every call.
 //
 // deviceID and distinctID are kept separate on purpose: deviceID is always the
 // anonymous SHA256 of the hardware UUID (what DeviceID() exposes externally),
-// while distinctID is the per-event identifier sent to the endpoint — usually
-// the git user.email, with the device hash as a fallback. Logging distinctID
+// while distinctID is the identifier sent to PostHog — the git user.email in
+// full mode (so one human is one person across their machines), and the device
+// hash in minimal mode (so no identity leaves the machine). Logging distinctID
 // would leak email; logging deviceID is safe.
 type Client struct {
-	httpClient *http.Client
-	ingestURL  string
+	ph         sink
 	deviceID   string
 	distinctID string
 	version    string
-	queue      chan ingestItem
-	wg         sync.WaitGroup
 	disabled   bool
 	// mode is the resolved telemetry mode this client runs in
 	// (ModeFull/ModeMinimal) — the single source of truth, also emitted as the
-	// "mode" property on DAU events. Minimal is anonymous, DAU-only: no git
-	// name/email, no people profile, and Track/Gauge/Distribution/
+	// "mode" property on every event. Minimal is anonymous, DAU-only: no git
+	// name/email, no people profile (events carry $process_person_profile=false
+	// so the device still counts as a unique user), and Track/Gauge/Distribution/
 	// SetUserProperties all no-op; only app_started and the app_active heartbeat
-	// are sent, keyed on the anonymous device hash. A disabled client leaves
-	// this empty.
+	// are sent. A disabled client leaves this empty.
 	mode string
 
 	// mu guards lastActiveDay, which the daily-active Heartbeat reads and
@@ -124,25 +138,11 @@ func DiscoverIdentity() Identity {
 	}
 }
 
-// ingestItem is one record for the worker to POST — either an event or a
-// profile (people) update, distinguished by Kind. It serializes directly to
-// the endpoint's batch contract.
-type ingestItem struct {
-	Kind       string         `json:"kind"` // "event" | "profile"
-	Event      string         `json:"event,omitempty"`
-	DistinctID string         `json:"distinct_id"`
-	DeviceID   string         `json:"device_id,omitempty"`
-	Mode       string         `json:"mode,omitempty"`
-	Version    string         `json:"version,omitempty"`
-	TS         string         `json:"ts,omitempty"`
-	Props      map[string]any `json:"props,omitempty"`
-}
-
-// Init wires up the client and starts the worker goroutine using a pre-resolved
-// Identity. Pass the result of DiscoverIdentity() (called before the TUI
-// starts) so no blocking I/O happens here. Safe to call once; subsequent calls
-// are no-ops. mode is one of ModeFull/ModeMinimal/ModeOff. ModeOff (or an env
-// opt-out) creates a "disabled" client and all helper calls become no-ops.
+// Init wires up the client using a pre-resolved Identity. Pass the result of
+// DiscoverIdentity() (called before the TUI starts) so no blocking I/O happens
+// here. Safe to call once; subsequent calls are no-ops. mode is one of
+// ModeFull/ModeMinimal/ModeOff. ModeOff (or an env opt-out, or a missing
+// project key) creates a "disabled" client and all helper calls become no-ops.
 // ModeMinimal creates an anonymous client that sends only the DAU signals
 // (app_started + app_active) with no git name/email and no people profile.
 func Init(mode string, version string, identity Identity) {
@@ -153,9 +153,20 @@ func Init(mode string, version string, identity Identity) {
 		return
 	}
 
-	if mode == ModeOff || isOptedOut() {
+	key := projectAPIKey
+	if v := strings.TrimSpace(os.Getenv("FLEET_POSTHOG_KEY")); v != "" {
+		key = v
+	}
+
+	// Disabled when the user opted out, or before the PostHog project key is
+	// configured — the latter keeps this file safe to land ahead of the account.
+	if mode == ModeOff || isOptedOut() || key == "" {
 		global = &Client{disabled: true}
-		debuglog.Logger.Info("analytics disabled")
+		if key == "" && mode != ModeOff && !isOptedOut() {
+			debuglog.Logger.Warn("analytics disabled: no PostHog project key configured")
+		} else {
+			debuglog.Logger.Info("analytics disabled")
+		}
 		return
 	}
 
@@ -169,42 +180,43 @@ func Init(mode string, version string, identity Identity) {
 		distinctID = identity.GitEmail
 	}
 
-	ingestURL := defaultIngestURL
-	if v := strings.TrimSpace(os.Getenv("FLEET_ANALYTICS_URL")); v != "" {
-		ingestURL = v
+	host := defaultPostHogHost
+	if v := strings.TrimSpace(os.Getenv("FLEET_POSTHOG_HOST")); v != "" {
+		host = v
+	}
+
+	ph, err := newSink(key, host)
+	if err != nil {
+		global = &Client{disabled: true}
+		debuglog.Logger.Warn("analytics disabled: posthog init failed", "err", err)
+		return
 	}
 
 	c := &Client{
-		httpClient: &http.Client{},
-		ingestURL:  ingestURL,
+		ph:         ph,
 		deviceID:   identity.DeviceID,
 		distinctID: distinctID,
 		version:    version,
 		mode:       mode,
-		queue:      make(chan ingestItem, queueSize),
 	}
-	c.wg.Add(1)
-	go c.worker()
-
 	global = c
 
 	// Minimal mode ships no people profile at all — only anonymous events.
 	if !minimal {
-		// Set baseline profile properties so the endpoint sees this
-		// device/install even before the first explicit SetUserProperties call.
-		people := map[string]any{
-			"app_version":  version,
-			"os_version":   identity.OSVersion,
-			"arch":         runtime.GOARCH,
-			"machine_hash": identity.DeviceID,
-		}
+		// Set baseline profile properties so PostHog has this device/install
+		// even before the first explicit SetUserProperties call.
+		people := posthog.NewProperties().
+			Set("app_version", version).
+			Set("os_version", identity.OSVersion).
+			Set("arch", runtime.GOARCH).
+			Set("machine_hash", identity.DeviceID)
 		if identity.GitName != "" {
-			people["$name"] = identity.GitName
+			people.Set("$name", identity.GitName)
 		}
 		if identity.GitEmail != "" {
-			people["$email"] = identity.GitEmail
+			people.Set("$email", identity.GitEmail)
 		}
-		enqueueProfile(c, people)
+		c.identify(people)
 	}
 
 	// Log the mode and only whether git identity was present, never the value
@@ -231,48 +243,73 @@ func readGitIdentity() (name, email string) {
 	return name, email
 }
 
-// worker drains the queue and POSTs each item to the ingestion endpoint one at
-// a time. Each request gets a 5s timeout so a hung endpoint can't permanently
-// stall the worker.
-func (c *Client) worker() {
-	defer c.wg.Done()
-	for item := range c.queue {
-		if err := c.post(item); err != nil {
-			debuglog.Logger.Debug("analytics post failed", "err", err)
-		}
+// phLogger routes the SDK's internal logging into fleet's debug log. Without
+// it the SDK would write to stdout/stderr and corrupt the Bubble Tea display.
+// Everything is logged at debug level — analytics is best-effort, so its noise
+// should never surface as a fleet error.
+type phLogger struct{}
+
+func (phLogger) Debugf(f string, a ...interface{}) {
+	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
+}
+func (phLogger) Logf(f string, a ...interface{}) {
+	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
+}
+func (phLogger) Warnf(f string, a ...interface{}) {
+	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
+}
+func (phLogger) Errorf(f string, a ...interface{}) {
+	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
+}
+
+// baseProps builds the property set stamped on every event: the client's
+// version, resolved mode, and anonymous device hash, plus any caller extras.
+func (c *Client) baseProps(extra map[string]any) posthog.Properties {
+	p := posthog.NewProperties().
+		Set("version", c.version).
+		Set("mode", c.mode).
+		Set("device_id", c.deviceID)
+	for k, v := range extra {
+		p.Set(k, v)
+	}
+	return p
+}
+
+// capture enqueues an event. In minimal mode it sets $process_person_profile
+// to false, so the event still counts the device as a unique user (DAU) but
+// creates no person profile and carries no identity.
+func (c *Client) capture(event string, props posthog.Properties) {
+	if c == nil || c.ph == nil {
+		return
+	}
+	if props == nil {
+		props = posthog.NewProperties()
+	}
+	if c.mode == ModeMinimal {
+		props.Set("$process_person_profile", false)
+	}
+	if err := c.ph.Enqueue(posthog.Capture{
+		DistinctId: c.distinctID,
+		Event:      event,
+		Properties: props,
+		Timestamp:  time.Now(),
+	}); err != nil {
+		debuglog.Logger.Debug("analytics enqueue failed", "event", event, "err", err)
 	}
 }
 
-// post sends a single-item batch to the ingestion endpoint. The endpoint's
-// contract is {"batch":[item]}; sending one per request keeps the worker
-// simple, and fleet emits few enough events that batching isn't worth it.
-func (c *Client) post(item ingestItem) error {
-	body, err := json.Marshal(map[string][]ingestItem{"batch": {item}})
-	if err != nil {
-		return err
+// identify enqueues a people-profile update for this device's distinct_id.
+// Only used in full mode; PostHog merges props (latest value per key wins).
+func (c *Client) identify(props posthog.Properties) {
+	if c == nil || c.ph == nil {
+		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.ingestURL, bytes.NewReader(body))
-	if err != nil {
-		return err
+	if err := c.ph.Enqueue(posthog.Identify{
+		DistinctId: c.distinctID,
+		Properties: props,
+	}); err != nil {
+		debuglog.Logger.Debug("analytics identify failed", "err", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-fleet-token", ingestToken)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	// Drain the body before closing so net/http can reuse the keep-alive
-	// connection instead of opening a fresh TLS handshake per event.
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("ingest returned %d", resp.StatusCode)
-	}
-	return nil
 }
 
 // Track enqueues an event with the given properties. No-op in minimal mode,
@@ -282,7 +319,7 @@ func Track(eventType string, properties map[string]interface{}) {
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
-	enqueue(c, newEvent(c, eventType, sanitizeProperties(properties)))
+	c.capture(eventType, c.baseProps(sanitizeProperties(properties)))
 }
 
 // trackRaw enqueues an event bypassing the minimal-mode gate. Reserved for the
@@ -292,7 +329,7 @@ func trackRaw(c *Client, eventType string, properties map[string]any) {
 	if c == nil || c.disabled {
 		return
 	}
-	enqueue(c, newEvent(c, eventType, properties))
+	c.capture(eventType, c.baseProps(properties))
 }
 
 // Heartbeat records that this device is active today, at most once per calendar
@@ -314,19 +351,18 @@ func Heartbeat() {
 	c.lastActiveDay = day
 	c.mu.Unlock()
 
-	trackRaw(c, EventAppActive, map[string]any{"version": c.version, "mode": c.mode})
+	trackRaw(c, EventAppActive, nil)
 }
 
 // Gauge records a point-in-time value as an event with a numeric `value`
 // property. There's no native gauge type; this convention lets you chart
-// averages or maxes by event name.
+// averages or maxes by event name in PostHog.
 func Gauge(name string, value float64, properties map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
-	props := mergeValue(properties, value)
-	enqueue(c, newEvent(c, name, props))
+	c.capture(name, c.baseProps(mergeValue(properties, value)))
 }
 
 // Distribution records a sampled value as an event with a numeric `value`
@@ -337,19 +373,18 @@ func Distribution(name string, sample float64, properties map[string]interface{}
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
-	props := mergeValue(properties, sample)
-	enqueue(c, newEvent(c, name, props))
+	c.capture(name, c.baseProps(mergeValue(properties, sample)))
 }
 
-// SetUserProperties enqueues a profile update for this device. The endpoint
+// SetUserProperties enqueues a people-profile update for this device. PostHog
 // merges props into the existing profile (latest value per key wins), so
-// repeated calls during a session are fine.
+// repeated calls during a session are fine. No-op in minimal mode.
 func SetUserProperties(props map[string]interface{}) {
 	c := current()
 	if c == nil || c.disabled || c.mode == ModeMinimal {
 		return
 	}
-	enqueueProfile(c, sanitizeProperties(props))
+	c.identify(toProps(sanitizeProperties(props)))
 }
 
 // SyncEnabled reconciles the live client with the user's current telemetry
@@ -378,7 +413,7 @@ func SyncEnabled(mode string, version string, identity Identity) {
 	Init(mode, version, identity)
 }
 
-// Shutdown closes the queue, drains in-flight events with a timeout, and
+// Shutdown flushes in-flight events (bounded by the SDK's ShutdownTimeout) and
 // clears the global. Subsequent Track calls are no-ops.
 func Shutdown() {
 	globalMu.Lock()
@@ -386,20 +421,13 @@ func Shutdown() {
 	global = nil
 	globalMu.Unlock()
 
-	if c == nil || c.disabled {
+	if c == nil || c.disabled || c.ph == nil {
 		return
 	}
 
-	close(c.queue)
-	done := make(chan struct{})
-	go func() {
-		c.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(shutdownTimeout):
-		debuglog.Logger.Info("analytics shutdown timed out, dropping queued events")
+	// posthog Close respects Config.ShutdownTimeout, so this can't hang quit.
+	if err := c.ph.Close(); err != nil {
+		debuglog.Logger.Debug("analytics shutdown", "err", err)
 	}
 	debuglog.Logger.Info("analytics shutdown")
 }
@@ -419,49 +447,14 @@ func current() *Client {
 	return global
 }
 
-// newEvent builds an event item stamped with the client's identity and the
-// current time (the endpoint records it as client_ts).
-func newEvent(c *Client, eventType string, props map[string]any) ingestItem {
-	return ingestItem{
-		Kind:       "event",
-		Event:      eventType,
-		DistinctID: c.distinctID,
-		DeviceID:   c.deviceID,
-		Mode:       c.mode,
-		Version:    c.version,
-		TS:         time.Now().Format(time.RFC3339),
-		Props:      props,
+// toProps converts a plain property map into a posthog.Properties. A nil map
+// yields an empty (non-nil) Properties.
+func toProps(m map[string]any) posthog.Properties {
+	p := posthog.NewProperties()
+	for k, v := range m {
+		p.Set(k, v)
 	}
-}
-
-// enqueue pushes an item onto the worker queue without blocking. If the queue
-// is full, the item is dropped — fleet emits few enough events that this
-// should never happen in practice, but the non-blocking guarantee is what
-// keeps Track safe to call from the Bubble Tea Update() loop.
-//
-// The recover handles a narrow Shutdown race: between current() returning a
-// non-nil *Client and reaching the channel send below, Shutdown can close
-// c.queue from another goroutine (hook watcher, chrome client, etc.). A
-// closed channel makes `case c.queue <- …` selectable and panics. Analytics
-// is best-effort, so we'd rather drop the item than crash the TUI.
-func enqueue(c *Client, item ingestItem) {
-	defer func() { _ = recover() }()
-	select {
-	case c.queue <- item:
-	default:
-		debuglog.Logger.Debug("analytics queue full, dropping item", "kind", item.Kind, "event", item.Event)
-	}
-}
-
-// enqueueProfile queues a profile (people) update keyed on this device's
-// distinct_id.
-func enqueueProfile(c *Client, props map[string]any) {
-	enqueue(c, ingestItem{
-		Kind:       "profile",
-		DistinctID: c.distinctID,
-		DeviceID:   c.deviceID,
-		Props:      props,
-	})
+	return p
 }
 
 // mergeValue returns a copy of `properties` with a "value" key added. We
@@ -599,8 +592,8 @@ func osVersion() string {
 // TrackAppStarted records app launch. In full mode it merges usage properties
 // into the people profile and emits an app_started event with session/repo
 // counts. In minimal mode it emits only an anonymous app_started (version +
-// mode), with no people profile and no counts — the leanest launch signal that
-// still marks the device active today.
+// mode via baseProps), with no people profile and no counts — the leanest
+// launch signal that still marks the device active today.
 func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMode, defaultAgent string, autoName, copyClaudeSettings bool) {
 	c := current()
 	if c == nil || c.disabled {
@@ -608,7 +601,7 @@ func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMo
 	}
 
 	if c.mode == ModeMinimal {
-		trackRaw(c, EventAppStarted, map[string]any{"version": version, "mode": c.mode})
+		trackRaw(c, EventAppStarted, nil)
 		return
 	}
 
@@ -621,9 +614,7 @@ func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMo
 	})
 
 	Track(EventAppStarted, map[string]interface{}{
-		"version":       version,
 		"session_count": sessionCount,
 		"repo_count":    repoCount,
-		"mode":          c.mode,
 	})
 }
