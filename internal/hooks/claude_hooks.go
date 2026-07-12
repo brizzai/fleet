@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -79,9 +80,38 @@ func fleetBinaryPath() string {
 		return "fleet"
 	}
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		return resolved
+		exe = resolved
+	}
+	// Hooks outlive the process that writes them, so the path has to survive
+	// our exit. `go run` deletes its binary as soon as we quit; resolve to an
+	// installed fleet instead of leaving hooks pointing at a deleted file.
+	if isGoRunBinary(exe) {
+		debuglog.Logger.Warn("hooks: launched via go run, resolving hook command from PATH", "exe", exe)
+		if installed, err := exec.LookPath("fleet"); err == nil {
+			return installed
+		}
+		return "fleet"
 	}
 	return exe
+}
+
+// isGoRunBinary reports whether path is the throwaway binary `go run` builds
+// (<tmp>/go-build<rand>/b001/exe/<name>), which Go removes on process exit.
+func isGoRunBinary(path string) bool {
+	dir := filepath.Dir(path)
+	if filepath.Base(dir) != "exe" {
+		return false
+	}
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		if strings.HasPrefix(filepath.Base(dir), "go-build") {
+			return true
+		}
+		dir = parent
+	}
 }
 
 // GetHookCommand returns the full hook command string using the current binary path.

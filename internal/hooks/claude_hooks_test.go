@@ -29,6 +29,26 @@ func TestIsFleetHook(t *testing.T) {
 	}
 }
 
+func TestIsGoRunBinary(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"go run temp binary", "/private/var/folders/k3/T/go-build2026166274/b001/exe/fleet", true},
+		{"installed binary", "/Users/dev/.local/bin/fleet", false},
+		{"repo build output", "/Users/dev/code/fleet/build/fleet", false},
+		{"exe dir outside a go-build tree", "/opt/tools/exe/fleet", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isGoRunBinary(c.path); got != c.want {
+				t.Errorf("isGoRunBinary(%q) = %v, want %v", c.path, got, c.want)
+			}
+		})
+	}
+}
+
 func TestGetHookCommandHasMarker(t *testing.T) {
 	if cmd := GetHookCommand(); !strings.Contains(cmd, fleetHookArg) {
 		t.Errorf("GetHookCommand() = %q, want it to contain the marker %q", cmd, fleetHookArg)

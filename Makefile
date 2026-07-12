@@ -7,8 +7,12 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 build:
 	go build -v -ldflags "-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY) ./cmd/fleet
 
+# Build then exec (not `go run`): fleet writes its own path into Claude's
+# hooks, and go run deletes its binary on exit, leaving them dangling.
+# version=dev keeps the auto-updater from swapping in the released binary.
 run:
-	FLEET_DEBUG=$${FLEET_DEBUG:-1} go run ./cmd/fleet
+	go build -ldflags "-X main.version=dev" -o $(BUILD_DIR)/$(BINARY) ./cmd/fleet
+	FLEET_DEBUG=$${FLEET_DEBUG:-1} ./$(BUILD_DIR)/$(BINARY)
 
 clean:
 	rm -rf $(BUILD_DIR)
