@@ -48,7 +48,7 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 	}
 
 	// The resolved fleet binary path is baked in so the plugin invokes this build.
-	if bin := fleetBinaryPath(); !strings.Contains(content, bin) {
+	if bin := FleetBinaryPath(); !strings.Contains(content, bin) {
 		t.Errorf("plugin does not bake in fleet binary path %q:\n%s", bin, content)
 	}
 

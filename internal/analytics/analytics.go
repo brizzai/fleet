@@ -5,10 +5,12 @@
 // is intentionally backend-agnostic so call sites in app.go / settings.go /
 // hooks / chrome don't need to change when the backend does.
 //
-// Backend: the posthog-go SDK, which owns its own batching/flush worker —
-// Enqueue is non-blocking and safe to call from the Bubble Tea Update() loop.
-// A thin Client wraps it to enforce the telemetry modes (full/minimal/off),
-// strip PII, and keep anonymous (minimal-mode) events profile-less.
+// Backend: the posthog-go SDK, which owns its own batching/flush worker. A thin
+// Client wraps it to enforce the telemetry modes (full/minimal/off), strip PII,
+// and keep anonymous (minimal-mode) events profile-less. The SDK's Enqueue is
+// *blocking*, so Client fronts it with a drop-on-full queue drained by a
+// background goroutine — that is what makes the public surface safe to call from
+// the Bubble Tea Update() loop, as CLAUDE.md requires.
 package analytics
 
 import (
@@ -40,14 +42,21 @@ const (
 	// the US region. Overridable via FLEET_POSTHOG_HOST for local testing.
 	defaultPostHogHost = "https://us.i.posthog.com"
 
-	// flushInterval is how often the SDK ships a batch. fleet emits few events;
-	// a short interval keeps dashboards fresh and Close() quick on quit.
-	flushInterval = 5 * time.Second
+	// flushInterval is how often the SDK ships a batch. Kept short because the
+	// events that matter most (app_started, the app_active heartbeat) are emitted
+	// at launch: a user who quits a few seconds later must already have had them
+	// flushed, or DAU and the telemetry-decline rate silently undercount exactly
+	// the launch-and-quit population they exist to measure.
+	flushInterval = 1 * time.Second
 
-	// shutdownTimeout caps how long the SDK's Close blocks draining the queue,
-	// so quitting fleet stays prompt. Any events still queued past this are
-	// dropped on a slow/unreachable network.
-	shutdownTimeout = 500 * time.Millisecond
+	// shutdownTimeout caps how long quitting waits for queued events to reach
+	// PostHog. A cap, not a fixed wait — it only bites on a slow or unreachable
+	// network, where the alternative is holding the process open indefinitely.
+	shutdownTimeout = 2 * time.Second
+
+	// queueSize bounds the hand-off between callers and the drain goroutine.
+	// Generous for fleet's event volume; see Client.enqueue for what overflow means.
+	queueSize = 256
 )
 
 // projectAPIKey is PostHog's project (capture) API key, embedded in the
@@ -91,7 +100,16 @@ var newSink = func(key, host string) (sink, error) {
 // hash in minimal mode (so no identity leaves the machine). Logging distinctID
 // would leak email; logging deviceID is safe.
 type Client struct {
-	ph         sink
+	ph sink
+
+	// queue hands messages to the drain goroutine. The SDK's own Enqueue does a
+	// *blocking* channel send (and marshals the message on the caller's
+	// goroutine), while Track/Gauge are called straight from Bubble Tea's
+	// Update() — where CLAUDE.md forbids anything that can block. This channel is
+	// the buffer that keeps that promise; done closes once drain has flushed.
+	queue chan posthog.Message
+	done  chan struct{}
+
 	deviceID   string
 	distinctID string
 	version    string
@@ -194,11 +212,14 @@ func Init(mode string, version string, identity Identity) {
 
 	c := &Client{
 		ph:         ph,
+		queue:      make(chan posthog.Message, queueSize),
+		done:       make(chan struct{}),
 		deviceID:   identity.DeviceID,
 		distinctID: distinctID,
 		version:    version,
 		mode:       mode,
 	}
+	go c.drain()
 	global = c
 
 	// Minimal mode ships no people profile at all — only anonymous events.
@@ -243,23 +264,27 @@ func readGitIdentity() (name, email string) {
 	return name, email
 }
 
-// phLogger routes the SDK's internal logging into fleet's debug log. Without
-// it the SDK would write to stdout/stderr and corrupt the Bubble Tea display.
-// Everything is logged at debug level — analytics is best-effort, so its noise
-// should never surface as a fleet error.
+// phLogger routes the SDK's internal logging into fleet's debug log. Without it
+// the SDK writes to stdout/stderr and corrupts the Bubble Tea display.
+//
+// Debugf and Logf are deliberately dropped: the SDK logs the *serialized message*
+// at those levels, and in full mode a message's distinct_id is the user's git
+// email. debug.log is what the bug-report flow (! → g) pastes into a public
+// GitHub issue, so forwarding them would leak the reporter's email. Nothing at
+// those levels is worth that — it's per-batch buffer bookkeeping.
+//
+// Warnf/Errorf carry only counts and error strings (no payloads), and they are
+// the sole signal that telemetry is broken — a revoked key, a 4xx from PostHog.
+// They go to Warn, not Debug, so they survive without FLEET_DEBUG set.
 type phLogger struct{}
 
-func (phLogger) Debugf(f string, a ...interface{}) {
-	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
-}
-func (phLogger) Logf(f string, a ...interface{}) {
-	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
-}
+func (phLogger) Debugf(string, ...interface{}) {}
+func (phLogger) Logf(string, ...interface{})   {}
 func (phLogger) Warnf(f string, a ...interface{}) {
-	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
+	debuglog.Logger.Warn("posthog: " + fmt.Sprintf(f, a...))
 }
 func (phLogger) Errorf(f string, a ...interface{}) {
-	debuglog.Logger.Debug("posthog: " + fmt.Sprintf(f, a...))
+	debuglog.Logger.Warn("posthog: " + fmt.Sprintf(f, a...))
 }
 
 // baseProps builds the property set stamped on every event: the client's
@@ -275,11 +300,41 @@ func (c *Client) baseProps(extra map[string]any) posthog.Properties {
 	return p
 }
 
+// enqueue hands a message to the drain goroutine without ever blocking, so it
+// is safe to call from the Bubble Tea Update() loop. When the queue is full
+// (PostHog unreachable and the drain goroutine wedged on a send), the event is
+// dropped: losing a usage event is always preferable to freezing the UI.
+func (c *Client) enqueue(msg posthog.Message) {
+	if c == nil || c.queue == nil {
+		return
+	}
+	select {
+	case c.queue <- msg:
+	default:
+		debuglog.Logger.Debug("analytics queue full, dropping event")
+	}
+}
+
+// drain feeds queued messages into the SDK, keeping its blocking Enqueue off the
+// UI thread, then flushes on close. Owns the sink's lifecycle end: closing
+// c.queue is what shuts it down (see shutdownClient).
+func (c *Client) drain() {
+	defer close(c.done)
+	for msg := range c.queue {
+		if err := c.ph.Enqueue(msg); err != nil {
+			debuglog.Logger.Debug("analytics enqueue failed", "err", err)
+		}
+	}
+	if err := c.ph.Close(); err != nil {
+		debuglog.Logger.Debug("analytics close failed", "err", err)
+	}
+}
+
 // capture enqueues an event. In minimal mode it sets $process_person_profile
 // to false, so the event still counts the device as a unique user (DAU) but
 // creates no person profile and carries no identity.
 func (c *Client) capture(event string, props posthog.Properties) {
-	if c == nil || c.ph == nil {
+	if c == nil {
 		return
 	}
 	if props == nil {
@@ -288,28 +343,24 @@ func (c *Client) capture(event string, props posthog.Properties) {
 	if c.mode == ModeMinimal {
 		props.Set("$process_person_profile", false)
 	}
-	if err := c.ph.Enqueue(posthog.Capture{
+	c.enqueue(posthog.Capture{
 		DistinctId: c.distinctID,
 		Event:      event,
 		Properties: props,
 		Timestamp:  time.Now(),
-	}); err != nil {
-		debuglog.Logger.Debug("analytics enqueue failed", "event", event, "err", err)
-	}
+	})
 }
 
 // identify enqueues a people-profile update for this device's distinct_id.
 // Only used in full mode; PostHog merges props (latest value per key wins).
 func (c *Client) identify(props posthog.Properties) {
-	if c == nil || c.ph == nil {
+	if c == nil {
 		return
 	}
-	if err := c.ph.Enqueue(posthog.Identify{
+	c.enqueue(posthog.Identify{
 		DistinctId: c.distinctID,
 		Properties: props,
-	}); err != nil {
-		debuglog.Logger.Debug("analytics identify failed", "err", err)
-	}
+	})
 }
 
 // Track enqueues an event with the given properties. No-op in minimal mode,
@@ -409,27 +460,48 @@ func SyncEnabled(mode string, version string, identity Identity) {
 		return
 	}
 
-	Shutdown()
+	// SyncEnabled runs on the Bubble Tea Update() goroutine (the Settings dialog
+	// closing), and flushing the old client is a network round-trip — so it must
+	// not happen inline. detach() still runs on this goroutine (Go evaluates a
+	// call's arguments before starting it), which matters: the global has to be
+	// cleared before Init below, or Init would see a live client and no-op.
+	go shutdownClient(detach())
 	Init(mode, version, identity)
 }
 
-// Shutdown flushes in-flight events (bounded by the SDK's ShutdownTimeout) and
-// clears the global. Subsequent Track calls are no-ops.
+// Shutdown flushes in-flight events and clears the global. Subsequent Track
+// calls are no-ops. Blocks up to shutdownTimeout — call it on quit, where
+// waiting for the flush is the point; use the detach/shutdownClient pair
+// directly to flush off-thread.
 func Shutdown() {
+	shutdownClient(detach())
+}
+
+// detach clears the global client and hands it back, so the caller can flush it
+// without holding globalMu.
+func detach() *Client {
 	globalMu.Lock()
 	c := global
 	global = nil
 	globalMu.Unlock()
+	return c
+}
 
-	if c == nil || c.disabled || c.ph == nil {
+// shutdownClient closes c's queue — which tells drain to hand the SDK everything
+// still buffered and then flush — and waits for that to finish, but never longer
+// than shutdownTimeout: a wedged network must not hold the process open.
+func shutdownClient(c *Client) {
+	if c == nil || c.disabled || c.queue == nil {
 		return
 	}
 
-	// posthog Close respects Config.ShutdownTimeout, so this can't hang quit.
-	if err := c.ph.Close(); err != nil {
-		debuglog.Logger.Debug("analytics shutdown", "err", err)
+	close(c.queue)
+	select {
+	case <-c.done:
+		debuglog.Logger.Info("analytics shutdown")
+	case <-time.After(shutdownTimeout):
+		debuglog.Logger.Warn("analytics shutdown timed out, dropping queued events")
 	}
-	debuglog.Logger.Info("analytics shutdown")
 }
 
 // DeviceID returns the anonymous device ID, or "" if analytics is disabled.

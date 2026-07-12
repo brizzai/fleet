@@ -87,13 +87,14 @@ var testIdentity = Identity{DeviceID: "devhash", GitName: "Ada", GitEmail: "ada@
 func TestFullModeIdentifiesAndTracks(t *testing.T) {
 	f := withFake(t)
 	Init(ModeFull, "9.9.9", testIdentity)
+	Track("thing_happened", map[string]interface{}{"count": 3})
+	Shutdown() // drains the queue into the sink; assertions below are race-free
 
 	// Init sets a baseline people profile.
 	if len(f.identifies()) == 0 {
 		t.Fatal("full mode should enqueue an Identify at Init")
 	}
 
-	Track("thing_happened", map[string]interface{}{"count": 3})
 	c, ok := captureByEvent(f.captures(), "thing_happened")
 	if !ok {
 		t.Fatal("full mode should Track the event")
@@ -112,20 +113,20 @@ func TestFullModeIdentifiesAndTracks(t *testing.T) {
 func TestMinimalModeIsAnonymousDAUOnly(t *testing.T) {
 	f := withFake(t)
 	Init(ModeMinimal, "9.9.9", testIdentity)
+	Track("thing_happened", map[string]interface{}{"count": 3}) // must no-op
+	Heartbeat()                                                 // must still fire
+	Shutdown()                                                  // drains the queue into the sink
 
 	// No people profile in minimal mode.
 	if got := len(f.identifies()); got != 0 {
 		t.Errorf("minimal mode enqueued %d Identify messages, want 0", got)
 	}
 
-	// Track no-ops...
-	Track("thing_happened", map[string]interface{}{"count": 3})
 	if _, ok := captureByEvent(f.captures(), "thing_happened"); ok {
 		t.Error("minimal mode must not send Track events")
 	}
 
-	// ...but the heartbeat still fires, anonymously and profile-less.
-	Heartbeat()
+	// The heartbeat is the one thing minimal mode does send: anonymous, profile-less.
 	c, ok := captureByEvent(f.captures(), EventAppActive)
 	if !ok {
 		t.Fatal("minimal mode should still send the app_active heartbeat")
@@ -148,6 +149,7 @@ func TestOffModeSendsNothing(t *testing.T) {
 	Track("thing_happened", nil)
 	Heartbeat()
 	TrackAppStarted("9.9.9", 1, 1, "fleet-pink", "enter", "claude", true, true)
+	Shutdown()
 
 	if n := len(f.msgs); n != 0 {
 		t.Errorf("off mode enqueued %d messages, want 0", n)
@@ -172,6 +174,7 @@ func TestMissingKeyDisables(t *testing.T) {
 
 	Init(ModeFull, "9.9.9", testIdentity)
 	Track("thing_happened", nil)
+	Shutdown()
 	if len(f.msgs) != 0 {
 		t.Errorf("with no project key, expected a disabled client sending nothing; got %d messages", len(f.msgs))
 	}

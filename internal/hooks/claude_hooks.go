@@ -70,53 +70,78 @@ func GetClaudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-// fleetBinaryPath returns the absolute, symlink-resolved path to the running
-// fleet binary, falling back to "fleet" if it can't be resolved. Shared by the
-// Claude/Codex hook command and the OpenCode status plugin so both invoke the
-// same binary regardless of how fleet was launched.
-func fleetBinaryPath() string {
+// FleetBinaryPath returns the absolute, symlink-resolved path to the running
+// fleet binary. Shared by the Claude/Codex hook command, the OpenCode status
+// plugin, and the Chrome native-messaging-host manifest, so all three invoke the
+// same binary regardless of how fleet was launched — and all three inherit the
+// `go run` handling below.
+//
+// The path is returned unquoted. Callers embedding it in a shell command must
+// quote it themselves; see GetHookCommand.
+func FleetBinaryPath() string {
 	exe, err := os.Executable()
 	if err != nil {
+		// Nothing resolvable to point at; leave it to PATH.
 		return "fleet"
 	}
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-	// Hooks outlive the process that writes them, so the path has to survive
-	// our exit. `go run` deletes its binary as soon as we quit; resolve to an
-	// installed fleet instead of leaving hooks pointing at a deleted file.
+	// Hooks and the NMH manifest outlive the process that writes them, so the
+	// path has to survive our exit. `go run` deletes its binary as soon as we
+	// quit; prefer an installed fleet over pointing at a file that's about to
+	// vanish.
 	if isGoRunBinary(exe) {
 		debuglog.Logger.Warn("hooks: launched via go run, resolving hook command from PATH", "exe", exe)
 		if installed, err := exec.LookPath("fleet"); err == nil {
 			return installed
 		}
-		return "fleet"
+		// No installed fleet either. The go-run path still works until we exit,
+		// which beats a bare "fleet" that never resolves at all.
+		debuglog.Logger.Warn("hooks: no installed fleet on PATH; hooks will break once this process exits", "exe", exe)
 	}
 	return exe
 }
 
-// isGoRunBinary reports whether path is the throwaway binary `go run` builds
-// (<tmp>/go-build<rand>/b001/exe/<name>), which Go removes on process exit.
+// isGoRunBinary reports whether path is the throwaway binary `go run` builds at
+// <tmp>/go-build<rand>/b001/exe/<name>, which Go removes on process exit. That
+// layout is fixed-depth, so match exactly those three levels: walking every
+// ancestor would misread e.g. ~/go-build-tools/dist/exe/fleet as a go-run temp.
 func isGoRunBinary(path string) bool {
-	dir := filepath.Dir(path)
-	if filepath.Base(dir) != "exe" {
-		return false
-	}
-	for {
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
-		}
-		if strings.HasPrefix(filepath.Base(dir), "go-build") {
-			return true
-		}
-		dir = parent
-	}
+	exeDir := filepath.Dir(path)      // <tmp>/go-build<rand>/b001/exe
+	stepDir := filepath.Dir(exeDir)   // <tmp>/go-build<rand>/b001
+	buildDir := filepath.Dir(stepDir) // <tmp>/go-build<rand>
+	return filepath.Base(exeDir) == "exe" &&
+		isBuildStepDir(filepath.Base(stepDir)) &&
+		strings.HasPrefix(filepath.Base(buildDir), "go-build")
 }
 
-// GetHookCommand returns the full hook command string using the current binary path.
+// isBuildStepDir reports whether name is one of go build's per-step work dirs
+// (b001, b042, …).
+func isBuildStepDir(name string) bool {
+	if len(name) < 2 || name[0] != 'b' {
+		return false
+	}
+	for _, r := range name[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// GetHookCommand returns the full hook command string using the current binary
+// path. Claude runs this through a shell, so the path is quoted: a dev build's
+// path is the repo checkout, which may well contain a space.
 func GetHookCommand() string {
-	return fleetBinaryPath() + " hook-handler " + fleetHookArg
+	return shellQuote(FleetBinaryPath()) + " hook-handler " + fleetHookArg
+}
+
+// shellQuote single-quotes s for safe use in a shell command. An embedded single
+// quote is escaped by closing the quote, emitting an escaped quote, and reopening
+// it — the standard POSIX idiom, since nothing else is special inside single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // fleetHook returns a hook entry with the current binary path.
