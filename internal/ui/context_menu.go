@@ -113,11 +113,16 @@ func (d *ContextMenuDialog) nextEnabled(i, step int) int {
 	return i
 }
 
-// maxVisible is how many rows fit between the menu's top and the footer, after
-// the box chrome (2 border rows + title + hint). Keeps the dropdown on screen on
-// a short terminal; the overflow scrolls.
+// contextMenuChrome is every non-item row View can draw: 2 border rows, the title,
+// and — once the list overflows — a "⋮" indicator above AND below. Budgeting the
+// worst case unconditionally costs one wasted row on an unscrolled menu; getting
+// it wrong lets a scrolled box overrun the footer.
+const contextMenuChrome = 5
+
+// maxVisible is how many item rows fit between the menu's top and the footer.
+// Keeps the dropdown on screen on a short terminal; the overflow scrolls.
 func (d *ContextMenuDialog) maxVisible() int {
-	return min(max(d.bottomLimit-4, 1), len(d.items))
+	return min(max(d.bottomLimit-contextMenuChrome, 1), len(d.items))
 }
 
 func (d *ContextMenuDialog) syncScroll() {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
@@ -172,24 +173,112 @@ func TestContextMenuTitleNamesTheRowKind(t *testing.T) {
 }
 
 // A dim row's note is the only thing telling the user why the action is off, so
-// it has to name the reason the handler actually refuses for — not a plausible
-// one. mark_unread refuses for two different reasons.
-func TestContextMenuMarkUnreadNoteNamesTheRealReason(t *testing.T) {
-	running := session.NewSession("s", "/tmp/cm-repo")
-	running.SetStatus(session.StatusRunning)
-	h := menuHome(sessionRow(running), running)
-	_, items := h.buildContextMenuItems()
-	if it, _ := findItem(items, "mark_unread"); it.Note != "idle only" {
-		t.Errorf("running session: note = %q, want %q", it.Note, "idle only")
+// it has to name the clause that actually failed — not a plausible-sounding one.
+// Every one of these guards is a conjunction, and a constant note contradicts the
+// status dot the sidebar draws right next to the row.
+func TestContextMenuNotesNameTheRealReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		id     string
+		mutate func(s *session.Session)
+		want   string
+	}{
+		{"mark unread, not idle", "mark_unread", func(s *session.Session) {
+			s.SetStatus(session.StatusRunning)
+		}, "idle only"},
+		// It IS idle here, so "idle only" would be a lie.
+		{"mark unread, idle but never ran", "mark_unread", func(s *session.Session) {
+			s.SetStatus(session.StatusIdle)
+		}, "hasn't run yet"},
+
+		{"approve, not waiting", "approve", func(s *session.Session) {
+			s.SetStatus(session.StatusIdle)
+		}, "not waiting"},
+		// It IS waiting (the sidebar shows ◐ waiting) — the pane is just dead.
+		{"approve, waiting but pane dead", "approve", func(s *session.Session) {
+			s.SetStatus(session.StatusWaiting)
+		}, "session not running"},
+
+		{"fork to worktree, wrong agent", "fork_worktree", func(s *session.Session) {
+			s.Agent = agent.Codex
+			s.ClaudeSessionID = "abc"
+		}, "Claude only"},
+		// It IS Claude — it just hasn't captured a resume id yet, which is exactly
+		// what the `fork` row directly above it says for the same state.
+		{"fork to worktree, claude without a resume id", "fork_worktree", func(s *session.Session) {
+			s.Agent = agent.Claude
+			s.ClaudeSessionID = ""
+		}, "no session id yet"},
+
+		{"suspend, wrong status", "suspend_session", func(s *session.Session) {
+			s.SetStatus(session.StatusRunning)
+			s.ClaudeSessionID = "abc"
+		}, "idle or finished only"},
+		{"suspend, already suspended", "suspend_session", func(s *session.Session) {
+			s.SetStatus(session.StatusSuspended)
+			s.ClaudeSessionID = "abc"
+		}, "already suspended"},
+		// It IS idle — there's just no resume id, so suspending would lose the convo.
+		{"suspend, idle without a resume id", "suspend_session", func(s *session.Session) {
+			s.SetStatus(session.StatusIdle)
+			s.ClaudeSessionID = ""
+		}, "no session id yet"},
 	}
 
-	// Idle, but no hook ever fired: it IS idle, so "idle only" would be a lie.
-	fresh := session.NewSession("s", "/tmp/cm-repo")
-	fresh.SetStatus(session.StatusIdle)
-	h = menuHome(sessionRow(fresh), fresh)
-	_, items = h.buildContextMenuItems()
-	if it, _ := findItem(items, "mark_unread"); it.Note != "hasn't run yet" {
-		t.Errorf("never-run idle session: note = %q, want %q", it.Note, "hasn't run yet")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := session.NewSession("s", "/tmp/cm-repo")
+			s.Agent = agent.Claude
+			tt.mutate(s)
+
+			h := menuHome(sessionRow(s), s)
+			_, items := h.buildContextMenuItems()
+
+			it, ok := findItem(items, tt.id)
+			if !ok {
+				t.Fatalf("no %q entry", tt.id)
+			}
+			if it.Enabled {
+				t.Fatalf("%q is enabled — this case is supposed to be blocked", tt.id)
+			}
+			if it.Note != tt.want {
+				t.Errorf("%q note = %q, want %q", tt.id, it.Note, tt.want)
+			}
+		})
+	}
+}
+
+// The menu teaches keybindings, so a row's shortcut has to be the key that
+// actually works. handleKey's suspended check sits inside `case "enter"` ABOVE the
+// split-mode swap, so Enter resumes in BOTH modes — advertising ⇥ in split mode
+// would point at attachSelected(), which has no live tmux for a suspended session.
+func TestContextMenuResumeShortcutIsEnterInBothModes(t *testing.T) {
+	for _, mode := range []string{"attach", "split"} {
+		t.Run(mode, func(t *testing.T) {
+			s := session.NewSession("s", "/tmp/cm-repo")
+			s.SetStatus(session.StatusSuspended)
+
+			h := menuHome(sessionRow(s), s)
+			h.cfg = &config.Config{EnterMode: mode}
+
+			_, items := h.buildContextMenuItems()
+			it, ok := findItem(items, "resume")
+			if !ok {
+				t.Fatalf("no resume entry in %s mode", mode)
+			}
+			if it.Shortcut != "⏎" {
+				t.Errorf("resume shortcut = %q in %s mode, want ⏎ (Tab does not resume)", it.Shortcut, mode)
+			}
+		})
+	}
+
+	// Sanity: the swap still applies to the rows that genuinely follow it.
+	live := session.NewSession("s", "/tmp/cm-repo")
+	h := menuHome(sessionRow(live), live)
+	h.cfg = &config.Config{EnterMode: "split"}
+	_, items := h.buildContextMenuItems()
+	if it, _ := findItem(items, "attach"); it.Shortcut != "⇥" {
+		t.Errorf("split-mode attach shortcut = %q, want ⇥", it.Shortcut)
 	}
 }
 
@@ -457,6 +546,101 @@ func TestContextMenuEndToEndOpensAndDispatches(t *testing.T) {
 	}
 }
 
+// The bug this guards: the menu's entries resolve their subject from h.cursor at
+// dispatch time, and an ASYNC message can move the cursor while the menu is open
+// (handleSessionCreate auto-selects the session it just made; rebuildFlatItems
+// runs on the tick). Keys can't do it — routeToModal feeds those to the menu — so
+// the original "the cursor can't move" reasoning missed this entirely. Left
+// unfixed, `d` on a menu titled `session: A` would confirm deleting session B.
+func TestContextMenuDispatchFollowsTargetNotCursor(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cm-target.db")
+	storage, err := session.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { storage.Close() })
+
+	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
+	h.width, h.height = 120, 40
+
+	a := session.NewSession("alpha", "/tmp/cm-e2e")
+	b := session.NewSession("beta", "/tmp/cm-e2e")
+	h.sessions = []*session.Session{a, b}
+	h.flatItems = []SidebarItem{sessionRow(a), sessionRow(b)}
+	h.cursor = 0 // menu opens on alpha
+
+	h.handleKey(key("."))
+	if !h.contextMenu.IsVisible() {
+		t.Fatal("`.` did not open the menu")
+	}
+
+	// Simulate the async move: a session-create result auto-selects the new row.
+	h.cursor = 1 // cursor is now on beta, but the menu still says `session: alpha`
+
+	_, cmd := h.handleKey(key("d"))
+	if cmd == nil {
+		t.Fatal("`d` produced no command")
+	}
+	msg := cmd().(contextMenuMsg)
+	if _, cmd = h.Update(msg); cmd != nil {
+		cmd()
+	}
+
+	// The confirm must be for alpha — the row the menu was opened on and named.
+	if h.cursor != 0 {
+		t.Errorf("cursor = %d after dispatch, want 0 (re-pinned to the menu's target)", h.cursor)
+	}
+	if !h.confirmDialog.IsVisible() {
+		t.Fatal("no confirm dialog raised")
+	}
+	if h.confirmDialog.subject != "alpha" {
+		t.Errorf("confirm names %q, want %q", h.confirmDialog.subject, "alpha")
+	}
+	// The subject is just a label — assert on the id the confirm would actually delete.
+	del, ok := h.confirmDialog.onYes().(sessionDeleteMsg)
+	if !ok {
+		t.Fatalf("confirm emits %#v, want sessionDeleteMsg", h.confirmDialog.onYes())
+	}
+	if del.id != a.ID {
+		t.Errorf("confirm would delete %q (beta), want %q (alpha) — the menu acted on the wrong session", del.id, a.ID)
+	}
+}
+
+// If the menu's row is deleted out from under it, dispatch must refuse rather than
+// silently act on whatever row inherited the cursor index.
+func TestContextMenuRefusesWhenTargetIsGone(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cm-gone.db")
+	storage, err := session.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { storage.Close() })
+
+	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
+	h.width, h.height = 120, 40
+
+	a := session.NewSession("alpha", "/tmp/cm-e2e")
+	b := session.NewSession("beta", "/tmp/cm-e2e")
+	h.sessions = []*session.Session{a, b}
+	h.flatItems = []SidebarItem{sessionRow(a), sessionRow(b)}
+	h.cursor = 0
+
+	h.handleKey(key("."))
+	_, cmd := h.handleKey(key("d"))
+	msg := cmd().(contextMenuMsg)
+
+	// alpha vanishes before the pick lands; beta slides into index 0.
+	h.sessions = []*session.Session{b}
+	h.flatItems = []SidebarItem{sessionRow(b)}
+
+	if _, cmd = h.Update(msg); cmd != nil {
+		cmd()
+	}
+	if h.confirmDialog.IsVisible() {
+		t.Error("dispatched onto a different session after the menu's target disappeared")
+	}
+}
+
 // `.` on a row with nothing to act on stays silent rather than popping an empty box.
 func TestContextMenuKeyIsNoOpOnEmptyRow(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "cm2.db")
@@ -598,6 +782,36 @@ func TestContextMenuEscCloses(t *testing.T) {
 		}
 		if cmd != nil {
 			t.Errorf("closing emitted %#v, want nothing", cmd())
+		}
+	}
+}
+
+// The rendered box must never be taller than the space it's budgeted for. The
+// original budget counted "2 borders + title + hint" — but there is no hint line,
+// and the two `⋮` scroll indicators weren't counted at all, so a scrolled menu on
+// a short terminal overran the footer by a row.
+func TestContextMenuFitsShortTerminal(t *testing.T) {
+	items := make([]ContextMenuItem, 14) // more rows than a short screen can hold
+	for i := range items {
+		items[i] = ContextMenuItem{ID: "a", Label: "Action", Enabled: true}
+	}
+
+	for _, height := range []int{10, 12, 16, 24} {
+		bottomLimit := height - 1 // 1-row footer
+		d := NewContextMenuDialog()
+		d.SetSize(80, height)
+		d.SetAnchor(3, 2, bottomLimit)
+		d.Show("row", items)
+
+		// Scroll to the middle so BOTH ⋮ indicators render — the worst case.
+		for i := 0; i < len(items)/2; i++ {
+			d, _ = d.Update(key("j"))
+		}
+
+		got := lipgloss.Height(d.View())
+		if got > bottomLimit {
+			t.Errorf("height=%d: box is %d rows but only %d are available — it overruns the footer",
+				height, got, bottomLimit)
 		}
 	}
 }
