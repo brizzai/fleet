@@ -122,12 +122,30 @@ func appForIn(cmd string, bundlePaths []string) (string, bool) {
 	if prefix == "" {
 		return "", false
 	}
+	// Exact bundle name wins. Prefix matching is what lets an edition resolve at
+	// all ("PyCharm Community Edition.app" -> pycharm), but on its own it hands
+	// the win to whichever bundle ReadDir lists first — and ReadDir sorts by
+	// name, where the space in "Visual Studio Code - Insiders.app" (0x20) sorts
+	// ahead of the dot in "Visual Studio Code.app" (0x2e). A user with both would
+	// get Insiders. So take the exact match if there is one, and only then fall
+	// back to a prefix.
 	for _, p := range bundlePaths {
-		if strings.HasPrefix(strings.TrimSuffix(filepath.Base(p), ".app"), prefix) {
+		if bundleName(p) == prefix {
+			return p, true
+		}
+	}
+	for _, p := range bundlePaths {
+		if strings.HasPrefix(bundleName(p), prefix) {
 			return p, true
 		}
 	}
 	return "", false
+}
+
+// bundleName is an app bundle path's display name: "/Applications/GoLand.app"
+// -> "GoLand".
+func bundleName(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".app")
 }
 
 // Available returns the known editors this machine can launch — CLI launcher on

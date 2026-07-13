@@ -40,6 +40,58 @@ func TestAppForIn(t *testing.T) {
 	}
 }
 
+// With two editions installed, the exact bundle must win. The paths here are in
+// os.ReadDir order (sorted by name), which is what makes this a trap: the space
+// in " - Insiders.app" sorts ahead of the dot in ".app", so a plain prefix match
+// picks Insiders — a different application from the one the user configured.
+func TestAppForInPrefersExactBundleOverEdition(t *testing.T) {
+	tests := []struct {
+		name      string
+		cmd       string
+		installed []string
+		want      string
+	}{
+		{
+			name: "stable VS Code wins over Insiders",
+			cmd:  "code",
+			installed: []string{
+				"/Applications/Visual Studio Code - Insiders.app",
+				"/Applications/Visual Studio Code.app",
+			},
+			want: "/Applications/Visual Studio Code.app",
+		},
+		{
+			name: "PyCharm Professional wins over Community",
+			cmd:  "pycharm",
+			installed: []string{
+				"/Applications/PyCharm Community Edition.app",
+				"/Applications/PyCharm.app",
+			},
+			want: "/Applications/PyCharm.app",
+		},
+		{
+			name: "edition still resolves when it is the only one installed",
+			cmd:  "pycharm",
+			installed: []string{
+				"/Applications/PyCharm Community Edition.app",
+			},
+			want: "/Applications/PyCharm Community Edition.app",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := appForIn(tt.cmd, tt.installed)
+			if !ok {
+				t.Fatalf("appForIn(%q) found nothing, want %q", tt.cmd, tt.want)
+			}
+			if got != tt.want {
+				t.Errorf("appForIn(%q) = %q, want %q", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCommand(t *testing.T) {
 	// A terminal editor is on PATH everywhere these tests run, so it exercises
 	// the direct-exec branch without depending on which GUI apps are installed.
@@ -89,6 +141,9 @@ func TestCommand(t *testing.T) {
 func TestOpenFallbackIsWaitedOn(t *testing.T) {
 	if _, ok := appFor("goland"); !ok {
 		t.Skip("no GoLand bundle on this machine; nothing to exercise the open fallback")
+	}
+	if _, err := exec.LookPath("goland"); err == nil {
+		t.Skip("goland CLI launcher is on PATH here; the open fallback is unreachable")
 	}
 	cmd, wait, err := command("goland", "/repo")
 	if err != nil {
