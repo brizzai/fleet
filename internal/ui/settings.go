@@ -8,13 +8,16 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
+	"github.com/brizzai/fleet/internal/editor"
 )
 
 // settingsClosedMsg is sent when the settings dialog closes.
 type settingsClosedMsg struct{}
 
 var (
-	editorPresets = []string{"code", "cursor", "vim", "nvim", "nano", "emacs", "zed"}
+	// Only the editors this machine can actually launch — a preset the user picks
+	// must not fail with "executable not found" (see internal/editor).
+	editorPresets = editor.Available()
 	tickPresets   = []int{1, 2, 3, 5, 10}
 	// Bounded by config.DrawerHeightMax (the UI's hard body cap) — taller can't render.
 	drawerHeightPresets = []int{6, 8, 10, 12, 14}

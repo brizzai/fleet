@@ -24,6 +24,7 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/discovery"
+	"github.com/brizzai/fleet/internal/editor"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
@@ -4003,18 +4004,15 @@ func (h *Home) openEditorSelected() tea.Cmd {
 	if s == nil {
 		return nil
 	}
-	parts := strings.Fields(h.cfg.GetEditor())
-	if len(parts) == 0 {
-		return func() tea.Msg {
-			return openEditorMsg{err: fmt.Errorf("no editor configured")}
-		}
-	}
+	spec := h.cfg.GetEditor()
 	projectPath := s.ProjectPath
 	return func() tea.Msg {
-		args := append(parts[1:], projectPath)
-		cmd := exec.Command(parts[0], args...)
+		cmd, err := editor.Command(spec, projectPath)
+		if err != nil {
+			return openEditorMsg{err: err}
+		}
 		if err := cmd.Start(); err != nil {
-			debuglog.Logger.Error("editor launch failed", "editor", parts[0], "args", args, "err", err)
+			debuglog.Logger.Error("editor launch failed", "editor", spec, "args", cmd.Args, "err", err)
 			return openEditorMsg{err: err}
 		}
 		return openEditorMsg{}
