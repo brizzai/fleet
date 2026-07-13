@@ -6237,10 +6237,11 @@ func (h *Home) loadSessions() tea.Msg {
 			debuglog.Logger.Error("opencode plugin inject failed", "err", err)
 		}
 	}
-	// Route tmux copy-mode selections to the macOS clipboard via pbcopy, so
-	// drag/click-to-copy works on terminals that block OSC 52 (iTerm2 default)
-	// or don't support it (Apple Terminal). Runs here for users with existing
-	// sessions; Start covers fresh installs once a server exists.
+	// Route tmux copy-mode selections to the system clipboard (pbcopy on
+	// macOS; wl-copy/xclip/xsel on Linux), so drag/click-to-copy works on
+	// terminals that block OSC 52 (iTerm2 default) or don't support it (Apple
+	// Terminal). Runs here for users with existing sessions; Start covers
+	// fresh installs once a server exists.
 	tmux.EnsureCopyCommand()
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()

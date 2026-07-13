@@ -652,8 +652,21 @@ func generateDeviceID() string {
 	return fmt.Sprintf("%x", h)
 }
 
-// osVersion returns the macOS version string.
+// osVersion returns the OS version string: the macOS product version, or the
+// distro PRETTY_NAME from /etc/os-release on Linux.
 func osVersion() string {
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile("/etc/os-release")
+		if err != nil {
+			return "unknown"
+		}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			if v, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
+				return strings.Trim(strings.TrimSpace(v), `"`)
+			}
+		}
+		return "unknown"
+	}
 	out, err := exec.Command("sw_vers", "-productVersion").Output()
 	if err != nil {
 		return "unknown"

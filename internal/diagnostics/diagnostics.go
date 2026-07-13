@@ -19,6 +19,8 @@ type Report struct {
 	OS            string
 	Arch          string
 	MacOSVersion  string
+	LinuxDistro   string // PRETTY_NAME from /etc/os-release (Linux only)
+	KernelVersion string // uname -r (Linux only)
 	TmuxVersion   string
 	ClaudeVersion string
 	CodexVersion  string
@@ -60,7 +62,12 @@ func Collect(version string, sessionCount int) *Report {
 		SessionCount: sessionCount,
 	}
 
-	r.MacOSVersion = runCmd("sw_vers", "-productVersion")
+	if runtime.GOOS == "linux" {
+		r.LinuxDistro = osReleasePrettyName()
+		r.KernelVersion = runCmd("uname", "-r")
+	} else {
+		r.MacOSVersion = runCmd("sw_vers", "-productVersion")
+	}
 	r.TmuxVersion = runCmd("tmux", "-V")
 	r.ClaudeVersion = runCmd("claude", "--version")
 	r.CodexVersion = firstLine(runCmd("codex", "--version"))
@@ -149,9 +156,16 @@ func (r *Report) formatMarkdown(description string) string {
 	// Diagnostics.
 	b.WriteString("### Diagnostics\n")
 	fmt.Fprintf(&b, "- **Version**: %s\n", r.Version)
-	if r.MacOSVersion != "" {
+	switch {
+	case r.MacOSVersion != "":
 		fmt.Fprintf(&b, "- **macOS**: %s (%s)\n", r.MacOSVersion, r.Arch)
-	} else {
+	case r.LinuxDistro != "":
+		fmt.Fprintf(&b, "- **Linux**: %s (%s", r.LinuxDistro, r.Arch)
+		if r.KernelVersion != "" {
+			fmt.Fprintf(&b, ", kernel %s", r.KernelVersion)
+		}
+		b.WriteString(")\n")
+	default:
 		fmt.Fprintf(&b, "- **OS**: %s/%s\n", r.OS, r.Arch)
 	}
 	if r.TmuxVersion != "" {
@@ -234,6 +248,21 @@ func runCmd(name string, args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// osReleasePrettyName returns PRETTY_NAME from /etc/os-release (os-release(5)),
+// e.g. `Ubuntu 24.04.1 LTS`, or "" when unavailable.
+func osReleasePrettyName() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if v, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
+			return strings.Trim(strings.TrimSpace(v), `"`)
+		}
+	}
+	return ""
 }
 
 func firstLine(s string) string {
