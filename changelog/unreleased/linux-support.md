@@ -1,4 +1,5 @@
 ---
 type: added
+highlight: true
 ---
-fleet now runs natively on **Linux**: worktree cleanup reads `/proc` instead of macOS `lsof`, copy-mode selections route through `wl-copy`/`xclip`/`xsel` (OSC 52 fallback), and tmux 3.2 servers no longer lose their session options. Ships with a `Dockerfile`, `.deb`/`.rpm` packaging, and an optional systemd user unit.
+**Native Linux support.** fleet now runs on Linux: install via `.deb`/`.rpm` or Docker, with worktree cleanup, copy-to-clipboard (Wayland and X11), and tmux 3.2 compatibility all handled natively. An optional systemd user unit keeps the tmux server alive across logins.
