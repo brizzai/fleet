@@ -21,6 +21,13 @@ type StatusFile struct {
 }
 
 // WriteStatusFile atomically writes a status file to the hooks directory.
+//
+// The temp file is uniquely named. Hook handlers are one-shot processes and an
+// agent can fire two hooks at once (Codex requests permission per concurrent
+// tool call), so a shared `<id>.json.tmp` had two processes writing the same
+// path: whoever renamed second failed with ENOENT, and an interleaved write
+// could be renamed into place as truncated JSON. Racing writers now each rename
+// their own file; last one wins, which is fine — they report the same event.
 func WriteStatusFile(hooksDir, instanceID string, sf *StatusFile) error {
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		return err
@@ -31,11 +38,26 @@ func WriteStatusFile(hooksDir, instanceID string, sf *StatusFile) error {
 		return err
 	}
 
-	filePath := filepath.Join(hooksDir, instanceID+".json")
-	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	tmp, err := os.CreateTemp(hooksDir, instanceID+".*.json.tmp")
+	if err != nil {
 		return err
 	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0644); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	filePath := filepath.Join(hooksDir, instanceID+".json")
 	if err := os.Rename(tmpPath, filePath); err != nil {
 		os.Remove(tmpPath)
 		return err
