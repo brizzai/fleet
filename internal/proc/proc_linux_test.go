@@ -168,6 +168,34 @@ func TestCommandNameSelf(t *testing.T) {
 	}
 }
 
+// TestFindHoldersSparesLoginShell: a login shell announces itself as "-bash"
+// in argv[0]; the /proc walk reads argv[0] (unlike lsof's comm), so the dash
+// variant must still match the never-kill set. Regression test for the pane
+// shell of a tmux session being reported as killable.
+func TestFindHoldersSparesLoginShell(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command("bash", "-c", "sleep 60")
+	cmd.Args[0] = "-bash" // spawn with the login-shell argv[0] convention
+	cmd.Dir = dir
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start -bash: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	holders, err := FindHolders(dir, nil)
+	if err != nil {
+		t.Fatalf("FindHolders: %v", err)
+	}
+	for _, h := range holders {
+		if h.PID == cmd.Process.Pid {
+			t.Fatalf("login shell -bash reported as killable holder: %+v", h)
+		}
+	}
+}
+
 // TestFindHoldersExcludesNeverKill: a shell holding the dir must be spared.
 func TestFindHoldersExcludesNeverKill(t *testing.T) {
 	dir := t.TempDir()

@@ -145,7 +145,11 @@ func excluded(cmd string, extra map[string]bool) bool {
 }
 
 // normalizeCmd reduces a command string to a lowercase basename of its first
-// field, e.g. "/usr/local/bin/code --wait" -> "code".
+// field, e.g. "/usr/local/bin/code --wait" -> "code". A leading dash — the
+// login-shell convention in argv[0] ("-bash", "-zsh") — is stripped so pane
+// shells match the never-kill set: macOS lsof reports comm ("bash"), but the
+// Linux /proc walk reads argv[0] and would otherwise let "-bash" through to
+// be killed.
 func normalizeCmd(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -154,7 +158,7 @@ func normalizeCmd(s string) string {
 	if i := strings.IndexAny(s, " \t"); i != -1 {
 		s = s[:i]
 	}
-	return strings.ToLower(filepath.Base(s))
+	return strings.TrimPrefix(strings.ToLower(filepath.Base(s)), "-")
 }
 
 // ForegroundCommands maps each given pane-shell pid to the command line of the
