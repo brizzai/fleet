@@ -15,3 +15,6 @@ var/
 
 # macOS
 .DS_Store
+
+# Local cross-compile output (use build/ for make build)
+/fleet-linux

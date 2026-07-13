@@ -35,10 +35,13 @@ Implementation notes:
 ## Clipboard
 
 `tmux.EnsureCopyCommand` picks the copy-mode pipe per platform: `pbcopy` on
-macOS; on Linux the first of `wl-copy` (Wayland) → `xclip` → `xsel`. With
-none installed it sets `set-clipboard on` so tmux falls back to OSC 52,
-which most modern Linux terminals accept. `FLEET_NO_COPY_COMMAND=1` opts out
-entirely.
+macOS; on Linux the first *usable* tool — `wl-copy` when `WAYLAND_DISPLAY`
+is set, else `xclip`/`xsel` when `DISPLAY` is set. A tool on PATH whose
+display server isn't reachable (headless/SSH, or wl-clipboard installed as
+a dependency on an X11 desktop) is skipped: piping into it would swallow
+the copy. With no usable tool it sets `set-clipboard on` so tmux falls back
+to OSC 52, which most modern Linux terminals accept.
+`FLEET_NO_COPY_COMMAND=1` opts out entirely.
 
 ## tmux version gating
 
@@ -46,6 +49,16 @@ entirely.
 an unknown option would abort fleet's whole batched `set-option` call — so
 fleet probes `tmux -V` and drops that option (only) on older servers.
 tmux ≥ 3.3 is recommended; 24.04 ships 3.4.
+
+## Idle-session suspend (memory pressure)
+
+The suspend sweep's pressure probe reads `/proc/pressure/memory` (PSI,
+kernel ≥ 4.20 with `CONFIG_PSI` — present on all mainstream distros) where
+macOS reads the Jetsam pressure level: sustained `some avg10 ≥ 10%` maps to
+warning, `full avg10 ≥ 10%` (or `some ≥ 50%`) to critical. Free swap comes
+from `/proc/meminfo`; a swapless box reports swap as unknown rather than
+"critically low", so suspend never fires on swap absence alone. Kernels
+without PSI report unknown pressure, and no session is ever auto-suspended.
 
 ## Diagnostics / bug reports
 

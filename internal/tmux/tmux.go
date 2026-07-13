@@ -75,16 +75,23 @@ func serverVersion() (major, minor int, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	v := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "tmux"))
+	return parseTmuxVersion(string(out))
+}
+
+// parseTmuxVersion parses `tmux -V` output; split from the exec so the spiky
+// inputs (patch letters, dev builds) are testable.
+func parseTmuxVersion(out string) (major, minor int, ok bool) {
+	v := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "tmux"))
 	numMajor, rest, found := strings.Cut(v, ".")
 	if !found {
 		return 0, 0, false
 	}
+	var err error
 	major, err = strconv.Atoi(strings.TrimSpace(numMajor))
 	if err != nil {
 		return 0, 0, false
 	}
-	// Minor may carry a patch-letter suffix: "3a" -> 3.
+	// Minor may carry a patch-letter or rc suffix: "3a" -> 3, "4-rc2" -> 4.
 	digits := rest
 	for i, r := range rest {
 		if r < '0' || r > '9' {
@@ -106,7 +113,10 @@ func serverVersion() (major, minor int, ok bool) {
 // remain-on-exit included — so it must be dropped, not just tolerated.
 // Common on Linux: Ubuntu 22.04 LTS ships tmux 3.2a.
 func supportsAllowPassthrough() bool {
-	major, minor, ok := serverVersion()
+	return allowPassthroughSupported(serverVersion())
+}
+
+func allowPassthroughSupported(major, minor int, ok bool) bool {
 	if !ok {
 		return true // dev build or unparseable: assume modern
 	}
@@ -154,21 +164,39 @@ func EnsureCopyCommand() {
 }
 
 // clipboardCopyCommand returns the command line tmux should pipe copy-mode
-// selections into, or "" when no local clipboard tool exists. macOS always has
-// pbcopy. Linux picks the first tool present, preferring Wayland's wl-copy
-// (wl-clipboard) over the X11 tools; under XWayland either works, and both
-// xclip and xsel are widespread on X11 desktops.
+// selections into, or "" when no usable clipboard tool exists. macOS always
+// has pbcopy. Linux requires both the tool on PATH *and* its display server
+// reachable: wl-copy without WAYLAND_DISPLAY (or xclip/xsel without DISPLAY)
+// exits non-zero and the selection silently vanishes — strictly worse than
+// returning "" and letting copy-mode fall back to OSC 52, which is exactly
+// what headless/SSH sessions need. wl-clipboard is a common transitive
+// dependency, so "wl-copy on PATH" says nothing about the session type.
 func clipboardCopyCommand() string {
-	if runtime.GOOS != "linux" {
+	hasTool := func(bin string) bool {
+		_, err := exec.LookPath(bin)
+		return err == nil
+	}
+	return clipboardCopyCommandFor(runtime.GOOS, os.Getenv, hasTool)
+}
+
+// clipboardCopyCommandFor is the pure core of clipboardCopyCommand, split out
+// so the routing table is testable without a real PATH or display server.
+// Wayland sessions normally export DISPLAY too (XWayland), so checking
+// WAYLAND_DISPLAY first keeps the wl-copy preference while still letting a
+// Wayland session without wl-clipboard fall through to the X11 tools.
+func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool func(string) bool) string {
+	if goos != "linux" {
 		return "pbcopy"
 	}
-	for _, c := range [...]struct{ bin, cmdline string }{
-		{"wl-copy", "wl-copy"},
-		{"xclip", "xclip -selection clipboard -in"},
-		{"xsel", "xsel --clipboard --input"},
-	} {
-		if _, err := exec.LookPath(c.bin); err == nil {
-			return c.cmdline
+	if getenv("WAYLAND_DISPLAY") != "" && hasTool("wl-copy") {
+		return "wl-copy"
+	}
+	if getenv("DISPLAY") != "" {
+		if hasTool("xclip") {
+			return "xclip -selection clipboard -in"
+		}
+		if hasTool("xsel") {
+			return "xsel --clipboard --input"
 		}
 	}
 	return ""

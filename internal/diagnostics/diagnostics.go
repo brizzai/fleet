@@ -63,7 +63,7 @@ func Collect(version string, sessionCount int) *Report {
 	}
 
 	if runtime.GOOS == "linux" {
-		r.LinuxDistro = osReleasePrettyName()
+		r.LinuxDistro = OSReleasePrettyName()
 		r.KernelVersion = runCmd("uname", "-r")
 	} else {
 		r.MacOSVersion = runCmd("sw_vers", "-productVersion")
@@ -250,17 +250,31 @@ func runCmd(name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// osReleasePrettyName returns PRETTY_NAME from /etc/os-release (os-release(5)),
-// e.g. `Ubuntu 24.04.1 LTS`, or "" when unavailable.
-func osReleasePrettyName() string {
+// OSReleasePrettyName returns PRETTY_NAME from /etc/os-release (os-release(5)),
+// e.g. `Ubuntu 24.04.1 LTS`, or "" when unavailable. Exported because
+// internal/analytics reports the same distro string.
+func OSReleasePrettyName() string {
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		return ""
 	}
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if v, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
-			return strings.Trim(strings.TrimSpace(v), `"`)
+	return parseOSReleasePrettyName(string(data))
+}
+
+// parseOSReleasePrettyName is the pure parser behind OSReleasePrettyName.
+// os-release(5) values are shell-compatible: unquoted, double- or
+// single-quoted all occur in the wild (Alpine single-quotes).
+func parseOSReleasePrettyName(data string) string {
+	for line := range strings.SplitSeq(data, "\n") {
+		v, ok := strings.CutPrefix(line, "PRETTY_NAME=")
+		if !ok {
+			continue
 		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		return v
 	}
 	return ""
 }

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/diagnostics"
 	"github.com/posthog/posthog-go"
 )
 
@@ -656,14 +657,8 @@ func generateDeviceID() string {
 // distro PRETTY_NAME from /etc/os-release on Linux.
 func osVersion() string {
 	if runtime.GOOS == "linux" {
-		data, err := os.ReadFile("/etc/os-release")
-		if err != nil {
-			return "unknown"
-		}
-		for line := range strings.SplitSeq(string(data), "\n") {
-			if v, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
-				return strings.Trim(strings.TrimSpace(v), `"`)
-			}
+		if name := diagnostics.OSReleasePrettyName(); name != "" {
+			return name
 		}
 		return "unknown"
 	}
