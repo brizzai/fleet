@@ -35,6 +35,9 @@
 
 <br />
 
+> [!NOTE]
+> **This is FleetLinux** — a fork of [brizzai/fleet](https://github.com/brizzai/fleet) adding full native Linux support: a `/proc`-based process manager replacing the macOS-only lsof path, Linux clipboard routing (wl-copy/xclip/xsel/OSC 52), tmux version gating for pre-3.3 servers, distro-aware diagnostics, and Linux packaging (`.deb`/`.rpm`, Dockerfile, optional systemd user unit). See [docs/linux.md](docs/linux.md).
+
 Your agents are coding. fleet keeps you in control.
 
 - 👀 **See** — every session's live status in one sidebar: running, waiting for you, finished
@@ -65,11 +68,25 @@ go install github.com/brizzai/fleet/cmd/fleet@latest
 
 Requires Go 1.26+.
 
+### Docker (Linux)
+
+```bash
+docker build -t fleet .
+docker run -it --rm -v "$PWD:/repo" -w /repo fleet
+```
+
+`.deb`/`.rpm` packages are produced by `goreleaser release` (see `nfpms` in [.goreleaser.yml](.goreleaser.yml)):
+
+```bash
+sudo apt install ./fleet_*.deb
+```
+
 ### Requirements
 
-- macOS
-- [tmux](https://github.com/tmux/tmux) (`brew install tmux`)
+- macOS or Linux
+- [tmux](https://github.com/tmux/tmux) — `brew install tmux` / `apt install tmux` (≥ 3.3 recommended on Linux; older versions work with terminal passthrough disabled)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex), or [OpenCode](https://opencode.ai) — at least one
+- Linux clipboard (optional): `wl-clipboard`, `xclip`, or `xsel` for copy-mode → system clipboard; without one, fleet falls back to OSC 52
 
 ## Quick Start
 
@@ -144,7 +161,7 @@ fleet goes the other way: **deep integration with the agents that expose real ho
 | **Git worktrees**                   | ✅ | ✅ | ✅ | ✅ |
 | **Hook-based multi-agent**          | ✅ Claude + Codex + OpenCode | — | — | — |
 | **Many agents** (Gemini, Aider…)    | — | ✅ | ✅ | ✅ |
-| **Linux**                           | — | ✅ | ✅ | ✅ |
+| **Linux**                           | ✅ (this fork) | ✅ | ✅ | ✅ |
 | **No tmux dependency**              | — | — | ✅ | — |
 
 **The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code, Codex, and OpenCode, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
