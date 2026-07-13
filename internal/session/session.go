@@ -45,24 +45,24 @@ const (
 
 // Session represents a managed Claude Code session.
 type Session struct {
-	ID                    string
-	Title                 string
-	ProjectPath           string
-	Agent                 agent.Type // which coding agent runs in this session (claude/codex)
-	Status                Status
-	TmuxSessionName       string
-	CreatedAt             time.Time
-	LastAccessedAt        time.Time
-	Acknowledged          bool
-	ClaudeSessionID       string
-	ClaudeSessionName     string    // Transient: read from Claude's JSONL, not persisted to SQLite.
-	ClaudeNameLastChecked time.Time // Transient: last time we read the JSONL for Claude name.
-	WorkspaceName         string
-	ManuallyRenamed       bool
-	FirstPrompt           string
-	TitleGenerated        bool
-	PromptCount           int
-	ForkFromID            string // Transient: if set, start with --resume <id> --fork-session (cleared after start)
+	ID                   string
+	Title                string
+	ProjectPath          string
+	Agent                agent.Type // which coding agent runs in this session (claude/codex)
+	Status               Status
+	TmuxSessionName      string
+	CreatedAt            time.Time
+	LastAccessedAt       time.Time
+	Acknowledged         bool
+	ClaudeSessionID      string
+	AgentSessionName     string    // Transient: the agent's own title (Claude JSONL / Codex state DB), not persisted to SQLite.
+	AgentNameLastChecked time.Time // Transient: last time we read the agent's title.
+	WorkspaceName        string
+	ManuallyRenamed      bool
+	FirstPrompt          string
+	TitleGenerated       bool
+	PromptCount          int
+	ForkFromID           string // Transient: if set, start with --resume <id> --fork-session (cleared after start)
 
 	hookStatus       string
 	hookUpdatedAt    time.Time

@@ -236,7 +236,10 @@ func handleHooksCmd(args []string) {
 	}
 }
 
-// cleanStaleHookFiles removes hook status files older than 24 hours.
+// cleanStaleHookFiles removes hook status files older than 24 hours. Temp files
+// are swept too: they're uniquely named now (see hooks.WriteStatusFile), so a
+// handler killed between creating one and renaming it leaves one behind rather
+// than having it overwritten by the next write.
 func cleanStaleHookFiles(hooksDir string) {
 	entries, err := os.ReadDir(hooksDir)
 	if err != nil {
@@ -245,7 +248,10 @@ func cleanStaleHookFiles(hooksDir string) {
 
 	cutoff := time.Now().Add(-24 * time.Hour)
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if entry.IsDir() {
+			continue
+		}
+		if ext := filepath.Ext(entry.Name()); ext != ".json" && ext != ".tmp" {
 			continue
 		}
 		info, err := entry.Info()

@@ -21,6 +21,20 @@ type StatusFile struct {
 }
 
 // WriteStatusFile atomically writes a status file to the hooks directory.
+//
+// The temp file is uniquely named. Hook handlers are one-shot processes and an
+// agent can fire two hooks at once (Codex requests permission per concurrent
+// tool call), so a shared `<id>.json.tmp` had two processes writing the same
+// path: whoever renamed second failed with ENOENT, and an interleaved write
+// could be renamed into place as truncated JSON.
+//
+// Racing writers now each rename their own file, so every write lands intact and
+// the last one wins. That does not order them: two concurrent handlers can carry
+// *different* events (a PermissionRequest→waiting racing a Stop→finished), and
+// nothing sequences the renames — Timestamp is Unix seconds, too coarse to break
+// the tie. A stale event can therefore win and stand until the next hook. That
+// was equally true of the shared-tmp scheme; don't build on an ordering nobody
+// enforces.
 func WriteStatusFile(hooksDir, instanceID string, sf *StatusFile) error {
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		return err
@@ -31,16 +45,26 @@ func WriteStatusFile(hooksDir, instanceID string, sf *StatusFile) error {
 		return err
 	}
 
-	filePath := filepath.Join(hooksDir, instanceID+".json")
-	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	tmp, err := os.CreateTemp(hooksDir, instanceID+".*.json.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		os.Remove(tmpPath)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return err
 	}
-	return nil
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, filepath.Join(hooksDir, instanceID+".json"))
 }
 
 // ReadStatusFile reads and parses a status file.

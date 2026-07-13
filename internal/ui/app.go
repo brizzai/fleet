@@ -51,14 +51,15 @@ const (
 	statusRoundRobin       = 5 // sessions per tick
 	undoDeleteTimeout      = 5 * time.Second
 
-	// claudeNameRecheckInterval is the steady-state cadence for re-reading a
-	// session's title from its (growing) JSONL transcript.
-	claudeNameRecheckInterval = 30 * time.Second
-	// claudeNameFreshPollWindow is how long after creation a still-untitled
+	// agentNameRecheckInterval is the steady-state cadence for re-reading a
+	// session's title from the agent (Claude's growing JSONL transcript, Codex's
+	// state DB).
+	agentNameRecheckInterval = 30 * time.Second
+	// agentNameFreshPollWindow is how long after creation a still-untitled
 	// session is polled every cycle so it adopts its ai-title promptly. Past
 	// this window the transcript is large enough that scanning it every tick is
-	// wasteful, so we fall back to claudeNameRecheckInterval.
-	claudeNameFreshPollWindow = 2 * time.Minute
+	// wasteful, so we fall back to agentNameRecheckInterval.
+	agentNameFreshPollWindow = 2 * time.Minute
 )
 
 // PendingDelete holds state for a deferred session deletion (undo window).
@@ -5015,31 +5016,32 @@ func (h *Home) statusWorkerCycle() {
 	h.syncHookStatuses(sessions, true)
 
 	// 3b. Auto-name: generate title for ONE session per cycle (heavy cadence).
-	// Priority: manual (R key) > custom-title > ai-title > last prompt heuristic.
+	// Priority: manual (R key) > the agent's own title (Claude custom-title, then
+	// ai-title; Codex `/rename`) > last prompt heuristic.
 	if heavy && h.cfg.IsAutoNameEnabled() {
 		for _, s := range sessions {
 			if s.ManuallyRenamed {
 				continue
 			}
 
-			// Re-read Claude's title from the JSONL. A freshly-created session
-			// with no title yet is polled every cycle so it adopts its ai-title
-			// promptly; otherwise (already titled, or old enough that its
-			// transcript is large) we re-check ~every 30s to follow
-			// custom-title/ai-title drift without re-scanning a growing file
-			// each tick.
-			recheck := claudeNameRecheckInterval
-			if s.ClaudeSessionName == "" && time.Since(s.CreatedAt) < claudeNameFreshPollWindow {
+			// Re-read the agent's own title (Claude's JSONL, Codex's state DB). A
+			// freshly-created session with no title yet is polled every cycle so
+			// it adopts its ai-title promptly; otherwise (already titled, or old
+			// enough that its transcript is large) we re-check ~every 30s to
+			// follow custom-title/ai-title/`/rename` drift without re-scanning a
+			// growing file each tick.
+			recheck := agentNameRecheckInterval
+			if s.AgentSessionName == "" && time.Since(s.CreatedAt) < agentNameFreshPollWindow {
 				recheck = 0
 			}
-			if s.ClaudeSessionID != "" && time.Since(s.ClaudeNameLastChecked) >= recheck {
-				s.ClaudeNameLastChecked = time.Now()
-				name := session.ReadClaudeSessionName(s.ClaudeSessionID, s.ProjectPath)
-				if name != "" && name != s.ClaudeSessionName {
-					s.ClaudeSessionName = name
+			if s.ClaudeSessionID != "" && time.Since(s.AgentNameLastChecked) >= recheck {
+				s.AgentNameLastChecked = time.Now()
+				name := session.ReadAgentSessionName(s.Agent, s.ClaudeSessionID, s.ProjectPath)
+				if name != "" && name != s.AgentSessionName {
+					s.AgentSessionName = name
 					s.Title = name
 					if err := h.storage.UpdateTitle(s.ID, name); err != nil {
-						debuglog.Logger.Error("storage: UpdateTitle (claude name)", "id", s.ID, "err", err)
+						debuglog.Logger.Error("storage: UpdateTitle (agent name)", "id", s.ID, "err", err)
 					}
 					s.TitleGenerated = true
 					if err := h.storage.MarkTitleGenerated(s.ID); err != nil {
@@ -5047,7 +5049,7 @@ func (h *Home) statusWorkerCycle() {
 					}
 				}
 			}
-			if s.ClaudeSessionName != "" {
+			if s.AgentSessionName != "" {
 				continue
 			}
 
