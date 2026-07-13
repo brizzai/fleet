@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.21.0] - 2026-07-13
+
+### Added
+
+- **JetBrains IDEs now open with `e`.** Set your editor to `goland`, `pycharm`, `idea`, or any other JetBrains IDE and fleet opens the project in it — no need to install the Toolbox command-line launcher first. The Settings editor list now shows only the editors you actually have installed.
+
+### Fixed
+
+- **Codex `/rename` now sticks.** Renaming a thread with `/rename` inside Codex retitles the session in fleet's sidebar within ~30s, the way Claude's `/rename` already did — no more Codex rows stuck on `do this:`.
+- **Status updates stopped dropping.** Two agent hooks firing at once could lose one update with a cryptic `rename … no such file or directory` (Codex asks permission per concurrent tool call); both now land.
+
 ## [2.20.0] - 2026-07-12
 
 ### Changed
@@ -410,7 +421,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.20.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.21.0...HEAD
+[2.21.0]: https://github.com/brizzai/fleet/releases/tag/v2.21.0
 [2.20.0]: https://github.com/brizzai/fleet/releases/tag/v2.20.0
 [2.19.0]: https://github.com/brizzai/fleet/releases/tag/v2.19.0
 [2.18.0]: https://github.com/brizzai/fleet/releases/tag/v2.18.0
