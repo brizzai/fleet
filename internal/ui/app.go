@@ -4007,12 +4007,8 @@ func (h *Home) openEditorSelected() tea.Cmd {
 	spec := h.cfg.GetEditor()
 	projectPath := s.ProjectPath
 	return func() tea.Msg {
-		cmd, err := editor.Command(spec, projectPath)
-		if err != nil {
-			return openEditorMsg{err: err}
-		}
-		if err := cmd.Start(); err != nil {
-			debuglog.Logger.Error("editor launch failed", "editor", spec, "args", cmd.Args, "err", err)
+		if err := editor.Launch(spec, projectPath); err != nil {
+			debuglog.Logger.Error("editor launch failed", "editor", spec, "path", projectPath, "err", err)
 			return openEditorMsg{err: err}
 		}
 		return openEditorMsg{}
