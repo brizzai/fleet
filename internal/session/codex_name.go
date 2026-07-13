@@ -6,11 +6,20 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode/utf8"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 	_ "modernc.org/sqlite"
 )
+
+// codexTitleMaxRunes bounds what we'll accept as a Codex title. A `/rename` is a
+// handful of words; a seeded first prompt runs to thousands of characters.
+const codexTitleMaxRunes = 120
+
+// codexQueryErrOnce keeps a broken-schema warning to one line per launch.
+var codexQueryErrOnce sync.Once
 
 // codexStateDBPath returns the Codex state database holding the `threads` table,
 // or "" if there isn't one.
@@ -74,12 +83,29 @@ func ReadCodexSessionName(threadID string) string {
 		Scan(&title, &firstUserMessage)
 	if err != nil {
 		if err != sql.ErrNoRows {
-			debuglog.Logger.Debug("codex name: query threads", "thread", threadID, "err", err)
+			// A failing query — as opposed to a missing DB or an unknown thread —
+			// is what a Codex schema bump looks like, and it silently kills title
+			// pickup. Say so at Warn (Debug is invisible at the default level,
+			// including in the log the bug-report flow pastes into issues), but
+			// only once: the worker re-reads every 30s per session, and the report
+			// carries just the last 100 lines, so spamming it would evict the
+			// context that makes this diagnosable.
+			codexQueryErrOnce.Do(func() {
+				debuglog.Logger.Warn("codex name: query failed — Codex titles won't update (schema change?)",
+					"db", path, "err", err)
+			})
 		}
 		return ""
 	}
 
 	if title == "" || title == firstUserMessage {
+		return ""
+	}
+	// Belt and braces on the seeded-title check above: equality is only as good
+	// as Codex writing the two columns byte-identically, so a future Codex that
+	// trims or normalizes `title` alone would defeat it and hand us a prompt.
+	// Nothing a person types into `/rename` is this long.
+	if utf8.RuneCountInString(title) > codexTitleMaxRunes {
 		return ""
 	}
 	return title

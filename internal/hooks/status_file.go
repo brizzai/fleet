@@ -26,8 +26,15 @@ type StatusFile struct {
 // agent can fire two hooks at once (Codex requests permission per concurrent
 // tool call), so a shared `<id>.json.tmp` had two processes writing the same
 // path: whoever renamed second failed with ENOENT, and an interleaved write
-// could be renamed into place as truncated JSON. Racing writers now each rename
-// their own file; last one wins, which is fine — they report the same event.
+// could be renamed into place as truncated JSON.
+//
+// Racing writers now each rename their own file, so every write lands intact and
+// the last one wins. That does not order them: two concurrent handlers can carry
+// *different* events (a PermissionRequest→waiting racing a Stop→finished), and
+// nothing sequences the renames — Timestamp is Unix seconds, too coarse to break
+// the tie. A stale event can therefore win and stand until the next hook. That
+// was equally true of the shared-tmp scheme; don't build on an ordering nobody
+// enforces.
 func WriteStatusFile(hooksDir, instanceID string, sf *StatusFile) error {
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		return err
@@ -43,26 +50,21 @@ func WriteStatusFile(hooksDir, instanceID string, sf *StatusFile) error {
 		return err
 	}
 	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below succeeds
+
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0644); err != nil {
-		os.Remove(tmpPath)
 		return err
 	}
 
-	filePath := filepath.Join(hooksDir, instanceID+".json")
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return nil
+	return os.Rename(tmpPath, filepath.Join(hooksDir, instanceID+".json"))
 }
 
 // ReadStatusFile reads and parses a status file.

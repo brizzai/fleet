@@ -38,8 +38,11 @@ func writeCodexStateDB(t *testing.T, dir string, version int, threads map[string
 }
 
 func TestReadCodexSessionName(t *testing.T) {
-	longPrompt := "please go read every file in the repo and " +
-		"tell me what you think about the architecture, in detail"
+	// Real seeded titles are whole prompts — the longest in a live Codex DB ran
+	// 3,636 chars. This one is enough to sit well past codexTitleMaxRunes.
+	longPrompt := "please go read every file in the repo and tell me what you think " +
+		"about the architecture, in detail, then write it up as a document I can " +
+		"share with the team on monday"
 
 	dir := t.TempDir()
 	writeCodexStateDB(t, dir, 5, map[string][2]string{
@@ -47,8 +50,14 @@ func TestReadCodexSessionName(t *testing.T) {
 		"untouched": {longPrompt, longPrompt},
 		// The user ran /rename.
 		"renamed": {"my new title", longPrompt},
+		// A rename issued before the first prompt: Codex has no first_user_message
+		// to seed from yet. Still a rename, and fleet must adopt it.
+		"renamed-before-prompt": {"named up front", ""},
 		// Defensive: a blank title is nothing to adopt.
 		"blank": {"", longPrompt},
+		// Belt-and-braces: if a future Codex ever normalized `title` alone, the
+		// equality check would miss and hand us a prompt. Length catches it.
+		"seed-defeats-equality": {longPrompt + " ", longPrompt},
 	})
 	t.Setenv("CODEX_HOME", dir)
 
@@ -59,7 +68,9 @@ func TestReadCodexSessionName(t *testing.T) {
 	}{
 		{"title still equals first prompt is not a rename", "untouched", ""},
 		{"renamed thread returns the new title", "renamed", "my new title"},
+		{"rename before the first prompt is still a rename", "renamed-before-prompt", "named up front"},
 		{"blank title returns empty", "blank", ""},
+		{"prompt-length title is rejected even if equality misses", "seed-defeats-equality", ""},
 		{"unknown thread returns empty", "nope", ""},
 		{"empty thread id returns empty", "", ""},
 	}
