@@ -3,18 +3,25 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
+	"github.com/brizzai/fleet/internal/editor"
 )
 
 // settingsClosedMsg is sent when the settings dialog closes.
 type settingsClosedMsg struct{}
 
 var (
-	editorPresets = []string{"code", "cursor", "vim", "nvim", "nano", "emacs", "zed"}
+	// Only the editors this machine can actually launch — a preset the user picks
+	// must not fail with "executable not found" (see internal/editor). Lazy: the
+	// PATH walk and /Applications scan behind it would otherwise run at package
+	// init in *every* fleet process, including each one-shot `fleet hook-handler`
+	// spawned per hook event, for a value only this dialog reads.
+	editorPresets = sync.OnceValue(editor.Available)
 	tickPresets   = []int{1, 2, 3, 5, 10}
 	// Bounded by config.DrawerHeightMax (the UI's hard body cap) — taller can't render.
 	drawerHeightPresets = []int{6, 8, 10, 12, 14}
@@ -587,9 +594,19 @@ func buildSettingsCategories() []settingsCategory {
 			{
 				label:  "Editor",
 				value:  func(c *config.Config) string { return c.GetEditor() },
-				valueW: func() int { return maxStrW(editorPresets) },
+				valueW: func() int { return maxStrW(editorPresets()) },
 				cycle: func(d *SettingsDialog, dir int) {
-					d.cfg.Editor = cycleString(d.cfg.GetEditor(), editorPresets, dir)
+					// The presets hold only what this machine can launch, so a config
+					// synced from another Mac may name an editor that isn't installed
+					// here. cycleString treats an absent value as index 0, which would
+					// overwrite it on the first arrow with no way back — so keep it in
+					// the ring and step from it instead.
+					cur := d.cfg.GetEditor()
+					presets := editorPresets()
+					if indexOf(presets, cur) < 0 {
+						presets = append([]string{cur}, presets...)
+					}
+					d.cfg.Editor = cycleString(cur, presets, dir)
 				},
 			},
 			{

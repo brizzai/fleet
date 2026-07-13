@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/brizzai/fleet/internal/editor"
 )
 
 // Holder is a process holding a directory open — via its cwd or an open file
@@ -32,15 +34,26 @@ type Holder struct {
 // the user's editor/shell rather than the session's dev stack. Open *read*
 // handles don't block directory removal on macOS anyway, so sparing them is
 // safe.
+//
+// The editor names are not listed here — they are seeded from internal/editor
+// below, so an editor fleet offers in Settings cannot be one it SIGKILLs off a
+// worktree. Only names that are *not* editors belong in this literal.
 var neverKill = map[string]bool{
-	"code": true, "electron": true, "cursor": true, "windsurf": true,
-	"nvim": true, "vim": true, "emacs": true, "nano": true, "subl": true,
-	"idea": true, "goland": true, "webstorm": true, "pycharm": true,
-	"clion": true, "rider": true, "zed": true,
-	"gopls": true, "terraform-ls": true, "rust-analyzer": true,
+	"electron": true, // VS Code / Cursor helper processes
+	"gopls":    true, "terraform-ls": true, "rust-analyzer": true,
 	"zsh": true, "bash": true, "fish": true, "sh": true,
 	"tmux": true, "fleet": true, "ssh": true, "sshd": true,
 	"git": true, "gpg-agent": true,
+}
+
+// Seeding from internal/editor keeps the two lists from drifting: they had
+// already diverged by hand (`subl` was spared here but unknown to the editor
+// package). editor.Commands() is a slice literal — no filesystem scan — so this
+// stays cheap at init.
+func init() {
+	for _, cmd := range editor.Commands() {
+		neverKill[cmd] = true
+	}
 }
 
 // FindHolders returns the processes (deduped by PID) that hold dir open,
