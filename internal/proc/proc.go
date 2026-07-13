@@ -1,14 +1,15 @@
 // Package proc inspects and terminates processes that hold a filesystem path
-// open. macOS-only: it shells out to lsof. It exists to clear a git worktree of
-// leftover dev-stack daemons (process-compose, air, vite/node, …) that detached
-// from the session's tmux pane and would otherwise pin the directory, making
-// `git worktree remove` fail with "Directory not empty".
+// open. It exists to clear a git worktree of leftover dev-stack daemons
+// (process-compose, air, vite/node, …) that detached from the session's tmux
+// pane and would otherwise pin the directory, making `git worktree remove`
+// fail with "Directory not empty".
+//
+// Discovery is platform-specific: macOS shells out to lsof/ps
+// (proc_darwin.go); Linux reads /proc directly (proc_linux.go). The exported
+// API and the kill/exclusion policy are shared.
 package proc
 
 import (
-	"context"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -58,7 +59,8 @@ func init() {
 
 // FindHolders returns the processes (deduped by PID) that hold dir open,
 // excluding the never-kill set and the caller-supplied extraExclude (e.g. the
-// configured editor). macOS-only.
+// configured editor). Discovery is delegated to the platform implementation
+// (lsof on macOS, /proc on Linux).
 func FindHolders(dir string, extraExclude []string) ([]Holder, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -73,24 +75,13 @@ func FindHolders(dir string, extraExclude []string) ([]Holder, error) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// -F p/c/n: machine-readable records (pid, command, name). -w silences
-	// warnings; -n/-P skip DNS/port lookups (the slow parts). No `+D` — that
-	// would stat the whole tree; instead we enumerate every open file once and
-	// prefix-match in Go (~0.5s system-wide). lsof exits non-zero when some
-	// files can't be examined even on an otherwise-good run, so we parse
-	// whatever it produced and only surface the error when it returned nothing.
-	out, err := exec.CommandContext(ctx, "lsof", "-Fpcn", "-w", "-n", "-P").Output()
-	if len(out) == 0 && err != nil {
-		return nil, err
-	}
-	return parseHolders(string(out), abs, os.Getpid(), extra), nil
+	return findHolders(abs, extra)
 }
 
-// parseHolders is the pure core of FindHolders: it turns lsof -Fpcn output into
-// the killable holder set. Split out so it can be unit-tested without lsof.
+// parseHolders is the pure core of the darwin findHolders: it turns lsof
+// -Fpcn output into the killable holder set. It lives here untagged (rather
+// than in proc_darwin.go) so it stays unit-testable on every platform,
+// including the Linux CI runners.
 func parseHolders(lsofOut, absDir string, self int, extra map[string]bool) []Holder {
 	prefix := absDir + string(filepath.Separator)
 
@@ -170,7 +161,8 @@ func normalizeCmd(s string) string {
 // process it is currently running — the leader of its tty's foreground process
 // group (e.g. a `pane_pid` shell running "npm run dev" reports "npm run dev").
 // Background jobs are excluded and a shell sitting at its prompt is absent from
-// the result. One `ps` call regardless of how many pids are passed. macOS-only.
+// the result. Discovery is delegated to the platform implementation (one `ps`
+// call on macOS, /proc/<pid>/stat reads on Linux).
 func ForegroundCommands(shellPIDs []int) map[int]string {
 	if len(shellPIDs) == 0 {
 		return nil
@@ -185,18 +177,11 @@ func ForegroundCommands(shellPIDs []int) map[int]string {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	// pid, ppid, tpgid (the tty's foreground process group), then the full argv
-	// (command= is last so it may contain spaces).
-	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,tpgid=,command=").Output()
-	if len(out) == 0 || err != nil {
-		return nil
-	}
-	return parseForeground(string(out), want)
+	return foregroundCommands(want)
 }
 
-// parseForeground is the pure core of ForegroundCommands. A shell's tpgid is the
+// parseForeground is the pure core of the darwin foregroundCommands (kept
+// untagged for cross-platform test coverage). A shell's tpgid is the
 // process group its tty currently gives keyboard input to; the leader of that
 // group (pid == tpgid) is a direct child of the shell and the command it is
 // running. Reading the leader by tpgid means background jobs (a different group)
@@ -258,7 +243,7 @@ func cutField(s string) (field, rest string, ok bool) {
 }
 
 // Kill sends SIGTERM to each pid, waits up to grace for them to exit, then
-// SIGKILLs any survivors. Pids already gone are ignored. macOS-only.
+// SIGKILLs any survivors. Pids already gone are ignored.
 func Kill(pids []int, grace time.Duration) error {
 	if len(pids) == 0 {
 		return nil
