@@ -1,0 +1,32 @@
+# Optional systemd user unit: start the tmux server at login so fleet's
+# agent sessions are already alive before you open the TUI, and survive
+# closing your terminal.
+#
+# fleet itself is a foreground TUI — it is not a daemon and needs no unit.
+# The tmux server it shares is the thing worth supervising, and only if you
+# want sessions to outlive your login session:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/fleet-tmux.service ~/.config/systemd/user/
+#   systemctl --user enable --now fleet-tmux.service
+#
+# To keep sessions running after you log out entirely (e.g. a headless box
+# you SSH into), also enable lingering:
+#
+#   loginctl enable-linger "$USER"
+
+[Unit]
+Description=tmux server for fleet agent sessions
+
+[Service]
+Type=forking
+# start-server only: no windows are created; fleet attaches its sessions to
+# this server as usual.
+ExecStart=/usr/bin/tmux start-server
+# Don't tear the server (and every agent session in it) down when the unit
+# stops — leave that to `tmux kill-server` as a deliberate act.
+RemainAfterExit=yes
+KillMode=none
+
+[Install]
+WantedBy=default.target
