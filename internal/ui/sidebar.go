@@ -805,7 +805,21 @@ func LastSelectableItem(items []SidebarItem) int {
 // stalling — so the motion doubles as a jump to top/bottom. Headers are never
 // spacers and the clamp goes through First/LastSelectableItem, so the cursor
 // can't land on a gap row.
+//
+// `current` is clamped into range before the scan: rebuildFlatItems does not fix
+// h.cursor (only syncViewport does), so a shrinking rebuild can leave it past the
+// end. Scanning from an out-of-range index would run the loop zero times and fall
+// straight through to the edge clamp — sending the cursor to the *opposite* end of
+// the list from where NextSelectableItem leaves it in the same state.
 func NextHeaderItem(items []SidebarItem, current, direction int) int {
+	if len(items) == 0 {
+		return 0
+	}
+	if current < 0 {
+		current = 0
+	} else if current >= len(items) {
+		current = len(items) - 1
+	}
 	for i := current + direction; i >= 0 && i < len(items); i += direction {
 		if items[i].IsRepoHeader {
 			return i

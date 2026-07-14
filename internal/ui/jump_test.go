@@ -1,9 +1,9 @@
 package ui
 
 import (
-	tea "charm.land/bubbletea/v2"
-
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/session"
@@ -264,7 +264,6 @@ func TestHeaderJumpUpClimbsOutOfGroup(t *testing.T) {
 		idxOfCheckout(t, h, "/tmp/hj-a-wt"),   // own checkout header
 		idxOfCheckout(t, h, "/tmp/hj-a-main"), // previous checkout header
 		idxOfOrigin(t, h, "github.com/acme/alpha"),
-		FirstSelectableItem(h.flatItems), // no header above → clamp to top
 	}
 	for step, w := range want {
 		h.jumpToHeader(-1)
@@ -364,5 +363,54 @@ func TestHeaderJumpKeyBinding(t *testing.T) {
 	}
 	if _, _ = h.handleKey(up); h.cursor != idxOfCheckout(t, h, "/tmp/hj-a-main") {
 		t.Errorf("shift+up through handleKey: cursor = %d, want the previous checkout header", h.cursor)
+	}
+}
+
+// TestHeaderJumpCursorOutOfRange pins the contract for a cursor that is not a
+// valid index. rebuildFlatItems does not clamp h.cursor — only syncViewport
+// does — so a shrinking rebuild that forgets to fix the cursor leaves it past
+// the end of the list. NextSelectableItem degrades to a no-op there; without a
+// clamp NextHeaderItem would instead fall through to FirstSelectableItem and
+// teleport the cursor to row 0, so the two navigations would disagree about
+// which end of the list a stale cursor means.
+//
+// This also gives the direction<0 clamp its only real coverage: BuildFlatItems
+// always emits an origin header as row 0, so walking up from an in-range cursor
+// can never run off the top.
+func TestHeaderJumpCursorOutOfRange(t *testing.T) {
+	h, _ := headerJumpHome()
+	items := h.flatItems
+
+	lastHeader := idxOfCheckout(t, h, "/tmp/hj-b") // deepest header in the tree
+	bottom := LastSelectableItem(items)
+	if lastHeader == bottom {
+		t.Fatal("precondition: the last header must differ from the last row, or the assertions below are vacuous")
+	}
+
+	tests := []struct {
+		name      string
+		current   int
+		direction int
+		want      int
+	}{
+		{"past the end, up → last header (not row 0)", len(items) + 5, -1, lastHeader},
+		{"past the end, down → bottom", len(items) + 5, 1, bottom},
+		{"negative, down → first header below row 0", -3, 1, idxOfCheckout(t, h, "/tmp/hj-a-main")},
+		{"negative, up → top", -3, -1, FirstSelectableItem(items)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NextHeaderItem(items, tc.current, tc.direction); got != tc.want {
+				t.Errorf("NextHeaderItem(items, %d, %d) = %d, want %d", tc.current, tc.direction, got, tc.want)
+			}
+		})
+	}
+
+	// An empty list must be a no-op, not a panic — and must agree with
+	// NextSelectableItem, which returns current.
+	for _, dir := range []int{-1, 1} {
+		if got := NextHeaderItem(nil, 0, dir); got != 0 {
+			t.Errorf("NextHeaderItem(nil, 0, %d) = %d, want 0", dir, got)
+		}
 	}
 }
