@@ -17,6 +17,7 @@ var allKeyBindings = []KeyBinding{
 	// Navigation.
 	{Key: "j / ↓", BarKey: "↑↓", BarDesc: "Nav", Desc: "Move down", Section: "nav"},
 	{Key: "k / ↑", Desc: "Move up", Section: "nav"},
+	{Key: "Shift+↑/↓", Desc: "Jump to previous / next group header", Section: "nav"},
 	{Key: "PgDn", Desc: "Page down", Section: "nav"},
 	{Key: "PgUp", Desc: "Page up", Section: "nav"},
 
