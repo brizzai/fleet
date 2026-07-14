@@ -2160,6 +2160,14 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, -1)
 		h.syncViewport()
 		return h, h.fetchPreviewForSelected()
+	case "shift+down":
+		h.jumpToHeader(1)
+		analytics.Track(analytics.EventHeaderJump, nil)
+		return h, h.fetchPreviewForSelected()
+	case "shift+up":
+		h.jumpToHeader(-1)
+		analytics.Track(analytics.EventHeaderJump, nil)
+		return h, h.fetchPreviewForSelected()
 	case "pgdown":
 		target := h.cursor + h.sidebarPanelRows()
 		if target > len(h.flatItems)-1 {
@@ -3894,6 +3902,16 @@ func (h *Home) collapseRepoAtCursor() {
 			break
 		}
 	}
+	h.syncViewport()
+}
+
+// jumpToHeader moves the cursor to the nearest group header (origin or checkout)
+// in `direction`, clamping to the edge of the list when there is none.
+//
+// Unlike the other jumps below, this needs no reveal/rebuild: a collapsed group
+// still emits its header row, so every target is already in flatItems.
+func (h *Home) jumpToHeader(direction int) {
+	h.cursor = NextHeaderItem(h.flatItems, h.cursor, direction)
 	h.syncViewport()
 }
 

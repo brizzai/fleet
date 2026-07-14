@@ -43,6 +43,7 @@ const (
 	// Navigation / filtering.
 	EventFilterUsed = "filter_used"
 	EventSpaceJump  = "space_jump"
+	EventHeaderJump = "header_jump"
 
 	// RTS slot bindings.
 	EventSlotBindingSet = "slot_binding_set"
