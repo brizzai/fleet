@@ -70,13 +70,27 @@ func IsTmuxAvailable() error {
 // ("tmux next-3.5", "tmux master") and parse failures report ok=false;
 // callers should treat those as new-enough rather than degrade a build
 // that is almost certainly ahead of any release.
+//
+// Memoized: the tmux binary can't change under a running fleet, and Start
+// calls this per session — a reloadAll of N dead sessions would otherwise
+// fork N redundant `tmux -V` processes.
 func serverVersion() (major, minor int, ok bool) {
-	out, err := exec.Command("tmux", "-V").Output()
-	if err != nil {
-		return 0, 0, false
-	}
-	return parseTmuxVersion(string(out))
+	versionOnce.Do(func() {
+		out, err := exec.Command("tmux", "-V").Output()
+		if err != nil {
+			return // leave the zero values: ok=false
+		}
+		versionMajor, versionMinor, versionOK = parseTmuxVersion(string(out))
+	})
+	return versionMajor, versionMinor, versionOK
 }
+
+var (
+	versionOnce  sync.Once
+	versionMajor int
+	versionMinor int
+	versionOK    bool
+)
 
 // parseTmuxVersion parses `tmux -V` output; split from the exec so the spiky
 // inputs (patch letters, dev builds) are testable.
