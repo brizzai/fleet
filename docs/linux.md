@@ -12,7 +12,7 @@ and shows each drawer shell's foreground command.
 
 | | macOS (`proc_darwin.go`) | Linux (`proc_linux.go`) |
 |---|---|---|
-| Holder discovery | one system-wide `lsof -Fpcn` | native `/proc/<pid>/{cwd,exe,fd/*}` readlinks + `maps` fallback |
+| Holder discovery | one system-wide `lsof -Fpcn` | native `/proc/<pid>/{cwd,exe,fd/*}` readlinks (no `maps` scan — see below) |
 | Foreground command | one `ps -axo pid=,ppid=,tpgid=,command=` | `/proc/<pid>/stat` (tpgid), leader's `cmdline` |
 | Subprocesses spawned | lsof, ps | none |
 
@@ -31,6 +31,11 @@ Implementation notes:
   reports comm). Regression-tested.
 - Semantics: on Linux an open fd never blocks rmdir; the walk exists to kill
   daemons that would otherwise keep recreating files mid-removal.
+- No `/proc/<pid>/maps` scan: it would cost a full file read for every
+  same-user process on the box per holder scan, and its only unique catch — a
+  worktree file mmap'd and then closed — isn't how dev daemons hold a dir. A
+  daemon exec'd from a since-deleted worktree binary is still caught via the
+  `exe` readlink, which reports `path (deleted)`.
 
 ## Clipboard
 
@@ -56,9 +61,12 @@ The suspend sweep's pressure probe reads `/proc/pressure/memory` (PSI,
 kernel ≥ 4.20 with `CONFIG_PSI` — present on all mainstream distros) where
 macOS reads the Jetsam pressure level: sustained `some avg10 ≥ 10%` maps to
 warning, `full avg10 ≥ 10%` (or `some ≥ 50%`) to critical. Free swap comes
-from `/proc/meminfo`; a swapless box reports swap as unknown rather than
-"critically low", so suspend never fires on swap absence alone. Kernels
-without PSI report unknown pressure, and no session is ever auto-suspended.
+from `/proc/meminfo`, but unlike macOS's demand-grown swap files, Linux swap
+partitions sit partially used on healthy boxes — so low free swap never
+escalates the level on its own; it only upgrades a PSI *warning* to critical
+(`SwapEscalatesPressure`, `pressure_linux.go`). A swapless box reports swap
+as unknown, and kernels without PSI report unknown pressure — in both cases
+no session is ever auto-suspended.
 
 ## Diagnostics / bug reports
 
