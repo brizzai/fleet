@@ -63,7 +63,7 @@ nfpms:
       - rpm
     homepage: https://github.com/brizzai/fleet
     description: TUI for managing multiple Claude Code sessions in parallel
-    maintainer: FleetLinux <amnontoker@gmail.com>
+    maintainer: brizzai <https://github.com/brizzai/fleet>
     license: Apache-2.0
     bindir: /usr/bin
     # tmux >= 3.3 is where allow-passthrough appeared; fleet degrades

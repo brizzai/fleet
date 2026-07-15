@@ -158,4 +158,4 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Chrome extension ID: `haphpcoecelhofejcklinnlbfijgdnih` (stable via `key` in manifest.json)
 - Extension commands: `open_or_focus`, `close_tab`, `create_tab_group`, `ping`
 - Service worker reconnects to native host on disconnect (2s delay)
-- Claude Code + OpenAI Codex + OpenCode, macOS + Linux (this fork adds native Linux support; see `docs/linux.md` for the platform split)
+- Claude Code + OpenAI Codex + OpenCode, macOS + Linux (see `docs/linux.md` for the platform split)

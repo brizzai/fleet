@@ -35,9 +35,6 @@
 
 <br />
 
-> [!NOTE]
-> **This is FleetLinux** — a fork of [brizzai/fleet](https://github.com/brizzai/fleet) adding full native Linux support: a `/proc`-based process manager replacing the macOS-only lsof path, Linux clipboard routing (wl-copy/xclip/xsel/OSC 52), tmux version gating for pre-3.3 servers, distro-aware diagnostics, and Linux packaging (`.deb`/`.rpm`, Dockerfile, optional systemd user unit). See [docs/linux.md](docs/linux.md).
-
 Your agents are coding. fleet keeps you in control.
 
 - 👀 **See** — every session's live status in one sidebar: running, waiting for you, finished
@@ -161,7 +158,7 @@ fleet goes the other way: **deep integration with the agents that expose real ho
 | **Git worktrees**                   | ✅ | ✅ | ✅ | ✅ |
 | **Hook-based multi-agent**          | ✅ Claude + Codex + OpenCode | — | — | — |
 | **Many agents** (Gemini, Aider…)    | — | ✅ | ✅ | ✅ |
-| **Linux**                           | ✅ (this fork) | ✅ | ✅ | ✅ |
+| **Linux**                           | ✅ | ✅ | ✅ | ✅ |
 | **No tmux dependency**              | — | — | ✅ | — |
 
 **The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code, Codex, and OpenCode, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
