@@ -19,17 +19,17 @@ func TestParseStat(t *testing.T) {
 		{
 			name: "plain comm",
 			line: "1234 (sleep) S 100 200 300 34816 456 4194304 0 0 0 0",
-			want: procStat{ppid: 100, pgrp: 200, tpgid: 456},
+			want: procStat{ppid: 100, tpgid: 456},
 		},
 		{
 			name: "comm with spaces and parens", // e.g. a process named "a) b (c"
 			line: "42 (a) b (c) R 7 8 9 34816 11 0 0",
-			want: procStat{ppid: 7, pgrp: 8, tpgid: 11},
+			want: procStat{ppid: 7, tpgid: 11},
 		},
 		{
 			name: "no tty",
 			line: "99 (daemon) S 1 99 99 0 -1 4194304 0",
-			want: procStat{ppid: 1, pgrp: 99, tpgid: -1},
+			want: procStat{ppid: 1, tpgid: -1},
 		},
 		{name: "no paren", line: "garbage", err: true},
 		{name: "truncated", line: "5 (x) S 1", err: true},

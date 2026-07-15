@@ -9,12 +9,14 @@ import (
 )
 
 // findHolders is the Linux discovery backend for FindHolders: a native /proc
-// walk, no subprocesses. For each pid it resolves cwd, exe, and every open fd
-// symlink, with a /proc/<pid>/maps scan as a last resort for file-backed
-// mappings (a daemon exec'd from a since-deleted worktree binary). Pids owned
-// by other users fail with EPERM on readlink and are skipped — the same
-// blindness non-root lsof has on macOS, and irrelevant here: the leftover
-// daemons we hunt were spawned by the user's own session.
+// walk, no subprocesses. For each pid it resolves cwd, exe (which still names
+// a deleted worktree binary as "path (deleted)"), and every open fd symlink —
+// cheap readlinks only. Deliberately no /proc/<pid>/maps scan: it would cost
+// a full file read for every same-user process on the box, and its only
+// unique catch (a worktree file mmap'd and then closed) isn't how the target
+// daemons hold a dir. Pids owned by other users fail with EPERM and are
+// skipped — the same blindness non-root lsof has on macOS, and irrelevant
+// here: the leftover daemons we hunt were spawned by the user's own session.
 //
 // Semantics note: unlike macOS, an open fd on Linux never blocks rmdir — the
 // point of this walk is not dodging EBUSY but killing leftover dev daemons
@@ -47,8 +49,8 @@ func findHolders(absDir string, extra map[string]bool) ([]Holder, error) {
 	return holders, nil
 }
 
-// pidHoldsDir reports whether pid holds absDir open via cwd, exe, an open fd,
-// or a file-backed mapping under it.
+// pidHoldsDir reports whether pid holds absDir open via cwd, exe, or an open
+// fd under it.
 func pidHoldsDir(pid int, absDir, prefix string) bool {
 	base := "/proc/" + strconv.Itoa(pid)
 	for _, link := range [...]string{base + "/cwd", base + "/exe"} {
@@ -65,16 +67,6 @@ func pidHoldsDir(pid int, absDir, prefix string) bool {
 			return true
 		}
 	}
-	// maps last: it's the only per-pid *read* (not readlink) and rarely the
-	// sole hit, so most processes never pay for it.
-	if data, err := os.ReadFile(base + "/maps"); err == nil {
-		for line := range strings.SplitSeq(string(data), "\n") {
-			// Mapping lines end in the pathname column (absolute path or blank).
-			if i := strings.IndexByte(line, '/'); i != -1 && pathUnder(line[i:], absDir, prefix) {
-				return true
-			}
-		}
-	}
 	return false
 }
 
@@ -86,15 +78,18 @@ func pathUnder(p, absDir, prefix string) bool {
 	return p == absDir || strings.HasPrefix(p, prefix)
 }
 
-// commandName returns pid's command for display and exclusion matching:
-// argv[0]'s full string from cmdline (so normalizeCmd can basename a path like
-// /usr/local/bin/code), falling back to comm — which the kernel truncates to
-// 15 bytes — for zombies and kernel-adjacent processes with an empty cmdline.
+// commandName returns pid's command for display and exclusion matching: the
+// basename of argv[0] from cmdline, falling back to comm — which the kernel
+// truncates to 15 bytes — for zombies and kernel-adjacent processes with an
+// empty cmdline. Basenaming matches what darwin's lsof c-field reports, so
+// the worktree-delete confirm dialog shows "vite", not
+// "/home/u/wt/node_modules/.bin/vite" (exclusion matching is unaffected
+// either way — excluded() basenames via normalizeCmd).
 func commandName(pid int) string {
 	base := "/proc/" + strconv.Itoa(pid)
 	if data, err := os.ReadFile(base + "/cmdline"); err == nil {
 		if argv0, _, _ := strings.Cut(string(data), "\x00"); argv0 != "" {
-			return argv0
+			return filepath.Base(argv0)
 		}
 	}
 	data, err := os.ReadFile(base + "/comm")
@@ -118,8 +113,10 @@ func foregroundCommands(want map[int]bool) map[int]string {
 			continue
 		}
 		leaderPID := shell.tpgid
-		// Idle shell: the tty's foreground group is the shell's own group.
-		if leaderPID <= 0 || leaderPID == shellPID || leaderPID == shell.pgrp {
+		// Idle shell: the tty's foreground group is the shell's own group —
+		// and a tmux pane shell is a session leader (pgrp == pid), so
+		// comparing against shellPID covers it.
+		if leaderPID <= 0 || leaderPID == shellPID {
 			continue
 		}
 		leader, err := readStat(leaderPID)
@@ -150,7 +147,6 @@ func commandLine(pid int) string {
 // procStat is the subset of /proc/<pid>/stat this package needs.
 type procStat struct {
 	ppid  int
-	pgrp  int
 	tpgid int
 }
 
@@ -162,8 +158,8 @@ func readStat(pid int) (procStat, error) {
 	return parseStat(string(data))
 }
 
-// parseStat extracts ppid, pgrp, and tpgid from a stat(5) line. Field 2 (comm)
-// is parenthesized and may itself contain spaces and parens — e.g. a process
+// parseStat extracts ppid and tpgid from a stat(5) line. Field 2 (comm) is
+// parenthesized and may itself contain spaces and parens — e.g. a process
 // named "a) b" — so the only safe anchor is the *last* ')'; everything after
 // it is space-separated: state ppid pgrp session tty_nr tpgid …
 func parseStat(line string) (procStat, error) {
@@ -176,10 +172,9 @@ func parseStat(line string) (procStat, error) {
 		return procStat{}, strconv.ErrSyntax
 	}
 	ppid, e1 := strconv.Atoi(fields[1])
-	pgrp, e2 := strconv.Atoi(fields[2])
-	tpgid, e3 := strconv.Atoi(fields[5])
-	if e1 != nil || e2 != nil || e3 != nil {
+	tpgid, e2 := strconv.Atoi(fields[5])
+	if e1 != nil || e2 != nil {
 		return procStat{}, strconv.ErrSyntax
 	}
-	return procStat{ppid: ppid, pgrp: pgrp, tpgid: tpgid}, nil
+	return procStat{ppid: ppid, tpgid: tpgid}, nil
 }
