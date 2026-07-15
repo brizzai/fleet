@@ -104,6 +104,24 @@ func collectTerminalEnv() TerminalEnv {
 	return env
 }
 
+// OSSummary is the single source for the human-readable OS description —
+// "macOS 15.1", "Ubuntu 24.04.4 LTS", or the bare GOOS as a fallback. Both
+// the bug-report dialog and the markdown issue body render through this;
+// they used to hand-roll separate switches over the same fields and drifted
+// (the dialog shipped without the Linux case). Kernel version is deliberately
+// not included — WSL kernel strings are long and would crowd the dialog's
+// one-liner; the markdown body carries it on its own line.
+func (r *Report) OSSummary() string {
+	switch {
+	case r.MacOSVersion != "":
+		return "macOS " + r.MacOSVersion
+	case r.LinuxDistro != "":
+		return r.LinuxDistro
+	default:
+		return r.OS
+	}
+}
+
 // FormatMarkdownWithDesc formats the report with a user-provided description.
 func (r *Report) FormatMarkdownWithDesc(description string) string {
 	return r.formatMarkdown(description)
@@ -156,17 +174,9 @@ func (r *Report) formatMarkdown(description string) string {
 	// Diagnostics.
 	b.WriteString("### Diagnostics\n")
 	fmt.Fprintf(&b, "- **Version**: %s\n", r.Version)
-	switch {
-	case r.MacOSVersion != "":
-		fmt.Fprintf(&b, "- **macOS**: %s (%s)\n", r.MacOSVersion, r.Arch)
-	case r.LinuxDistro != "":
-		fmt.Fprintf(&b, "- **Linux**: %s (%s", r.LinuxDistro, r.Arch)
-		if r.KernelVersion != "" {
-			fmt.Fprintf(&b, ", kernel %s", r.KernelVersion)
-		}
-		b.WriteString(")\n")
-	default:
-		fmt.Fprintf(&b, "- **OS**: %s/%s\n", r.OS, r.Arch)
+	fmt.Fprintf(&b, "- **OS**: %s (%s)\n", r.OSSummary(), r.Arch)
+	if r.KernelVersion != "" {
+		fmt.Fprintf(&b, "- **Kernel**: %s\n", r.KernelVersion)
 	}
 	if r.TmuxVersion != "" {
 		fmt.Fprintf(&b, "- **tmux**: %s\n", r.TmuxVersion)

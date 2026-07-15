@@ -254,14 +254,7 @@ func (d *BugReportDialog) View() string {
 	b.WriteString(sectionStyle.Render("Diagnostics"))
 	b.WriteString("\n")
 	r := d.report
-	diag := fmt.Sprintf("  %s", r.Version)
-	switch {
-	case r.MacOSVersion != "":
-		diag += fmt.Sprintf(" · macOS %s", r.MacOSVersion)
-	case r.LinuxDistro != "":
-		diag += fmt.Sprintf(" · %s", r.LinuxDistro)
-	}
-	diag += fmt.Sprintf(" · %s", r.Arch)
+	diag := fmt.Sprintf("  %s · %s · %s", r.Version, r.OSSummary(), r.Arch)
 	if r.TmuxVersion != "" {
 		diag += fmt.Sprintf(" · %s", r.TmuxVersion)
 	}
