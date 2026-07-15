@@ -20,3 +20,16 @@ func MemoryPressure() (level int, swapFreeMB int64) {
 	}
 	return level, swapFreeMB
 }
+
+// SwapEscalatesPressure reports whether critically-low free swap should
+// escalate the pressure level to critical. Unlike macOS's demand-grown swap
+// files, Linux swap partitions are fixed-size and sit partially used on
+// perfectly healthy boxes (default swappiness proactively parks idle pages),
+// so an absolute free-swap floor is meaningless on its own — a 512MB
+// partition would read "critical" forever. Low swap only corroborates
+// pressure PSI already sees: it upgrades warning to critical, and never
+// overrides a normal or unknown reading. A PSI-less kernel therefore keeps
+// its documented guarantee that nothing is ever auto-suspended.
+func SwapEscalatesPressure(level int, swapFreeMB int64) bool {
+	return level >= PressureWarning && swapFreeMB >= 0 && swapFreeMB < swapCriticalMB
+}

@@ -3436,9 +3436,6 @@ const (
 	// suspendSweepBatch caps how many sessions one auto-sweep hibernates, so a
 	// fleet sheds gradually and re-checks pressure before shedding more.
 	suspendSweepBatch = 5
-	// suspendSwapCriticalMB: free swap below this is treated as critical even if
-	// kern.memorystatus_vm_pressure_level hasn't caught up (it lags swap thrash).
-	suspendSwapCriticalMB = 512
 )
 
 // maybeSuspendIdleSessions hibernates the most-idle sessions under memory pressure,
@@ -3486,7 +3483,11 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 	}
 
 	level, swapFreeMB := perfwatch.MemoryPressure()
-	if swapFreeMB >= 0 && swapFreeMB < suspendSwapCriticalMB {
+	// Whether low free swap escalates the level is a per-platform judgment:
+	// trusted outright on macOS (demand-grown swap, Jetsam lags thrash), but on
+	// Linux only when PSI already reports warning — fixed partitions sit
+	// partially used on healthy boxes.
+	if perfwatch.SwapEscalatesPressure(level, swapFreeMB) {
 		level = perfwatch.PressureCritical
 	}
 	minIdle, act := suspendIdleThreshold(mode, level)

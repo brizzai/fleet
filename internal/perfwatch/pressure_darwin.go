@@ -26,3 +26,12 @@ func MemoryPressure() (level int, swapFreeMB int64) {
 	}
 	return level, swapFreeMB
 }
+
+// SwapEscalatesPressure reports whether critically-low free swap should
+// escalate the pressure level to critical. On macOS swap files are grown and
+// shrunk on demand, so free swap only runs low when the system is genuinely
+// out of room — and the Jetsam level lags swap thrash, so low free swap is
+// trusted on its own, whatever the reported level says.
+func SwapEscalatesPressure(_ int, swapFreeMB int64) bool {
+	return swapFreeMB >= 0 && swapFreeMB < swapCriticalMB
+}

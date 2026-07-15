@@ -413,6 +413,12 @@ const (
 	PressureCritical = 4
 )
 
+// swapCriticalMB: free swap below this is treated as an OOM signal by
+// SwapEscalatesPressure — but under platform-specific conditions (see
+// pressure_darwin.go / pressure_linux.go): trusted on its own on macOS,
+// only corroborating a PSI warning on Linux.
+const swapCriticalMB = 512
+
 // The MemoryPressure probe itself lives in pressure_darwin.go /
 // pressure_linux.go; the parsers below are kept untagged (same pattern as
 // internal/proc) so their tests run on any platform's CI.
