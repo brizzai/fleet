@@ -21,12 +21,21 @@ Description=tmux server for fleet agent sessions
 [Service]
 Type=forking
 # start-server only: no windows are created; fleet attaches its sessions to
-# this server as usual.
-ExecStart=/usr/bin/tmux start-server
+# this server as usual. exit-empty defaults to on, which means a server with
+# zero sessions and no attached client exits again almost immediately
+# (reproducible: `tmux -f /dev/null -L t start-server; sleep 1; tmux -L t ls`
+# -> "no server running") — turning it off in the same invocation, before
+# systemd considers the unit started, is what makes the server actually
+# persist. `env` resolves tmux via PATH rather than a hardcoded path, so this
+# also works for Homebrew-on-Linux, Nix, or from-source installs.
+ExecStart=/usr/bin/env tmux start-server \; set -s exit-empty off
 # Don't tear the server (and every agent session in it) down when the unit
-# stops — leave that to `tmux kill-server` as a deliberate act.
+# stops — leave that to `tmux kill-server` as a deliberate act. KillMode=none
+# is deprecated (systemd >= 243 warns on load); process + a no-op ExecStop is
+# the supported way to express the same "never signal it" intent.
 RemainAfterExit=yes
-KillMode=none
+KillMode=process
+ExecStop=/bin/true
 
 [Install]
 WantedBy=default.target
