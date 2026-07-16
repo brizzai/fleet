@@ -31,9 +31,9 @@ func TestClipboardCopyCommandFor(t *testing.T) {
 	}{
 		{"darwin always pbcopy", "darwin", headless, has(), "pbcopy"},
 		{"wayland prefers wl-copy", "linux", wayland, allTools, "wl-copy"},
-		{"x11 with wl-clipboard installed skips wl-copy", "linux", x11, allTools, "xclip -selection clipboard -in"},
+		{"x11 with wl-clipboard installed skips wl-copy", "linux", x11, allTools, "xclip -selection clipboard -in >/dev/null"},
 		{"x11 falls back to xsel", "linux", x11, has("wl-copy", "xsel"), "xsel --clipboard --input"},
-		{"wayland without wl-copy uses x11 tools via XWayland", "linux", wayland, has("xclip"), "xclip -selection clipboard -in"},
+		{"wayland without wl-copy uses x11 tools via XWayland", "linux", wayland, has("xclip"), "xclip -selection clipboard -in >/dev/null"},
 		{"wayland-only display can't use x11 tools", "linux", waylandOnly, has("xclip", "xsel"), ""},
 		{"headless with every tool installed: OSC 52", "linux", headless, allTools, ""},
 		{"x11 with no tools: OSC 52", "linux", x11, has(), ""},
@@ -44,6 +44,31 @@ func TestClipboardCopyCommandFor(t *testing.T) {
 			got := clipboardCopyCommandFor(tt.goos, env(tt.env), tt.hasTool)
 			if got != tt.want {
 				t.Errorf("clipboardCopyCommandFor(%q, %v) = %q, want %q", tt.goos, tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
+// parseTmuxShowEnvironment must read the *server's* environment table, not
+// fleet's own — a headless-started server (e.g. via the systemd unit) has no
+// display vars in its table even if fleet itself was launched from one.
+func TestParseTmuxShowEnvironment(t *testing.T) {
+	tests := []struct {
+		name    string
+		varName string
+		out     string
+		want    string
+	}{
+		{"set", "WAYLAND_DISPLAY", "WAYLAND_DISPLAY=wayland-0\n", "wayland-0"},
+		{"set no trailing newline", "DISPLAY", "DISPLAY=:0", ":0"},
+		{"unset/removed", "WAYLAND_DISPLAY", "-WAYLAND_DISPLAY\n", ""},
+		{"empty output", "DISPLAY", "", ""},
+		{"value containing an equals sign", "DISPLAY", "DISPLAY=:0=extra\n", ":0=extra"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseTmuxShowEnvironment(tt.varName, tt.out); got != tt.want {
+				t.Errorf("parseTmuxShowEnvironment(%q, %q) = %q, want %q", tt.varName, tt.out, got, tt.want)
 			}
 		})
 	}

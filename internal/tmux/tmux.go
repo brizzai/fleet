@@ -173,7 +173,16 @@ func EnsureCopyCommand() {
 	// No local clipboard tool (headless Linux, no wl-copy/xclip/xsel): enable
 	// set-clipboard so copy-mode falls back to OSC 52 and terminals that
 	// support it (most modern Linux terminals, and anything over SSH) still
-	// get the selection.
+	// get the selection. Same "only when unset" guard as copy-command above —
+	// otherwise this would silently override a user's deliberate
+	// `set-clipboard off` (a common hardening choice) on every call.
+	scOut, err := exec.Command("tmux", "show-options", "-sv", "set-clipboard").Output()
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(string(scOut)) != "" {
+		return // User already configured set-clipboard; leave it alone.
+	}
 	_ = exec.Command("tmux", "set-option", "-s", "set-clipboard", "on").Run()
 }
 
@@ -190,7 +199,36 @@ func clipboardCopyCommand() string {
 		_, err := exec.LookPath(bin)
 		return err == nil
 	}
-	return clipboardCopyCommandFor(runtime.GOOS, os.Getenv, hasTool)
+	return clipboardCopyCommandFor(runtime.GOOS, tmuxServerGetenv, hasTool)
+}
+
+// tmuxServerGetenv reads a variable from the tmux server's own environment
+// table (tmux show-environment -g) rather than fleet's process environment.
+// copy-command runs as a child of the *server*, which inherits this table —
+// not fleet's env — when it execs a command. The two commonly diverge: the
+// systemd unit in this repo starts the server with no display at all, so a
+// server-launched-headless-then-attached-from-a-Wayland-terminal session
+// would otherwise pass this check on fleet's env and set copy-command to
+// wl-copy, which the server then fails to run with no WAYLAND_DISPLAY of its
+// own — silently losing the copy, worse than the OSC 52 fallback this
+// function exists to prefer when no tool can actually be reached.
+func tmuxServerGetenv(name string) string {
+	out, err := exec.Command("tmux", "show-environment", "-g", name).Output()
+	if err != nil {
+		return "" // no server, or the var isn't set — either way, no display.
+	}
+	return parseTmuxShowEnvironment(name, string(out))
+}
+
+// parseTmuxShowEnvironment is the pure core of tmuxServerGetenv. Queried by
+// name, tmux prints "NAME=value" when set, or "-NAME" when the variable was
+// explicitly unset/removed from the table.
+func parseTmuxShowEnvironment(name, out string) string {
+	line := strings.TrimSpace(out)
+	if v, ok := strings.CutPrefix(line, name+"="); ok {
+		return v
+	}
+	return ""
 }
 
 // clipboardCopyCommandFor is the pure core of clipboardCopyCommand, split out
@@ -207,7 +245,12 @@ func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool fu
 	}
 	if getenv("DISPLAY") != "" {
 		if hasTool("xclip") {
-			return "xclip -selection clipboard -in"
+			// xclip forks and keeps its inherited stdout open to serve the
+			// selection to a future paste; tmux's copy-pipe blocks reading
+			// that pipe until it closes, freezing copy-mode until something
+			// else takes clipboard ownership. Redirecting stdout closes it
+			// immediately (the standard fix — see the tmux FAQ on xclip).
+			return "xclip -selection clipboard -in >/dev/null"
 		}
 		if hasTool("xsel") {
 			return "xsel --clipboard --input"
