@@ -263,10 +263,19 @@ func runCmd(name string, args ...string) string {
 // OSReleasePrettyName returns PRETTY_NAME from /etc/os-release (os-release(5)),
 // e.g. `Ubuntu 24.04.1 LTS`, or "" when unavailable. Exported because
 // internal/analytics reports the same distro string.
+//
+// os-release(5): "/etc/os-release takes precedence over /usr/lib/os-release.
+// Applications should check for the former, and exclusively use its data if
+// it exists, and only fall back to /usr/lib/os-release if /etc/os-release
+// does not exist." Most distros symlink the former to the latter, but some
+// minimal/container images ship only /usr/lib/os-release.
 func OSReleasePrettyName() string {
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
-		return ""
+		data, err = os.ReadFile("/usr/lib/os-release")
+		if err != nil {
+			return ""
+		}
 	}
 	return parseOSReleasePrettyName(string(data))
 }

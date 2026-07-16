@@ -18,7 +18,7 @@ description: What fleet needs to run.
 ## Permissions
 
 - fleet writes to `~/.config/fleet/` (state DB, hook status files, debug log)
-- The Chrome extension installs a Native Messaging Host manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (macOS) or `~/.config/google-chrome/NativeMessagingHosts/` (Linux)
+- The Chrome extension installs a Native Messaging Host manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (macOS) or `~/.config/google-chrome/NativeMessagingHosts/` (Linux) — also installed into `~/.config/chromium/` and the beta/unstable config dirs when present
 - Hooks are auto-installed into `~/.claude/settings.json` on first launch
 
 Nothing leaves your machine.
