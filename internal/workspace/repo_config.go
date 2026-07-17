@@ -6,7 +6,6 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
@@ -104,15 +103,18 @@ func CopyFilesPatterns(repoPath string) []string {
 }
 
 // WorktreeDirTemplate returns the effective worktree-location path template for
-// repoPath, resolving precedence in one place: the per-repo .fleet.json
-// workspace.dir wins, else the global config worktree_dir, else "" (the classic
-// sibling layout). Used by both ResolveProvider and DeriveWorktreePathPreview so
-// creation, removal, and the UI preview never disagree.
-func WorktreeDirTemplate(repoPath string) string {
+// repoPath: the per-repo .fleet.json workspace.dir wins, else globalDefault
+// (the caller's already-loaded config worktree_dir), else "" (the classic
+// sibling layout). ResolveProvider uses it to stamp GitWorktreeProvider.WorktreeDir,
+// which Create/Destroy and the UI preview (via GitWorktreeDirTemplate) then read —
+// so precedence lives in one place. The global default is passed in rather than
+// reloaded from disk here, avoiding per-call config I/O and debug-log noise on
+// the ResolveProvider path (which runs on the Update loop, e.g. the d-key delete).
+func WorktreeDirTemplate(repoPath, globalDefault string) string {
 	if d := loadMergedRepoConfig(repoPath).Workspace.Dir; d != "" {
 		return d
 	}
-	return config.Load().GetWorktreeDir()
+	return globalDefault
 }
 
 // ResolveProvider loads workspace config from repoPath. Preference is by file
@@ -121,7 +123,7 @@ func WorktreeDirTemplate(repoPath string) string {
 // otherwise .bc.json is used. Same rule for .fleet.local.json over
 // .bc.local.json. Local overrides base field-by-field. Returns ShellProvider
 // if any command ends up set, otherwise GitWorktreeProvider.
-func ResolveProvider(repoPath string) Provider {
+func ResolveProvider(repoPath, worktreeDir string) Provider {
 	merged := loadMergedRepoConfig(repoPath).Workspace
 
 	// If any shell command is set, use ShellProvider.
@@ -135,7 +137,7 @@ func ResolveProvider(repoPath string) Provider {
 
 	// Default: built-in git worktree provider, honoring the configured
 	// worktree-location template (per-repo dir override, else global config).
-	return &GitWorktreeProvider{WorktreeDir: WorktreeDirTemplate(repoPath)}
+	return &GitWorktreeProvider{WorktreeDir: WorktreeDirTemplate(repoPath, worktreeDir)}
 }
 
 // preferredConfig returns the config from preferredName if that file exists at

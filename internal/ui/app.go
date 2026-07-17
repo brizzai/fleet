@@ -2896,7 +2896,7 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 	// Discoverability nudge: when this is the last session in a destroyable
 	// worktree, the worktree dir is kept — point the user at the header.
 	if s.WorkspaceName != "" && h.countSessionsForRepo(repoPath) == 1 &&
-		workspace.ResolveProvider(repoPath).CanDestroy() {
+		workspace.ResolveProvider(repoPath, h.cfg.GetWorktreeDir()).CanDestroy() {
 		details = append(details, "Worktree kept — press d on its header to remove it")
 	}
 
@@ -3311,8 +3311,9 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 			repoPath := msg.repoPath
 			name := filepath.Base(repoPath)
 			editor := h.cfg.GetEditor()
+			worktreeDir := h.cfg.GetWorktreeDir()
 			destroyCmd := func() tea.Msg {
-				remaining, err := destroyWorktree(repoPath, name, editor, 2*time.Second)
+				remaining, err := destroyWorktree(repoPath, name, editor, worktreeDir, 2*time.Second)
 				return deleteCleanupDoneMsg{
 					workspaceErr:     err,
 					repoPath:         repoPath,
@@ -4374,7 +4375,8 @@ func (h *Home) handlePendingDeleteExpire(msg pendingDeleteExpireMsg) (tea.Model,
 // duration of `tmux kill-session`. Always returns deleteCleanupDoneMsg so
 // the entry can be removed from finalizingDeletes.
 func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
-	editor := h.cfg.GetEditor() // capture on the Update loop; the goroutine must not touch h
+	editor := h.cfg.GetEditor()           // capture on the Update loop; the goroutine must not touch h
+	worktreeDir := h.cfg.GetWorktreeDir() // ditto — worktree-location template for ResolveProvider
 	return func() tea.Msg {
 		debuglog.Logger.Info("finalizing delete", "id", pd.Session.ID, "title", pd.Session.Title)
 
@@ -4392,7 +4394,7 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 		var remaining []string
 		attempted := pd.DestroyWS && pd.WorkspaceName != ""
 		if attempted {
-			remaining, workspaceErr = destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, 2*time.Second)
+			remaining, workspaceErr = destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, worktreeDir, 2*time.Second)
 		}
 		return deleteCleanupDoneMsg{
 			sessionID:        pd.Session.ID,
@@ -4412,8 +4414,8 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 // re-scans and returns the remaining holder names so the caller can surface
 // what's still blocking removal. Runs on a background goroutine — must not
 // touch Home.
-func destroyWorktree(repoPath, workspaceName, editor string, grace time.Duration) (remaining []string, err error) {
-	provider := workspace.ResolveProvider(repoPath)
+func destroyWorktree(repoPath, workspaceName, editor, worktreeDir string, grace time.Duration) (remaining []string, err error) {
+	provider := workspace.ResolveProvider(repoPath, worktreeDir)
 	if provider == nil || !provider.CanDestroy() {
 		return nil, nil
 	}
@@ -4519,6 +4521,7 @@ func (h *Home) handleWorktreeDestroyResult(msg deleteCleanupDoneMsg) {
 // responsible for the destroy.
 func (h *Home) finalizeAllPendingDeletes() {
 	editor := h.cfg.GetEditor()
+	worktreeDir := h.cfg.GetWorktreeDir()
 	finalize := func(pd PendingDelete, destroyWorkspace bool) {
 		debuglog.Logger.Info("finalizing pending delete on quit", "id", pd.Session.ID, "title", pd.Session.Title)
 		if pd.Session.IsAlive() {
@@ -4532,7 +4535,7 @@ func (h *Home) finalizeAllPendingDeletes() {
 		if destroyWorkspace && pd.DestroyWS && pd.WorkspaceName != "" {
 			// Route through destroyWorktree so leftover dev daemons are killed
 			// before removal — grace 0 (immediate SIGKILL) so quit isn't delayed.
-			if _, err := destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, 0); err != nil {
+			if _, err := destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, worktreeDir, 0); err != nil {
 				debuglog.Logger.Error("failed to destroy workspace on quit", "id", pd.Session.ID, "workspace", pd.WorkspaceName, "err", err)
 			}
 		}
@@ -5631,8 +5634,9 @@ func (h *Home) fetchBranchList(repoPath string) tea.Cmd {
 }
 
 func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
+	worktreeDir := h.cfg.GetWorktreeDir() // capture on the Update loop; the goroutine must not touch h
 	return func() tea.Msg {
-		provider := workspace.ResolveProvider(repoPath)
+		provider := workspace.ResolveProvider(repoPath, worktreeDir)
 		// For the built-in git provider, resolve to the main worktree: a new
 		// worktree is a sibling of the main repo, so its name must derive from the
 		// main repo — not from whichever linked worktree is currently selected,

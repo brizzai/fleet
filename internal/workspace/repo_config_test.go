@@ -9,7 +9,7 @@ import (
 func TestResolveProvider(t *testing.T) {
 	t.Run("no config files returns GitWorktreeProvider", func(t *testing.T) {
 		repo := t.TempDir()
-		got := ResolveProvider(repo)
+		got := ResolveProvider(repo, "")
 		if _, ok := got.(*GitWorktreeProvider); !ok {
 			t.Errorf("got %T, want *GitWorktreeProvider", got)
 		}
@@ -18,7 +18,7 @@ func TestResolveProvider(t *testing.T) {
 	t.Run(".fleet.json with shell commands wins", func(t *testing.T) {
 		repo := t.TempDir()
 		writeFile(t, repo, ".fleet.json", `{"workspace":{"create":"new-fleet","destroy":"destroy-fleet"}}`)
-		got, ok := ResolveProvider(repo).(*ShellProvider)
+		got, ok := ResolveProvider(repo, "").(*ShellProvider)
 		if !ok {
 			t.Fatalf("got %T, want *ShellProvider", got)
 		}
@@ -30,7 +30,7 @@ func TestResolveProvider(t *testing.T) {
 	t.Run("legacy .bc.json is used when .fleet.json absent", func(t *testing.T) {
 		repo := t.TempDir()
 		writeFile(t, repo, ".bc.json", `{"workspace":{"create":"new-bc"}}`)
-		got, ok := ResolveProvider(repo).(*ShellProvider)
+		got, ok := ResolveProvider(repo, "").(*ShellProvider)
 		if !ok {
 			t.Fatalf("got %T, want *ShellProvider", got)
 		}
@@ -43,7 +43,7 @@ func TestResolveProvider(t *testing.T) {
 		repo := t.TempDir()
 		writeFile(t, repo, ".fleet.json", `{}`)
 		writeFile(t, repo, ".bc.json", `{"workspace":{"create":"new-bc"}}`)
-		got := ResolveProvider(repo)
+		got := ResolveProvider(repo, "")
 		if _, ok := got.(*GitWorktreeProvider); !ok {
 			t.Errorf("got %T, want *GitWorktreeProvider — empty .fleet.json should suppress .bc.json", got)
 		}
@@ -53,7 +53,7 @@ func TestResolveProvider(t *testing.T) {
 		repo := t.TempDir()
 		writeFile(t, repo, ".fleet.json", `{not valid json`)
 		writeFile(t, repo, ".bc.json", `{"workspace":{"create":"new-bc"}}`)
-		got := ResolveProvider(repo)
+		got := ResolveProvider(repo, "")
 		if _, ok := got.(*GitWorktreeProvider); !ok {
 			t.Errorf("got %T, want *GitWorktreeProvider — malformed .fleet.json should still suppress .bc.json", got)
 		}
@@ -70,7 +70,7 @@ func TestResolveProvider(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(fleetPath, 0o644) })
 
-		got := ResolveProvider(repo)
+		got := ResolveProvider(repo, "")
 		if _, ok := got.(*GitWorktreeProvider); !ok {
 			t.Errorf("got %T, want *GitWorktreeProvider — unreadable .fleet.json should still suppress .bc.json", got)
 		}
@@ -80,7 +80,7 @@ func TestResolveProvider(t *testing.T) {
 		repo := t.TempDir()
 		writeFile(t, repo, ".fleet.json", `{"workspace":{"create":"base-create","destroy":"base-destroy"}}`)
 		writeFile(t, repo, ".fleet.local.json", `{"workspace":{"create":"local-create"}}`)
-		got, ok := ResolveProvider(repo).(*ShellProvider)
+		got, ok := ResolveProvider(repo, "").(*ShellProvider)
 		if !ok {
 			t.Fatalf("got %T, want *ShellProvider", got)
 		}
@@ -148,7 +148,7 @@ func TestIgnorePatterns(t *testing.T) {
 		if got := IgnorePatterns(repo); !equalStrings(got, []string{"x"}) {
 			t.Errorf("ignore: got %v, want [x]", got)
 		}
-		sp, ok := ResolveProvider(repo).(*ShellProvider)
+		sp, ok := ResolveProvider(repo, "").(*ShellProvider)
 		if !ok {
 			t.Fatalf("got %T, want *ShellProvider", sp)
 		}
@@ -161,56 +161,33 @@ func TestIgnorePatterns(t *testing.T) {
 func TestWorktreeDirTemplate(t *testing.T) {
 	const globalTemplate = "{{parent}}/global.worktrees/{{name}}"
 
-	// Redirect HOME so config.Load() reads a config.json we control instead of
-	// the developer's real one, making the global-fallback cases deterministic.
-	writeGlobalConfig := func(t *testing.T, worktreeDir string) {
-		t.Helper()
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		dir := filepath.Join(home, ".config", "fleet")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		content := `{}`
-		if worktreeDir != "" {
-			content = `{"worktree_dir":"` + worktreeDir + `"}`
-		}
-		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	t.Run("per-repo .fleet.json dir wins over global", func(t *testing.T) {
-		writeGlobalConfig(t, globalTemplate)
 		repo := t.TempDir()
 		writeFile(t, repo, ".fleet.json", `{"workspace":{"dir":"{{parent}}/{{repo}}.worktrees/{{name}}"}}`)
-		if got := WorktreeDirTemplate(repo); got != "{{parent}}/{{repo}}.worktrees/{{name}}" {
+		if got := WorktreeDirTemplate(repo, globalTemplate); got != "{{parent}}/{{repo}}.worktrees/{{name}}" {
 			t.Errorf("got %q, want per-repo template", got)
 		}
 	})
 
 	t.Run(".fleet.local.json dir overrides .fleet.json dir", func(t *testing.T) {
-		writeGlobalConfig(t, "")
 		repo := t.TempDir()
 		writeFile(t, repo, ".fleet.json", `{"workspace":{"dir":"base"}}`)
 		writeFile(t, repo, ".fleet.local.json", `{"workspace":{"dir":"local"}}`)
-		if got := WorktreeDirTemplate(repo); got != "local" {
+		if got := WorktreeDirTemplate(repo, ""); got != "local" {
 			t.Errorf("got %q, want %q", got, "local")
 		}
 	})
 
-	t.Run("falls back to global config when no per-repo dir", func(t *testing.T) {
-		writeGlobalConfig(t, globalTemplate)
+	t.Run("falls back to global default when no per-repo dir", func(t *testing.T) {
 		repo := t.TempDir()
-		if got := WorktreeDirTemplate(repo); got != globalTemplate {
-			t.Errorf("got %q, want global template %q", got, globalTemplate)
+		if got := WorktreeDirTemplate(repo, globalTemplate); got != globalTemplate {
+			t.Errorf("got %q, want global default %q", got, globalTemplate)
 		}
 	})
 
 	t.Run("empty when nothing set", func(t *testing.T) {
-		writeGlobalConfig(t, "")
 		repo := t.TempDir()
-		if got := WorktreeDirTemplate(repo); got != "" {
+		if got := WorktreeDirTemplate(repo, ""); got != "" {
 			t.Errorf("got %q, want empty", got)
 		}
 	})
