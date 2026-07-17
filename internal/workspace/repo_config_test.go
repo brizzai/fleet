@@ -191,6 +191,14 @@ func TestWorktreeDirTemplate(t *testing.T) {
 			t.Errorf("got %q, want empty", got)
 		}
 	})
+
+	t.Run("whitespace-only per-repo dir defers to global", func(t *testing.T) {
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"workspace":{"dir":"   "}}`)
+		if got := WorktreeDirTemplate(repo, globalTemplate); got != globalTemplate {
+			t.Errorf("got %q, want global default %q (whitespace dir should not override)", got, globalTemplate)
+		}
+	})
 }
 
 func equalStrings(a, b []string) bool {

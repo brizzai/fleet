@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
@@ -111,7 +112,10 @@ func CopyFilesPatterns(repoPath string) []string {
 // reloaded from disk here, avoiding per-call config I/O and debug-log noise on
 // the ResolveProvider path (which runs on the Update loop, e.g. the d-key delete).
 func WorktreeDirTemplate(repoPath, globalDefault string) string {
-	if d := loadMergedRepoConfig(repoPath).Workspace.Dir; d != "" {
+	// Trim before the emptiness check so a whitespace-only per-repo dir behaves
+	// as "no override" (defer to globalDefault) rather than silently shadowing
+	// it — matching the field doc and GetWorktreeDir, which also trims.
+	if d := strings.TrimSpace(loadMergedRepoConfig(repoPath).Workspace.Dir); d != "" {
 		return d
 	}
 	return globalDefault
