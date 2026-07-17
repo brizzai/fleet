@@ -158,6 +158,64 @@ func TestIgnorePatterns(t *testing.T) {
 	})
 }
 
+func TestWorktreeDirTemplate(t *testing.T) {
+	const globalTemplate = "{{parent}}/global.worktrees/{{name}}"
+
+	// Redirect HOME so config.Load() reads a config.json we control instead of
+	// the developer's real one, making the global-fallback cases deterministic.
+	writeGlobalConfig := func(t *testing.T, worktreeDir string) {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		dir := filepath.Join(home, ".config", "fleet")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := `{}`
+		if worktreeDir != "" {
+			content = `{"worktree_dir":"` + worktreeDir + `"}`
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("per-repo .fleet.json dir wins over global", func(t *testing.T) {
+		writeGlobalConfig(t, globalTemplate)
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"workspace":{"dir":"{{parent}}/{{repo}}.worktrees/{{name}}"}}`)
+		if got := WorktreeDirTemplate(repo); got != "{{parent}}/{{repo}}.worktrees/{{name}}" {
+			t.Errorf("got %q, want per-repo template", got)
+		}
+	})
+
+	t.Run(".fleet.local.json dir overrides .fleet.json dir", func(t *testing.T) {
+		writeGlobalConfig(t, "")
+		repo := t.TempDir()
+		writeFile(t, repo, ".fleet.json", `{"workspace":{"dir":"base"}}`)
+		writeFile(t, repo, ".fleet.local.json", `{"workspace":{"dir":"local"}}`)
+		if got := WorktreeDirTemplate(repo); got != "local" {
+			t.Errorf("got %q, want %q", got, "local")
+		}
+	})
+
+	t.Run("falls back to global config when no per-repo dir", func(t *testing.T) {
+		writeGlobalConfig(t, globalTemplate)
+		repo := t.TempDir()
+		if got := WorktreeDirTemplate(repo); got != globalTemplate {
+			t.Errorf("got %q, want global template %q", got, globalTemplate)
+		}
+	})
+
+	t.Run("empty when nothing set", func(t *testing.T) {
+		writeGlobalConfig(t, "")
+		repo := t.TempDir()
+		if got := WorktreeDirTemplate(repo); got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

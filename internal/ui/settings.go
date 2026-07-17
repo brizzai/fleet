@@ -32,7 +32,24 @@ var (
 	defaultAgentSet     = []string{"claude", "codex", "opencode"}
 	telemetryModeSet    = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
 	suspendModeSet      = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
+	// worktreeDirSet holds the raw preset templates for the "Worktree location"
+	// cycler: "" = classic sibling layout, the second = a per-repo ".worktrees"
+	// subfolder. A custom template set in config.json is injected into the ring
+	// at cycle time (like the Editor row) so it's never hidden.
+	worktreeDirSet = []string{"", "{{parent}}/{{repo}}.worktrees/{{name}}"}
 )
+
+// worktreeDirLabel maps a raw worktree-dir template to its display label.
+func worktreeDirLabel(template string) string {
+	switch strings.TrimSpace(template) {
+	case "":
+		return "Sibling (repo-branch)"
+	case "{{parent}}/{{repo}}.worktrees/{{name}}":
+		return "Subfolder (.worktrees)"
+	default:
+		return "Custom"
+	}
+}
 
 // settingsFocus tracks which pane (category rail or detail list) has the cursor.
 type settingsFocus int
@@ -652,6 +669,23 @@ func buildSettingsCategories() []settingsCategory {
 			withLabel("Origin forget removes worktrees", toggle(
 				(*config.Config).GetOriginDeleteRemovesWorktrees,
 				func(c *config.Config, v bool) { c.OriginDeleteRemovesWorktrees = &v }, false)),
+			{
+				// Where the built-in git provider puts new worktrees. Sibling =
+				// today's <repo>-<branch>; Subfolder = <repo>.worktrees/<branch>.
+				// A custom template edited in config.json shows as "Custom" and is
+				// kept in the ring so cycling never overwrites it blindly.
+				label:  "Worktree location",
+				value:  func(c *config.Config) string { return worktreeDirLabel(c.GetWorktreeDir()) },
+				valueW: func() int { return maxStrW([]string{"Sibling (repo-branch)", "Subfolder (.worktrees)", "Custom"}) },
+				cycle: func(d *SettingsDialog, dir int) {
+					cur := d.cfg.GetWorktreeDir()
+					presets := worktreeDirSet
+					if indexOf(presets, cur) < 0 {
+						presets = append([]string{cur}, presets...)
+					}
+					d.cfg.WorktreeDir = cycleString(cur, presets, dir)
+				},
+			},
 			{
 				label:  "Enter mode",
 				value:  func(c *config.Config) string { return c.GetEnterMode() },

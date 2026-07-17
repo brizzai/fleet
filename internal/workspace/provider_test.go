@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -207,7 +208,7 @@ func TestSanitizeBranchName(t *testing.T) {
 	}
 }
 
-func TestDeriveWorktreePath(t *testing.T) {
+func TestResolveWorktreePathSiblingDefault(t *testing.T) {
 	tests := []struct {
 		name     string
 		repoPath string
@@ -216,17 +217,75 @@ func TestDeriveWorktreePath(t *testing.T) {
 	}{
 		{"basic", "/code/myrepo", "feature-login", "myrepo-feature-login"},
 		{"nested repo", "/home/user/projects/app", "hotfix", "app-hotfix"},
+		{"whitespace template treated as empty", "/code/myrepo", "x", "myrepo-x"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := deriveWorktreePath(tt.repoPath, tt.wtName)
+			template := ""
+			if tt.name == "whitespace template treated as empty" {
+				template = "   "
+			}
+			got := resolveWorktreePath(tt.repoPath, tt.wtName, template)
 			if filepath.Base(got) != tt.wantEnd {
-				t.Errorf("deriveWorktreePath(%q, %q) base = %q, want %q", tt.repoPath, tt.wtName, filepath.Base(got), tt.wantEnd)
+				t.Errorf("resolveWorktreePath(%q, %q) base = %q, want %q", tt.repoPath, tt.wtName, filepath.Base(got), tt.wantEnd)
 			}
 			// Should be a sibling directory (same parent).
 			if filepath.Dir(got) != filepath.Dir(tt.repoPath) {
-				t.Errorf("deriveWorktreePath result parent = %q, want %q", filepath.Dir(got), filepath.Dir(tt.repoPath))
+				t.Errorf("resolveWorktreePath result parent = %q, want %q", filepath.Dir(got), filepath.Dir(tt.repoPath))
+			}
+		})
+	}
+}
+
+func TestResolveWorktreePathTemplate(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		repoPath string
+		wtName   string
+		template string
+		want     string
+	}{
+		{
+			name:     "subfolder",
+			repoPath: "/code/myrepo",
+			wtName:   "feature-login",
+			template: "{{parent}}/{{repo}}.worktrees/{{name}}",
+			want:     "/code/myrepo.worktrees/feature-login",
+		},
+		{
+			name:     "absolute central dir",
+			repoPath: "/code/myrepo",
+			wtName:   "hotfix",
+			template: "/var/wt/{{repo}}/{{name}}",
+			want:     "/var/wt/myrepo/hotfix",
+		},
+		{
+			name:     "tilde expansion",
+			repoPath: "/code/myrepo",
+			wtName:   "hotfix",
+			template: "~/worktrees/{{repo}}/{{name}}",
+			want:     filepath.Join(home, "worktrees", "myrepo", "hotfix"),
+		},
+		{
+			name:     "name only under parent",
+			repoPath: "/code/myrepo",
+			wtName:   "feat",
+			template: "{{parent}}/wt/{{name}}",
+			want:     "/code/wt/feat",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveWorktreePath(tt.repoPath, tt.wtName, tt.template)
+			if got != tt.want {
+				t.Errorf("resolveWorktreePath(%q, %q, %q) = %q, want %q", tt.repoPath, tt.wtName, tt.template, got, tt.want)
 			}
 		})
 	}
