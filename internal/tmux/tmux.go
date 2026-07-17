@@ -258,11 +258,14 @@ func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool fu
 // app requests (Claude requests it), and advertising `extkeys` in
 // terminal-features tells tmux the outer terminal can carry those sequences.
 // extended-keys and terminal-features are server options (global to the tmux
-// server fleet shares, as it runs no dedicated socket); we set extended-keys only
-// when it isn't already on/always — leaving a user's explicit choice untouched —
-// and append the extkeys feature only when absent (no duplicate entries). Set
-// FLEET_NO_EXTENDED_KEYS to opt out entirely — e.g. a terminal whose Shift+Enter
-// you've bound differently, or a remote tmux you don't want reconfigured.
+// server fleet shares, as it runs no dedicated socket); we set extended-keys to
+// on unless it's already on/always, and append the extkeys feature only when
+// absent (no duplicate entries). Note this also overrides an explicit
+// `extended-keys off`: tmux `show-options -sv` returns the effective value, not
+// empty-when-unset, so we can't distinguish a deliberate off from the default.
+// Set FLEET_NO_EXTENDED_KEYS to opt out entirely — e.g. a terminal whose
+// Shift+Enter you've bound differently, a remote tmux you don't want
+// reconfigured, or a server where you've deliberately set extended-keys off.
 //
 // Note: the outer terminal must itself emit a distinct Shift+Enter (Claude's
 // /terminal-setup configures this for iTerm2/VS Code; Ghostty/kitty bind it to
@@ -270,7 +273,7 @@ func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool fu
 // not sufficient.
 //
 // Re-checks the live server each call rather than caching, like EnsureCopyCommand:
-// cheap (one show-options), and a server created fresh after a restart still gets
+// cheap (two show-options), and a server created fresh after a restart still gets
 // configured. Called from Start (server guaranteed up) + the startup bootstrap.
 // Best-effort; a no-server attempt just returns.
 func EnsureExtendedKeys() {
@@ -281,14 +284,18 @@ func EnsureExtendedKeys() {
 	if err != nil {
 		return // No server yet (or tmux error) — retry on a later call.
 	}
-	// Respect an explicit on/always; set on for the default (off) or anything else.
+	// Set on unless already on/always. This also overrides an explicit off (see
+	// the doc comment); FLEET_NO_EXTENDED_KEYS is the opt-out.
 	if v := strings.TrimSpace(string(out)); v != "on" && v != "always" {
 		_ = exec.Command("tmux", "set-option", "-s", "extended-keys", "on").Run()
 	}
-	// Advertise extkeys for xterm-like outer terminals, once (terminal-features is
-	// additive, so guard against piling up duplicate entries across calls).
+	// Advertise extkeys for xterm-like outer terminals, once. Match the exact
+	// `xterm*:extkeys` entry, not a bare `extkeys` substring: a user may already
+	// carry extkeys for a different pattern (e.g. `screen*:extkeys`), and we still
+	// need to add the xterm entry. terminal-features is additive, so this also
+	// guards against piling up the same entry across calls.
 	feat, err := exec.Command("tmux", "show-options", "-sv", "terminal-features").Output()
-	if err == nil && !strings.Contains(string(feat), "extkeys") {
+	if err == nil && !strings.Contains(string(feat), "xterm*:extkeys") {
 		_ = exec.Command("tmux", "set-option", "-sa", "terminal-features", "xterm*:extkeys").Run()
 	}
 }
