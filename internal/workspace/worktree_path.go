@@ -20,7 +20,12 @@ import (
 //	template="{{parent}}/{{repo}}.worktrees/{{name}}"
 //	  -> "/code/myrepo.worktrees/feature-login"
 func resolveWorktreePath(repoPath, name, template string) string {
-	absRepo, _ := filepath.Abs(repoPath)
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		// Abs only fails when the cwd is unavailable; fall back to the original
+		// path so derivation stays stable instead of collapsing to ".".
+		absRepo = repoPath
+	}
 	parent := filepath.Dir(absRepo)
 	base := filepath.Base(absRepo)
 

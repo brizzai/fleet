@@ -45,7 +45,7 @@ func worktreeDirLabel(template string) string {
 	case "":
 		return "Sibling (repo-branch)"
 	case "{{parent}}/{{repo}}.worktrees/{{name}}":
-		return "Subfolder (.worktrees)"
+		return "Subfolder (<repo>.worktrees)"
 	default:
 		return "Custom"
 	}
@@ -674,9 +674,13 @@ func buildSettingsCategories() []settingsCategory {
 				// today's <repo>-<branch>; Subfolder = <repo>.worktrees/<branch>.
 				// A custom template edited in config.json shows as "Custom" and is
 				// kept in the ring so cycling never overwrites it blindly.
-				label:  "Worktree location",
-				value:  func(c *config.Config) string { return worktreeDirLabel(c.GetWorktreeDir()) },
-				valueW: func() int { return maxStrW([]string{"Sibling (repo-branch)", "Subfolder (.worktrees)", "Custom"}) },
+				label: "Worktree location",
+				value: func(c *config.Config) string { return worktreeDirLabel(c.GetWorktreeDir()) },
+				// Derive the width from worktreeDirLabel itself so it can never
+				// drift from the displayed text ("Custom" covers any injected value).
+				valueW: func() int {
+					return maxStrW([]string{worktreeDirLabel(worktreeDirSet[0]), worktreeDirLabel(worktreeDirSet[1]), "Custom"})
+				},
 				cycle: func(d *SettingsDialog, dir int) {
 					cur := d.cfg.GetWorktreeDir()
 					presets := worktreeDirSet
