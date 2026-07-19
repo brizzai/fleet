@@ -65,20 +65,32 @@ func IsTmuxAvailable() error {
 	return nil
 }
 
-// serverVersion returns tmux's version as (major, minor), parsed from
-// `tmux -V` output like "tmux 3.4" or "tmux 3.3a". Development builds
-// ("tmux next-3.5", "tmux master") and parse failures report ok=false;
-// callers should treat those as new-enough rather than degrade a build
-// that is almost certainly ahead of any release.
+// serverVersion returns the tmux *server's* version as (major, minor).
+// Options are interpreted by the server, and on Linux the server and the
+// client binary routinely disagree: a package upgrade swaps the binary but
+// never restarts a user's running server, so `tmux -V` alone would let a
+// 3.4 client wave allow-passthrough through to a still-running 3.2 server —
+// aborting the very batch the gate exists to protect. So ask the live
+// server first (`display-message -p '#{version}'`, which errors rather than
+// spawning a server when none runs) and only fall back to the binary's
+// `tmux -V` when there is no server yet — any server started later comes
+// from this binary. Development builds ("next-3.5") and parse failures
+// report ok=false; callers treat those as new-enough rather than degrade a
+// build that is almost certainly ahead of any release.
 //
-// Memoized: the tmux binary can't change under a running fleet, and Start
-// calls this per session — a reloadAll of N dead sessions would otherwise
-// fork N redundant `tmux -V` processes.
+// Memoized: Start calls this per session — a reloadAll of N dead sessions
+// would otherwise fork N redundant probes. Memoizing is conservative: the
+// binary can't change under a running fleet, so a server restarted mid-run
+// can only be newer than the memoized answer, and a stale too-old answer
+// merely skips passthrough instead of aborting the batch.
 func serverVersion() (major, minor int, ok bool) {
 	versionOnce.Do(func() {
-		out, err := exec.Command("tmux", "-V").Output()
+		out, err := exec.Command("tmux", "display-message", "-p", "#{version}").Output()
 		if err != nil {
-			return // leave the zero values: ok=false
+			out, err = exec.Command("tmux", "-V").Output()
+			if err != nil {
+				return // leave the zero values: ok=false
+			}
 		}
 		versionMajor, versionMinor, versionOK = parseTmuxVersion(string(out))
 	})
@@ -92,8 +104,9 @@ var (
 	versionOK    bool
 )
 
-// parseTmuxVersion parses `tmux -V` output; split from the exec so the spiky
-// inputs (patch letters, dev builds) are testable.
+// parseTmuxVersion parses a tmux version string — `tmux -V` output ("tmux
+// 3.4") or the bare `#{version}` format variable ("3.4") — split from the
+// exec so the spiky inputs (patch letters, dev builds) are testable.
 func parseTmuxVersion(out string) (major, minor int, ok bool) {
 	v := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "tmux"))
 	numMajor, rest, found := strings.Cut(v, ".")

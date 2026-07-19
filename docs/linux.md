@@ -61,8 +61,13 @@ option when reachability varies per client.
 
 `allow-passthrough` appeared in tmux 3.3. Ubuntu 22.04 LTS ships 3.2a, where
 an unknown option would abort fleet's whole batched `set-option` call — so
-fleet probes `tmux -V` and drops that option (only) on older servers.
-tmux ≥ 3.3 is recommended; 24.04 ships 3.4.
+fleet probes the version and drops that option (only) on older servers.
+The probe asks the *running server* (`display-message -p '#{version}'`),
+not just the binary: options are interpreted by the server, and a package
+upgrade swaps the binary without restarting a user's live server — `tmux
+-V` alone would let a 3.4 client wave the option through to a still-running
+3.2 server. The binary's `tmux -V` is only the fallback when no server is
+up yet. tmux ≥ 3.3 is recommended; 24.04 ships 3.4.
 
 ## Idle-session suspend (memory pressure)
 

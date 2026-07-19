@@ -12,6 +12,10 @@ func TestParseTmuxVersion(t *testing.T) {
 	}{
 		{"plain release", "tmux 3.4", 3, 4, true},
 		{"patch-letter suffix", "tmux 3.3a", 3, 3, true},
+		// The server probe (`display-message -p '#{version}'`) reports the
+		// bare version with no "tmux " prefix.
+		{"server format variable", "3.4\n", 3, 4, true},
+		{"server format variable with patch letter", "3.2a", 3, 2, true},
 		{"ubuntu 22.04 LTS build", "tmux 3.2a", 3, 2, true},
 		{"trailing newline", "tmux 3.4\n", 3, 4, true},
 		{"rc suffix", "tmux 3.4-rc2", 3, 4, true},
