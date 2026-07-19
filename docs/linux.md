@@ -44,9 +44,18 @@ macOS; on Linux the first *usable* tool — `wl-copy` when `WAYLAND_DISPLAY`
 is set, else `xclip`/`xsel` when `DISPLAY` is set. A tool on PATH whose
 display server isn't reachable (headless/SSH, or wl-clipboard installed as
 a dependency on an X11 desktop) is skipped: piping into it would swallow
-the copy. With no usable tool it sets `set-clipboard on` so tmux falls back
-to OSC 52, which most modern Linux terminals accept.
+the copy. With no usable tool, fleet leaves tmux alone — the default
+`set-clipboard external` already forwards copy-mode selections via OSC 52,
+which most modern Linux terminals accept, and a deliberate
+`set-clipboard off` is never overridden.
 `FLEET_NO_COPY_COMMAND=1` opts out entirely.
+
+Display vars (`WAYLAND_DISPLAY`/`DISPLAY`) are read from fleet's own
+process environment: tmux runs `copy-command` jobs with the *session*
+environment, which `update-environment` refreshes from the most recently
+attached client — and fleet's terminal is the client its sessions get
+attached from, making its env the best proxy for a single server-wide
+option when reachability varies per client.
 
 ## tmux version gating
 
@@ -78,10 +87,15 @@ On Linux, reports carry `PRETTY_NAME` from `/etc/os-release` plus
 - `Dockerfile` — golang:1.26 build stage → ubuntu:24.04 runtime with tmux,
   git, xclip.
 - `.goreleaser.yml` `nfpms` — `.deb`/`.rpm` with tmux+git dependencies,
-  gh+xclip recommends.
+  gh+xclip recommends; ships the systemd user unit to
+  `/usr/lib/systemd/user/`.
 - `contrib/systemd/fleet-tmux.service` — optional user unit starting the
   tmux server at login; see comments in the unit for `loginctl
   enable-linger`.
+- Package installs land the binary in `/usr/bin`, which an unprivileged
+  user can't replace — the auto-updater probes this *before* downloading
+  and skips with a hint in `debug.log` (once per hourly check, not per
+  launch). Update via `apt`/`dnf`, or turn auto-update off in Settings.
 
 ## Known limits on Linux
 

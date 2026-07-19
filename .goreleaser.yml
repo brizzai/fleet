@@ -74,6 +74,12 @@ nfpms:
     recommends:
       - gh
       - xclip
+    # Ship the optional tmux-server user unit where `systemctl --user` finds
+    # it — package installs have no source checkout to copy it from. Installed,
+    # not enabled: opting in stays `systemctl --user enable --now fleet-tmux`.
+    contents:
+      - src: contrib/systemd/fleet-tmux.service
+        dst: /usr/lib/systemd/user/fleet-tmux.service
 
 homebrew_casks:
   - name: fleet

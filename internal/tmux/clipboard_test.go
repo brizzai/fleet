@@ -48,28 +48,3 @@ func TestClipboardCopyCommandFor(t *testing.T) {
 		})
 	}
 }
-
-// parseTmuxShowEnvironment must read the *server's* environment table, not
-// fleet's own — a headless-started server (e.g. via the systemd unit) has no
-// display vars in its table even if fleet itself was launched from one.
-func TestParseTmuxShowEnvironment(t *testing.T) {
-	tests := []struct {
-		name    string
-		varName string
-		out     string
-		want    string
-	}{
-		{"set", "WAYLAND_DISPLAY", "WAYLAND_DISPLAY=wayland-0\n", "wayland-0"},
-		{"set no trailing newline", "DISPLAY", "DISPLAY=:0", ":0"},
-		{"unset/removed", "WAYLAND_DISPLAY", "-WAYLAND_DISPLAY\n", ""},
-		{"empty output", "DISPLAY", "", ""},
-		{"value containing an equals sign", "DISPLAY", "DISPLAY=:0=extra\n", ":0=extra"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := parseTmuxShowEnvironment(tt.varName, tt.out); got != tt.want {
-				t.Errorf("parseTmuxShowEnvironment(%q, %q) = %q, want %q", tt.varName, tt.out, got, tt.want)
-			}
-		})
-	}
-}
