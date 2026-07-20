@@ -1,7 +1,7 @@
 // Package agent describes the coding agents fleet can launch in a session
-// (Claude Code, OpenAI Codex, and OpenCode) and owns the per-agent divergence:
-// the binary name, display name, and the launch command (including resume/fork
-// forms).
+// (Claude Code, OpenAI Codex, OpenCode, and Cursor CLI) and owns the per-agent
+// divergence: the binary name, display name, and the launch command (including
+// resume/fork forms).
 package agent
 
 import "fmt"
@@ -13,6 +13,7 @@ const (
 	Claude   Type = "claude"
 	Codex    Type = "codex"
 	OpenCode Type = "opencode"
+	Cursor   Type = "cursor"
 
 	// Default is the agent assumed when none is recorded (legacy sessions, empty config).
 	Default = Claude
@@ -28,6 +29,8 @@ func Parse(s string) Type {
 		return Codex
 	case OpenCode:
 		return OpenCode
+	case Cursor:
+		return Cursor
 	default:
 		return Default
 	}
@@ -40,6 +43,8 @@ func (t Type) Binary() string {
 		return "codex"
 	case OpenCode:
 		return "opencode"
+	case Cursor:
+		return "cursor-agent"
 	default:
 		return "claude"
 	}
@@ -52,6 +57,8 @@ func (t Type) DisplayName() string {
 		return "Codex"
 	case OpenCode:
 		return "OpenCode"
+	case Cursor:
+		return "Cursor"
 	default:
 		return "Claude"
 	}
@@ -88,6 +95,12 @@ type LaunchOpts struct {
 //	opencode
 //	opencode --session <id>
 //	opencode --session <id> --fork         (fork)
+//
+// Cursor (hooks are seeded out-of-band; no fork primitive — fork-to-worktree
+// stays Claude-only):
+//
+//	cursor-agent
+//	cursor-agent --resume <id>
 func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	if t == Codex {
 		switch {
