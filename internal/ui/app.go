@@ -220,6 +220,7 @@ type Home struct {
 	branchDialog          *BranchCheckoutDialog
 	commandPalette        *CommandPaletteDialog
 	contextMenu           *ContextMenuDialog
+	snoozeDialog          *SnoozeDialog
 	// The row the open context menu was built for. Its entries resolve their
 	// subject from h.cursor, which an async rebuild can move — see contextMenuTarget.
 	contextMenuTarget   contextMenuTarget
@@ -271,6 +272,16 @@ type Home struct {
 	// lastSuspendSweepAt throttles the memory-pressure idle-suspend sweep so it
 	// runs on its own slow cadence inside the ~2s heavy pass.
 	lastSuspendSweepAt time.Time
+
+	// groupSnooze maps a sidebar group key ("origin:<key>" or a checkout path)
+	// to its umbrella snooze deadline. Read only while building the sidebar
+	// tree and written only by the wake sweep — both on the Update goroutine —
+	// so a plain map needs no lock. (Deliberately NOT on the worker: unlike the
+	// idle-suspend sweep, which lives there because it probes sysctl, expiry is
+	// clock arithmetic and a tiny SQLite write.)
+	groupSnooze map[string]time.Time
+	// lastSnoozeSweepAt throttles that sweep, mirroring lastSuspendSweepAt.
+	lastSnoozeSweepAt time.Time
 	// attachAfterResumeID: when a suspended session is resumed via Enter, the
 	// resume runs async; this holds its id so the sessionRestartMsg handler
 	// attaches once the tmux is live again. Empty otherwise.
@@ -452,6 +463,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		storage:                storage,
 		sessionByID:            make(map[string]*session.Session),
 		repoExpanded:           make(map[string]bool),
+		groupSnooze:            make(map[string]time.Time),
 		lastTmuxStatusBar:      make(map[string]string),
 		slotBindings:           make(map[int]string),
 		lastSlotTapSlot:        -1,
@@ -472,6 +484,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		branchDialog:           NewBranchCheckoutDialog(),
 		commandPalette:         NewCommandPaletteDialog(),
 		contextMenu:            NewContextMenuDialog(),
+		snoozeDialog:           NewSnoozeDialog(),
 		sessionCreateDialog:    NewSessionCreateDialog(),
 		consentDialog:          NewConsentDialog(),
 		onboardingDialog:       NewOnboardingDialog(cfg),
@@ -632,6 +645,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.branchDialog.SetSize(msg.Width, msg.Height)
 		h.commandPalette.SetSize(msg.Width, msg.Height)
 		h.contextMenu.SetSize(msg.Width, msg.Height)
+		h.snoozeDialog.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
@@ -642,6 +656,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (syncViewport may also re-scroll). Re-anchor so it doesn't strand.
 		if h.contextMenu.IsVisible() {
 			h.contextMenu.SetAnchor(h.contextMenuAnchor())
+		}
+		if h.snoozeDialog.IsVisible() {
+			h.snoozeDialog.SetAnchor(h.contextMenuAnchor())
 		}
 		return h, nil
 
@@ -913,6 +930,22 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case commandPaletteMsg:
 		return h.dispatchPaletteSelection(msg)
+
+	case snoozeSelectedMsg:
+		// Same discipline as contextMenuMsg: the picker names a row, and an
+		// async rebuild may have moved the cursor while it was open, so put the
+		// cursor back before applying — otherwise a session finishing mid-pick
+		// could snooze a row the dialog never named.
+		if !h.focusContextMenuTarget() {
+			h.setInfo("That row is gone — nothing to snooze")
+			return h, nil
+		}
+		sc, ok := h.snoozeScopeAtCursor()
+		if !ok {
+			return h, nil
+		}
+		h.applySnoozeUntil(sc, msg.until, msg.durationID)
+		return h, nil
 
 	case contextMenuMsg:
 		// Put the cursor back on the row the menu was opened for before dispatching —
@@ -1421,6 +1454,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.repoExpanded[key] = false
 			}
 		}
+		// Restore group snoozes, dropping any that lapsed while fleet was
+		// closed so the very first frame is already correct (waiting for the
+		// sweep would paint a stale dim group for up to one interval).
+		if snoozed, err := h.storage.LoadSnoozedGroups(); err == nil {
+			now := time.Now()
+			for key, until := range snoozed {
+				if until.After(now) {
+					h.groupSnooze[key] = until
+					continue
+				}
+				if err := h.storage.SetGroupSnooze(key, time.Time{}); err != nil {
+					debuglog.Logger.Error("failed to clear expired group snooze", "key", key, "err", err)
+				}
+			}
+		}
 		// Default all repos to expanded on first load.
 		groups := session.GroupByRepo(h.sessions)
 		for repo := range groups {
@@ -1589,6 +1637,11 @@ func (h *Home) View() tea.View {
 		x, y := h.contextMenu.Position(lipgloss.Width(mv), lipgloss.Height(mv))
 		base = overlayAt(mv, base, x, y)
 	}
+	// Snooze picker: same row-anchored dropdown treatment as the context menu.
+	if sv := h.snoozeDialog.View(); sv != "" {
+		x, y := h.snoozeDialog.Position(lipgloss.Width(sv), lipgloss.Height(sv))
+		base = overlayAt(sv, base, x, y)
+	}
 	// Contextual tip box — suppressed while a modal owns the screen so a sticky
 	// tip never paints over a dialog.
 	tip := ""
@@ -1660,6 +1713,7 @@ func (h *Home) modalOpen() bool {
 		h.renameDialog.IsVisible() ||
 		h.commandPalette.IsVisible() ||
 		h.contextMenu.IsVisible() ||
+		h.snoozeDialog.IsVisible() ||
 		h.launchpadActive()
 }
 
@@ -1987,6 +2041,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		dialog, cmd := h.commandPalette.Update(msg)
 		h.commandPalette = dialog
 		return cmd, true
+	case h.snoozeDialog.IsVisible():
+		dialog, cmd := h.snoozeDialog.Update(msg)
+		h.snoozeDialog = dialog
+		return cmd, true
 	case h.contextMenu.IsVisible():
 		dialog, cmd := h.contextMenu.Update(msg)
 		h.contextMenu = dialog
@@ -2273,6 +2331,19 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.forkSelected()
 	case "F":
 		return h, h.forkToWorktreeSelected()
+	case "z":
+		// Scope follows the cursor, like `d`. On an already-snoozed row this
+		// wakes immediately rather than re-opening the picker — the common
+		// follow-up to "I snoozed this" is "actually, bring it back".
+		sc, ok := h.snoozeScopeAtCursor()
+		if !ok {
+			return h, nil
+		}
+		if h.snoozed(sc) {
+			h.clearSnooze(sc)
+			return h, nil
+		}
+		return h.dispatchCommand("snooze")
 	case ".":
 		// Context menu for the row under the cursor. No items means there's nothing
 		// actionable there (spacer, pending workspace, empty fleet) — stay silent
@@ -3958,6 +4029,12 @@ func (h *Home) jumpToNextAttentionSession() {
 	findNext := func(status session.Status) *session.Session {
 		for off := 1; off <= n; off++ {
 			it := cand[(start+off+n)%n] // +n keeps the index non-negative when start == -1
+			// Snoozed sessions are muted from the rotation — that IS the
+			// feature. BuildFlatItems already resolved the group umbrella, so
+			// this needs no origin/checkout lookup of its own.
+			if it.Snooze.Muted {
+				continue
+			}
 			if !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status {
 				return it.Session
 			}
@@ -3999,7 +4076,7 @@ func (h *Home) buildJumpTree() []SidebarItem {
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
-	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, originOf, isWorktreeOf)
+	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
 }
 
 func (h *Home) renameSelected() tea.Cmd {
@@ -4611,6 +4688,12 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	case h.statusTrigger <- struct{}{}:
 	default: // worker busy, skip
 	}
+
+	// Wake anything whose snooze has expired. Self-throttled, and it rebuilds
+	// the tree itself when something changed — so it runs before the
+	// unconditional rebuild below rather than after, and the woken rows are
+	// already un-dimmed on this frame.
+	h.maybeWakeSnoozed()
 
 	h.rebuildFlatItems()
 	h.refreshTips(!h.modalOpen())
@@ -5789,7 +5872,17 @@ func (h *Home) cursorBreadcrumb(bg color.Color) string {
 // total fleet size is useful info, but it doesn't deserve a glyph.
 func (h *Home) statusCountsLine(bg color.Color) string {
 	counts := make(map[session.Status]int)
+	originOf, _ := h.originResolvers()
+	now := time.Now()
 	for _, s := range h.sessions {
+		// Muted sessions are absent from the attention glyphs here for the
+		// same reason they're absent from the per-header pills — otherwise the
+		// global line contradicts the sidebar it sits above. Snooze gets no
+		// counter of its own: it is a sidebar-only signal by design.
+		repo := session.GetRepoRoot(s.ProjectPath)
+		if snoozeState(s, originOf(repo), repo, h.groupSnooze, now).Muted {
+			continue
+		}
 		counts[s.GetStatus()]++
 	}
 	summary := renderStatusSummaryOpts(counts, true)
@@ -6026,7 +6119,7 @@ func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 
 func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, originOf, isWorktreeOf)
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
 	h.sidebarDirty = true
 }
 
@@ -6481,6 +6574,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		},
 		forkWorktree,
 		suspend,
+		h.snoozeMenuItem(),
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
 		{ID: "delete_at_cursor", Label: "Delete Session", Shortcut: "d", Key: "d", Enabled: true},
 	}
@@ -6518,6 +6612,7 @@ func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
 			Enabled: h.hasPRForCursor(),
 			Note:    "no PR",
 		},
+		h.snoozeMenuItem(),
 		{ID: "delete_at_cursor", Label: deleteLabel, Shortcut: "d", Key: "d", Enabled: true},
 	}
 	return kind + ": " + filepath.Base(repo), items
@@ -6534,6 +6629,7 @@ func (h *Home) originContextMenu() (string, []ContextMenuItem) {
 	items := []ContextMenuItem{
 		{ID: "toggle_group", Label: expand, Shortcut: "⏎", Enabled: true},
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
+		h.snoozeMenuItem(),
 		{ID: "delete_at_cursor", Label: "Forget Origin Group", Shortcut: "d", Key: "d", Enabled: true},
 	}
 	return "origin: " + item.OriginLabel, items
@@ -6570,6 +6666,8 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "suspend_now", Name: "Suspend Idle Sessions Now"},
 		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
 		{Kind: PaletteKindCommand, ID: "mark_unread", Name: "Mark as Unread", Shortcut: "m"},
+		{Kind: PaletteKindCommand, ID: "snooze", Name: "Snooze (Session / Repo / Worktree)", Shortcut: "z"},
+		{Kind: PaletteKindCommand, ID: "unsnooze", Name: "Wake Now (Clear Snooze)", Shortcut: "z"},
 		{Kind: PaletteKindCommand, ID: "expand_all", Name: "Expand All Repos"},
 		{Kind: PaletteKindCommand, ID: "collapse_all", Name: "Collapse All Repos"},
 		{Kind: PaletteKindCommand, ID: "quit", Name: "Quit", Shortcut: "⌃C"},
@@ -6703,6 +6801,25 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.attachSelected()
 	case "focus":
 		return h, h.enterFocusMode()
+	case "snooze":
+		sc, ok := h.snoozeScopeAtCursor()
+		if !ok {
+			return h, nil
+		}
+		// Remember which row the picker speaks for, and re-anchor from the
+		// cursor: reached via `z` or the palette no menu was ever opened, so
+		// the stored target and anchor would be stale.
+		h.contextMenuTarget = h.targetForCursor()
+		h.snoozeDialog.SetAnchor(h.contextMenuAnchor())
+		h.snoozeDialog.Show("Snooze " + sc.label)
+		return h, nil
+	case "unsnooze":
+		sc, ok := h.snoozeScopeAtCursor()
+		if !ok || !h.snoozed(sc) {
+			return h, nil
+		}
+		h.clearSnooze(sc)
+		return h, nil
 	case "jump_next":
 		h.jumpToNextAttentionSession()
 		analytics.Track(analytics.EventSpaceJump, nil)

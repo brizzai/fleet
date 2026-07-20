@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/github"
@@ -32,6 +33,8 @@ func TestBuildFlatItems_OriginGrouping(t *testing.T) {
 		"",
 		nil,
 		nil,
+		nil,
+		time.Time{},
 		originOf,
 		nil,
 	)
@@ -119,7 +122,7 @@ func TestRenderSessionItem_AgentGlyph(t *testing.T) {
 		for _, selected := range []bool{false, true} {
 			s := session.NewSession("a title", "/tmp/repo")
 			s.Agent = tc.agentType
-			out := renderSessionItem(s, 40, selected, -1)
+			out := renderSessionItem(SidebarItem{Session: s}, 40, selected, -1)
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("%s (selected=%v): output missing %q glyph: %q", tc.name, selected, tc.want, out)
 			}

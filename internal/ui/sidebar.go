@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
@@ -37,6 +38,14 @@ type SidebarItem struct {
 	IsLast        bool // retained for layout decisions
 	Pending       *PendingWorkspace
 	RemovalFailed bool // checkout header: worktree whose destroy failed (press d to retry)
+
+	// Snooze is the resolved attention-mute for a session row, stamped here by
+	// BuildFlatItems so no downstream caller re-derives the precedence rule.
+	Snooze snoozeResult
+	// GroupSnooze is a header row's OWN snooze deadline (zero = not snoozed).
+	// Only the group that holds the snooze renders a countdown — a checkout
+	// under a snoozed origin stays silent for the same reason its sessions do.
+	GroupSnooze time.Time
 }
 
 // RepoGroupInfo holds status counts for a checkout (used by other call sites).
@@ -99,9 +108,14 @@ func BuildFlatItems(
 	filter string,
 	pinnedRepos map[string]bool,
 	failedRemovals map[string]bool,
+	groupSnooze map[string]time.Time,
+	now time.Time,
 	originOf OriginOf,
 	isWorktreeOf IsWorktreeOf,
 ) []SidebarItem {
+	if now.IsZero() {
+		now = time.Now()
+	}
 	if originOf == nil {
 		originOf = func(string) string { return "" }
 	}
@@ -175,6 +189,9 @@ func BuildFlatItems(
 			sessions     []*session.Session
 			pending      []*PendingWorkspace
 			statusCounts map[session.Status]int
+			// snooze[i] pairs with sessions[i] — resolved once here so the row
+			// renderer and the jump scan read the same answer.
+			snooze []snoozeResult
 		}
 		var blocks []checkoutBlock
 		originStatusCounts := make(map[session.Status]int)
@@ -195,12 +212,20 @@ func BuildFlatItems(
 				coSessions = filtered
 			}
 			coCounts := make(map[session.Status]int)
-			for _, s := range coSessions {
+			coSnooze := make([]snoozeResult, len(coSessions))
+			for i, s := range coSessions {
+				coSnooze[i] = snoozeState(s, origin, repo, groupSnooze, now)
+				// A muted session is absent from the attention surfaces, so it
+				// contributes to neither the checkout nor the origin pill. Both
+				// counters skip together or the two headers disagree.
+				if coSnooze[i].Muted {
+					continue
+				}
 				st := s.GetStatus()
 				coCounts[st]++
 				originStatusCounts[st]++
 			}
-			blocks = append(blocks, checkoutBlock{repo: repo, sessions: coSessions, pending: coPending, statusCounts: coCounts})
+			blocks = append(blocks, checkoutBlock{repo: repo, sessions: coSessions, pending: coPending, statusCounts: coCounts, snooze: coSnooze})
 		}
 
 		if len(blocks) == 0 {
@@ -226,6 +251,7 @@ func BuildFlatItems(
 			Expanded:       originExpanded,
 			SessionCount:   len(blocks),
 			StatusCounts:   originStatusCounts,
+			GroupSnooze:    groupSnoozeAt(groupSnooze, OriginExpandKey(origin), now),
 		})
 
 		if !originExpanded {
@@ -243,6 +269,9 @@ func BuildFlatItems(
 				SessionCount:     len(blk.sessions),
 				StatusCounts:     blk.statusCounts,
 				RemovalFailed:    failedRemovals[blk.repo],
+				// Only its own snooze — a checkout inside a snoozed origin
+				// renders no countdown of its own (the origin owns the clock).
+				GroupSnooze: groupSnoozeAt(groupSnooze, blk.repo, now),
 			})
 
 			if !checkoutExpanded {
@@ -251,13 +280,14 @@ func BuildFlatItems(
 
 			totalChildren := len(blk.sessions) + len(blk.pending)
 			childIdx := 0
-			for _, s := range blk.sessions {
+			for i, s := range blk.sessions {
 				childIdx++
 				items = append(items, SidebarItem{
 					OriginKey: origin,
 					RepoPath:  blk.repo,
 					Session:   s,
 					IsLast:    childIdx == totalChildren,
+					Snooze:    blk.snooze[i],
 				})
 			}
 			for _, pw := range blk.pending {
@@ -349,7 +379,7 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 					slot = n
 				}
 			}
-			b.WriteString(renderSessionItem(item.Session, width, i == cursor, slot))
+			b.WriteString(renderSessionItem(item, width, i == cursor, slot))
 		}
 		if i < visibleEnd-1 {
 			b.WriteString("\n")
@@ -455,6 +485,12 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 	if ShowStatusPills {
 		summary = renderStatusSummary(item.StatusCounts)
 	}
+	// A snoozed group replaces its pill with the countdown: every child is
+	// muted, so the pill is empty anyway, and the clock is the useful signal.
+	snoozeSuffix := renderGroupSnooze(item.GroupSnooze)
+	if snoozeSuffix != "" {
+		summary = ""
+	}
 
 	if selected {
 		icon := SessionSelectionPrefix.Render(chevron)
@@ -466,10 +502,13 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 		if summary != "" {
 			out += "  " + summary
 		}
-		return out
+		return out + snoozeSuffix
 	}
 	icon := DimStyle.Render(chevron)
 	name := RepoHeaderStyle.Render(item.OriginLabel)
+	if !item.GroupSnooze.IsZero() {
+		name = DimStyle.Render(item.OriginLabel)
+	}
 	out := fmt.Sprintf("%s %s", icon, name)
 	if countStr != "" {
 		out += " " + DimStyle.Render(countStr)
@@ -477,7 +516,16 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 	if summary != "" {
 		out += "  " + summary
 	}
-	return out
+	return out + snoozeSuffix
+}
+
+// renderGroupSnooze renders a header's snooze countdown, or "" when the group
+// isn't snoozed. Shared by both header kinds so they can't drift.
+func renderGroupSnooze(until time.Time) string {
+	if until.IsZero() {
+		return ""
+	}
+	return "  " + DimStyle.Render(SnoozeGlyph+" "+formatSnoozeRemaining(until, time.Now()))
 }
 
 // renderCheckoutHeader → "   ⎇ branch * #PR"  for a git checkout,
@@ -513,6 +561,11 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	if repoInfo.IsWorktreeRepo {
 		branchFG = branchFG.Italic(true)
 	}
+	if !item.GroupSnooze.IsZero() {
+		// Drop the branch colour but keep the worktree italic — a snoozed
+		// worktree is still a worktree.
+		branchFG = branchFG.Foreground(ColorTextDim)
+	}
 
 	prBadge := ""
 	if ShowPRBadges && repoInfo.PR != nil {
@@ -527,8 +580,15 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	if summary != "" {
 		summarySuffix = "  " + summary
 	}
+	// A snoozed checkout shows its countdown instead of a pill (every child is
+	// muted, so the pill is empty anyway).
+	if s := renderGroupSnooze(item.GroupSnooze); s != "" {
+		summarySuffix = s
+	}
 	// Persistent marker for a worktree whose destroy failed (part B). Appended
 	// to summarySuffix so it shows on both the selected and unselected rows.
+	// Deliberately after the snooze suffix: a failed removal is actionable and
+	// must never be hidden by a snooze.
 	if item.RemovalFailed {
 		summarySuffix += "  " + ErrorStyle.Render("✕ removal failed — d to retry")
 	}
@@ -574,11 +634,23 @@ func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 	return fmt.Sprintf("  %s %s", icon, nameStyled) + failMark
 }
 
-// renderSessionItem → "  │ <status> <agent> title [slot]"  (under a checkout)
-func renderSessionItem(s *session.Session, width int, selected bool, slot int) string {
+// renderSessionItem → "  │ <status> <agent> title [slot] <snooze>"  (under a checkout)
+func renderSessionItem(item SidebarItem, width int, selected bool, slot int) string {
+	s := item.Session
 	status := s.GetStatus()
 	symbolRaw := StatusSymbolRaw(status)
 	title := s.Title
+
+	// Snooze suffix. Only a session's OWN snooze renders a countdown — under a
+	// snoozed group the header owns the clock, so N children don't repeat the
+	// same number N times; they carry a bare marker instead.
+	snoozeRaw := ""
+	if item.Snooze.Muted {
+		snoozeRaw = "  " + SnoozeGlyph
+		if item.Snooze.OwnTimer {
+			snoozeRaw += " " + formatSnoozeRemaining(item.Snooze.Until, time.Now())
+		}
+	}
 
 	// Agent glyph (✻/◇) is optional — when shown it occupies a glyph + a space.
 	glyphRaw := ""
@@ -597,7 +669,11 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	if glyphRaw == "" {
 		reserve = 11
 	}
-	maxTitleLen := width - reserve - len(slotRaw)
+	// The snooze suffix comes out of the title's budget like the slot badge,
+	// rather than bumping `reserve` — it's present on only some rows. Measured
+	// with ansi.StringWidth because the marker is a multi-byte rune (len() would
+	// over-reserve by 2 and truncate snoozed titles early).
+	maxTitleLen := width - reserve - len(slotRaw) - ansi.StringWidth(snoozeRaw)
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -619,26 +695,45 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 	if selected {
 		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
 		rendered := fmt.Sprintf("   %s", selTitle().Render(row))
-		// On the focused suspended row, spell out the resume affordance — this is
-		// exactly when Enter is actionable. Unselected rows rely on the dim dot
-		// + dimmed title (the row is width-truncated, so no room for a suffix).
-		if status == session.StatusSuspended {
+		// On the focused row, spell out the affordance. Exactly one note fits
+		// before the row overflows, so these are mutually exclusive: suspended
+		// wins, because it's the one that makes Enter mean something unusual.
+		switch {
+		case status == session.StatusSuspended:
+			// Unselected rows rely on the dim dot + dimmed title (the row is
+			// width-truncated, so no room for a suffix).
 			rendered += "  " + DimStyle.Render("suspended · enter to resume")
+		case item.Snooze.Muted && item.Snooze.OwnTimer:
+			rendered += "  " + DimStyle.Render(fmt.Sprintf("%s snoozed %s · z to wake",
+				SnoozeGlyph, formatSnoozeRemaining(item.Snooze.Until, time.Now())))
+		case item.Snooze.Muted:
+			rendered += "  " + DimStyle.Render(SnoozeGlyph+" sleeping · group snoozed")
 		}
 		return rendered
 	}
 
 	styledSymbol := StatusSymbol(status)
 	styledTitle := TitleStyleForStatus(status).Render(title)
+	if item.Snooze.Muted {
+		// A muted row reads dim whatever its real status is — that's the whole
+		// signal. The status dot keeps its shape (the session is still waiting
+		// or running; we're just not nagging), it only loses its colour.
+		styledSymbol = DimStyle.Render(symbolRaw)
+		styledTitle = DimStyle.Render(title)
+	}
 	styledSlot := ""
 	if slotRaw != "" {
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
 	}
+	styledSnooze := ""
+	if snoozeRaw != "" {
+		styledSnooze = DimStyle.Render(snoozeRaw)
+	}
 	if glyphRaw != "" {
 		styledGlyph := AgentGlyphStyle.Render(glyphRaw)
-		return fmt.Sprintf("    %s %s %s%s", styledSymbol, styledGlyph, styledTitle, styledSlot)
+		return fmt.Sprintf("    %s %s %s%s%s", styledSymbol, styledGlyph, styledTitle, styledSlot, styledSnooze)
 	}
-	return fmt.Sprintf("    %s %s%s", styledSymbol, styledTitle, styledSlot)
+	return fmt.Sprintf("    %s %s%s%s", styledSymbol, styledTitle, styledSlot, styledSnooze)
 }
 
 // Agent glyphs mark which coding agent a session runs — a quiet, dim,

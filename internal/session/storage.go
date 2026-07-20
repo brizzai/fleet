@@ -51,6 +51,9 @@ type SessionRow struct {
 	FirstPrompt     string
 	TitleGenerated  bool
 	PromptCount     int
+	// SnoozedUntil is the deadline past which the session rejoins the
+	// attention surfaces. Zero = not snoozed.
+	SnoozedUntil time.Time
 }
 
 // ShellRow is the persisted form of a drawer shell (a plain non-agent
@@ -182,6 +185,16 @@ func (s *StateDB) migrate() error {
 			return err
 		}
 	}
+	// Snooze deadline (unix seconds, 0 = not snoozed). Orthogonal to status:
+	// a snoozed session keeps running and keeps its real status, it is just
+	// muted from the attention surfaces until the deadline passes.
+	if !s.hasColumn("sessions", "snoozed_until") {
+		_, err = s.db.Exec(`ALTER TABLE sessions ADD COLUMN snoozed_until INTEGER NOT NULL DEFAULT 0`)
+		if err != nil {
+			debuglog.Logger.Error("migration failed: add snoozed_until column", "error", err)
+			return err
+		}
+	}
 	// Add agent column if missing (which coding agent the session runs).
 	if !s.hasColumn("sessions", "agent") {
 		_, err = s.db.Exec(`ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'`)
@@ -215,6 +228,21 @@ func (s *StateDB) migrate() error {
 	_, err = s.db.Exec(`CREATE TABLE IF NOT EXISTS collapsed_groups (group_key TEXT PRIMARY KEY)`)
 	if err != nil {
 		debuglog.Logger.Error("migration failed: create collapsed_groups table", "error", err)
+		return err
+	}
+
+	// Snoozed sidebar groups: an umbrella mute over a whole origin or checkout.
+	// Same keyspace as collapsed_groups ("origin:<key>" for origin headers, the
+	// repo path for checkout headers). Absence = not snoozed; a row whose
+	// deadline has passed is dropped by the wake sweep.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS snoozed_groups (
+			group_key     TEXT PRIMARY KEY,
+			snoozed_until INTEGER NOT NULL
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create snoozed_groups table", "error", err)
 		return err
 	}
 
@@ -287,14 +315,14 @@ func (s *StateDB) hasColumn(table, column string) bool {
 // SaveSession inserts or replaces a session row.
 func (s *StateDB) SaveSession(row *SessionRow) error {
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		row.ID, row.Title, row.ProjectPath, string(agent.Parse(row.Agent)), row.Status, row.TmuxSession,
 		row.CreatedAt.Unix(), row.LastAccessed.Unix(), boolToInt(row.Acknowledged),
 		row.ClaudeSessionID, row.WorkspaceName,
 		boolToInt(row.ManuallyRenamed), row.FirstPrompt, boolToInt(row.TitleGenerated),
-		row.PromptCount,
+		row.PromptCount, timeToUnix(row.SnoozedUntil),
 	)
 	if err != nil {
 		debuglog.Logger.Error("failed to save session", "id", row.ID, "error", err)
@@ -305,7 +333,7 @@ func (s *StateDB) SaveSession(row *SessionRow) error {
 // LoadSessions returns all sessions ordered by creation time.
 func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count
+		SELECT id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until
 		FROM sessions ORDER BY created_at
 	`)
 	if err != nil {
@@ -317,14 +345,15 @@ func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 	var sessions []*SessionRow
 	for rows.Next() {
 		var r SessionRow
-		var createdAt, lastAccessed int64
+		var createdAt, lastAccessed, snoozedUntil int64
 		var ack, manuallyRenamed, titleGenerated int
-		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount, &snoozedUntil); err != nil {
 			debuglog.Logger.Error("failed to scan session row", "error", err)
 			return nil, err
 		}
 		r.CreatedAt = time.Unix(createdAt, 0)
 		r.LastAccessed = time.Unix(lastAccessed, 0)
+		r.SnoozedUntil = unixToTime(snoozedUntil)
 		r.Acknowledged = ack != 0
 		r.ManuallyRenamed = manuallyRenamed != 0
 		r.TitleGenerated = titleGenerated != 0
@@ -415,6 +444,16 @@ func (s *StateDB) UpdateStatus(id, status string) error {
 	`, status, status, id)
 	if err != nil {
 		debuglog.Logger.Error("failed to update session status", "id", id, "status", status, "error", err)
+	}
+	return err
+}
+
+// SetSessionSnooze records (or clears, on the zero time) a session's snooze
+// deadline. Deliberately does not touch status — snooze is orthogonal to it.
+func (s *StateDB) SetSessionSnooze(id string, until time.Time) error {
+	_, err := s.db.Exec("UPDATE sessions SET snoozed_until = ? WHERE id = ?", timeToUnix(until), id)
+	if err != nil {
+		debuglog.Logger.Error("failed to set session snooze", "id", id, "until", until, "error", err)
 	}
 	return err
 }
@@ -616,6 +655,46 @@ func (s *StateDB) LoadCollapsedGroups() ([]string, error) {
 	return keys, rows.Err()
 }
 
+// SetGroupSnooze records (or clears, on the zero time) an umbrella snooze over
+// a sidebar group. Key space matches SetGroupCollapsed: "origin:<key>" for
+// origin headers, the repo path for checkout headers.
+func (s *StateDB) SetGroupSnooze(groupKey string, until time.Time) error {
+	var err error
+	if until.IsZero() {
+		_, err = s.db.Exec("DELETE FROM snoozed_groups WHERE group_key = ?", groupKey)
+	} else {
+		_, err = s.db.Exec(
+			"INSERT OR REPLACE INTO snoozed_groups (group_key, snoozed_until) VALUES (?, ?)",
+			groupKey, until.Unix())
+	}
+	if err != nil {
+		debuglog.Logger.Error("failed to set group snooze", "key", groupKey, "until", until, "error", err)
+	}
+	return err
+}
+
+// LoadSnoozedGroups returns every group's snooze deadline, keyed by group key.
+func (s *StateDB) LoadSnoozedGroups() (map[string]time.Time, error) {
+	rows, err := s.db.Query("SELECT group_key, snoozed_until FROM snoozed_groups")
+	if err != nil {
+		debuglog.Logger.Error("failed to load snoozed groups", "error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var key string
+		var until int64
+		if err := rows.Scan(&key, &until); err != nil {
+			debuglog.Logger.Error("failed to scan snoozed group row", "error", err)
+			return nil, err
+		}
+		out[key] = unixToTime(until)
+	}
+	return out, rows.Err()
+}
+
 // SavePRCacheRow upserts a single repo's PR-refresh state. Called per-repo
 // after each successful refresh in the worker. JSON-encodes the PR; on
 // nil PR we persist an empty string (distinct from row absence, which
@@ -713,4 +792,22 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// timeToUnix stores an optional deadline as unix seconds, mapping the zero
+// time to 0 so "unset" round-trips through a NOT NULL DEFAULT 0 column.
+func timeToUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// unixToTime is timeToUnix's inverse: 0 (and anything non-positive) reads back
+// as the zero time rather than 1970.
+func unixToTime(sec int64) time.Time {
+	if sec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
 }
