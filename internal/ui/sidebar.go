@@ -646,15 +646,17 @@ func renderSessionItem(s *session.Session, width int, selected bool, slot int) s
 // carried by shape alone: the status dot keeps the (dynamic) status color, so
 // the glyph is always rendered muted via AgentGlyphStyle regardless of status.
 const (
-	// Both glyphs are width-1 and live in well-covered Unicode blocks so they
+	// All glyphs are width-1 and live in well-covered Unicode blocks so they
 	// render cleanly in base monospace fonts (Menlo/SF Mono) and stay aligned:
-	// ✻ is Dingbats; ◇ and △ are Geometric Shapes — the same block as the status
-	// dots (●○◐). A hexagon (U+2B21) was tried first but falls back to a wider
-	// glyph in those fonts, shifting the title. △ is a clean third shape, distinct
-	// from the star and the diamond.
+	// ✻ and ✦ are Dingbats; ◇ and △ are Geometric Shapes — the same block as the
+	// status dots (●○◐). A hexagon (U+2B21) was tried first but falls back to a
+	// wider glyph in those fonts, shifting the title. △ is a clean third shape,
+	// distinct from the star and the diamond; ✦ (four-pointed star) is a clean
+	// fourth, distinct from ✻'s six-pointed asterisk.
 	claudeGlyph   = "✻"
 	codexGlyph    = "◇"
 	opencodeGlyph = "△"
+	cursorGlyph   = "✦"
 )
 
 // agentGlyph returns the sigil for a session's agent. An empty or unrecognized
@@ -665,6 +667,8 @@ func agentGlyph(t agent.Type) string {
 		return codexGlyph
 	case agent.OpenCode:
 		return opencodeGlyph
+	case agent.Cursor:
+		return cursorGlyph
 	default:
 		return claudeGlyph
 	}
