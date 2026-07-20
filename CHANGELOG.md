@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.22.0] - 2026-07-20
+
+### Highlights
+
+- **Snooze the noise** — `z` mutes a session, worktree, or repo for `30m`/`1h`/`4h`/tomorrow or a duration you type (`15m`, `2d`), so work you're not touching today stops claiming a slot in the `Space` rotation and stops counting toward the header pills. The session keeps running; snoozing a repo folds the whole group, and `z` again wakes it early.
+
+### Added
+
+- **Native Linux support.** fleet now runs on Linux — install via `.deb`/`.rpm` or Docker. Worktree cleanup, copy-to-clipboard (Wayland and X11, with an OSC 52 fallback), idle-session suspend, and tmux 3.2+ compatibility are all handled natively, and the worktree-delete dialog shows tidy process names (`vite`, not a full path). An optional systemd user unit keeps the tmux server alive across logins.
+- **Snooze the noise** — `z` mutes a session, worktree, or repo for `30m`/`1h`/`4h`/tomorrow or a duration you type (`15m`, `2d`), so work you're not touching today stops claiming a slot in the `Space` rotation and stops counting toward the header pills. The session keeps running; snoozing a repo folds the whole group, and `z` again wakes it early.
+
+### Improved
+
+- **Hop between groups** — `Shift+↑`/`Shift+↓` jumps the sidebar cursor to the previous/next group header instead of one row at a time, so a fleet with a dozen origins no longer means holding the arrow key. At the top and bottom of the list it lands on the first/last row.
+
 ## [2.21.0] - 2026-07-13
 
 ### Added
@@ -421,7 +436,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.21.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.22.0...HEAD
+[2.22.0]: https://github.com/brizzai/fleet/releases/tag/v2.22.0
 [2.21.0]: https://github.com/brizzai/fleet/releases/tag/v2.21.0
 [2.20.0]: https://github.com/brizzai/fleet/releases/tag/v2.20.0
 [2.19.0]: https://github.com/brizzai/fleet/releases/tag/v2.19.0
