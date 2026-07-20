@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -27,17 +28,22 @@ const snoozeMaxDuration = 30 * 24 * time.Hour
 // plus a free-text duration. Anchored to its row like the context menu rather
 // than centered — it's a dropdown from the thing it acts on, not a takeover.
 //
-// Presets and the input are one surface: arrow onto a preset, or just start
-// typing. Typing a valid duration takes over Enter, so the fast path (open,
-// type "2d", Enter) never touches the list.
+// Presets and the input are one surface: the input is simply the row below the
+// last preset, so ↑↓ walks the whole dialog and Enter always acts on whatever
+// carries the highlight. Typing from a preset row jumps to the input and keeps
+// the keystroke, so the fast path (open, type "2d", Enter) never needs arrows.
 type SnoozeDialog struct {
 	visible bool
 	width   int
 	height  int
 
-	title  string
-	cursor int
-	input  textinput.Model
+	title string
+	// focus indexes SnoozeDurations, with len(SnoozeDurations) meaning the
+	// custom-duration input — i.e. the input is just the row below the last
+	// preset, so ↑↓ walks the whole dialog and the highlight always says what
+	// Enter will do.
+	focus int
+	input textinput.Model
 
 	// anchor mirrors ContextMenuDialog's: the sidebar column and the row to
 	// hang from, plus the first y the footer owns.
@@ -54,12 +60,35 @@ func NewSnoozeDialog() *SnoozeDialog {
 	return &SnoozeDialog{input: ti}
 }
 
+// snoozeInputRow is the focus index of the custom-duration input: one past the
+// last preset.
+func snoozeInputRow() int { return len(SnoozeDurations) }
+
+// inputFocused reports whether the custom-duration box owns the keyboard.
+func (d *SnoozeDialog) inputFocused() bool { return d.focus == snoozeInputRow() }
+
+// setFocus moves the highlight and keeps the text input's own focus (and so its
+// cursor) in step, so the caret only blinks where the highlight is.
+func (d *SnoozeDialog) setFocus(i int) {
+	if i < 0 {
+		i = 0
+	}
+	if i > snoozeInputRow() {
+		i = snoozeInputRow()
+	}
+	d.focus = i
+	if d.inputFocused() {
+		d.input.Focus()
+	} else {
+		d.input.Blur()
+	}
+}
+
 func (d *SnoozeDialog) Show(title string) {
 	d.visible = true
 	d.title = title
-	d.cursor = 0
 	d.input.SetValue("")
-	d.input.Focus()
+	d.setFocus(0)
 }
 
 func (d *SnoozeDialog) Hide() {
@@ -77,58 +106,66 @@ func (d *SnoozeDialog) SetAnchor(x, rowY, bottomLimit int) {
 	d.anchorX, d.rowY, d.bottomLimit = x, rowY, bottomLimit
 }
 
-// customDuration returns the parsed custom input, if the box holds a valid one.
-func (d *SnoozeDialog) customDuration() (time.Duration, bool) {
-	dur, err := parseSnoozeDuration(d.input.Value())
-	return dur, err == nil
-}
-
 func (d *SnoozeDialog) Update(msg tea.Msg) (*SnoozeDialog, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return d, nil
 	}
 
-	switch keyMsg.String() {
+	key := keyMsg.String()
+	switch key {
 	case "esc", "ctrl+c":
 		d.Hide()
 		return d, nil
-	case "up":
-		if d.cursor > 0 {
-			d.cursor--
-		}
+	case "up", "shift+tab":
+		d.setFocus(d.focus - 1)
 		return d, nil
-	case "down":
-		if d.cursor < len(SnoozeDurations)-1 {
-			d.cursor++
-		}
+	case "down", "tab":
+		d.setFocus(d.focus + 1)
 		return d, nil
 	case "enter":
-		// A valid custom duration wins: the user typed it on purpose, and the
-		// preset cursor is only where it was left.
-		if dur, ok := d.customDuration(); ok {
-			until := time.Now().Add(dur)
+		// Enter acts on whatever is highlighted — the highlight is the promise.
+		if !d.inputFocused() {
+			sel := SnoozeDurations[d.focus]
+			until := sel.Resolve(time.Now())
 			d.Hide()
 			return d, func() tea.Msg {
-				return snoozeSelectedMsg{until: until, durationID: "custom"}
+				return snoozeSelectedMsg{until: until, durationID: sel.ID}
 			}
 		}
-		// A non-empty but unparseable box is a typo, not a request for the
-		// highlighted preset — refuse rather than snooze for the wrong span.
-		if strings.TrimSpace(d.input.Value()) != "" {
+		dur, err := parseSnoozeDuration(d.input.Value())
+		if err != nil {
+			// Stay open so the typo is fixable; View renders the reason. Never
+			// fall through to a preset — that would snooze for a span the user
+			// never asked for.
 			return d, nil
 		}
-		sel := SnoozeDurations[d.cursor]
-		until := sel.Resolve(time.Now())
+		until := time.Now().Add(dur)
 		d.Hide()
 		return d, func() tea.Msg {
-			return snoozeSelectedMsg{until: until, durationID: sel.ID}
+			return snoozeSelectedMsg{until: until, durationID: "custom"}
 		}
+	}
+
+	// Typing from a preset row jumps to the input and keeps the keystroke, so
+	// the fast path (open, type "2d", enter) never needs the arrow keys.
+	if !d.inputFocused() && isTypingKey(key) {
+		d.setFocus(snoozeInputRow())
+	}
+	if !d.inputFocused() {
+		return d, nil
 	}
 
 	var cmd tea.Cmd
 	d.input, cmd = d.input.Update(msg)
 	return d, cmd
+}
+
+// isTypingKey reports whether a key press is someone starting to type a
+// duration (a bare printable rune) rather than navigation or a chord.
+func isTypingKey(key string) bool {
+	r := []rune(key)
+	return len(r) == 1 && unicode.IsPrint(r[0]) && r[0] != ' '
 }
 
 // View returns the bare box (empty when hidden); app.go composites it at
@@ -138,7 +175,6 @@ func (d *SnoozeDialog) View() string {
 		return ""
 	}
 	now := time.Now()
-	typing := strings.TrimSpace(d.input.Value()) != ""
 
 	// Fixed width so the box doesn't resize or reflow under the cursor as the
 	// verdict line swaps between the hint and a wake time. Sized so the widest
@@ -159,9 +195,7 @@ func (d *SnoozeDialog) View() string {
 		// Pad the RAW text before styling — padding a styled string counts the
 		// ANSI escape bytes and the columns come out ragged.
 		row := fmt.Sprintf(" %-12s %10s ", dur.Label, wake)
-		// While a custom duration is being typed it owns Enter, so the preset
-		// highlight would be lying about what Enter does — drop it.
-		if i == d.cursor && !typing {
+		if i == d.focus {
 			b.WriteString(" " + selTitle().Render(row))
 		} else {
 			b.WriteString(" " + DimStyle.Render(row))
@@ -169,18 +203,26 @@ func (d *SnoozeDialog) View() string {
 		b.WriteString("\n")
 	}
 
+	// The input is the row below the presets and carries the same highlight, so
+	// the eye tracks one moving selection through the whole dialog.
 	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("or type: "))
+	label := " or type: "
+	if d.inputFocused() {
+		b.WriteString(" " + selTitle().Render(label))
+	} else {
+		b.WriteString(" " + DimStyle.Render(label))
+	}
 	b.WriteString(d.input.View())
 	b.WriteString("\n")
 
-	// Third line is the live verdict on what was typed: the resolved wake time,
-	// or why it won't parse. Always rendered so the box height never jumps.
+	// Last line is the live verdict on what was typed — the resolved wake time,
+	// or why it won't parse. Exactly one line in every state, or the box height
+	// jumps mid-keystroke. Each string must fit contentW without wrapping.
 	switch {
-	case !typing:
-		// Must fit contentW on one line, or the box grows a row and the height
-		// jumps the moment the user starts typing.
+	case !d.inputFocused():
 		b.WriteString(DimStyle.Render("  ↑↓ pick • enter ok • esc cancel"))
+	case strings.TrimSpace(d.input.Value()) == "":
+		b.WriteString(DimStyle.Render("  type a duration • ↑ for presets"))
 	default:
 		if dur, err := parseSnoozeDuration(d.input.Value()); err == nil {
 			b.WriteString(PROpenStyle.Render("  → wakes " + formatSnoozeWake(now.Add(dur), now)))

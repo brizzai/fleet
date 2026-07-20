@@ -269,16 +269,84 @@ func TestParseSnoozeDuration(t *testing.T) {
 	}
 }
 
-// TestSnoozeDialogCustomBeatsPreset: a typed duration owns Enter. The preset
-// cursor is only wherever it was left, so honouring it while the box holds a
-// deliberate value would snooze for the wrong span.
-func TestSnoozeDialogCustomBeatsPreset(t *testing.T) {
+// TestSnoozeDialogDownReachesInput: the input is the row below the last preset,
+// so ↓ walks into it and ↑ walks back out. Focus must move the text input's own
+// focus with it, or the caret blinks somewhere the highlight isn't.
+func TestSnoozeDialogDownReachesInput(t *testing.T) {
 	d := NewSnoozeDialog()
 	d.Show("Snooze x")
-	d.cursor = 0 // "30 minutes"
+
+	if d.inputFocused() {
+		t.Fatal("dialog should open on the first preset, not the input")
+	}
+	for i := 0; i < len(SnoozeDurations); i++ {
+		d.Update(key("down"))
+	}
+	if !d.inputFocused() {
+		t.Fatalf("↓ past the last preset should focus the input, focus = %d", d.focus)
+	}
+	if !d.input.Focused() {
+		t.Error("the text input must actually take focus, or typing goes nowhere")
+	}
+
+	// One more ↓ must clamp, not wrap around to the top.
+	d.Update(key("down"))
+	if !d.inputFocused() {
+		t.Error("↓ at the input should clamp, not wrap")
+	}
+
+	d.Update(key("up"))
+	if d.inputFocused() {
+		t.Error("↑ from the input should go back to the last preset")
+	}
+	if d.input.Focused() {
+		t.Error("leaving the input must blur it, or the caret outlives the highlight")
+	}
+	if d.focus != len(SnoozeDurations)-1 {
+		t.Errorf("↑ landed on focus %d, want the last preset (%d)", d.focus, len(SnoozeDurations)-1)
+	}
+}
+
+// TestSnoozeDialogTypingJumpsToInput: typing from a preset row moves focus to
+// the input and keeps the keystroke, so the fast path never needs the arrows.
+func TestSnoozeDialogTypingJumpsToInput(t *testing.T) {
+	d := NewSnoozeDialog()
+	d.Show("Snooze x")
+
+	for _, k := range []string{"2", "d"} {
+		d.Update(key(k))
+	}
+	if !d.inputFocused() {
+		t.Fatal("typing from a preset should jump to the input")
+	}
+	if got := d.input.Value(); got != "2d" {
+		t.Errorf("input = %q, want %q — the jumping keystroke must not be swallowed", got, "2d")
+	}
+}
+
+// TestSnoozeDialogFocusDecidesEnter: Enter acts on whatever is highlighted. The
+// highlight is the promise — with focus on the input a typed value wins, and
+// with focus on a preset the preset wins even if the box holds text.
+func TestSnoozeDialogFocusDecidesEnter(t *testing.T) {
+	d := NewSnoozeDialog()
+	d.Show("Snooze x")
 	d.input.SetValue("2d")
+	d.setFocus(0) // back onto "30 minutes" with text still in the box
 
 	_, cmd := d.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter on a preset produced no command")
+	}
+	if got := cmd().(snoozeSelectedMsg).durationID; got != SnoozeDurations[0].ID {
+		t.Errorf("durationID = %q, want the highlighted preset %q", got, SnoozeDurations[0].ID)
+	}
+
+	// Now with the input focused, the same text wins.
+	d.Show("Snooze x")
+	d.setFocus(snoozeInputRow())
+	d.input.SetValue("2d")
+
+	_, cmd = d.Update(key("enter"))
 	if cmd == nil {
 		t.Fatal("enter with a valid custom duration produced no command")
 	}
@@ -303,6 +371,7 @@ func TestSnoozeDialogCustomBeatsPreset(t *testing.T) {
 func TestSnoozeDialogRefusesBadCustom(t *testing.T) {
 	d := NewSnoozeDialog()
 	d.Show("Snooze x")
+	d.setFocus(snoozeInputRow())
 	d.input.SetValue("2x")
 
 	if _, cmd := d.Update(key("enter")); cmd != nil {
@@ -340,6 +409,7 @@ func TestSnoozeDialogPreviewsWakeTime(t *testing.T) {
 	d := NewSnoozeDialog()
 	d.SetSize(100, 40)
 	d.Show("Snooze x")
+	d.setFocus(snoozeInputRow())
 	d.input.SetValue("3h")
 
 	want := formatSnoozeWake(time.Now().Add(3*time.Hour), time.Now())
@@ -352,12 +422,30 @@ func TestSnoozeDialogPreviewsWakeTime(t *testing.T) {
 // and a wake time as you type, and a wrapped hint would grow the box a row
 // mid-keystroke. Pin both dimensions so a longer hint can't reintroduce that.
 func TestSnoozeDialogHeightIsStable(t *testing.T) {
+	// Every distinct verdict-line state, including input-focused-but-empty —
+	// that one has its own hint string, and it wrapped the first time.
+	states := []struct {
+		name    string
+		onInput bool
+		typed   string
+	}{
+		{"preset focused", false, ""},
+		{"input focused, empty", true, ""},
+		{"input focused, valid", true, "2d"},
+		{"input focused, bad unit", true, "2x"},
+		{"input focused, over cap", true, "99d"},
+		{"input focused, partial", true, "1"},
+		{"input focused, widest", true, "30d"},
+	}
 	var w, h int
-	for i, typed := range []string{"", "2d", "2x", "99d", "1", "30d"} {
+	for i, st := range states {
 		d := NewSnoozeDialog()
 		d.SetSize(120, 40)
 		d.Show("Snooze Refactor status worker")
-		d.input.SetValue(typed)
+		if st.onInput {
+			d.setFocus(snoozeInputRow())
+		}
+		d.input.SetValue(st.typed)
 		v := d.View()
 		gotW, gotH := lipgloss.Width(v), lipgloss.Height(v)
 		if i == 0 {
@@ -365,8 +453,8 @@ func TestSnoozeDialogHeightIsStable(t *testing.T) {
 			continue
 		}
 		if gotW != w || gotH != h {
-			t.Errorf("typed %q: box is %dx%d, want %dx%d — it must not resize as you type",
-				typed, gotW, gotH, w, h)
+			t.Errorf("%s: box is %dx%d, want %dx%d — it must not resize as you move or type",
+				st.name, gotW, gotH, w, h)
 		}
 	}
 }
