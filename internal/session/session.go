@@ -141,10 +141,10 @@ func (s *Session) buildAgentCmd() string {
 }
 
 // initialRunStatus is the status to show right after launching the agent.
-// Codex and OpenCode fire no event until their first turn, so they start idle
-// (sitting at their prompt) rather than flashing running.
+// Codex, OpenCode, and Cursor fire no event until their first turn, so they
+// start idle (sitting at their prompt) rather than flashing running.
 func (s *Session) initialRunStatus() Status {
-	if s.Agent == agent.Codex || s.Agent == agent.OpenCode {
+	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Cursor {
 		return StatusIdle
 	}
 	return StatusRunning
@@ -233,8 +233,8 @@ func (s *Session) getCapturer() PaneCapturer {
 // conversationActivePastHook reports whether the Claude conversation transcript
 // shows lead-turn activity that resumed after the current waiting hook — the
 // out-of-pane tiebreaker for the between-bursts frame where the pane is
-// indistinguishable from a finished idle prompt. Claude only; Codex has no Claude
-// transcript. MUST NOT be called while holding s.mu — it does disk I/O.
+// indistinguishable from a finished idle prompt. Claude only; Codex/Cursor have
+// no Claude transcript. MUST NOT be called while holding s.mu — it does disk I/O.
 func (s *Session) conversationActivePastHook() bool {
 	if s.convActiveFn != nil {
 		return s.convActiveFn()
@@ -250,7 +250,7 @@ func (s *Session) conversationActivePastHook() bool {
 	cacheTS := s.convLeadTimestamp
 	s.mu.RUnlock()
 
-	if agentType == agent.Codex || claudeID == "" {
+	if agentType == agent.Codex || agentType == agent.Cursor || claudeID == "" {
 		return false
 	}
 
@@ -730,11 +730,16 @@ func (s *Session) UpdateStatus() {
 	// including the waiting→running transition after a permission reply, so the
 	// hook is always trusted and no pane scraping is needed. Before the first
 	// event there is no hook — the session sits idle at its prompt.
-	if s.Agent == agent.OpenCode {
+	//
+	// Cursor CLI rides the same path: its hooks.json events (mapped in
+	// cmd/fleet/hook_handler.go) report running/waiting/finished/dead directly,
+	// with no pane scraping. Before the first event there is no hook — the
+	// session sits idle at its prompt.
+	if s.Agent == agent.OpenCode || s.Agent == agent.Cursor {
 		if !hasHook {
 			if oldStatus != StatusIdle {
 				s.SetStatus(StatusIdle)
-				log.Info("status changed (opencode no-hook)", "old", oldStatus, "new", StatusIdle)
+				log.Info("status changed (hook-only agent, no-hook)", "old", oldStatus, "new", StatusIdle)
 			}
 			return
 		}
