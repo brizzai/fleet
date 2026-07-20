@@ -64,6 +64,13 @@ type Session struct {
 	PromptCount          int
 	ForkFromID           string // Transient: if set, start with --resume <id> --fork-session (cleared after start)
 
+	// snoozedUntil mutes this session from the attention surfaces (Space jump,
+	// status pills) until the deadline passes. Deliberately NOT a Status: a
+	// snoozed session keeps running and keeps its real status — snooze is a
+	// lens over the attention surfaces, not a state of the session itself.
+	// Guarded by mu (written by the worker's wake sweep, read while rendering).
+	snoozedUntil time.Time
+
 	hookStatus       string
 	hookUpdatedAt    time.Time
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
@@ -213,6 +220,31 @@ func (s *Session) SetStatus(status Status) {
 	if status == StatusRunning || status == StatusWaiting {
 		s.Acknowledged = false
 	}
+}
+
+// SnoozedUntil returns this session's own snooze deadline (thread-safe). The
+// zero time means not snoozed. Note this is the session's *own* snooze — a
+// session may also be muted by an umbrella snooze on its repo group, which
+// lives in the UI layer since it isn't a property of the session.
+func (s *Session) SnoozedUntil() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snoozedUntil
+}
+
+// SetSnoozedUntil sets (or, on the zero time, clears) the snooze deadline.
+// Status is untouched by design.
+func (s *Session) SetSnoozedUntil(until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snoozedUntil = until
+}
+
+// IsSnoozed reports whether the session's own snooze is still in effect at now.
+func (s *Session) IsSnoozed(now time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.snoozedUntil.IsZero() && s.snoozedUntil.After(now)
 }
 
 // GetHookStatus returns the raw hook status string (thread-safe).
@@ -1326,6 +1358,7 @@ func (s *Session) ToRow() *SessionRow {
 		FirstPrompt:     s.FirstPrompt,
 		TitleGenerated:  s.TitleGenerated,
 		PromptCount:     s.PromptCount,
+		SnoozedUntil:    s.snoozedUntil,
 	}
 }
 
@@ -1401,8 +1434,20 @@ func FromRow(row *SessionRow) *Session {
 		FirstPrompt:     row.FirstPrompt,
 		TitleGenerated:  row.TitleGenerated,
 		PromptCount:     row.PromptCount,
-		tmuxSession:     ts,
+		// A deadline that lapsed while fleet was closed is dropped here rather
+		// than waiting for the wake sweep, so the first frame is already correct.
+		snoozedUntil: dropIfPast(row.SnoozedUntil, time.Now()),
+		tmuxSession:  ts,
 	}
+}
+
+// dropIfPast returns the zero time for a deadline that has already lapsed,
+// so an expired snooze never has to be reasoned about downstream.
+func dropIfPast(deadline, now time.Time) time.Time {
+	if deadline.IsZero() || !deadline.After(now) {
+		return time.Time{}
+	}
+	return deadline
 }
 
 // --- Status detection ---

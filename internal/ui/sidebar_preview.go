@@ -2,6 +2,7 @@ package ui
 
 import (
 	"sync"
+	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/git"
@@ -81,6 +82,6 @@ func previewIsWorktreeOf(repo string) bool { return repo == mockRepoFeat }
 // keep the sample neutral for reading.
 func RenderSidebarPreview(width, height int) string {
 	previewFixtureOnce.Do(buildPreviewFixture)
-	items := BuildFlatItems(previewSess, nil, nil, "", nil, nil, previewOriginOf, previewIsWorktreeOf)
+	items := BuildFlatItems(previewSess, nil, nil, "", nil, nil, nil, time.Time{}, previewOriginOf, previewIsWorktreeOf)
 	return RenderSidebar(items, previewSess, previewGit, previewSlotMap, -1, 0, width, height, true)
 }
