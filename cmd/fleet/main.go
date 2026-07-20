@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -118,6 +119,11 @@ func runTUI() {
 	if cfg.IsAutoUpdateEnabled() && version != "dev" && update.ShouldCheck() {
 		debuglog.Logger.Info("checking for updates", "current", version)
 		newVer, err := update.Update(version)
+		// A package-managed install can never swap its own binary. That's a
+		// permanent property of how fleet was installed, not a failure, so it
+		// is not counted as an update error — otherwise every packaged Linux
+		// install reports a broken updater once an hour, forever.
+		skipped := errors.Is(err, update.ErrNotReplaceable)
 		// Record update health for analytics. The updater runs before
 		// analytics.Init (which waits on the consent prompt inside the TUI) and
 		// re-execs on a successful update, so these events can't be sent now —
@@ -126,7 +132,7 @@ func runTUI() {
 		if cfg.GetTelemetryMode() == config.TelemetryFull && !analytics.IsOptedOutByEnv() {
 			analytics.QueuePending(analytics.EventUpdateCheck, map[string]any{
 				"updated": err == nil && newVer != "",
-				"error":   err != nil,
+				"error":   err != nil && !skipped,
 			})
 			if err == nil && newVer != "" {
 				analytics.QueuePending(analytics.EventUpdateApplied, map[string]any{
@@ -135,7 +141,9 @@ func runTUI() {
 				})
 			}
 		}
-		if err != nil {
+		if skipped {
+			debuglog.Logger.Info("auto-update skipped", "reason", err)
+		} else if err != nil {
 			debuglog.Logger.Error("auto-update failed", "err", err)
 		} else if newVer != "" {
 			debuglog.Logger.Info("auto-updated", "from", version, "to", newVer)

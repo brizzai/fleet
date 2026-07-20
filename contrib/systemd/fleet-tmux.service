@@ -1,0 +1,55 @@
+# Optional systemd user unit: start the tmux server at login so fleet's
+# agent sessions are already alive before you open the TUI, and survive
+# closing your terminal.
+#
+# fleet itself is a foreground TUI — it is not a daemon and needs no unit.
+# The tmux server it shares is the thing worth supervising, and only if you
+# want sessions to outlive your login session.
+#
+# The .deb/.rpm packages install this file to /usr/lib/systemd/user/, so
+# package installs just run:
+#
+#   systemctl --user enable --now fleet-tmux.service
+#
+# From a source checkout, copy it into your user unit dir first:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/fleet-tmux.service ~/.config/systemd/user/
+#   systemctl --user enable --now fleet-tmux.service
+#
+# To keep sessions running after you log out entirely (e.g. a headless box
+# you SSH into), also enable lingering:
+#
+#   loginctl enable-linger "$USER"
+
+[Unit]
+Description=tmux server for fleet agent sessions
+
+[Service]
+# oneshot, not forking: the tmux server double-forks away from ExecStart, and
+# forking would adopt that daemonized server as MAINPID — which systemd
+# SIGTERMs on `systemctl --user stop`, KillMode=process notwithstanding
+# (process scopes the cgroup sweep; the main process is always signalled).
+# oneshot + RemainAfterExit tracks no MAINPID at all, so stopping the unit
+# signals nothing and the server only dies by deliberate `tmux kill-server`.
+Type=oneshot
+# start-server only: no windows are created; fleet attaches its sessions to
+# this server as usual. exit-empty defaults to on, which means a server with
+# zero sessions and no attached client exits again almost immediately
+# (reproducible: `tmux -f /dev/null -L t start-server; sleep 1; tmux -L t ls`
+# -> "no server running") — turning it off in the same invocation, before
+# systemd considers the unit started, is what makes the server actually
+# persist. `env` resolves tmux via PATH rather than a hardcoded path, so this
+# also works for Homebrew-on-Linux, Nix, or from-source installs.
+ExecStart=/usr/bin/env tmux start-server \; set -s exit-empty off
+# Don't tear the server (and every agent session in it) down when the unit
+# stops. KillMode=process (not the default control-group) keeps systemd from
+# sweeping the unit's cgroup on stop — the daemonized server still lives
+# there. KillMode=none would too, but it's deprecated (systemd >= 243 warns
+# on load); process + a no-op ExecStop is the supported spelling.
+RemainAfterExit=yes
+KillMode=process
+ExecStop=/bin/true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,4 @@
+# Terminal pane captures: byte-exact fixtures (escape sequences, \r-sensitive
+# status detection). Never CRLF-convert them on checkout — a Windows clone
+# with core.autocrlf=true would otherwise corrupt the golden tests.
+internal/session/testdata/* -text

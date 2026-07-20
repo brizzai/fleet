@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,18 +56,107 @@ var (
 func IsTmuxAvailable() error {
 	cmd := exec.Command("tmux", "-V")
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tmux not found: install with 'brew install tmux'")
+		hint := "brew install tmux"
+		if runtime.GOOS == "linux" {
+			hint = "apt install tmux (or your distro's equivalent)"
+		}
+		return fmt.Errorf("tmux not found: install with '%s'", hint)
 	}
 	return nil
 }
 
-// EnsureCopyCommand points tmux's copy-command at pbcopy so a copy-mode
-// selection (mouse drag, double/triple-click, keyboard copy) reaches the macOS
-// clipboard. tmux's default copy bindings run `copy-pipe-and-cancel` with no
-// argument, which pipes to copy-command; when that's unset they fall back to
-// OSC 52 — which iTerm2 blocks by default and Apple Terminal doesn't support —
-// so the selection never reaches the clipboard. pbcopy is a local pipe, so it
-// works on every terminal regardless of OSC 52.
+// serverVersion returns the tmux *server's* version as (major, minor).
+// Options are interpreted by the server, and on Linux the server and the
+// client binary routinely disagree: a package upgrade swaps the binary but
+// never restarts a user's running server, so `tmux -V` alone would let a
+// 3.4 client wave allow-passthrough through to a still-running 3.2 server —
+// aborting the very batch the gate exists to protect. So ask the live
+// server first (`display-message -p '#{version}'`, which errors rather than
+// spawning a server when none runs) and only fall back to the binary's
+// `tmux -V` when there is no server yet — any server started later comes
+// from this binary. Development builds ("next-3.5") and parse failures
+// report ok=false; callers treat those as new-enough rather than degrade a
+// build that is almost certainly ahead of any release.
+//
+// Memoized: Start calls this per session — a reloadAll of N dead sessions
+// would otherwise fork N redundant probes. Memoizing is conservative: the
+// binary can't change under a running fleet, so a server restarted mid-run
+// can only be newer than the memoized answer, and a stale too-old answer
+// merely skips passthrough instead of aborting the batch.
+func serverVersion() (major, minor int, ok bool) {
+	versionOnce.Do(func() {
+		out, err := exec.Command("tmux", "display-message", "-p", "#{version}").Output()
+		if err != nil {
+			out, err = exec.Command("tmux", "-V").Output()
+			if err != nil {
+				return // leave the zero values: ok=false
+			}
+		}
+		versionMajor, versionMinor, versionOK = parseTmuxVersion(string(out))
+	})
+	return versionMajor, versionMinor, versionOK
+}
+
+var (
+	versionOnce  sync.Once
+	versionMajor int
+	versionMinor int
+	versionOK    bool
+)
+
+// parseTmuxVersion parses a tmux version string — `tmux -V` output ("tmux
+// 3.4") or the bare `#{version}` format variable ("3.4") — split from the
+// exec so the spiky inputs (patch letters, dev builds) are testable.
+func parseTmuxVersion(out string) (major, minor int, ok bool) {
+	v := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "tmux"))
+	numMajor, rest, found := strings.Cut(v, ".")
+	if !found {
+		return 0, 0, false
+	}
+	var err error
+	major, err = strconv.Atoi(strings.TrimSpace(numMajor))
+	if err != nil {
+		return 0, 0, false
+	}
+	// Minor may carry a patch-letter or rc suffix: "3a" -> 3, "4-rc2" -> 4.
+	digits := rest
+	for i, r := range rest {
+		if r < '0' || r > '9' {
+			digits = rest[:i]
+			break
+		}
+	}
+	minor, err = strconv.Atoi(digits)
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
+}
+
+// supportsAllowPassthrough reports whether the installed tmux understands the
+// allow-passthrough option (added in 3.3). On tmux 3.2 and older the option is
+// unknown, and because Start batches its set-option calls into one command an
+// unknown option would abort the entire batch — mouse, history-limit and
+// remain-on-exit included — so it must be dropped, not just tolerated.
+// Common on Linux: Ubuntu 22.04 LTS ships tmux 3.2a.
+func supportsAllowPassthrough() bool {
+	return allowPassthroughSupported(serverVersion())
+}
+
+func allowPassthroughSupported(major, minor int, ok bool) bool {
+	if !ok {
+		return true // dev build or unparseable: assume modern
+	}
+	return major > 3 || (major == 3 && minor >= 3)
+}
+
+// EnsureCopyCommand points tmux's copy-command at the platform clipboard tool
+// so a copy-mode selection (mouse drag, double/triple-click, keyboard copy)
+// reaches the system clipboard. tmux's default copy bindings run
+// `copy-pipe-and-cancel` with no argument, which pipes to copy-command; when
+// that's unset they fall back to OSC 52 — which iTerm2 blocks by default and
+// Apple Terminal doesn't support — so the selection never reaches the
+// clipboard. A local pipe works on every terminal regardless of OSC 52.
 //
 // copy-command is a server option (global to the tmux server fleet shares, as
 // it runs no dedicated socket); we set it only when unset, leaving a user's own
@@ -75,9 +166,8 @@ func IsTmuxAvailable() error {
 //
 // Re-checks the live server on every call rather than caching: cheap (one
 // show-options), and a tmux server created fresh after a restart still gets
-// pbcopy. Called from Start (server guaranteed up) + the startup bootstrap.
-// Best-effort; a no-server attempt just returns. fleet is macOS-only, so pbcopy
-// is present.
+// the option. Called from Start (server guaranteed up) + the startup
+// bootstrap. Best-effort; a no-server attempt just returns.
 func EnsureCopyCommand() {
 	if envIsTruthy("FLEET_NO_COPY_COMMAND") {
 		return
@@ -86,9 +176,75 @@ func EnsureCopyCommand() {
 	if err != nil {
 		return // No server yet (or tmux error) — retry on a later call.
 	}
-	if strings.TrimSpace(string(out)) == "" {
-		_ = exec.Command("tmux", "set-option", "-s", "copy-command", "pbcopy").Run()
+	if strings.TrimSpace(string(out)) != "" {
+		return // User already has a copy-command; leave it alone.
 	}
+	// No local clipboard tool (headless Linux, no wl-copy/xclip/xsel): leave
+	// everything alone. tmux's default set-clipboard (external) already sends
+	// copy-mode selections to the outer terminal via OSC 52, so the fallback
+	// needs no help from fleet — and a user who deliberately hardened with
+	// `set-clipboard off` keeps that choice untouched.
+	if copyCmd := clipboardCopyCommand(); copyCmd != "" {
+		_ = exec.Command("tmux", "set-option", "-s", "copy-command", copyCmd).Run()
+	}
+}
+
+// clipboardCopyCommand returns the command line tmux should pipe copy-mode
+// selections into, or "" when no usable clipboard tool exists. macOS always
+// has pbcopy. Linux requires both the tool on PATH *and* its display server
+// reachable: wl-copy without WAYLAND_DISPLAY (or xclip/xsel without DISPLAY)
+// exits non-zero, so the local pipe delivers nothing. That is not by itself
+// data loss — copy-pipe-and-cancel passes set_clip=1, so tmux emits the OSC 52
+// selection *in addition to* running copy-command, and the two are independent
+// (verified on 3.5a: a copy-command exiting 1 still produced OSC 52). The copy
+// is only lost when the user has also set `set-clipboard off`, which suppresses
+// OSC 52 entirely. Still worth returning "" rather than a tool that cannot run:
+// it keeps the setting honest, and it is the only path that works for the
+// set-clipboard-off case. wl-clipboard is a common transitive dependency, so
+// "wl-copy on PATH" says nothing about the session type.
+//
+// Display vars come from fleet's own process environment. tmux runs
+// copy-command jobs with the *session* environment (environ_for_session),
+// which update-environment refreshes from the most recently attached client
+// — not the global table frozen at server start, and there is no one table
+// to read a true answer from, since display reachability varies per client
+// while copy-command is a single server-wide option. fleet's env describes
+// the terminal the user is driving fleet from — the same client its
+// sessions get attached from — which makes it the best available proxy.
+func clipboardCopyCommand() string {
+	hasTool := func(bin string) bool {
+		_, err := exec.LookPath(bin)
+		return err == nil
+	}
+	return clipboardCopyCommandFor(runtime.GOOS, os.Getenv, hasTool)
+}
+
+// clipboardCopyCommandFor is the pure core of clipboardCopyCommand, split out
+// so the routing table is testable without a real PATH or display server.
+// Wayland sessions normally export DISPLAY too (XWayland), so checking
+// WAYLAND_DISPLAY first keeps the wl-copy preference while still letting a
+// Wayland session without wl-clipboard fall through to the X11 tools.
+func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool func(string) bool) string {
+	if goos != "linux" {
+		return "pbcopy"
+	}
+	if getenv("WAYLAND_DISPLAY") != "" && hasTool("wl-copy") {
+		return "wl-copy"
+	}
+	if getenv("DISPLAY") != "" {
+		if hasTool("xclip") {
+			// xclip forks and keeps its inherited stdout open to serve the
+			// selection to a future paste; tmux's copy-pipe blocks reading
+			// that pipe until it closes, freezing copy-mode until something
+			// else takes clipboard ownership. Redirecting stdout closes it
+			// immediately (the standard fix — see the tmux FAQ on xclip).
+			return "xclip -selection clipboard -in >/dev/null"
+		}
+		if hasTool("xsel") {
+			return "xsel --clipboard --input"
+		}
+	}
+	return ""
 }
 
 // envIsTruthy reports whether the named env var is set to a common truthy value.
@@ -207,9 +363,15 @@ func (s *Session) Start(command string, env ...string) error {
 		"set-option", "-t", s.Name, "mouse", "on", ";",
 		"set-option", "-t", s.Name, "history-limit", "10000", ";",
 		"set-option", "-t", s.Name, "escape-time", "10", ";",
-		"set-option", "-t", s.Name, "allow-passthrough", "on", ";",
-		"set-option", "-t", s.Name, "remain-on-exit", "on",
 	}
+	// allow-passthrough needs tmux ≥ 3.3; on older servers the unknown option
+	// would abort this whole batched command, so it is skipped instead.
+	if supportsAllowPassthrough() {
+		optArgs = append(optArgs, "set-option", "-t", s.Name, "allow-passthrough", "on", ";")
+	} else {
+		debuglog.Logger.Warn("tmux < 3.3: allow-passthrough unavailable, skipping", "session", s.Name)
+	}
+	optArgs = append(optArgs, "set-option", "-t", s.Name, "remain-on-exit", "on")
 	optCmd := exec.Command("tmux", optArgs...)
 	_ = optCmd.Run() // Best effort.
 
