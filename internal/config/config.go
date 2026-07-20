@@ -58,7 +58,7 @@ type Config struct {
 	// Telemetry is the legacy on/off flag, kept only for migration — new writes
 	// go to TelemetryMode. See GetTelemetryMode.
 	Telemetry    *bool  `json:"telemetry,omitempty"`
-	DefaultAgent string `json:"default_agent,omitempty"` // "claude" or "codex"
+	DefaultAgent string `json:"default_agent,omitempty"` // "claude", "codex", "opencode", or "cursor"
 	DrawerHeight int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
 	// SessionSuspendMode controls auto-hibernation of idle sessions under memory
 	// pressure: "off", "light" (default), "balanced", or "aggressive". Read via
@@ -127,7 +127,7 @@ type Config struct {
 func (c *Config) IsFirstRun() bool { return !c.loadedFromDisk }
 
 // GetDefaultAgent returns the default coding agent for new sessions ("claude",
-// "codex", or "opencode"). The stored value is normalized (trimmed +
+// "codex", "opencode", or "cursor"). The stored value is normalized (trimmed +
 // lower-cased) so hand-edited configs like "Codex" or " codex " resolve
 // correctly instead of silently falling back.
 func (c *Config) GetDefaultAgent() string {
@@ -136,6 +136,8 @@ func (c *Config) GetDefaultAgent() string {
 		return "codex"
 	case "opencode":
 		return "opencode"
+	case "cursor":
+		return "cursor"
 	default:
 		return "claude"
 	}
