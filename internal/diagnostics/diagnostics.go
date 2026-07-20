@@ -22,6 +22,7 @@ type Report struct {
 	TmuxVersion   string
 	ClaudeVersion string
 	CodexVersion  string
+	CursorVersion string
 	GhVersion     string
 	Config        string
 	SessionCount  int
@@ -64,6 +65,7 @@ func Collect(version string, sessionCount int) *Report {
 	r.TmuxVersion = runCmd("tmux", "-V")
 	r.ClaudeVersion = runCmd("claude", "--version")
 	r.CodexVersion = firstLine(runCmd("codex", "--version"))
+	r.CursorVersion = firstLine(runCmd("cursor-agent", "--version"))
 	r.GhVersion = firstLine(runCmd("gh", "--version"))
 
 	r.TerminalEnv = collectTerminalEnv()
@@ -162,6 +164,9 @@ func (r *Report) formatMarkdown(description string) string {
 	}
 	if r.CodexVersion != "" {
 		fmt.Fprintf(&b, "- **Codex CLI**: %s\n", sanitize(r.CodexVersion))
+	}
+	if r.CursorVersion != "" {
+		fmt.Fprintf(&b, "- **Cursor CLI**: %s\n", sanitize(r.CursorVersion))
 	}
 	if r.GhVersion != "" {
 		fmt.Fprintf(&b, "- **gh CLI**: %s\n", r.GhVersion)
