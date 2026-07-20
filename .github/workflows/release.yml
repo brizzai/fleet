@@ -74,7 +74,7 @@ jobs:
           fi
           git push origin "$TAG" 2>/dev/null || echo "Tag $TAG already pushed"
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
