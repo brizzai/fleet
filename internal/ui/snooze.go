@@ -220,8 +220,15 @@ func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID stri
 }
 
 // clearSnooze wakes the cursor's scope now. A woken group re-expands, mirroring
-// the auto-collapse — setExpanded is idempotent, so a group the user already
-// re-expanded by hand is unaffected.
+// the auto-collapse; setExpanded is idempotent, so a group the user re-expanded
+// by hand meanwhile is unaffected.
+//
+// Known limitation: a group that was ALREADY folded before the snooze does
+// spring open on wake — snooze takes ownership of a collapse state that
+// predated it. Accepted deliberately: knowing the difference means persisting
+// "the snooze is what collapsed this" across restarts (the restart is the
+// common wake path — see the startup reconciliation in loadSessions), i.e. a
+// schema change on snoozed_groups for a fairly small nicety.
 func (h *Home) clearSnooze(sc snoozeScope) {
 	if sc.session != nil {
 		sc.session.SetSnoozedUntil(time.Time{})

@@ -286,10 +286,12 @@ func parseSnoozeDuration(s string) (time.Duration, error) {
 	if n <= 0 {
 		return 0, fmt.Errorf("must be more than 0")
 	}
-
-	total := time.Duration(n) * mult
-	if total > snoozeMaxDuration {
+	// Bound n BEFORE multiplying. CharLimit admits 8 digits, and
+	// time.Duration(n)*mult overflows int64 well below that — `9999999d` wraps
+	// to a *negative* duration, which is not `> snoozeMaxDuration`, so a
+	// post-multiply cap waves it through as a wake time in the past.
+	if time.Duration(n) > snoozeMaxDuration/mult {
 		return 0, fmt.Errorf("max 30d")
 	}
-	return total, nil
+	return time.Duration(n) * mult, nil
 }

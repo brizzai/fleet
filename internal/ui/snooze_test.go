@@ -246,25 +246,39 @@ func TestParseSnoozeDuration(t *testing.T) {
 	}
 
 	bad := []string{
-		"",       // empty
-		"15",     // bare number — no unit
-		"m",      // unit with no number
-		"15s",    // seconds aren't offered
-		"1h30m",  // combos aren't offered
-		"-5m",    // negative
-		"0m",     // zero
-		"31d",    // past the 30d cap
-		"999d",   // fat-fingered
+		"",      // empty
+		"15",    // bare number — no unit
+		"m",     // unit with no number
+		"15s",   // seconds aren't offered
+		"1h30m", // combos aren't offered
+		"-5m",   // negative
+		"0m",    // zero
+		"31d",   // past the 30d cap
+		"999d",  // fat-fingered
+		// Overflow guard: CharLimit admits 8 digits, and time.Duration(n)*mult
+		// wraps int64 well below that. Before the fix these returned a NEGATIVE
+		// duration with err == nil — not > the cap, so it sailed through as a
+		// wake time in the past.
+		"9999999d",
+		"9999999h",
+		"999999d",
+		"99999999m",
 		"abc",    // nonsense
 		"1.5h",   // fractional
 		"15 m",   // internal space
 		"1m2d3h", // multi-unit
 	}
 	for _, in := range bad {
-		if got, err := parseSnoozeDuration(in); err == nil {
+		got, err := parseSnoozeDuration(in)
+		if err == nil {
 			t.Errorf("parse(%q) = %v, want an error", in, got)
 		} else if err.Error() == "" {
 			t.Errorf("parse(%q): error message is empty — it renders in the dialog", in)
+		}
+		// Belt and braces for the overflow class: a rejected input must never
+		// hand back a usable duration, and never a negative one.
+		if got < 0 {
+			t.Errorf("parse(%q) returned a negative duration %v — overflow slipped through", in, got)
 		}
 	}
 }
@@ -580,6 +594,101 @@ func TestGroupSnoozeCollapsesAndWakeExpands(t *testing.T) {
 	}
 }
 
+// TestSnoozeMutedCoversCollapsedGroups: statusCountsLine is fleet-wide, so the
+// muted map must cover sessions hidden inside a collapsed group. Reading the
+// answer off flatItems instead would silently drop them and make the global
+// pill disagree with the sidebar underneath it.
+func TestSnoozeMutedCoversCollapsedGroups(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "snzm.db")
+	storage, err := session.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { storage.Close() })
+
+	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
+	const repo = "/tmp/snz-collapsed"
+	const origin = "github.com/acme/collapsed"
+	h.setGitInfo(map[string]*git.RepoInfo{repo: {OriginKey: origin}})
+
+	hidden := session.NewSession("hidden under a fold", repo)
+	hidden.SetStatus(session.StatusWaiting)
+	hidden.SetSnoozedUntil(time.Now().Add(time.Hour))
+	h.sessions = []*session.Session{hidden}
+
+	// Fold the origin so the session is absent from flatItems entirely.
+	h.repoExpanded[OriginExpandKey(origin)] = false
+	h.rebuildFlatItems()
+
+	for _, it := range h.flatItems {
+		if it.Session != nil && it.Session.ID == hidden.ID {
+			t.Fatal("precondition failed: session should be hidden by the collapsed origin")
+		}
+	}
+	if !h.snoozeMuted[hidden.ID] {
+		t.Error("a snoozed session inside a collapsed group must still be marked muted")
+	}
+}
+
+// TestForgetSnoozeClearsGroupState: snoozed_groups shares collapsed_groups'
+// keyspace, so it has to share its lifecycle. Without cleanup on delete, a
+// worktree created later at the same path is born muted — dimmed, skipped by
+// Space, with a countdown nobody set — until the original deadline lapses.
+func TestForgetSnoozeClearsGroupState(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "snzf.db")
+	storage, err := session.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { storage.Close() })
+
+	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
+	const repo = "/tmp/snz-forget"
+	const origin = "github.com/acme/forget"
+	h.setGitInfo(map[string]*git.RepoInfo{repo: {OriginKey: origin}})
+
+	h.flatItems = []SidebarItem{{IsRepoHeader: true, IsCheckoutHeader: true, RepoPath: repo, Expanded: true}}
+	h.cursor = 0
+	sc, ok := h.snoozeScopeAtCursor()
+	if !ok {
+		t.Fatal("expected a checkout scope at the cursor")
+	}
+	h.applySnooze(sc, SnoozeDurations[2]) // 4h
+
+	if groupSnoozeAt(h.groupSnooze, repo, time.Now()).IsZero() {
+		t.Fatal("precondition failed: group snooze was not set")
+	}
+
+	h.forgetSnooze(repo)
+
+	if got := groupSnoozeAt(h.groupSnooze, repo, time.Now()); !got.IsZero() {
+		t.Errorf("in-memory group snooze survived the delete: %v", got)
+	}
+	persisted, err := storage.LoadSnoozedGroups()
+	if err != nil {
+		t.Fatalf("LoadSnoozedGroups: %v", err)
+	}
+	if _, still := persisted[repo]; still {
+		t.Error("persisted group snooze survived the delete — it would resurrect on re-add")
+	}
+	// The origin key goes too when the last checkout under it is gone, matching
+	// forgetCollapse's rule.
+	if _, still := persisted[OriginExpandKey(origin)]; still {
+		t.Error("orphaned origin snooze survived the last checkout's removal")
+	}
+
+	// The real symptom: a session created at that path afterwards must be awake.
+	reborn := session.NewSession("created after the delete", repo)
+	reborn.SetStatus(session.StatusWaiting)
+	h.sessions = []*session.Session{reborn}
+	h.rebuildFlatItems()
+	for _, it := range h.flatItems {
+		if it.Session != nil && it.Session.ID == reborn.ID && it.Snooze.Muted {
+			t.Error("a session created after the delete was born muted")
+		}
+	}
+}
+
 // TestMaybeWakeSnoozedExpires: the sweep drops lapsed deadlines and leaves live
 // ones alone, and self-throttles so it isn't doing SQLite writes every tick.
 func TestMaybeWakeSnoozedExpires(t *testing.T) {
@@ -652,6 +761,39 @@ func TestRenderSnoozedRowFitsWidth(t *testing.T) {
 					tc.name, ansi.StringWidth(out), width, out)
 			}
 		}
+	}
+}
+
+// TestSelectedRowKeepsFullTitleBudget: the selected branch never renders
+// snoozeRaw (it draws its own affordance note outside the pill), so it must not
+// be charged for it. Before the fix the cursor row lost ~6 cells of title to a
+// suffix it didn't draw — and the title visibly grew when you moved the cursor off.
+func TestSelectedRowKeepsFullTitleBudget(t *testing.T) {
+	const width = 44
+	longTitle := "a really quite long session title that needs truncating"
+
+	mk := func(sn snoozeResult) string {
+		s := session.NewSession(longTitle, "/tmp/w")
+		s.SetStatus(session.StatusWaiting)
+		return renderSessionItem(SidebarItem{Session: s, Snooze: sn}, width, true, -1)
+	}
+
+	plain := mk(snoozeResult{})
+	snoozed := mk(snoozeResult{Muted: true, Until: time.Now().Add(4 * time.Hour), OwnTimer: true})
+
+	// Compare the title as rendered inside the selection pill: strip styling and
+	// cut at the affordance note, which is appended outside the budget.
+	titleOf := func(row string) string {
+		plainRow := ansi.Strip(row)
+		if i := strings.Index(plainRow, SnoozeGlyph); i >= 0 {
+			plainRow = plainRow[:i]
+		}
+		return strings.TrimSpace(plainRow)
+	}
+
+	if got, want := titleOf(snoozed), titleOf(plain); got != want {
+		t.Errorf("selected snoozed row truncates differently from an unsnoozed one:\n"+
+			" snoozed: %q\n   plain: %q", got, want)
 	}
 }
 

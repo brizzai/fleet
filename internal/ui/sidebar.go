@@ -673,7 +673,16 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	// rather than bumping `reserve` — it's present on only some rows. Measured
 	// with ansi.StringWidth because the marker is a multi-byte rune (len() would
 	// over-reserve by 2 and truncate snoozed titles early).
-	maxTitleLen := width - reserve - len(slotRaw) - ansi.StringWidth(snoozeRaw)
+	//
+	// Charged on unselected rows only: the selected branch never renders
+	// snoozeRaw (it draws its own affordance note *outside* the selection pill,
+	// which is unbudgeted), so docking it there shortened the cursor row's title
+	// for a suffix it doesn't draw — the title visibly grew when you moved off.
+	snoozeCost := 0
+	if !selected {
+		snoozeCost = ansi.StringWidth(snoozeRaw)
+	}
+	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}

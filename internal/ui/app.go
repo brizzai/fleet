@@ -280,6 +280,12 @@ type Home struct {
 	// idle-suspend sweep, which lives there because it probes sysctl, expiry is
 	// clock arithmetic and a tiny SQLite write.)
 	groupSnooze map[string]time.Time
+	// snoozeMuted is the resolved "is this session attention-muted" answer for
+	// every session, recomputed in rebuildFlatItems. Exists so fleet-wide
+	// consumers (statusCountsLine) consult the same resolution the sidebar rows
+	// were stamped with instead of re-deriving the precedence rule — see
+	// snoozeState's doc. Keyed by session ID.
+	snoozeMuted map[string]bool
 	// lastSnoozeSweepAt throttles that sweep, mirroring lastSuspendSweepAt.
 	lastSnoozeSweepAt time.Time
 	// attachAfterResumeID: when a suspended session is resumed via Enter, the
@@ -1467,6 +1473,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err := h.storage.SetGroupSnooze(key, time.Time{}); err != nil {
 					debuglog.Logger.Error("failed to clear expired group snooze", "key", key, "err", err)
 				}
+				// Undo the auto-collapse, exactly as maybeWakeSnoozed does on
+				// the live path. Without this the two wake paths disagree: a
+				// "Tomorrow" snooze — the preset most likely to span a restart —
+				// would come back folded forever, with no marker left to
+				// explain why. Runs after the persisted-collapse restore above,
+				// so it deliberately overrides the row this snooze wrote.
+				h.setExpanded(key, true)
 			}
 		}
 		// Default all repos to expanded on first load.
@@ -3340,6 +3353,7 @@ func (h *Home) unpinRepoHeader(repoPath string) tea.Cmd {
 		debuglog.Logger.Error("failed to unpin repo", "repo", repoPath, "err", err)
 	}
 	h.forgetCollapse(repoPath)
+	h.forgetSnooze(repoPath)
 	h.actionLog.Add("unpin repo", filepath.Base(repoPath), true)
 	h.rebuildFlatItems()
 	if h.cursor >= len(h.flatItems) {
@@ -3887,6 +3901,33 @@ func (h *Home) forgetCollapse(repoPath string) {
 	h.clearCollapse(OriginExpandKey(origin))
 }
 
+// forgetSnooze drops group-snooze state for a checkout being forgotten, exactly
+// mirroring forgetCollapse (same key space, same last-checkout rule for the
+// origin). The two tables share a keyspace by design, so they have to share a
+// lifecycle: without this, snoozing a worktree and then removing it leaves the
+// row behind, and a worktree later created at the same path is born muted —
+// dimmed, skipped by Space, absent from the pills — with a countdown nobody set.
+func (h *Home) forgetSnooze(repoPath string) {
+	h.clearGroupSnooze(repoPath)
+	origin := h.originOf(repoPath)
+	if origin == "" || h.originHasCheckoutExcept(origin, repoPath) {
+		return
+	}
+	h.clearGroupSnooze(OriginExpandKey(origin))
+}
+
+// clearGroupSnooze drops a group key's snooze from memory and storage. No-op
+// when the key isn't snoozed, so it's safe on every delete path.
+func (h *Home) clearGroupSnooze(key string) {
+	if key == "" {
+		return
+	}
+	delete(h.groupSnooze, key)
+	if err := h.storage.SetGroupSnooze(key, time.Time{}); err != nil {
+		debuglog.Logger.Error("failed to clear group snooze", "key", key, "err", err)
+	}
+}
+
 // originHasCheckoutExcept reports whether any currently-known checkout other
 // than `except` maps to `origin`, scanning the same sources the sidebar renders
 // from (sessions, pinned repos, pending workspaces). Sessions sharing `except`'s
@@ -4308,6 +4349,7 @@ func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
 			debuglog.Logger.Error("failed to unpin repo", "repo", msg.repoPath, "err", err)
 		}
 		h.forgetCollapse(msg.repoPath)
+		h.forgetSnooze(msg.repoPath)
 	}
 
 	// Clear any slot binding pointing at this session. FK cascade drops the
@@ -5873,15 +5915,16 @@ func (h *Home) cursorBreadcrumb(bg color.Color) string {
 // total fleet size is useful info, but it doesn't deserve a glyph.
 func (h *Home) statusCountsLine(bg color.Color) string {
 	counts := make(map[session.Status]int)
-	originOf, _ := h.originResolvers()
-	now := time.Now()
 	for _, s := range h.sessions {
 		// Muted sessions are absent from the attention glyphs here for the
 		// same reason they're absent from the per-header pills — otherwise the
 		// global line contradicts the sidebar it sits above. Snooze gets no
 		// counter of its own: it is a sidebar-only signal by design.
-		repo := session.GetRepoRoot(s.ProjectPath)
-		if snoozeState(s, originOf(repo), repo, h.groupSnooze, now).Muted {
+		//
+		// Read from the map rebuildFlatItems stamped rather than calling
+		// snoozeState again: the precedence rule lives in exactly one place, and
+		// this runs on every View frame.
+		if h.snoozeMuted[s.ID] {
 			continue
 		}
 		counts[s.GetStatus()]++
@@ -6120,7 +6163,28 @@ func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 
 func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
+	now := time.Now()
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf)
+
+	// Resolve the attention-mute for EVERY session, not just the visible ones,
+	// so callers that count the whole fleet (statusCountsLine) read the same
+	// answer the sidebar rows do rather than re-deriving the precedence rule.
+	// Deliberately not read off flatItems: that omits children of collapsed
+	// groups, and the global pill is fleet-wide by design.
+	//
+	// Resolving here rather than at each call site also moves the work from
+	// per-View-frame to per-rebuild — statusCountsLine runs on every frame,
+	// including the ~60ms What's New shimmer tick, and originResolvers() takes
+	// the gitInfo lock and builds three maps each time.
+	muted := make(map[string]bool, len(h.sessions))
+	for _, s := range h.sessions {
+		repo := session.GetRepoRoot(s.ProjectPath)
+		if snoozeState(s, originOf(repo), repo, h.groupSnooze, now).Muted {
+			muted[s.ID] = true
+		}
+	}
+	h.snoozeMuted = muted
+
 	h.sidebarDirty = true
 }
 
