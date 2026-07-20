@@ -124,6 +124,13 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 		}
 	}
 
+	if t == Cursor {
+		if o.ResumeID != "" {
+			return fmt.Sprintf("cursor-agent --resume %s", o.ResumeID)
+		}
+		return "cursor-agent"
+	}
+
 	// Claude (default).
 	cmd := "claude"
 	if o.ForkID != "" {
