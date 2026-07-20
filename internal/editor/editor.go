@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -76,9 +77,15 @@ var (
 
 // installedBundles lists the app bundles in the standard macOS locations. It
 // scans once per process: installing an IDE mid-session is not worth a rescan
-// on every settings frame.
+// on every settings frame. Non-darwin returns nothing — `open -a` doesn't
+// exist there, and ~/Applications isn't safe to treat as empty-by-absence
+// (GNUstep desktops use it), so the guard is explicit rather than relying on
+// the scan dirs not existing.
 func installedBundles() []string {
 	scanOnce.Do(func() {
+		if runtime.GOOS != "darwin" {
+			return
+		}
 		dirs := []string{"/Applications"}
 		if home, err := os.UserHomeDir(); err == nil {
 			dirs = append(dirs,

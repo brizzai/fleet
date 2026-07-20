@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Install fleet via Homebrew, the install script, or go install.
+description: Install fleet via Homebrew, the install script, go install, or Linux packages.
 ---
 
 ## Homebrew (recommended)
@@ -24,6 +24,21 @@ go install github.com/brizzai/fleet/cmd/fleet@latest
 ```
 
 Requires Go 1.26+.
+
+## Linux packages
+
+`.deb`/`.rpm` packages are produced by the release pipeline:
+
+```bash
+sudo apt install ./fleet_<version>_linux_amd64.deb
+```
+
+Or build and run in Docker from the repo root:
+
+```bash
+docker build -t fleet .
+docker run -it --rm -v "$PWD:/repo" -w /repo fleet
+```
 
 ## Verify
 

@@ -19,6 +19,8 @@ type Report struct {
 	OS            string
 	Arch          string
 	MacOSVersion  string
+	LinuxDistro   string // PRETTY_NAME from /etc/os-release (Linux only)
+	KernelVersion string // uname -r (Linux only)
 	TmuxVersion   string
 	ClaudeVersion string
 	CodexVersion  string
@@ -60,7 +62,12 @@ func Collect(version string, sessionCount int) *Report {
 		SessionCount: sessionCount,
 	}
 
-	r.MacOSVersion = runCmd("sw_vers", "-productVersion")
+	if runtime.GOOS == "linux" {
+		r.LinuxDistro = OSReleasePrettyName()
+		r.KernelVersion = runCmd("uname", "-r")
+	} else {
+		r.MacOSVersion = runCmd("sw_vers", "-productVersion")
+	}
 	r.TmuxVersion = runCmd("tmux", "-V")
 	r.ClaudeVersion = runCmd("claude", "--version")
 	r.CodexVersion = firstLine(runCmd("codex", "--version"))
@@ -95,6 +102,24 @@ func collectTerminalEnv() TerminalEnv {
 	env.TmuxMouse = runCmd("tmux", "show-option", "-gv", "mouse")
 
 	return env
+}
+
+// OSSummary is the single source for the human-readable OS description —
+// "macOS 15.1", "Ubuntu 24.04.4 LTS", or the bare GOOS as a fallback. Both
+// the bug-report dialog and the markdown issue body render through this;
+// they used to hand-roll separate switches over the same fields and drifted
+// (the dialog shipped without the Linux case). Kernel version is deliberately
+// not included — WSL kernel strings are long and would crowd the dialog's
+// one-liner; the markdown body carries it on its own line.
+func (r *Report) OSSummary() string {
+	switch {
+	case r.MacOSVersion != "":
+		return "macOS " + r.MacOSVersion
+	case r.LinuxDistro != "":
+		return r.LinuxDistro
+	default:
+		return r.OS
+	}
 }
 
 // FormatMarkdownWithDesc formats the report with a user-provided description.
@@ -149,10 +174,9 @@ func (r *Report) formatMarkdown(description string) string {
 	// Diagnostics.
 	b.WriteString("### Diagnostics\n")
 	fmt.Fprintf(&b, "- **Version**: %s\n", r.Version)
-	if r.MacOSVersion != "" {
-		fmt.Fprintf(&b, "- **macOS**: %s (%s)\n", r.MacOSVersion, r.Arch)
-	} else {
-		fmt.Fprintf(&b, "- **OS**: %s/%s\n", r.OS, r.Arch)
+	fmt.Fprintf(&b, "- **OS**: %s (%s)\n", r.OSSummary(), r.Arch)
+	if r.KernelVersion != "" {
+		fmt.Fprintf(&b, "- **Kernel**: %s\n", r.KernelVersion)
 	}
 	if r.TmuxVersion != "" {
 		fmt.Fprintf(&b, "- **tmux**: %s\n", r.TmuxVersion)
@@ -234,6 +258,44 @@ func runCmd(name string, args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// OSReleasePrettyName returns PRETTY_NAME from /etc/os-release (os-release(5)),
+// e.g. `Ubuntu 24.04.1 LTS`, or "" when unavailable. Exported because
+// internal/analytics reports the same distro string.
+//
+// os-release(5): "/etc/os-release takes precedence over /usr/lib/os-release.
+// Applications should check for the former, and exclusively use its data if
+// it exists, and only fall back to /usr/lib/os-release if /etc/os-release
+// does not exist." Most distros symlink the former to the latter, but some
+// minimal/container images ship only /usr/lib/os-release.
+func OSReleasePrettyName() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		data, err = os.ReadFile("/usr/lib/os-release")
+		if err != nil {
+			return ""
+		}
+	}
+	return parseOSReleasePrettyName(string(data))
+}
+
+// parseOSReleasePrettyName is the pure parser behind OSReleasePrettyName.
+// os-release(5) values are shell-compatible: unquoted, double- or
+// single-quoted all occur in the wild (Alpine single-quotes).
+func parseOSReleasePrettyName(data string) string {
+	for line := range strings.SplitSeq(data, "\n") {
+		v, ok := strings.CutPrefix(line, "PRETTY_NAME=")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		return v
+	}
+	return ""
 }
 
 func firstLine(s string) string {

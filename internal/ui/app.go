@@ -3507,9 +3507,6 @@ const (
 	// suspendSweepBatch caps how many sessions one auto-sweep hibernates, so a
 	// fleet sheds gradually and re-checks pressure before shedding more.
 	suspendSweepBatch = 5
-	// suspendSwapCriticalMB: free swap below this is treated as critical even if
-	// kern.memorystatus_vm_pressure_level hasn't caught up (it lags swap thrash).
-	suspendSwapCriticalMB = 512
 )
 
 // maybeSuspendIdleSessions hibernates the most-idle sessions under memory pressure,
@@ -3557,7 +3554,11 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 	}
 
 	level, swapFreeMB := perfwatch.MemoryPressure()
-	if swapFreeMB >= 0 && swapFreeMB < suspendSwapCriticalMB {
+	// Whether low free swap escalates the level is a per-platform judgment:
+	// trusted outright on macOS (demand-grown swap, Jetsam lags thrash), but on
+	// Linux only when PSI already reports warning — fixed partitions sit
+	// partially used on healthy boxes.
+	if perfwatch.SwapEscalatesPressure(level, swapFreeMB) {
 		level = perfwatch.PressureCritical
 	}
 	minIdle, act := suspendIdleThreshold(mode, level)
@@ -6330,10 +6331,11 @@ func (h *Home) loadSessions() tea.Msg {
 			debuglog.Logger.Error("opencode plugin inject failed", "err", err)
 		}
 	}
-	// Route tmux copy-mode selections to the macOS clipboard via pbcopy, so
-	// drag/click-to-copy works on terminals that block OSC 52 (iTerm2 default)
-	// or don't support it (Apple Terminal). Runs here for users with existing
-	// sessions; Start covers fresh installs once a server exists.
+	// Route tmux copy-mode selections to the system clipboard (pbcopy on
+	// macOS; wl-copy/xclip/xsel on Linux), so drag/click-to-copy works on
+	// terminals that block OSC 52 (iTerm2 default) or don't support it (Apple
+	// Terminal). Runs here for users with existing sessions; Start covers
+	// fresh installs once a server exists.
 	tmux.EnsureCopyCommand()
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()
