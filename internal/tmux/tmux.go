@@ -193,11 +193,15 @@ func EnsureCopyCommand() {
 // selections into, or "" when no usable clipboard tool exists. macOS always
 // has pbcopy. Linux requires both the tool on PATH *and* its display server
 // reachable: wl-copy without WAYLAND_DISPLAY (or xclip/xsel without DISPLAY)
-// exits non-zero and the selection silently vanishes — strictly worse than
-// returning "" and letting tmux's default set-clipboard deliver the copy via
-// OSC 52, which is exactly what headless/SSH sessions need. wl-clipboard is
-// a common transitive dependency, so "wl-copy on PATH" says nothing about
-// the session type.
+// exits non-zero, so the local pipe delivers nothing. That is not by itself
+// data loss — copy-pipe-and-cancel passes set_clip=1, so tmux emits the OSC 52
+// selection *in addition to* running copy-command, and the two are independent
+// (verified on 3.5a: a copy-command exiting 1 still produced OSC 52). The copy
+// is only lost when the user has also set `set-clipboard off`, which suppresses
+// OSC 52 entirely. Still worth returning "" rather than a tool that cannot run:
+// it keeps the setting honest, and it is the only path that works for the
+// set-clipboard-off case. wl-clipboard is a common transitive dependency, so
+// "wl-copy on PATH" says nothing about the session type.
 //
 // Display vars come from fleet's own process environment. tmux runs
 // copy-command jobs with the *session* environment (environ_for_session),

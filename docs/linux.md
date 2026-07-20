@@ -43,12 +43,18 @@ Implementation notes:
 macOS; on Linux the first *usable* tool — `wl-copy` when `WAYLAND_DISPLAY`
 is set, else `xclip`/`xsel` when `DISPLAY` is set. A tool on PATH whose
 display server isn't reachable (headless/SSH, or wl-clipboard installed as
-a dependency on an X11 desktop) is skipped: piping into it would swallow
-the copy. With no usable tool, fleet leaves tmux alone — the default
+a dependency on an X11 desktop) is skipped: piping into it delivers
+nothing. With no usable tool, fleet leaves tmux alone — the default
 `set-clipboard external` already forwards copy-mode selections via OSC 52,
 which most modern Linux terminals accept, and a deliberate
 `set-clipboard off` is never overridden.
 `FLEET_NO_COPY_COMMAND=1` opts out entirely.
+
+Note that `copy-command` and OSC 52 are independent, not a fallback chain:
+`copy-pipe-and-cancel` passes `set_clip=1`, so tmux emits the OSC 52
+selection *as well as* running `copy-command`. A `copy-command` that fails
+therefore doesn't lose the copy unless `set-clipboard off` is also set,
+which suppresses OSC 52 on its own.
 
 Display vars (`WAYLAND_DISPLAY`/`DISPLAY`) are read from fleet's own
 process environment: tmux runs `copy-command` jobs with the *session*
@@ -90,7 +96,8 @@ On Linux, reports carry `PRETTY_NAME` from `/etc/os-release` plus
 ## Packaging
 
 - `Dockerfile` — golang:1.26 build stage → ubuntu:24.04 runtime with tmux,
-  git, xclip.
+  git, ca-certificates, locales. No clipboard tool: a plain container has no
+  display server to reach, so copy-mode uses the OSC 52 path.
 - `.goreleaser.yml` `nfpms` — `.deb`/`.rpm` with tmux+git dependencies,
   gh+xclip recommends; ships the systemd user unit to
   `/usr/lib/systemd/user/`.

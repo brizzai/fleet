@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,14 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrNotReplaceable reports that the running binary can't be swapped in place —
+// a package-managed install puts it in a root-owned dir (.deb/.rpm use
+// /usr/bin). It is a permanent, user-unfixable condition rather than a
+// failure, so the auto-update path treats it as a skip: logging it as an error
+// would put a red herring in every bug report (the ! flow pastes debug.log
+// into public issues) and count as a broken updater in telemetry.
+var ErrNotReplaceable = errors.New("binary is not replaceable by this user")
 
 const (
 	repo             = "brizzai/fleet"
@@ -228,7 +237,7 @@ func executablePath() (string, error) {
 func canReplace(exePath string) error {
 	tmp, err := os.CreateTemp(filepath.Dir(exePath), "fleet-update-probe-*")
 	if err != nil {
-		return fmt.Errorf("%s is not replaceable by this user (package-managed install?) — update via your package manager, or turn off auto-update in Settings: %w", exePath, err)
+		return fmt.Errorf("%w: %s (package-managed install?) — update via your package manager, or turn off auto-update in Settings: %v", ErrNotReplaceable, exePath, err)
 	}
 	name := tmp.Name()
 	_ = tmp.Close()
