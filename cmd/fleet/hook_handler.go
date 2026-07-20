@@ -25,8 +25,9 @@ type hookPayload struct {
 
 // mapEventToStatus maps a hook event to a fleet status string. Claude and Codex
 // send Claude-style event names; the OpenCode status plugin sends OpenCode-native
-// names (session.busy/session.idle/permission.asked) — these are additive, the
-// other agents never emit them, so the handler stays agent-neutral.
+// names (session.busy/session.idle/permission.asked); Cursor CLI's hooks.json
+// sends its own lowerCamelCase event names — these are all additive, no agent
+// emits another's names, so the handler stays agent-neutral.
 func mapEventToStatus(event string) string {
 	switch event {
 	case "UserPromptSubmit":
@@ -62,6 +63,26 @@ func mapEventToStatus(event string) string {
 		// the next session.idle. Without this, waiting can stick if OpenCode
 		// doesn't re-emit session.status{busy} after an in-flight approval.
 		return "running"
+	// Cursor CLI events (from hooks.json, see internal/hooks/cursor_hooks.go).
+	// Cursor has no dedicated permission/approval hook, so beforeShellExecution/
+	// afterShellExecution bracket the interactive approval prompt instead: the
+	// hook fires and returns immediately, then (unless auto-approved) Cursor's
+	// own UI blocks on a y/n prompt before the command actually runs and
+	// afterShellExecution fires — so "waiting" is only wrong for auto-approved
+	// commands, which resolve to "running" again almost immediately.
+	case "sessionStart":
+		// At rest until a prompt is submitted, same as Claude's SessionStart.
+		return "finished"
+	case "beforeSubmitPrompt":
+		return "running"
+	case "beforeShellExecution":
+		return "waiting"
+	case "afterShellExecution":
+		return "running"
+	case "stop":
+		return "finished"
+	case "sessionEnd":
+		return "dead"
 	default:
 		return ""
 	}
@@ -147,10 +168,12 @@ func handleHookHandler() {
 		"claudeSession", payload.SessionID,
 	)
 
-	// Extract user prompt and prompt count.
+	// Extract user prompt and prompt count. beforeSubmitPrompt is Cursor's
+	// UserPromptSubmit equivalent (see internal/hooks/cursor_hooks.go).
+	isPromptSubmit := payload.HookEventName == "UserPromptSubmit" || payload.HookEventName == "beforeSubmitPrompt"
 	var userPrompt string
 	var promptCount int
-	if payload.HookEventName == "UserPromptSubmit" && payload.Prompt != "" {
+	if isPromptSubmit && payload.Prompt != "" {
 		userPrompt = payload.Prompt
 	}
 
@@ -165,7 +188,7 @@ func handleHookHandler() {
 	}
 
 	// Increment prompt count on new user prompt submissions.
-	if payload.HookEventName == "UserPromptSubmit" {
+	if isPromptSubmit {
 		promptCount++
 	}
 
