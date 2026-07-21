@@ -80,7 +80,11 @@ func InjectCursorHooks(configDir string) (bool, error) {
 			debuglog.Logger.Error("cursor hooks: failed to parse hooks section", "err", err)
 			return false, fmt.Errorf("parse hooks section (refusing to overwrite user hooks): %w", err)
 		}
-	} else {
+	}
+	if events == nil {
+		// Either "hooks" was absent, or present as JSON null (Unmarshal leaves
+		// the map nil in both cases) — either way start from an empty map so
+		// the assignment below doesn't panic on a nil map.
 		events = make(map[string]json.RawMessage)
 	}
 

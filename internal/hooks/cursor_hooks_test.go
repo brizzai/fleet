@@ -150,3 +150,29 @@ func TestInjectCursorHooksRefusesMalformedEventEntries(t *testing.T) {
 		t.Errorf("hooks.json was modified despite the refusal:\nwant %s\ngot  %s", seed, data)
 	}
 }
+
+func TestInjectCursorHooksHandlesNullHooksSection(t *testing.T) {
+	dir := t.TempDir()
+	// json.Unmarshal leaves a map nil (not an error) when the JSON value is
+	// null, so a hand-edited "hooks": null must not panic on the later
+	// events[event] = ... assignment.
+	seed := `{"version":1,"hooks":null}`
+	path := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := InjectCursorHooks(dir)
+	if err != nil {
+		t.Fatalf("InjectCursorHooks: %v", err)
+	}
+	if !changed {
+		t.Errorf("expected changed=true when populating a null hooks section")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "stop") {
+		t.Errorf("fleet event not added:\n%s", data)
+	}
+}
