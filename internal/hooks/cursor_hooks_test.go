@@ -83,8 +83,10 @@ func TestInjectCursorHooksPreservesUnknownFieldsAndPromptHooks(t *testing.T) {
 	dir := t.TempDir()
 	// A managed event with: (1) a user's command-hook entry carrying fields
 	// []cursorHookEntry doesn't model (matcher, timeout), and (2) a prompt-hook
-	// entry with no "command" field at all. Both must survive byte-for-byte;
-	// only fleet's own entry gets appended alongside them.
+	// entry with no "command" field at all. Both must survive with their fields
+	// intact (re-marshaling via json.MarshalIndent means whitespace/key order
+	// can change, but no data is lost); only fleet's own entry gets appended
+	// alongside them.
 	seed := `{"version":1,"hooks":{"stop":[` +
 		`{"command":"./hooks/notify.sh","matcher":"^Bash$","timeout":30},` +
 		`{"type":"prompt","prompt":"Summarize what changed"}` +
