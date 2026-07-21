@@ -113,12 +113,28 @@ func InjectCursorHooks(configDir string) (bool, error) {
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return false, fmt.Errorf("create config dir: %w", err)
 	}
-	tmpPath := hooksPath + ".tmp"
-	if err := os.WriteFile(tmpPath, finalData, 0644); err != nil {
+	// A uniquely-named temp file (like WriteStatusFile) rather than a fixed
+	// "hooks.json.tmp": multiple fleet instances can start concurrently, and a
+	// shared tmp path would let one instance's rename race another's, failing
+	// with ENOENT or losing a write and leaving Cursor hooks uninstalled.
+	tmp, err := os.CreateTemp(configDir, "hooks.*.json.tmp")
+	if err != nil {
+		return false, fmt.Errorf("create hooks.json.tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below succeeds
+	if _, err := tmp.Write(finalData); err != nil {
+		tmp.Close()
 		return false, fmt.Errorf("write hooks.json.tmp: %w", err)
 	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return false, fmt.Errorf("chmod hooks.json.tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return false, fmt.Errorf("close hooks.json.tmp: %w", err)
+	}
 	if err := os.Rename(tmpPath, hooksPath); err != nil {
-		os.Remove(tmpPath)
 		debuglog.Logger.Error("cursor hooks: failed to rename hooks.json.tmp", "err", err)
 		return false, fmt.Errorf("rename hooks.json: %w", err)
 	}

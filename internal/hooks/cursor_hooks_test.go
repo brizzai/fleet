@@ -44,10 +44,17 @@ func TestInjectCursorHooks(t *testing.T) {
 			t.Errorf("event %q: unexpected hook entry %+v", event, e)
 		}
 	}
-	// Note: idempotency on re-install relies on the fleet-hook marker
-	// ("fleet hook-handler") matching the launch command, which requires the
-	// binary to be named "fleet" — true in production but not under `go test`
-	// (binary is *.test), so we don't assert no-op re-install here.
+	// Re-install is a no-op: isFleetHook also matches the binary-name-independent
+	// "--fleet-hook" marker arg, which GetHookCommand always appends regardless
+	// of what the running binary is named — so this holds under `go test` too,
+	// not just a binary literally named "fleet".
+	changed, err = InjectCursorHooks(dir)
+	if err != nil {
+		t.Fatalf("InjectCursorHooks (2nd): %v", err)
+	}
+	if changed {
+		t.Errorf("expected changed=false on re-install, got true")
+	}
 }
 
 func TestInjectCursorHooksPreservesUserHooks(t *testing.T) {
