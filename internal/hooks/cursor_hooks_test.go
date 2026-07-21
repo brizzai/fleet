@@ -67,7 +67,10 @@ func TestInjectCursorHooksPreservesUserHooks(t *testing.T) {
 	if _, err := InjectCursorHooks(dir); err != nil {
 		t.Fatalf("InjectCursorHooks: %v", err)
 	}
-	data, _ := os.ReadFile(filepath.Join(dir, "hooks.json"))
+	data, err := os.ReadFile(filepath.Join(dir, "hooks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(data), ".cursor/hooks/format.sh") {
 		t.Errorf("user hook was clobbered:\n%s", data)
 	}
@@ -145,7 +148,10 @@ func TestInjectCursorHooksRefusesMalformedEventEntries(t *testing.T) {
 	if _, err := InjectCursorHooks(dir); err == nil {
 		t.Fatal("expected InjectCursorHooks to error on malformed event entries, got nil")
 	}
-	data, _ := os.ReadFile(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(data) != seed {
 		t.Errorf("hooks.json was modified despite the refusal:\nwant %s\ngot  %s", seed, data)
 	}
