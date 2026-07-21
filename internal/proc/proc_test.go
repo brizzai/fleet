@@ -68,6 +68,8 @@ func TestExcluded(t *testing.T) {
 		{"", nil, true},
 		{"mycustomeditor", map[string]bool{"mycustomeditor": true}, true},
 		{"/usr/local/bin/code --wait", nil, true},
+		{"-bash", nil, true}, // login shell: argv[0] carries a leading dash
+		{"-zsh", nil, true},
 	}
 	for _, c := range cases {
 		if got := excluded(c.cmd, c.extra); got != c.want {
@@ -82,6 +84,7 @@ func TestNormalizeCmd(t *testing.T) {
 		"/usr/local/bin/code --wait": "code",
 		"Cursor":                     "cursor",
 		"  vim  ":                    "vim",
+		"-bash":                      "bash", // login-shell dash stripped
 		"":                           "",
 	}
 	for in, want := range cases {

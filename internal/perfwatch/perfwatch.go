@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"runtime/metrics"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -412,30 +413,109 @@ const (
 	PressureCritical = 4
 )
 
-// MemoryPressure reports the macOS system memory-pressure level and free swap in
-// MB. level follows kern.memorystatus_vm_pressure_level (1 normal / 2 warning /
-// 4 critical) — a far better OOM predictor than "Pages free" (systemFreeMB),
-// which macOS always keeps low by design. Returns (PressureUnknown, -1) on error.
-// Shells out to sysctl (~1-2ms) — call off the Update() loop.
-func MemoryPressure() (level int, swapFreeMB int64) {
-	level = PressureUnknown
-	swapFreeMB = -1
-	if out, err := exec.Command("sysctl", "-n", "kern.memorystatus_vm_pressure_level").Output(); err == nil {
-		var n int
-		if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n); err == nil {
-			level = n
+// swapCriticalMB: free swap below this is treated as an OOM signal by
+// SwapEscalatesPressure — but under platform-specific conditions (see
+// pressure_darwin.go / pressure_linux.go): trusted on its own on macOS,
+// only corroborating a PSI warning on Linux.
+const swapCriticalMB = 512
+
+// The MemoryPressure probe itself lives in pressure_darwin.go /
+// pressure_linux.go; the parsers below are kept untagged (same pattern as
+// internal/proc) so their tests run on any platform's CI.
+
+// parsePSIMemoryLevel maps /proc/pressure/memory (PSI, kernel ≥ 4.20) onto the
+// pressure levels above:
+//
+//	some avg10=14.22 avg60=8.00 avg300=2.00 total=999999
+//	full avg10=3.10 avg60=1.00 avg300=0.30 total=111111
+//
+// avg10 is the percentage of the last 10s that tasks spent stalled on memory —
+// "some" = at least one task, "full" = every runnable task. Thresholds are a
+// heuristic in the spirit of the macOS Jetsam levels this feeds: sustained
+// some-stalls (≥10%) mean reclaim is hurting → warning; full-stalls (≥10%) or
+// extreme some-stalls (≥50%) mean the machine is thrashing toward the OOM
+// killer → critical. Missing/unparseable input (CONFIG_PSI=n, kernel < 4.20)
+// reports PressureUnknown, which the suspend gate treats as "don't act".
+func parsePSIMemoryLevel(s string) int {
+	someAvg10, fullAvg10 := -1.0, -1.0
+	for line := range strings.SplitSeq(s, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
 		}
-	}
-	// vm.swapusage → "total = 11264.00M  used = 9955.44M  free = 1308.56M  (encrypted)"
-	if out, err := exec.Command("sysctl", "-n", "vm.swapusage").Output(); err == nil {
-		if i := strings.Index(string(out), "free = "); i >= 0 {
-			var f float64
-			if _, err := fmt.Sscanf(strings.TrimSpace(string(out)[i+len("free = "):]), "%fM", &f); err == nil {
-				swapFreeMB = int64(f)
+		var target *float64
+		switch fields[0] {
+		case "some":
+			target = &someAvg10
+		case "full":
+			target = &fullAvg10
+		default:
+			continue
+		}
+		for _, f := range fields[1:] {
+			if v, ok := strings.CutPrefix(f, "avg10="); ok {
+				if x, err := strconv.ParseFloat(v, 64); err == nil {
+					*target = x
+				}
 			}
 		}
 	}
-	return level, swapFreeMB
+	switch {
+	case someAvg10 < 0:
+		return PressureUnknown
+	case fullAvg10 >= 10 || someAvg10 >= 50:
+		return PressureCritical
+	case someAvg10 >= 10:
+		return PressureWarning
+	default:
+		return PressureNormal
+	}
+}
+
+// parseMeminfoSwapFreeMB extracts free swap in MB from /proc/meminfo. A box
+// with no swap configured (SwapTotal 0 — common on desktops and containers)
+// reports -1 (unknown), not 0: the caller treats scarce free swap as critical
+// pressure, which would otherwise fire permanently on swapless machines.
+func parseMeminfoSwapFreeMB(s string) int64 {
+	swapTotalKB, swapFreeKB := int64(-1), int64(-1)
+	for line := range strings.SplitSeq(s, "\n") {
+		if v, ok := strings.CutPrefix(line, "SwapTotal:"); ok {
+			swapTotalKB = parseMeminfoKB(v)
+		} else if v, ok := strings.CutPrefix(line, "SwapFree:"); ok {
+			swapFreeKB = parseMeminfoKB(v)
+		}
+	}
+	if swapTotalKB <= 0 || swapFreeKB < 0 {
+		return -1
+	}
+	return swapFreeKB / 1024
+}
+
+// parseMeminfoKB parses the value of a /proc/meminfo line ("  8388604 kB").
+func parseMeminfoKB(v string) int64 {
+	fields := strings.Fields(v)
+	if len(fields) == 0 {
+		return -1
+	}
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// parseSwapUsageFreeMB extracts free swap in MB from macOS `sysctl -n
+// vm.swapusage` output: "total = 11264.00M  used = 9955.44M  free = 1308.56M".
+func parseSwapUsageFreeMB(s string) int64 {
+	i := strings.Index(s, "free = ")
+	if i < 0 {
+		return -1
+	}
+	var f float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(s[i+len("free = "):]), "%fM", &f); err != nil {
+		return -1
+	}
+	return int64(f)
 }
 
 func sanitizeFilename(s string) string {

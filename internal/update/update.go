@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,14 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrNotReplaceable reports that the running binary can't be swapped in place —
+// a package-managed install puts it in a root-owned dir (.deb/.rpm use
+// /usr/bin). It is a permanent, user-unfixable condition rather than a
+// failure, so the auto-update path treats it as a skip: logging it as an error
+// would put a red herring in every bug report (the ! flow pastes debug.log
+// into public issues) and count as a broken updater in telemetry.
+var ErrNotReplaceable = errors.New("binary is not replaceable by this user")
 
 const (
 	repo             = "brizzai/fleet"
@@ -130,12 +139,28 @@ func Update(currentVersion string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The check itself succeeded — record it now, unconditionally. Recording
+	// only on full success let any later failure (an unwritable install dir,
+	// a flaky download) bypass the hourly throttle and re-run — re-download
+	// included — on every launch.
+	saveCheckTime()
 
 	latest := strings.TrimPrefix(release.TagName, "v")
 	current := strings.TrimPrefix(currentVersion, "v")
 	if latest == current {
-		saveCheckTime()
 		return "", nil
+	}
+
+	exePath, err := executablePath()
+	if err != nil {
+		return "", err
+	}
+	// Probe replaceability before downloading: a package-managed install
+	// (.deb/.rpm put the binary in /usr/bin) can't be swapped by an
+	// unprivileged user, and discovering that after the download wastes the
+	// whole transfer each time.
+	if err := canReplace(exePath); err != nil {
+		return "", err
 	}
 
 	archiveName := fmt.Sprintf("fleet_%s_%s_%s.tar.gz", latest, runtime.GOOS, runtime.GOARCH)
@@ -149,11 +174,10 @@ func Update(currentVersion string) (string, error) {
 		return "", err
 	}
 
-	if err := replaceBinary(binaryData); err != nil {
+	if err := replaceBinary(exePath, binaryData); err != nil {
 		return "", err
 	}
 
-	saveCheckTime()
 	return release.TagName, nil
 }
 
@@ -196,17 +220,33 @@ func downloadAsset(assetURL string) ([]byte, error) {
 	return data, nil
 }
 
-// replaceBinary atomically replaces the current executable with new binary data.
-func replaceBinary(binaryData []byte) error {
+// executablePath resolves the running binary's real path, symlinks followed,
+// so the writability probe and the final rename act on the actual file.
+func executablePath() (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
-		return err
+		return "", err
 	}
-	exePath, err = filepath.EvalSymlinks(exePath)
-	if err != nil {
-		return err
-	}
+	return filepath.EvalSymlinks(exePath)
+}
 
+// canReplace reports whether this process can swap the binary at exePath.
+// The rename in replaceBinary needs a writable *directory*, not a writable
+// binary, so the probe is the same operation replaceBinary starts with:
+// creating a temp file next to it.
+func canReplace(exePath string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(exePath), "fleet-update-probe-*")
+	if err != nil {
+		return fmt.Errorf("%w: %s (package-managed install?) — update via your package manager, or turn off auto-update in Settings: %v", ErrNotReplaceable, exePath, err)
+	}
+	name := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(name)
+	return nil
+}
+
+// replaceBinary atomically replaces the executable at exePath with new binary data.
+func replaceBinary(exePath string, binaryData []byte) error {
 	dir := filepath.Dir(exePath)
 	tmp, err := os.CreateTemp(dir, "fleet-update-*")
 	if err != nil {

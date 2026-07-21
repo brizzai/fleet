@@ -25,6 +25,11 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Build
         run: go build ./...
+      # The linux runner never compiles the darwin-tagged files
+      # (proc_darwin.go, pressure_darwin.go, …); cross-compile so a macOS
+      # build break is caught here, not at release time.
+      - name: Build (darwin)
+        run: GOOS=darwin go build ./...
       - name: Test
         run: go test -race ./...
 

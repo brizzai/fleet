@@ -5,19 +5,20 @@ description: What fleet needs to run.
 
 ## Required
 
-- **macOS** — fleet is Mac-only by design. Linux support is not planned.
-- **[tmux](https://github.com/tmux/tmux)** — `brew install tmux`
+- **macOS or Linux**
+- **[tmux](https://github.com/tmux/tmux)** — `brew install tmux` / `apt install tmux`. On Linux, tmux ≥ 3.3 is recommended (terminal passthrough); older versions work with that feature disabled.
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — `claude` on your `$PATH`
 
 ## Optional
 
 - **[`gh`](https://cli.github.com/)** — required for PR badges (CI status, reviews, unresolved threads). PR info is hidden if `gh` isn't installed.
-- **Google Chrome** — required for the `p`-to-open-PR tab-reuse feature. Falls back to `open <url>` if Chrome or the extension isn't available.
+- **Google Chrome** — required for the `p`-to-open-PR tab-reuse feature. Falls back to `open <url>` / `xdg-open <url>` if Chrome or the extension isn't available.
+- **Linux clipboard tool** — `wl-clipboard`, `xclip`, or `xsel` routes tmux copy-mode selections to the system clipboard; without one, fleet falls back to OSC 52.
 
 ## Permissions
 
 - fleet writes to `~/.config/fleet/` (state DB, hook status files, debug log)
-- The Chrome extension installs a Native Messaging Host manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/`
+- The Chrome extension installs a Native Messaging Host manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (macOS) or `~/.config/google-chrome/NativeMessagingHosts/` (Linux) — also installed into `~/.config/chromium/` and the beta/unstable config dirs when present
 - Hooks are auto-installed into `~/.claude/settings.json` on first launch
 
 Nothing leaves your machine.

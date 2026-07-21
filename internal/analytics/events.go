@@ -58,6 +58,11 @@ const (
 	EventMarkAllRead = "mark_all_read"
 	EventMarkUnread  = "mark_unread"
 
+	// Snooze (attention mute). Props: scope=session|checkout|origin,
+	// duration=30m|1h|4h|tomorrow, reason=manual|expired. No titles or paths.
+	EventSnoozeSet     = "snooze_set"
+	EventSnoozeCleared = "snooze_cleared"
+
 	// Claude / hook signals (engagement).
 	EventClaudePromptSubmitted  = "claude_prompt_submitted"
 	EventClaudeResponseReceived = "claude_response_received"
