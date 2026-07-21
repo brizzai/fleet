@@ -2,4 +2,4 @@
 type: added
 ---
 
-**Cursor CLI support** — Cursor's `cursor-agent` joins Claude, Codex, and OpenCode as a session agent, selectable from the `A` picker or as your `default_agent`.
+**Cursor joins the agent lineup.** You can now run sessions with Cursor CLI (`cursor-agent`) alongside Claude, Codex, and OpenCode — pick it from the `A` picker or set it as your `default_agent`.
