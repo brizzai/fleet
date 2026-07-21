@@ -19,11 +19,41 @@ func TestMapEventToStatus(t *testing.T) {
 		{"session.error", "error"},
 		{"permission.asked", "waiting"},
 		{"permission.replied", "running"},
+		// Cursor CLI events (see internal/hooks/cursor_hooks.go).
+		{"beforeSubmitPrompt", "running"},
+		{"beforeShellExecution", "waiting"},
+		{"afterShellExecution", "running"},
+		{"stop", "finished"},
+		{"sessionEnd", "dead"},
+		// Cursor's lowerCamelCase "sessionStart" is deliberately unmapped —
+		// distinct from Claude/Codex's PascalCase "SessionStart" above, which
+		// does map to "finished". See the no-sessionStart-case comment in
+		// mapEventToStatus.
+		{"sessionStart", ""},
 		{"UnknownEvent", ""},
 	}
 	for _, c := range cases {
 		if got := mapEventToStatus(c.event); got != c.want {
 			t.Errorf("mapEventToStatus(%q) = %q, want %q", c.event, got, c.want)
+		}
+	}
+}
+
+func TestIsPromptSubmit(t *testing.T) {
+	cases := []struct {
+		event string
+		want  bool
+	}{
+		{"UserPromptSubmit", true},
+		{"beforeSubmitPrompt", true},
+		{"Stop", false},
+		{"stop", false},
+		{"sessionStart", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isPromptSubmit(c.event); got != c.want {
+			t.Errorf("isPromptSubmit(%q) = %v, want %v", c.event, got, c.want)
 		}
 	}
 }

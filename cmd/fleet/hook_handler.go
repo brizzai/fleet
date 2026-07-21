@@ -70,9 +70,14 @@ func mapEventToStatus(event string) string {
 	// own UI blocks on a y/n prompt before the command actually runs and
 	// afterShellExecution fires — so "waiting" is only wrong for auto-approved
 	// commands, which resolve to "running" again almost immediately.
-	case "sessionStart":
-		// At rest until a prompt is submitted, same as Claude's SessionStart.
-		return "finished"
+	//
+	// No sessionStart case: unlike Claude, Cursor's initial status (see
+	// initialRunStatus in session.go) starts idle, not running — so there's
+	// nothing for sessionStart to correct, and mapping it to "finished" (as
+	// Claude's SessionStart does) would immediately flip a freshly launched,
+	// untouched session to finished before any turn ran. It falls through to
+	// the default unmapped case below; fleet subscribes to no such hook (see
+	// cursorHookEvents in internal/hooks/cursor_hooks.go).
 	case "beforeSubmitPrompt":
 		return "running"
 	case "beforeShellExecution":
@@ -86,6 +91,14 @@ func mapEventToStatus(event string) string {
 	default:
 		return ""
 	}
+}
+
+// isPromptSubmit reports whether event is a user-prompt-submission hook —
+// Claude/Codex's UserPromptSubmit, or Cursor's beforeSubmitPrompt equivalent
+// (see internal/hooks/cursor_hooks.go) — used to gate prompt-text capture and
+// prompt-count increments in handleHookHandler.
+func isPromptSubmit(event string) bool {
+	return event == "UserPromptSubmit" || event == "beforeSubmitPrompt"
 }
 
 // isCompactSessionStart reports the SessionStart that Claude Code fires when a
@@ -168,12 +181,11 @@ func handleHookHandler() {
 		"claudeSession", payload.SessionID,
 	)
 
-	// Extract user prompt and prompt count. beforeSubmitPrompt is Cursor's
-	// UserPromptSubmit equivalent (see internal/hooks/cursor_hooks.go).
-	isPromptSubmit := payload.HookEventName == "UserPromptSubmit" || payload.HookEventName == "beforeSubmitPrompt"
+	// Extract user prompt and prompt count.
+	promptSubmit := isPromptSubmit(payload.HookEventName)
 	var userPrompt string
 	var promptCount int
-	if isPromptSubmit && payload.Prompt != "" {
+	if promptSubmit && payload.Prompt != "" {
 		userPrompt = payload.Prompt
 	}
 
@@ -188,7 +200,7 @@ func handleHookHandler() {
 	}
 
 	// Increment prompt count on new user prompt submissions.
-	if isPromptSubmit {
+	if promptSubmit {
 		promptCount++
 	}
 
