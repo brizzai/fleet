@@ -14,8 +14,13 @@ import (
 // Cursor's payload field names match Claude's (hook_event_name, session_id,
 // prompt on beforeSubmitPrompt), so `fleet hook-handler` is reused unchanged;
 // only the event names and hooks.json shape are Cursor-specific.
+//
+// No sessionStart: fleet's initial status for a freshly launched Cursor
+// session is already idle (see initialRunStatus, session.go), and
+// mapEventToStatus (cmd/fleet/hook_handler.go) has no case for it — installing
+// the hook would only spawn an extra `fleet hook-handler` process per launch
+// for an event fleet doesn't act on.
 var cursorHookEvents = []string{
-	"sessionStart",
 	"beforeSubmitPrompt",
 	"beforeShellExecution",
 	"afterShellExecution",
@@ -143,16 +148,27 @@ func InjectCursorHooks(configDir string) (bool, error) {
 	return true, nil
 }
 
+// cursorHookEntryProbe is unmarshaled only to test whether a raw entry is
+// fleet's own command hook (by its "command" field). Every other field on the
+// raw entry — matcher, timeout, failClosed, loop_limit, or a prompt hook's
+// "prompt" (which carries no "command" at all) — is left untouched by
+// mergeCursorHookEvent; unmarshaling straight into []cursorHookEntry would
+// silently drop them on the re-marshal below.
+type cursorHookEntryProbe struct {
+	Command string `json:"command"`
+}
+
 // mergeCursorHookEvent adds fleet's hook to an event's flat entry array,
-// preserving any existing (non-fleet) entries and updating the command path
-// in place if it changed (e.g. after a rebuild).
+// preserving any existing (non-fleet) entries — including fields
+// []cursorHookEntry doesn't model — and updating the command path in place if
+// it changed (e.g. after a rebuild).
 //
-// Fail closed: an existing, non-empty entry that isn't a parseable
-// []cursorHookEntry array is refused rather than silently discarded — treating
-// unmarshal failure as "no entries" would clobber whatever the user (or another
-// tool) put there, contradicting InjectCursorHooks' preserve-user-hooks contract.
+// Fail closed: an existing, non-empty entry that isn't a parseable JSON array
+// is refused rather than silently discarded — treating unmarshal failure as
+// "no entries" would clobber whatever the user (or another tool) put there,
+// contradicting InjectCursorHooks' preserve-user-hooks contract.
 func mergeCursorHookEvent(existing json.RawMessage) (json.RawMessage, error) {
-	var entries []cursorHookEntry
+	var entries []json.RawMessage
 	if len(existing) > 0 {
 		if err := json.Unmarshal(existing, &entries); err != nil {
 			return nil, err
@@ -161,17 +177,40 @@ func mergeCursorHookEvent(existing json.RawMessage) (json.RawMessage, error) {
 
 	currentCmd := GetHookCommand()
 
-	for i, e := range entries {
-		if isFleetHook(e.Command) {
-			if e.Command != currentCmd {
-				entries[i].Command = currentCmd
-			}
-			result, err := json.Marshal(entries)
-			return result, err
+	for i, raw := range entries {
+		var probe cursorHookEntryProbe
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			continue // not a command-hook object (e.g. a prompt hook) — leave it untouched
 		}
+		if !isFleetHook(probe.Command) {
+			continue
+		}
+		if probe.Command == currentCmd {
+			return json.Marshal(entries)
+		}
+		// Patch only the "command" key so every other field on this entry
+		// (type, timeout, ...) survives untouched.
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, err
+		}
+		cmdRaw, err := json.Marshal(currentCmd)
+		if err != nil {
+			return nil, err
+		}
+		fields["command"] = cmdRaw
+		patched, err := json.Marshal(fields)
+		if err != nil {
+			return nil, err
+		}
+		entries[i] = patched
+		return json.Marshal(entries)
 	}
 
-	entries = append(entries, cursorHookEntry{Command: currentCmd, Type: "command"})
-	result, err := json.Marshal(entries)
-	return result, err
+	newEntry, err := json.Marshal(cursorHookEntry{Command: currentCmd, Type: "command"})
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, newEntry)
+	return json.Marshal(entries)
 }

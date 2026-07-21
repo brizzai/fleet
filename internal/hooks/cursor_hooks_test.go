@@ -74,8 +74,59 @@ func TestInjectCursorHooksPreservesUserHooks(t *testing.T) {
 	if !strings.Contains(string(data), "afterFileEdit") {
 		t.Errorf("user event removed:\n%s", data)
 	}
-	if !strings.Contains(string(data), "sessionStart") {
+	if !strings.Contains(string(data), "stop") {
 		t.Errorf("fleet event not added:\n%s", data)
+	}
+}
+
+func TestInjectCursorHooksPreservesUnknownFieldsAndPromptHooks(t *testing.T) {
+	dir := t.TempDir()
+	// A managed event with: (1) a user's command-hook entry carrying fields
+	// []cursorHookEntry doesn't model (matcher, timeout), and (2) a prompt-hook
+	// entry with no "command" field at all. Both must survive byte-for-byte;
+	// only fleet's own entry gets appended alongside them.
+	seed := `{"version":1,"hooks":{"stop":[` +
+		`{"command":"./hooks/notify.sh","matcher":"^Bash$","timeout":30},` +
+		`{"type":"prompt","prompt":"Summarize what changed"}` +
+		`]}}`
+	path := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InjectCursorHooks(dir); err != nil {
+		t.Fatalf("InjectCursorHooks: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var root struct {
+		Hooks map[string][]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse hooks.json: %v\n%s", err, data)
+	}
+	entries := root.Hooks["stop"]
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries on stop (2 preserved + fleet's), got %d:\n%s", len(entries), data)
+	}
+
+	var userCmdHook, promptHook map[string]any
+	if err := json.Unmarshal(entries[0], &userCmdHook); err != nil {
+		t.Fatal(err)
+	}
+	if userCmdHook["matcher"] != "^Bash$" || userCmdHook["timeout"] != float64(30) {
+		t.Errorf("user command-hook entry lost unrelated fields: %+v", userCmdHook)
+	}
+	if err := json.Unmarshal(entries[1], &promptHook); err != nil {
+		t.Fatal(err)
+	}
+	if promptHook["prompt"] != "Summarize what changed" || promptHook["type"] != "prompt" {
+		t.Errorf("prompt-hook entry (no \"command\" field) was corrupted: %+v", promptHook)
+	}
+	if !strings.Contains(string(entries[2]), "hook-handler") {
+		t.Errorf("fleet's own entry missing or malformed: %s", entries[2])
 	}
 }
 
