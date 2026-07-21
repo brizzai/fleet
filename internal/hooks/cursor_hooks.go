@@ -99,11 +99,16 @@ func InjectCursorHooks(configDir string) (bool, error) {
 	}
 	root["hooks"] = eventsRaw
 
-	versionRaw, err := json.Marshal(1)
-	if err != nil {
-		return false, fmt.Errorf("marshal version: %w", err)
+	// Only set version on a fresh file. Overwriting an existing value could
+	// silently downgrade a user's hooks.json metadata if Cursor bumps its
+	// schema version.
+	if _, ok := root["version"]; !ok {
+		versionRaw, err := json.Marshal(1)
+		if err != nil {
+			return false, fmt.Errorf("marshal version: %w", err)
+		}
+		root["version"] = versionRaw
 	}
-	root["version"] = versionRaw
 
 	finalData, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
