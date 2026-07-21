@@ -71,3 +71,22 @@ func TestInjectCursorHooksPreservesUserHooks(t *testing.T) {
 		t.Errorf("fleet event not added:\n%s", data)
 	}
 }
+
+func TestInjectCursorHooksRefusesMalformedEventEntries(t *testing.T) {
+	dir := t.TempDir()
+	// One of our managed events holds something that isn't a []cursorHookEntry
+	// array (e.g. hand-edited or written by another tool in a different shape).
+	// The whole write must be refused rather than silently dropping it.
+	seed := `{"version":1,"hooks":{"stop":{"command":"not-an-array"}}}`
+	path := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InjectCursorHooks(dir); err == nil {
+		t.Fatal("expected InjectCursorHooks to error on malformed event entries, got nil")
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != seed {
+		t.Errorf("hooks.json was modified despite the refusal:\nwant %s\ngot  %s", seed, data)
+	}
+}

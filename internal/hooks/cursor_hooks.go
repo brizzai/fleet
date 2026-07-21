@@ -80,7 +80,12 @@ func InjectCursorHooks(configDir string) (bool, error) {
 	}
 
 	for _, event := range cursorHookEvents {
-		events[event] = mergeCursorHookEvent(events[event])
+		merged, err := mergeCursorHookEvent(events[event])
+		if err != nil {
+			debuglog.Logger.Error("cursor hooks: failed to parse event entries", "event", event, "err", err)
+			return false, fmt.Errorf("parse %q entries (refusing to overwrite user hooks): %w", event, err)
+		}
+		events[event] = merged
 	}
 
 	eventsRaw, err := json.Marshal(events)
@@ -125,11 +130,16 @@ func InjectCursorHooks(configDir string) (bool, error) {
 // mergeCursorHookEvent adds fleet's hook to an event's flat entry array,
 // preserving any existing (non-fleet) entries and updating the command path
 // in place if it changed (e.g. after a rebuild).
-func mergeCursorHookEvent(existing json.RawMessage) json.RawMessage {
+//
+// Fail closed: an existing, non-empty entry that isn't a parseable
+// []cursorHookEntry array is refused rather than silently discarded — treating
+// unmarshal failure as "no entries" would clobber whatever the user (or another
+// tool) put there, contradicting InjectCursorHooks' preserve-user-hooks contract.
+func mergeCursorHookEvent(existing json.RawMessage) (json.RawMessage, error) {
 	var entries []cursorHookEntry
-	if existing != nil {
+	if len(existing) > 0 {
 		if err := json.Unmarshal(existing, &entries); err != nil {
-			entries = nil
+			return nil, err
 		}
 	}
 
@@ -140,12 +150,12 @@ func mergeCursorHookEvent(existing json.RawMessage) json.RawMessage {
 			if e.Command != currentCmd {
 				entries[i].Command = currentCmd
 			}
-			result, _ := json.Marshal(entries)
-			return result
+			result, err := json.Marshal(entries)
+			return result, err
 		}
 	}
 
 	entries = append(entries, cursorHookEntry{Command: currentCmd, Type: "command"})
-	result, _ := json.Marshal(entries)
-	return result
+	result, err := json.Marshal(entries)
+	return result, err
 }
