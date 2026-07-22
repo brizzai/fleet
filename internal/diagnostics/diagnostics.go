@@ -171,6 +171,32 @@ func (r *Report) formatMarkdown(description string) string {
 		b.WriteString("\n")
 	}
 
+	b.WriteString(r.FormatEnvironmentMarkdown(true))
+
+	return b.String()
+}
+
+// FormatEnvironmentMarkdown renders everything about the machine — versions,
+// terminal environment, and optionally the debug log and config — with no
+// description, errors, or action log. Split out of formatMarkdown so a report
+// that supplies its own narrative (the wrong-status report, whose evidence is a
+// signals table) can append the environment without a second "## Bug Report"
+// heading and an empty description placeholder underneath it.
+//
+// includeLogs gates the debug log, which is the reporter's content: a
+// wrong-status report offers to leave content out, and the global log tail must
+// honor that choice rather than smuggling it back in.
+func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
+	home, _ := os.UserHomeDir()
+	sanitize := func(s string) string {
+		if home != "" {
+			return strings.ReplaceAll(s, home, "~")
+		}
+		return s
+	}
+
+	var b strings.Builder
+
 	// Diagnostics.
 	b.WriteString("### Diagnostics\n")
 	fmt.Fprintf(&b, "- **Version**: %s\n", r.Version)
@@ -234,7 +260,7 @@ func (r *Report) formatMarkdown(description string) string {
 	b.WriteString("\n")
 
 	// Debug logs.
-	if r.RecentLogs != "" {
+	if includeLogs && r.RecentLogs != "" {
 		b.WriteString("<details><summary>Debug Log (last 100 lines)</summary>\n\n```\n")
 		b.WriteString(sanitize(r.RecentLogs))
 		b.WriteString("\n```\n</details>\n\n")

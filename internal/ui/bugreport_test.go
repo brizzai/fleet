@@ -6,12 +6,22 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+// bugFormDialog returns a dialog already past the type picker on the plain-bug
+// form, which is where these tests' assertions live. `!` now opens on the
+// picker, so tests that exercise submission have to step through it.
+func bugFormDialog() *BugReportDialog {
+	d := NewBugReportDialog()
+	d.Show("v0.0.0-test", 0, NewErrorHistory(50), NewActionLog(100), 100, 40, nil, 0, nil)
+	d.stage = stageForm
+	d.kind = kindBug
+	return d
+}
+
 func TestBugReportDialog_EnterWithGhMissing_ReturnsCmd(t *testing.T) {
 	// Ensure gh is not found regardless of the test environment.
 	t.Setenv("PATH", t.TempDir())
 
-	d := NewBugReportDialog()
-	d.visible = true
+	d := bugFormDialog()
 	d.descInput.SetValue("something broke")
 
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -30,8 +40,7 @@ func TestBugReportDialog_EnterWithGhMissing_ReturnsCmd(t *testing.T) {
 }
 
 func TestBugReportDialog_EnterWithEmptyDesc_Noop(t *testing.T) {
-	d := NewBugReportDialog()
-	d.visible = true
+	d := bugFormDialog()
 	d.descInput.SetValue("")
 
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -45,8 +54,7 @@ func TestBugReportDialog_EnterWithEmptyDesc_Noop(t *testing.T) {
 }
 
 func TestBugReportDialog_EnterWhileSubmitting_Noop(t *testing.T) {
-	d := NewBugReportDialog()
-	d.visible = true
+	d := bugFormDialog()
 	d.submitting = true
 	d.descInput.SetValue("something broke")
 
@@ -58,8 +66,7 @@ func TestBugReportDialog_EnterWhileSubmitting_Noop(t *testing.T) {
 }
 
 func TestBugReportDialog_Esc_Hides(t *testing.T) {
-	d := NewBugReportDialog()
-	d.visible = true
+	d := bugFormDialog()
 	d.submitting = true
 
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEsc})

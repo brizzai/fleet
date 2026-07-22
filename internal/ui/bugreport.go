@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/diagnostics"
+	"github.com/brizzai/fleet/internal/session"
 )
 
 // bugReportClosedMsg is sent when the bug report dialog closes.
@@ -20,12 +21,49 @@ type bugReportClosedMsg struct{}
 // bugReportOpenErrMsg is sent when opening the GitHub issue fails.
 type bugReportOpenErrMsg struct{ err error }
 
+// statusMisdetectedMsg is emitted when a wrong-status report is submitted, so
+// app.go can record the analytics event without the dialog importing analytics.
+type statusMisdetectedMsg struct {
+	shown, expected, agent string
+	hookStatus, paneDetect string
+	mismatch, wroteContent bool
+}
+
+// reportStage is which screen the dialog is on. The type picker comes first so
+// the report lands under the right label with a body sized to its kind — a
+// feature request has no business carrying a debug log, and a status complaint
+// filed as a generic bug is the failure mode this whole flow exists to fix.
+type reportStage int
+
+const (
+	stagePick reportStage = iota
+	stageForm
+)
+
+// reportKind is what the user said they were reporting.
+type reportKind int
+
+const (
+	kindStatus reportKind = iota
+	kindBug
+	kindFeature
+)
+
 // BugReportDialog displays diagnostics and recent errors for bug reporting.
 type BugReportDialog struct {
 	visible bool
 	width   int
 	height  int
 	scroll  int // scroll offset for content
+
+	stage      reportStage
+	kind       reportKind
+	pickCursor int
+	// kinds is the picker's rows for this invocation. kindStatus is present
+	// only when a session was under the cursor at `!` — there is nothing to
+	// report a wrong status *about* otherwise.
+	kinds  []reportKind
+	status statusReportForm
 
 	descInput     textinput.Model
 	report        *diagnostics.Report
@@ -46,12 +84,27 @@ func NewBugReportDialog() *BugReportDialog {
 }
 
 // Show collects diagnostics and shows the dialog.
-func (d *BugReportDialog) Show(version string, sessionCount int, errors *ErrorHistory, actions *ActionLog, tuiWidth, tuiHeight int, rs *RenderStats, uptime time.Duration) {
+//
+// sess describes the session under the cursor at the keypress, or nil when there
+// isn't one. Its status is read here and never refreshed: the capture and this
+// label both freeze the instant being complained about, and a status that
+// self-corrects before submit must not silently rewrite the report.
+func (d *BugReportDialog) Show(version string, sessionCount int, errors *ErrorHistory, actions *ActionLog, tuiWidth, tuiHeight int, rs *RenderStats, uptime time.Duration, sess *session.Session) {
 	d.visible = true
 	d.scroll = 0
 	d.submitting = false
 	d.descInput.SetValue("")
 	d.descInput.Focus()
+
+	d.stage = stagePick
+	d.pickCursor = 0
+	d.kinds = []reportKind{kindBug, kindFeature}
+	d.status = statusReportForm{}
+	if sess != nil {
+		d.kinds = []reportKind{kindStatus, kindBug, kindFeature}
+		d.status = newStatusReportForm(sess.Title, sess.GetStatus(), string(sess.Agent))
+	}
+	d.kind = d.kinds[0]
 
 	d.report = diagnostics.Collect(version, sessionCount)
 	d.report.TUIWidth = tuiWidth
@@ -76,12 +129,24 @@ func (d *BugReportDialog) SetSize(w, h int) {
 	d.height = h
 }
 
+// SetSnapshot installs an async status capture. Ignored unless the dialog is
+// still open on the invocation that asked for it — a capture landing after the
+// user closed and reopened would describe a session they are no longer
+// reporting on.
+func (d *BugReportDialog) SetSnapshot(snap snapshotResult) {
+	if !d.visible || d.status.sessionTitle == "" {
+		return
+	}
+	d.status.snap = snap
+	d.status.captured = snap.err == nil
+}
+
 // Update handles key events for the bug report dialog.
 func (d *BugReportDialog) Update(msg tea.Msg) (*BugReportDialog, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
 		// Non-key messages (notably tea.PasteMsg for cmd+v) go to the input.
-		if d.submitting {
+		if d.submitting || d.stage == stagePick {
 			return d, nil
 		}
 		var cmd tea.Cmd
@@ -89,10 +154,67 @@ func (d *BugReportDialog) Update(msg tea.Msg) (*BugReportDialog, tea.Cmd) {
 		return d, cmd
 	}
 
-	switch keyMsg.String() {
+	if d.stage == stagePick {
+		return d.updatePick(keyMsg)
+	}
+	return d.updateForm(keyMsg)
+}
+
+// updatePick handles the type picker. Esc closes outright rather than stepping
+// back, since the picker is the first screen.
+func (d *BugReportDialog) updatePick(keyMsg tea.KeyMsg) (*BugReportDialog, tea.Cmd) {
+	// Show always populates kinds, but the picker must not index a nil slice if
+	// the dialog is ever made visible another way.
+	if len(d.kinds) == 0 {
+		d.kinds = []reportKind{kindBug, kindFeature}
+	}
+	if d.pickCursor >= len(d.kinds) {
+		d.pickCursor = 0
+	}
+
+	switch key := keyMsg.String(); key {
 	case "esc":
 		d.Hide()
 		return d, func() tea.Msg { return bugReportClosedMsg{} }
+	case "up", "k":
+		if d.pickCursor > 0 {
+			d.pickCursor--
+		}
+		return d, nil
+	case "down", "j":
+		if d.pickCursor < len(d.kinds)-1 {
+			d.pickCursor++
+		}
+		return d, nil
+	case "1", "2", "3":
+		idx := int(key[0] - '1')
+		if idx >= len(d.kinds) {
+			return d, nil
+		}
+		d.pickCursor = idx
+		d.kind = d.kinds[idx]
+		d.stage = stageForm
+		return d, nil
+	case "enter":
+		d.kind = d.kinds[d.pickCursor]
+		d.stage = stageForm
+		return d, nil
+	}
+	return d, nil
+}
+
+// updateForm handles the per-kind form. Esc returns to the picker rather than
+// closing: reaching the wrong form is a misclick, and losing a typed
+// description to correct it would be a punishment for it.
+func (d *BugReportDialog) updateForm(keyMsg tea.KeyMsg) (*BugReportDialog, tea.Cmd) {
+	switch keyMsg.String() {
+	case "esc":
+		if d.submitting {
+			d.Hide()
+			return d, func() tea.Msg { return bugReportClosedMsg{} }
+		}
+		d.stage = stagePick
+		return d, nil
 	case "enter":
 		if d.submitting {
 			return d, nil
@@ -101,34 +223,117 @@ func (d *BugReportDialog) Update(msg tea.Msg) (*BugReportDialog, tea.Cmd) {
 		if desc == "" {
 			return d, nil
 		}
+		if d.kind == kindStatus {
+			expected, ok := d.status.expectedStatus()
+			if !ok {
+				return d, nil
+			}
+			d.submitting = true
+			return d, tea.Batch(d.submitStatusReport(desc, expected), d.trackMisdetection(expected))
+		}
 		d.submitting = true
 		return d, d.openGitHubIssue(desc)
-	default:
-		if d.submitting {
+	case "up", "down":
+		// ↑↓ rather than the ←→ this codebase usually gives cyclers: the
+		// description input holds focus here, and ←→ are its caret keys —
+		// taking them would cost the ability to fix a typo mid-string. ↑↓ do
+		// nothing in a single-line input, so they are free.
+		if d.kind == kindStatus && !d.submitting {
+			delta := 1
+			if keyMsg.String() == "up" {
+				delta = -1
+			}
+			d.status.cycleExpected(delta)
 			return d, nil
 		}
-		var cmd tea.Cmd
-		d.descInput, cmd = d.descInput.Update(msg)
-		return d, cmd
+	case "ctrl+p":
+		// Ctrl-modified so a literal "p" still types into the description.
+		if d.kind == kindStatus && !d.submitting && d.status.captured {
+			d.status.includeContent = !d.status.includeContent
+			return d, nil
+		}
 	}
+
+	if d.submitting {
+		return d, nil
+	}
+	var cmd tea.Cmd
+	d.descInput, cmd = d.descInput.Update(keyMsg)
+	return d, cmd
+}
+
+// trackMisdetection emits the analytics signal for a submitted status report.
+// It carries enum values and booleans only — no paths, no screen content — so
+// the aggregate survives regardless of what the reporter chose to attach.
+func (d *BugReportDialog) trackMisdetection(expected session.Status) tea.Cmd {
+	// Every field is read here, on the Update goroutine, and the message is
+	// built whole — the closure must not reach back into d.status, which a
+	// later Show() reassigns while this Cmd may still be pending.
+	f := &d.status
+	detection := metaSub(f.snap.meta, "detection")
+	hook := metaSub(f.snap.meta, "hook")
+	mismatch, _ := detection["mismatch"].(bool)
+	msg := statusMisdetectedMsg{
+		shown:        string(f.shownStatus),
+		expected:     string(expected),
+		agent:        f.agent,
+		hookStatus:   metaString(hook, "status"),
+		paneDetect:   metaString(detection, "pane_detected"),
+		mismatch:     mismatch,
+		wroteContent: f.includeContent,
+	}
+	return func() tea.Msg { return msg }
+}
+
+// submitStatusReport files the wrong-status issue.
+func (d *BugReportDialog) submitStatusReport(desc string, expected session.Status) tea.Cmd {
+	body := buildStatusReportBody(desc, expected, &d.status, d.report)
+	title := fmt.Sprintf("Wrong status: showed %s, expected %s — %s",
+		d.status.shownStatus, expected, truncate(desc, 60))
+	return d.createGitHubIssue(title, body, "bug")
 }
 
 func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
+	// Build title from description, truncated.
+	title := truncate(description, 60)
+
+	var body string
+	label := "bug"
+	if d.kind == kindFeature {
+		// A feature request carries prose and versions only. The error history,
+		// action log, and debug log are reproduction context for a defect; on an
+		// idea they are noise the maintainer has to scroll past.
+		label = "enhancement"
+		body = "## Feature Request\n\n### Problem\n" + description + "\n\n" +
+			fmt.Sprintf("### Environment\n- **Version**: %s\n- **OS**: %s (%s)\n",
+				d.report.Version, d.report.OSSummary(), d.report.Arch)
+	} else {
+		// Inject user description and render stats into the report.
+		body = d.report.FormatMarkdownWithDesc(description)
+		if d.renderStats != "" {
+			body += "\n" + d.renderStats
+		}
+	}
+
+	return d.createGitHubIssue(title, body, label)
+}
+
+// ghAvailable reports whether the gh CLI is on PATH. Filing goes through it, so
+// its absence is a dead end the footers have to say out loud.
+func ghAvailable() bool {
+	_, err := exec.LookPath("gh")
+	return err == nil
+}
+
+// createGitHubIssue files an issue and opens it in the browser. Shared by all
+// three report kinds; only title, body, and label differ between them.
+func (d *BugReportDialog) createGitHubIssue(title, body, label string) tea.Cmd {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return func() tea.Msg { return bugReportOpenErrMsg{err: fmt.Errorf("gh CLI not found")} }
 	}
 
-	// Build title from description, truncated.
-	title := truncate(description, 60)
-
-	// Inject user description and render stats into the report.
-	body := d.report.FormatMarkdownWithDesc(description)
-	if d.renderStats != "" {
-		body += "\n" + d.renderStats
-	}
-
 	return func() tea.Msg {
-		debuglog.Logger.Info("bug report: creating GitHub issue via API")
+		debuglog.Logger.Info("bug report: creating GitHub issue via API", "label", label)
 
 		// Write body to temp file.
 		tmpFile, err := os.CreateTemp("", "fleet-bug-*.md")
@@ -147,7 +352,7 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 		cmd := exec.Command("gh", "issue", "create",
 			"--repo", "brizzai/fleet",
 			"--title", title,
-			"--label", "bug",
+			"--label", label,
 			"--body-file", tmpFile.Name(),
 		)
 		out, err := cmd.Output()
@@ -170,6 +375,13 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 
 // View renders the bug report dialog.
 func (d *BugReportDialog) View() string {
+	if d.stage == stagePick {
+		return d.viewPick()
+	}
+	if d.kind == kindStatus {
+		return d.viewStatusForm()
+	}
+
 	dialogWidth := 60
 	if dialogWidth > d.width-4 {
 		dialogWidth = d.width - 4
@@ -186,7 +398,11 @@ func (d *BugReportDialog) View() string {
 	errorStyle := lipgloss.NewStyle().Foreground(ColorRed)
 
 	// Title.
-	b.WriteString(titleStyle.Render("Bug Report"))
+	heading := "Bug Report"
+	if d.kind == kindFeature {
+		heading = "Feature Request"
+	}
+	b.WriteString(titleStyle.Render(heading))
 	b.WriteString("\n")
 
 	// Description input.
@@ -197,55 +413,59 @@ func (d *BugReportDialog) View() string {
 	b.WriteString("  " + d.descInput.View())
 	b.WriteString("\n")
 
-	// Recent Errors.
-	b.WriteString("\n")
-	errCount := len(d.errorEntries)
-	if errCount > 5 {
-		errCount = 5
-	}
-	b.WriteString(sectionStyle.Render(fmt.Sprintf("Recent Errors (%d)", len(d.errorEntries))))
-	b.WriteString("\n")
-	if len(d.errorEntries) == 0 {
-		b.WriteString(dimStyle.Render("  No errors recorded"))
+	// Errors and actions are reproduction context for a defect. A feature
+	// request has nothing to reproduce, and its body omits them too.
+	if d.kind != kindFeature {
+		// Recent Errors.
 		b.WriteString("\n")
-	} else {
-		for i := 0; i < errCount; i++ {
-			e := d.errorEntries[i]
-			ago := formatTimeAgo(e.Timestamp)
-			line := fmt.Sprintf("  %s  %s", dimStyle.Render(ago), errorStyle.Render(truncate(e.Message, innerWidth-12)))
-			b.WriteString(line)
-			b.WriteString("\n")
+		errCount := len(d.errorEntries)
+		if errCount > 5 {
+			errCount = 5
 		}
-	}
-
-	// Recent Actions.
-	b.WriteString("\n")
-	actionCount := len(d.actionEntries)
-	if actionCount > 5 {
-		actionCount = 5
-	}
-	b.WriteString(sectionStyle.Render("Recent Actions"))
-	b.WriteString("\n")
-	if len(d.actionEntries) == 0 {
-		b.WriteString(dimStyle.Render("  No actions recorded"))
+		b.WriteString(sectionStyle.Render(fmt.Sprintf("Recent Errors (%d)", len(d.errorEntries))))
 		b.WriteString("\n")
-	} else {
-		for i := 0; i < actionCount; i++ {
-			a := d.actionEntries[i]
-			ago := formatTimeAgo(a.Timestamp)
-			result := dimStyle.Render("ok")
-			if !a.Success {
-				result = errorStyle.Render("ERROR")
-			}
-			detail := truncate(a.Detail, innerWidth-35)
-			line := fmt.Sprintf("  %s  %-18s %-20s %s",
-				dimStyle.Render(ago),
-				a.Action,
-				dimStyle.Render(detail),
-				result,
-			)
-			b.WriteString(line)
+		if len(d.errorEntries) == 0 {
+			b.WriteString(dimStyle.Render("  No errors recorded"))
 			b.WriteString("\n")
+		} else {
+			for i := 0; i < errCount; i++ {
+				e := d.errorEntries[i]
+				ago := formatTimeAgo(e.Timestamp)
+				line := fmt.Sprintf("  %s  %s", dimStyle.Render(ago), errorStyle.Render(truncate(e.Message, innerWidth-12)))
+				b.WriteString(line)
+				b.WriteString("\n")
+			}
+		}
+
+		// Recent Actions.
+		b.WriteString("\n")
+		actionCount := len(d.actionEntries)
+		if actionCount > 5 {
+			actionCount = 5
+		}
+		b.WriteString(sectionStyle.Render("Recent Actions"))
+		b.WriteString("\n")
+		if len(d.actionEntries) == 0 {
+			b.WriteString(dimStyle.Render("  No actions recorded"))
+			b.WriteString("\n")
+		} else {
+			for i := 0; i < actionCount; i++ {
+				a := d.actionEntries[i]
+				ago := formatTimeAgo(a.Timestamp)
+				result := dimStyle.Render("ok")
+				if !a.Success {
+					result = errorStyle.Render("ERROR")
+				}
+				detail := truncate(a.Detail, innerWidth-35)
+				line := fmt.Sprintf("  %s  %-18s %-20s %s",
+					dimStyle.Render(ago),
+					a.Action,
+					dimStyle.Render(detail),
+					result,
+				)
+				b.WriteString(line)
+				b.WriteString("\n")
+			}
 		}
 	}
 
@@ -277,12 +497,12 @@ func (d *BugReportDialog) View() string {
 		if ghAvailable {
 			hasDesc := strings.TrimSpace(d.descInput.Value()) != ""
 			if hasDesc {
-				b.WriteString(dimStyle.Render("enter") + " Submit    " + dimStyle.Render("esc") + " Close")
+				b.WriteString(dimStyle.Render("enter") + " Submit    " + dimStyle.Render("esc") + " Back")
 			} else {
-				b.WriteString(dimStyle.Render("Type a description, then press enter") + "    " + dimStyle.Render("esc") + " Close")
+				b.WriteString(dimStyle.Render("Type a description, then press enter") + "    " + dimStyle.Render("esc") + " Back")
 			}
 		} else {
-			b.WriteString(dimStyle.Render("gh CLI not found") + "    " + dimStyle.Render("esc") + " Close")
+			b.WriteString(dimStyle.Render("gh CLI not found") + "    " + dimStyle.Render("esc") + " Back")
 		}
 	}
 
