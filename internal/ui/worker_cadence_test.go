@@ -349,3 +349,101 @@ func mentions(t *testing.T, fnName, ident string) bool {
 	t.Fatalf("func %s not found in app.go — renamed?", fnName)
 	return false
 }
+
+// calleeName returns the called function's bare name (`h.foo(...)` → "foo").
+func calleeName(call *ast.CallExpr) string {
+	switch c := call.Fun.(type) {
+	case *ast.Ident:
+		return c.Name
+	case *ast.SelectorExpr:
+		return c.Sel.Name
+	}
+	return ""
+}
+
+// TestStatusWorkerFeedsHookChangesIntoPriority pins the fix for a 24s status lag:
+// statusWorkerCycle's own syncHookStatuses call must not drop its return value.
+//
+// syncHookStatuses diffs the hook against the session's in-memory hook state and then
+// overwrites it, so a transition is consume-once — whichever caller syncs first eats
+// it. During an attach tea.Exec suspends the Update loop, so hookChangedMsg never runs
+// and this worker call is always the first to observe. Discarding the result dropped
+// the transition entirely: the session fell back to the round-robin (≈26s at 65
+// sessions) and statusUpdateMsg's post-detach catch-up sync found nothing left to
+// enqueue, which is precisely the case it exists to cover.
+//
+// AST-based for the same reason the guards above are: the damage only appears when a
+// real attach suspends the Tea loop while the worker keeps cycling, and UpdateStatus
+// needs a live tmux pane to reach Running at all — neither is reachable from a unit
+// test, and Session.paneCapturer is package-private to internal/session.
+func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "app.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse app.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "statusWorkerCycle" {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("statusWorkerCycle not found in app.go — renamed?")
+	}
+
+	// 1. The result must be bound. A bare `h.syncHookStatuses(...)` expression
+	// statement is the original bug verbatim.
+	var bound string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.ExprStmt:
+			if call, ok := s.X.(*ast.CallExpr); ok && calleeName(call) == "syncHookStatuses" {
+				t.Error("statusWorkerCycle discards syncHookStatuses' return value — the hook " +
+					"transitions this call consumed are lost, so sessions whose status changed " +
+					"during an attach wait for the round-robin instead of the priority pass")
+			}
+		case *ast.AssignStmt:
+			for i, rhs := range s.Rhs {
+				call, ok := rhs.(*ast.CallExpr)
+				if !ok || calleeName(call) != "syncHookStatuses" || i >= len(s.Lhs) {
+					continue
+				}
+				if id, ok := s.Lhs[i].(*ast.Ident); ok {
+					bound = id.Name
+				}
+			}
+		}
+		return true
+	})
+	if bound == "" {
+		t.Fatal("no `x := h.syncHookStatuses(...)` in statusWorkerCycle — either the worker " +
+			"stopped syncing hooks, or the result is bound in a form this guard cannot see")
+	}
+
+	// 2. Binding it is not enough: it has to reach the priority set. Without this arm
+	// a log-only use (or `_ = hookChanged`) would satisfy the check above while the
+	// changed sessions still starved on the round-robin.
+	fed := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		rng, ok := n.(*ast.RangeStmt)
+		if !ok {
+			return true
+		}
+		if id, ok := rng.X.(*ast.Ident); !ok || id.Name != bound {
+			return true
+		}
+		ast.Inspect(rng.Body, func(b ast.Node) bool {
+			if id, ok := b.(*ast.Ident); ok && id.Name == "priorityIDs" {
+				fed = true
+			}
+			return true
+		})
+		return true
+	})
+	if !fed {
+		t.Errorf("statusWorkerCycle binds syncHookStatuses' result to %q but never merges it "+
+			"into priorityIDs — the sessions it consumed still wait for the round-robin", bound)
+	}
+}

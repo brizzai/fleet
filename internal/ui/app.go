@@ -5239,7 +5239,15 @@ func (h *Home) statusWorkerCycle() {
 
 	// 3. Sync hook status (fast: in-memory map lookups; worker may resolve a
 	// session-id rotation here — off the UI loop, so its transcript I/O is safe).
-	h.syncHookStatuses(sessions, true)
+	//
+	// The returned IDs MUST be carried into this cycle's priority set below.
+	// syncHookStatuses diffs against the session's in-memory hook state and then
+	// overwrites it, so a transition is consume-once: whichever caller syncs first
+	// eats it. During an attach tea.Exec suspends the Update loop, so hookChangedMsg
+	// never runs and this worker call is always the first to observe — dropping the
+	// result here left the session on the round-robin (≈26s at 65 sessions), and the
+	// post-detach catch-up sync in statusUpdateMsg found nothing left to enqueue.
+	hookChanged := h.syncHookStatuses(sessions, true)
 
 	// 3b. Auto-name: generate title for ONE session per cycle (heavy cadence).
 	// Priority: manual (R key) > the agent's own title (Claude custom-title, then
@@ -5309,6 +5317,12 @@ drainPriority:
 		default:
 			break drainPriority
 		}
+	}
+	// Hooks this cycle's own sync (step 3) observed. Merged directly rather than
+	// pushed through priorityStatusUpdates: the channel drops on full, and a
+	// send-then-drain round trip through our own queue buys nothing.
+	for _, id := range hookChanged {
+		priorityIDs[id] = true
 	}
 	processed := make(map[string]bool, len(priorityIDs))
 	// Sessions whose status flipped on the fast (non-heavy) path; their tmux
