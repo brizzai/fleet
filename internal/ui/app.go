@@ -5239,7 +5239,25 @@ func (h *Home) statusWorkerCycle() {
 
 	// 3. Sync hook status (fast: in-memory map lookups; worker may resolve a
 	// session-id rotation here — off the UI loop, so its transcript I/O is safe).
-	h.syncHookStatuses(sessions, true)
+	//
+	// The returned IDs MUST be carried into this cycle's priority set, and the merge
+	// below stays adjacent to this call on purpose. syncHookStatuses diffs against
+	// the session's in-memory hook state and then overwrites it, so a transition is
+	// consume-once: whichever caller syncs first eats it. During an attach tea.Exec
+	// suspends the Update loop, so hookChangedMsg never runs and this worker call is
+	// always the first to observe — dropping the result here left the session on the
+	// round-robin (≈26s at 65 sessions), and the post-detach catch-up sync in
+	// statusUpdateMsg found nothing left to enqueue.
+	//
+	// Nothing may come between the consume and the merge: the cycle's defer recover()
+	// swallows a panic from anything in between (step 3b reads transcripts and writes
+	// SQLite), and the transitions this call already ate would be gone for good —
+	// the same failure reached a different way.
+	hookChanged := h.syncHookStatuses(sessions, true)
+	priorityIDs := make(map[string]bool, len(hookChanged))
+	for _, id := range hookChanged {
+		priorityIDs[id] = true
+	}
 
 	// 3b. Auto-name: generate title for ONE session per cycle (heavy cadence).
 	// Priority: manual (R key) > the agent's own title (Claude custom-title, then
@@ -5297,10 +5315,10 @@ func (h *Home) statusWorkerCycle() {
 		}
 	}
 
-	// 4. Priority updates first — sessions whose hook file just changed.
+	// 4. Priority updates first — sessions whose hook just changed, seeded above
+	// from this cycle's own sync and topped up here from the UI path's queue.
 	// These bypass round-robin so the UI reflects fresh hook status within
 	// ~100ms of the hook firing (vs. up to (N/statusRoundRobin)*tickInterval seconds).
-	priorityIDs := make(map[string]bool)
 drainPriority:
 	for {
 		select {
@@ -5315,10 +5333,22 @@ drainPriority:
 	// status bars are repainted immediately below so the in-pane pill tracks
 	// the sidebar within ~500ms instead of lagging until the next heavy cycle.
 	var changedBars []*session.Session
+	prio := make([]*session.Session, 0, len(priorityIDs))
 	for _, s := range sessions {
-		if !priorityIDs[s.ID] {
-			continue
+		if priorityIDs[s.ID] {
+			prio = append(prio, s)
 		}
+	}
+	// Batch-capture their panes in one tmux call, exactly as the fast pass does
+	// below. This loop marks them processed and fastPassSessions skips processed,
+	// so without this they never reach that batch and each shells out to its own
+	// capture-pane inside UpdateStatus — captureCacheTTL (400ms) is already stale
+	// against the ~500ms cycle. That cost scales with hook bursts, not session
+	// count: the startup pass (loadExisting seeds every session's hook file before
+	// the first cycle, so every session reports changed) or Reload All Sessions
+	// would fork one capture-pane per session, serially, inside a single cycle.
+	h.seedActiveCaptures(prio)
+	for _, s := range prio {
 		if h.updateAndPersistStatus(s) {
 			changedBars = append(changedBars, s)
 		}

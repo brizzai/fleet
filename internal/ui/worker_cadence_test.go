@@ -349,3 +349,165 @@ func mentions(t *testing.T, fnName, ident string) bool {
 	t.Fatalf("func %s not found in app.go — renamed?", fnName)
 	return false
 }
+
+// calleeName returns the called function's bare name (`h.foo(...)` → "foo").
+func calleeName(call *ast.CallExpr) string {
+	switch c := call.Fun.(type) {
+	case *ast.Ident:
+		return c.Name
+	case *ast.SelectorExpr:
+		return c.Sel.Name
+	}
+	return ""
+}
+
+// TestStatusWorkerFeedsHookChangesIntoPriority pins the fix for a 24s status lag:
+// statusWorkerCycle's own syncHookStatuses call must not drop its return value.
+//
+// syncHookStatuses diffs the hook against the session's in-memory hook state and then
+// overwrites it, so a transition is consume-once — whichever caller syncs first eats
+// it. During an attach tea.Exec suspends the Update loop, so hookChangedMsg never runs
+// and this worker call is always the first to observe. Discarding the result dropped
+// the transition entirely: the session fell back to the round-robin (≈26s at 65
+// sessions) and statusUpdateMsg's post-detach catch-up sync found nothing left to
+// enqueue, which is precisely the case it exists to cover.
+//
+// AST-based for the same reason the guards above are: the damage only appears when a
+// real attach suspends the Tea loop while the worker keeps cycling, and UpdateStatus
+// needs a live tmux pane to reach Running at all — neither is reachable from a unit
+// test, and Session.paneCapturer is package-private to internal/session.
+func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "app.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse app.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "statusWorkerCycle" {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("statusWorkerCycle not found in app.go — renamed?")
+	}
+
+	// 1. The result must be bound. A bare `h.syncHookStatuses(...)` expression
+	// statement is the original bug verbatim.
+	var bound string
+	bindings := 0
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.ExprStmt:
+			if call, ok := s.X.(*ast.CallExpr); ok && calleeName(call) == "syncHookStatuses" {
+				t.Error("statusWorkerCycle discards syncHookStatuses' return value — the hook " +
+					"transitions this call consumed are lost, so sessions whose status changed " +
+					"during an attach wait for the round-robin instead of the priority pass")
+			}
+		case *ast.AssignStmt:
+			for i, rhs := range s.Rhs {
+				call, ok := rhs.(*ast.CallExpr)
+				if !ok || calleeName(call) != "syncHookStatuses" || i >= len(s.Lhs) {
+					continue
+				}
+				if id, ok := s.Lhs[i].(*ast.Ident); ok {
+					bound = id.Name
+					bindings++
+				}
+			}
+		}
+		return true
+	})
+	if bound == "" {
+		t.Fatal("no `x := h.syncHookStatuses(...)` in statusWorkerCycle — either the worker " +
+			"stopped syncing hooks, or the result is bound in a form this guard cannot see")
+	}
+	if bindings > 1 {
+		// Checking only the last binding would leave the others unguarded, and every
+		// one of them consumes transitions that must reach the priority set.
+		t.Fatalf("statusWorkerCycle calls syncHookStatuses %d times; this guard checks one "+
+			"binding (%q). Extend it to cover each call before adding another.", bindings, bound)
+	}
+
+	// 2. Binding it is not enough — it must *assign into* priorityIDs, and do so
+	// before anything reads that map. Asserting a mere mention would accept a
+	// read-only body (`if priorityIDs[id] { … }`), and asserting no position would
+	// accept the merge sitting below the loop that consumes priorityIDs — both
+	// leave the map missing this cycle's hook changes and restore the ≈26s lag
+	// with a green suite.
+	isPriorityIndex := func(e ast.Expr) bool {
+		ix, ok := e.(*ast.IndexExpr)
+		if !ok {
+			return false
+		}
+		id, ok := ix.X.(*ast.Ident)
+		return ok && id.Name == "priorityIDs"
+	}
+
+	// Every `priorityIDs[k] = v` in the function, so reads can be told from writes.
+	writes := map[token.Pos]bool{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range as.Lhs {
+			if isPriorityIndex(lhs) {
+				writes[lhs.Pos()] = true
+			}
+		}
+		return true
+	})
+
+	// The merge: a write to priorityIDs inside a `range <bound>` loop.
+	mergePos := token.NoPos
+	ast.Inspect(fn, func(n ast.Node) bool {
+		rng, ok := n.(*ast.RangeStmt)
+		if !ok {
+			return true
+		}
+		if id, ok := rng.X.(*ast.Ident); !ok || id.Name != bound {
+			return true
+		}
+		ast.Inspect(rng.Body, func(b ast.Node) bool {
+			if as, ok := b.(*ast.AssignStmt); ok {
+				for _, lhs := range as.Lhs {
+					if isPriorityIndex(lhs) && (mergePos == token.NoPos || lhs.Pos() < mergePos) {
+						mergePos = lhs.Pos()
+					}
+				}
+			}
+			return true
+		})
+		return true
+	})
+	if mergePos == token.NoPos {
+		t.Fatalf("statusWorkerCycle binds syncHookStatuses' result to %q but never assigns it "+
+			"into priorityIDs — the sessions it consumed still wait for the round-robin. "+
+			"(If the merge was refactored into a helper or maps.Copy, keep the invariant and "+
+			"update this guard: every id must land in priorityIDs before that map is read.)", bound)
+	}
+
+	// The consume: the first read of priorityIDs — an index that is not a write.
+	firstRead := token.NoPos
+	ast.Inspect(fn, func(n ast.Node) bool {
+		ix, ok := n.(*ast.IndexExpr)
+		if !ok || !isPriorityIndex(ix) || writes[ix.Pos()] {
+			return true
+		}
+		if firstRead == token.NoPos || ix.Pos() < firstRead {
+			firstRead = ix.Pos()
+		}
+		return true
+	})
+	if firstRead == token.NoPos {
+		t.Fatal("nothing reads priorityIDs in statusWorkerCycle — the priority set is built " +
+			"and never consumed, so no session is updated ahead of the round-robin")
+	}
+	if mergePos > firstRead {
+		t.Errorf("statusWorkerCycle merges %q into priorityIDs at offset %d, after the map is "+
+			"first read at offset %d — the sessions this cycle's sync consumed are missing from "+
+			"that read and fall back to the round-robin", bound, mergePos, firstRead)
+	}
+}
