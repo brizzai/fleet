@@ -4,9 +4,12 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/brizzai/fleet/internal/analytics"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -224,10 +227,51 @@ func TestGitFanoutPublishesWithoutTheUpdateLoop(t *testing.T) {
 			"presumably routed through h.send again, which blocks for the whole " +
 			"attach on Tea's unbuffered channel")
 	}
-	if got["gitInfoUpdateMsg"] {
-		t.Error("refreshAllGitAndPR sends gitInfoUpdateMsg — that carries the payload " +
+	// Must be mentions, not callees: `gitInfoUpdateMsg{...}` is an
+	// *ast.CompositeLit argument, never a *ast.CallExpr.Fun, so callees can
+	// never see it and the assertion would silently always pass.
+	if mentions(t, "refreshAllGitAndPR", "gitInfoUpdateMsg") {
+		t.Error("refreshAllGitAndPR references gitInfoUpdateMsg — that carries the payload " +
 			"through the Update loop, reintroducing the blocking rendezvous. Write the " +
 			"cache directly and send gitRepaintMsg as a hint instead.")
+	}
+}
+
+// TestGitWorkerCycleSkipsWhileAttaching is the behavioral counterpart to the AST
+// guards: it proves the gate's *polarity*, which `mentions` cannot. An inverted
+// condition (`if !h.isAttaching.Load()`) still mentions the identifier and would
+// sail past a presence check while making the fan-out run only during attaches.
+func TestGitWorkerCycleSkipsWhileAttaching(t *testing.T) {
+	newHome := func(t *testing.T) *Home {
+		t.Helper()
+		dir := t.TempDir()
+		storage, err := session.Open(filepath.Join(dir, "test.db"))
+		if err != nil {
+			t.Fatalf("open db: %v", err)
+		}
+		t.Cleanup(func() { storage.Close() })
+
+		h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
+		s := session.NewSession("s", filepath.Join(dir, "repo"))
+		h.sessions = []*session.Session{s}
+		return h
+	}
+
+	// Attached: the fan-out must not run, so the cache stays empty.
+	h := newHome(t)
+	h.isAttaching.Store(true)
+	h.gitWorkerCycle()
+	if n := len(h.gitInfo()); n != 0 {
+		t.Errorf("gitWorkerCycle populated %d repos while attached — the fan-out ran "+
+			"against a suspended Tea loop", n)
+	}
+
+	// Not attached: same input must populate the cache. Without this arm the test
+	// above would pass for a cycle that never does anything.
+	h2 := newHome(t)
+	h2.gitWorkerCycle()
+	if len(h2.gitInfo()) == 0 {
+		t.Error("gitWorkerCycle populated nothing while detached — the fan-out never ran")
 	}
 }
 
@@ -236,16 +280,46 @@ func TestGitFanoutPublishesWithoutTheUpdateLoop(t *testing.T) {
 // nothing about a wedge. Without this gate the watchdog fired on every attach
 // longer than workerStallThreshold — 18 stall dumps in a single day of normal
 // use, which is enough noise to hide a real one.
-func TestWorkerWatchdogIgnoresAttach(t *testing.T) {
-	if !mentions(t, "workerWatchdog", "isAttaching") {
-		t.Error("workerWatchdog no longer consults isAttaching — every attach over " +
-			"workerStallThreshold will dump a false stall")
+func TestWorkerWatchdogDiscountsAttachWindow(t *testing.T) {
+	if !mentions(t, "workerWatchdog", "attachAdjustedStall") {
+		t.Error("workerWatchdog no longer discounts the attach window — every attach " +
+			"over workerStallThreshold will dump a false stall")
 	}
-	// The gitWorker skips its cycle during an attach for the same reason: the
-	// sidebar isn't on screen, and the detach path rebuilds it wholesale.
-	if !mentions(t, "gitWorkerCycle", "isAttaching") {
-		t.Error("gitWorkerCycle no longer consults isAttaching — the fan-out will run " +
-			"against a Tea loop that tea.Exec has suspended")
+	// Both workers must be watched. The git+PR fan-out — the blocking work the
+	// watchdog exists for — lives on gitWorker now, so watching only the status
+	// worker would read healthy straight through a permanent git wedge.
+	if !mentions(t, "workerWatchdog", "lastGitCycleNano") {
+		t.Error("workerWatchdog does not watch gitWorker's liveness stamps — a wedged " +
+			"git fan-out would freeze branch/dirty/PR while the heartbeat reads healthy")
+	}
+	if !mentions(t, "gitWorkerCycle", "gitCycleStartNano") {
+		t.Error("gitWorkerCycle sets no liveness stamps — nothing can observe it wedging")
+	}
+}
+
+// TestAttachAdjustedStall pins the arithmetic the watchdog's accuracy rests on:
+// an attach must never manufacture a stall, and must never mask one either.
+func TestAttachAdjustedStall(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	attachedFor := func(d time.Duration) int64 { return now.Add(-d).UnixNano() }
+
+	cases := []struct {
+		name        string
+		stalledFor  time.Duration
+		attachStart int64
+		want        time.Duration
+	}{
+		{"not attached — unchanged", 100 * time.Second, 0, 100 * time.Second},
+		{"whole stall inside the attach — fully discounted", 100 * time.Second, attachedFor(100 * time.Second), 0},
+		{"attach longer than the stall — floors at 0", 30 * time.Second, attachedFor(100 * time.Second), 0},
+		// The case the plain skip got wrong: a 95s stall of which only 20s is
+		// attach is still a 75s real stall, and must stay measurable.
+		{"partial overlap — remainder survives", 95 * time.Second, attachedFor(20 * time.Second), 75 * time.Second},
+	}
+	for _, c := range cases {
+		if got := attachAdjustedStall(c.stalledFor, c.attachStart, now); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 

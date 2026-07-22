@@ -478,6 +478,7 @@ func (h *Home) attachShell(sh *shell.Shell) tea.Cmd {
 		return h.restartShell(sh)
 	}
 	h.isAttaching.Store(true)
+	h.attachStartedAt.Store(time.Now().UnixNano())
 	// Detach the drawer's control reader first — synchronously: a full-screen
 	// attach is another client on the pane, and tmux sizes a shared window to its
 	// smallest client, so the small drawer-sized reader must be gone before the
@@ -486,6 +487,7 @@ func (h *Home) attachShell(sh *shell.Shell) tea.Cmd {
 	h.actionLog.Add("attach shell", sh.Name, true)
 	return tea.Exec(attachCmd{session: sh.Tmux()}, func(err error) tea.Msg {
 		h.isAttaching.Store(false)
+		h.attachStartedAt.Store(0)
 		return statusUpdateMsg{} // generic refresh; field unused by the handler
 	})
 }
