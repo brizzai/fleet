@@ -13,6 +13,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/diagnostics"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // bugReportClosedMsg is sent when the bug report dialog closes.
@@ -102,7 +103,7 @@ func (d *BugReportDialog) Show(version string, sessionCount int, errors *ErrorHi
 	d.status = statusReportForm{}
 	if sess != nil {
 		d.kinds = []reportKind{kindStatus, kindBug, kindFeature}
-		d.status = newStatusReportForm(sess.Title, sess.GetStatus(), string(sess.Agent))
+		d.status = newStatusReportForm(sess.ID, sess.Title, sess.GetStatus(), string(sess.Agent))
 	}
 	d.kind = d.kinds[0]
 
@@ -129,12 +130,16 @@ func (d *BugReportDialog) SetSize(w, h int) {
 	d.height = h
 }
 
-// SetSnapshot installs an async status capture. Ignored unless the dialog is
-// still open on the invocation that asked for it — a capture landing after the
-// user closed and reopened would describe a session they are no longer
-// reporting on.
+// SetSnapshot installs an async status capture, matched by session id.
+//
+// The id check is what makes this safe, not the visibility check: a capture
+// takes long enough (capture-pane, transcript scan) that `!` on session A, esc,
+// then `!` on B can land A's result while B's form is open. Both are visible
+// status forms, so without the id comparison the issue would be headed with B's
+// title and shown status while its signals table, screen excerpt and debug log
+// all came from A — publishing A's screen, which this dialog never previewed.
 func (d *BugReportDialog) SetSnapshot(snap snapshotResult) {
-	if !d.visible || d.status.sessionTitle == "" {
+	if !d.visible || d.status.sessionID == "" || snap.sessionID != d.status.sessionID {
 		return
 	}
 	d.status.snap = snap
@@ -224,10 +229,12 @@ func (d *BugReportDialog) updateForm(keyMsg tea.KeyMsg) (*BugReportDialog, tea.C
 			return d, nil
 		}
 		if d.kind == kindStatus {
-			expected, ok := d.status.expectedStatus()
-			if !ok {
+			// One gate for both the key and the footer, so Enter can never act
+			// on a state the footer is telling the user isn't ready.
+			if d.status.submitBlocker(desc) != "" {
 				return d, nil
 			}
+			expected, _ := d.status.expectedStatus()
 			d.submitting = true
 			return d, tea.Batch(d.submitStatusReport(desc, expected), d.trackMisdetection(expected))
 		}
@@ -289,13 +296,15 @@ func (d *BugReportDialog) trackMisdetection(expected session.Status) tea.Cmd {
 func (d *BugReportDialog) submitStatusReport(desc string, expected session.Status) tea.Cmd {
 	body := buildStatusReportBody(desc, expected, &d.status, d.report)
 	title := fmt.Sprintf("Wrong status: showed %s, expected %s — %s",
-		d.status.shownStatus, expected, truncate(desc, 60))
+		d.status.shownStatus, expected, ansi.Truncate(sanitizeHome(desc), 60, "…"))
 	return d.createGitHubIssue(title, body, "bug")
 }
 
 func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
-	// Build title from description, truncated.
-	title := truncate(description, 60)
+	// Build title from description, truncated. Sanitized like the body: the
+	// title is what GitHub shows in search results and notification mail, so a
+	// home path leaking here survives even when the body below it is clean.
+	title := ansi.Truncate(sanitizeHome(description), 60, "…")
 
 	var body string
 	label := "bug"
@@ -304,7 +313,7 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 		// action log, and debug log are reproduction context for a defect; on an
 		// idea they are noise the maintainer has to scroll past.
 		label = "enhancement"
-		body = "## Feature Request\n\n### Problem\n" + description + "\n\n" +
+		body = "## Feature Request\n\n### Problem\n" + sanitizeHome(description) + "\n\n" +
 			fmt.Sprintf("### Environment\n- **Version**: %s\n- **OS**: %s (%s)\n",
 				d.report.Version, d.report.OSSummary(), d.report.Arch)
 	} else {
@@ -520,21 +529,15 @@ func (d *BugReportDialog) View() string {
 }
 
 func (d *BugReportDialog) formatErrors() []string {
-	home, _ := os.UserHomeDir()
 	var result []string
 	for _, e := range d.errorEntries {
 		ago := formatTimeAgo(e.Timestamp)
-		msg := e.Message
-		if home != "" {
-			msg = strings.ReplaceAll(msg, home, "~")
-		}
-		result = append(result, fmt.Sprintf("%s | %s", ago, msg))
+		result = append(result, fmt.Sprintf("%s | %s", ago, sanitizeHome(e.Message)))
 	}
 	return result
 }
 
 func (d *BugReportDialog) formatActions() []string {
-	home, _ := os.UserHomeDir()
 	var result []string
 	count := len(d.actionEntries)
 	if count > 20 {
@@ -543,10 +546,7 @@ func (d *BugReportDialog) formatActions() []string {
 	for i := 0; i < count; i++ {
 		a := d.actionEntries[i]
 		ts := a.Timestamp.Format("15:04:05")
-		detail := a.Detail
-		if home != "" {
-			detail = strings.ReplaceAll(detail, home, "~")
-		}
+		detail := sanitizeHome(a.Detail)
 		result_ := "ok"
 		if !a.Success {
 			result_ = "ERROR"

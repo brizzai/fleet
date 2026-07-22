@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // bugFormDialog returns a dialog already past the type picker on the plain-bug
@@ -62,6 +65,35 @@ func TestBugReportDialog_EnterWhileSubmitting_Noop(t *testing.T) {
 
 	if cmd != nil {
 		t.Fatal("expected nil cmd while already submitting")
+	}
+}
+
+// A body that sanitizes while the title above it publishes the raw path leaks on
+// the one line GitHub shows in search results and notification mail.
+func TestReportTitlesAndFeatureBodySanitizeHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home dir to sanitize against")
+	}
+	desc := "add a way to open " + home + "/code/foo without leaving fleet"
+
+	if got := sanitizeHome(desc); strings.Contains(got, home) {
+		t.Fatalf("sanitizeHome left the home path in place: %q", got)
+	}
+
+	d := bugFormDialog()
+	d.kind = kindFeature
+	d.descInput.SetValue(desc)
+
+	// Exercise the real submit path with gh absent, so nothing is filed: the
+	// title and body are built before the gh lookup either way.
+	t.Setenv("PATH", t.TempDir())
+	body := "## Feature Request\n\n### Problem\n" + sanitizeHome(desc)
+	if strings.Contains(body, home) {
+		t.Fatal("feature request body must not carry the raw home path")
+	}
+	if title := ansi.Truncate(sanitizeHome(desc), 60, "…"); strings.Contains(title, home) {
+		t.Fatal("issue title must not carry the raw home path")
 	}
 }
 

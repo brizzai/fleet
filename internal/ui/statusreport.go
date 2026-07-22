@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/diagnostics"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // statusReportPaneLines is how many trailing pane lines ride along in the issue
@@ -41,6 +42,10 @@ type statusReportForm struct {
 	// Frozen at the `!` keypress, not read live. The whole point of capturing
 	// on keypress is that status moves; by submit time the session may have
 	// self-corrected, and the report must describe the moment complained about.
+	//
+	// sessionID is what SetSnapshot matches an arriving capture against, so a
+	// slow capture for a previously-reported session can't land here.
+	sessionID    string
 	sessionTitle string
 	shownStatus  session.Status
 	agent        string
@@ -60,8 +65,9 @@ type statusReportForm struct {
 
 const expectedUnset = -1
 
-func newStatusReportForm(title string, shown session.Status, agent string) statusReportForm {
+func newStatusReportForm(sessionID, title string, shown session.Status, agent string) statusReportForm {
 	return statusReportForm{
+		sessionID:    sessionID,
 		sessionTitle: title,
 		shownStatus:  shown,
 		agent:        agent,
@@ -129,6 +135,14 @@ func (f *statusReportForm) submitBlocker(desc string) string {
 		return "Describe what happened, then press enter"
 	case !haveExpected:
 		return "Pick what the status should have been (↑↓)"
+	case !f.captured && f.snap.err == nil:
+		// The capture is still in flight. Submitting now would file a report
+		// whose body reads "the capture failed or the session had no live tmux
+		// pane" — a false cause that sends the maintainer hunting a bug that
+		// never happened, on exactly the undiagnosable report this flow exists
+		// to prevent. A capture that genuinely failed (err != nil) is NOT
+		// blocked: there the message is true and the account still has value.
+		return "Capturing the session's status…"
 	default:
 		return ""
 	}
@@ -175,11 +189,10 @@ func (d *BugReportDialog) viewPick() string {
 		hint := ""
 		switch k {
 		case kindStatus:
-			// StatusSymbolRaw, not StatusSymbol: truncate below counts bytes, and
-			// a styled glyph's ANSI escape would be cut mid-sequence and eat the
-			// whole hint's budget.
+			// StatusSymbolRaw, not StatusSymbol: the whole hint is dim-styled as
+			// one string below, so an inner color would be overridden anyway.
 			hint = fmt.Sprintf("%q shows %s %s",
-				truncate(d.status.sessionTitle, 22),
+				ansi.Truncate(d.status.sessionTitle, 22, "…"),
 				StatusSymbolRaw(d.status.shownStatus),
 				d.status.shownStatus)
 		case kindBug:
@@ -201,7 +214,7 @@ func (d *BugReportDialog) viewPick() string {
 			pad = 1
 		}
 		b.WriteString(cursor + labelOut + strings.Repeat(" ", pad) +
-			dimStyle.Render(truncate(hint, innerWidth-18)))
+			dimStyle.Render(ansi.Truncate(hint, innerWidth-18, "…")))
 		b.WriteString("\n")
 	}
 
@@ -243,7 +256,7 @@ func (d *BugReportDialog) viewStatusForm() string {
 	f := &d.status
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("Wrong status: " + truncate(f.sessionTitle, 40)))
+	b.WriteString(titleStyle.Render("Wrong status: " + ansi.Truncate(f.sessionTitle, 40, "…")))
 	b.WriteString("\n\n")
 
 	// Frozen, not live — this is the moment being reported on.
@@ -279,17 +292,25 @@ func (d *BugReportDialog) viewStatusForm() string {
 		b.WriteString(dimStyle.Render("  capturing…"))
 		b.WriteString("\n")
 	default:
-		lines := f.paneExcerpt(statusReportPreviewLines)
-		total := len(f.paneExcerpt(statusReportPaneLines))
 		b.WriteString("  " + checkbox + " " + sectionStyle.Render("include screen + logs") +
 			"    " + dimStyle.Render("ctrl+p"))
 		b.WriteString("\n")
-		for _, ln := range lines {
-			b.WriteString(dimStyle.Render("   │ " + truncate(ln, innerWidth-6)))
-			b.WriteString("\n")
-		}
-		if more := total - len(lines); more > 0 {
-			b.WriteString(dimStyle.Render(fmt.Sprintf("   +%d more lines, plus this session's debug log", more)))
+		// The excerpt shows only what will actually be filed. Rendering it under
+		// an unticked box would restate content the body omits, which is the one
+		// ambiguity previewing above the toggle exists to remove.
+		if f.includeContent {
+			lines := f.paneExcerpt(statusReportPreviewLines)
+			total := len(f.paneExcerpt(statusReportPaneLines))
+			for _, ln := range lines {
+				b.WriteString(dimStyle.Render("   │ " + ansi.Truncate(ln, innerWidth-6, "…")))
+				b.WriteString("\n")
+			}
+			if more := total - len(lines); more > 0 {
+				b.WriteString(dimStyle.Render(fmt.Sprintf("   +%d more lines, plus this session's debug log", more)))
+				b.WriteString("\n")
+			}
+		} else {
+			b.WriteString(dimStyle.Render("   │ not included — signals only"))
 			b.WriteString("\n")
 		}
 	}
@@ -320,6 +341,19 @@ func (d *BugReportDialog) viewStatusForm() string {
 		Width(dialogWidth).
 		Render(b.String())
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// sanitizeHome rewrites the user's home directory to "~" in anything bound for
+// a public issue. Every report kind must run its text through this, including
+// issue *titles*: a body that sanitizes while the title above it publishes
+// /Users/<name>/... verbatim leaks on the one line GitHub shows in search
+// results and notification mail.
+func sanitizeHome(s string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, home, "~")
 }
 
 // metaString/metaBool/metaSub read named fields out of the snapshot.json map.
@@ -365,13 +399,7 @@ func metaString(m map[string]any, key string) string {
 // debug log are the reporter's actual content and ride only when includeContent
 // is set, which the dialog previews and lets them switch off.
 func buildStatusReportBody(desc string, expected session.Status, f *statusReportForm, r *diagnostics.Report) string {
-	home, _ := os.UserHomeDir()
-	sanitize := func(s string) string {
-		if home != "" {
-			return strings.ReplaceAll(s, home, "~")
-		}
-		return s
-	}
+	sanitize := sanitizeHome
 
 	var b strings.Builder
 	b.WriteString("## Wrong Status Detected\n\n")

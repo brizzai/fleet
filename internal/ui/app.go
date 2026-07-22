@@ -2510,7 +2510,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.actionLog.Add("status snapshot", s.Title, true)
 		hb := h.workerHeartbeat()
 		return h, func() tea.Msg {
-			snap := captureStatusSnapshot(s, s.ID, hb, true)
+			snap := captureStatusSnapshot(s, s.ID, hb, true, true)
 			return statusSnapshotMsg{path: snap.path, err: snap.err}
 		}
 	case "?":
@@ -6462,8 +6462,14 @@ func (h *Home) setError(err error) {
 // The capture fires at the keypress rather than at submit because status is a
 // moving target: by the time someone has typed a description, the session may
 // have self-corrected, and re-reading it then would capture a state nobody is
-// complaining about. The Cmd keeps the blocking tmux/file I/O off the Update
-// loop, the same way the `D` key's capture does.
+// complaining about. The Cmd keeps the blocking tmux I/O off the Update loop,
+// the same way the `D` key's capture does.
+//
+// It captures in memory only (persist=false). This fires on every `!` press,
+// before a report kind is even chosen, so persisting would litter
+// ~/.config/fleet/snapshots/ with cancelled dialogs and feature requests — and
+// would put a full-process goroutine dump on a hot key. The filed issue is
+// unaffected: its body is built from the returned values, not read off disk.
 func (h *Home) openBugReport() (tea.Model, tea.Cmd) {
 	h.actionLog.Add("open bug report", "", true)
 	s := h.selectedSession()
@@ -6476,7 +6482,7 @@ func (h *Home) openBugReport() (tea.Model, tea.Cmd) {
 	}
 	hb := h.workerHeartbeat()
 	return h, func() tea.Msg {
-		return reportSnapshotMsg{snap: captureStatusSnapshot(s, s.ID, hb, false)}
+		return reportSnapshotMsg{snap: captureStatusSnapshot(s, s.ID, hb, false, false)}
 	}
 }
 

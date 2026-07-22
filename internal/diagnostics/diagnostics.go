@@ -183,9 +183,10 @@ func (r *Report) formatMarkdown(description string) string {
 // signals table) can append the environment without a second "## Bug Report"
 // heading and an empty description placeholder underneath it.
 //
-// includeLogs gates the debug log, which is the reporter's content: a
-// wrong-status report offers to leave content out, and the global log tail must
-// honor that choice rather than smuggling it back in.
+// includeLogs gates the debug log and the config block — both of which are the
+// reporter's content, not the machine's. A wrong-status report offers to leave
+// content out, and neither the global log tail nor config.json may smuggle
+// itself back in past that choice.
 func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
 	home, _ := os.UserHomeDir()
 	sanitize := func(s string) string {
@@ -266,8 +267,11 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
 		b.WriteString("\n```\n</details>\n\n")
 	}
 
-	// Config.
-	if r.Config != "" {
+	// Config. Gated alongside the log: config.json carries
+	// default_project_path, which can be confidential in its own right (client
+	// names live in directory names), and a reporter who unticked the content
+	// box was never shown it and never had it named to them.
+	if includeLogs && r.Config != "" {
 		b.WriteString("<details><summary>Config</summary>\n\n```json\n")
 		b.WriteString(sanitize(r.Config))
 		b.WriteString("\n```\n</details>\n")
