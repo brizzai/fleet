@@ -53,6 +53,11 @@ type snapshotResult struct {
 type workerHeartbeat struct {
 	LastCycleAt  time.Time // last completed statusWorkerCycle (zero if none yet)
 	CycleStartAt time.Time // in-flight cycle start (zero when idle)
+	// Same pair for gitWorker, which owns the git+PR fan-out. Reported
+	// separately because the two wedge independently: a stalled gitWorker
+	// freezes branch/dirty/PR while status keeps updating normally.
+	LastGitCycleAt  time.Time
+	GitCycleStartAt time.Time
 }
 
 // captureStatusSnapshot gathers a session's status evidence and, when persist is
@@ -199,6 +204,17 @@ func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFile
 	}
 	if !hb.CycleStartAt.IsZero() {
 		worker["cycle_in_flight_for"] = fmtSnapshotAge(hb.CycleStartAt, now)
+	}
+	// git worker liveness. A stall here means branch/dirty/PR badges are frozen
+	// while status detection is fine — without it, a wedged git fan-out would
+	// read healthy off the status worker's stamps above.
+	if !hb.LastGitCycleAt.IsZero() {
+		worker["git_last_cycle_at"] = hb.LastGitCycleAt.Format(time.RFC3339Nano)
+		worker["git_last_cycle_ago"] = fmtSnapshotAge(hb.LastGitCycleAt, now)
+		worker["git_stalled"] = now.Sub(hb.LastGitCycleAt) > workerStallThreshold
+	}
+	if !hb.GitCycleStartAt.IsZero() {
+		worker["git_cycle_in_flight_for"] = fmtSnapshotAge(hb.GitCycleStartAt, now)
 	}
 	m["worker"] = worker
 
