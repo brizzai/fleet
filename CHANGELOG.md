@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-07-22
+
+### Added
+
+- **Report a wrong status in two keys.** `!` now asks what you're reporting — wrong status, bug, or feature — and picking "Wrong status" files what fleet actually saw at that instant: the hook, the pane, the worker heartbeat, and where they disagreed. `ctrl+p` leaves your screen and logs out of it.
+
+### Fixed
+
+- **No more frozen statuses.** Session statuses used to stop updating the whole time you were attached and only catch up once you detached — one measured freeze ran 16 minutes, so `Space` came back with nothing waiting. They now keep updating while you're attached.
+
 ## [2.22.0] - 2026-07-20
 
 ### Highlights
@@ -436,7 +446,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.22.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.23.0...HEAD
+[2.23.0]: https://github.com/brizzai/fleet/releases/tag/v2.23.0
 [2.22.0]: https://github.com/brizzai/fleet/releases/tag/v2.22.0
 [2.21.0]: https://github.com/brizzai/fleet/releases/tag/v2.21.0
 [2.20.0]: https://github.com/brizzai/fleet/releases/tag/v2.20.0
