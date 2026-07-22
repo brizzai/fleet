@@ -2,4 +2,4 @@
 type: fixed
 ---
 
-**Status updates right after you detach.** Prompting a session and detaching left its row on the old status for up to ~25 seconds. It now updates in ~100ms.
+**Fresh status on detach.** Even after the freeze was fixed, a session you prompted while attached kept its old status for up to ~26 seconds after you detached. It now updates in ~100ms.

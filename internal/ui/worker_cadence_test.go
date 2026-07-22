@@ -396,6 +396,7 @@ func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
 	// 1. The result must be bound. A bare `h.syncHookStatuses(...)` expression
 	// statement is the original bug verbatim.
 	var bound string
+	bindings := 0
 	ast.Inspect(fn, func(n ast.Node) bool {
 		switch s := n.(type) {
 		case *ast.ExprStmt:
@@ -412,6 +413,7 @@ func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
 				}
 				if id, ok := s.Lhs[i].(*ast.Ident); ok {
 					bound = id.Name
+					bindings++
 				}
 			}
 		}
@@ -421,11 +423,45 @@ func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
 		t.Fatal("no `x := h.syncHookStatuses(...)` in statusWorkerCycle — either the worker " +
 			"stopped syncing hooks, or the result is bound in a form this guard cannot see")
 	}
+	if bindings > 1 {
+		// Checking only the last binding would leave the others unguarded, and every
+		// one of them consumes transitions that must reach the priority set.
+		t.Fatalf("statusWorkerCycle calls syncHookStatuses %d times; this guard checks one "+
+			"binding (%q). Extend it to cover each call before adding another.", bindings, bound)
+	}
 
-	// 2. Binding it is not enough: it has to reach the priority set. Without this arm
-	// a log-only use (or `_ = hookChanged`) would satisfy the check above while the
-	// changed sessions still starved on the round-robin.
-	fed := false
+	// 2. Binding it is not enough — it must *assign into* priorityIDs, and do so
+	// before anything reads that map. Asserting a mere mention would accept a
+	// read-only body (`if priorityIDs[id] { … }`), and asserting no position would
+	// accept the merge sitting below the loop that consumes priorityIDs — both
+	// leave the map missing this cycle's hook changes and restore the ≈26s lag
+	// with a green suite.
+	isPriorityIndex := func(e ast.Expr) bool {
+		ix, ok := e.(*ast.IndexExpr)
+		if !ok {
+			return false
+		}
+		id, ok := ix.X.(*ast.Ident)
+		return ok && id.Name == "priorityIDs"
+	}
+
+	// Every `priorityIDs[k] = v` in the function, so reads can be told from writes.
+	writes := map[token.Pos]bool{}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range as.Lhs {
+			if isPriorityIndex(lhs) {
+				writes[lhs.Pos()] = true
+			}
+		}
+		return true
+	})
+
+	// The merge: a write to priorityIDs inside a `range <bound>` loop.
+	mergePos := token.NoPos
 	ast.Inspect(fn, func(n ast.Node) bool {
 		rng, ok := n.(*ast.RangeStmt)
 		if !ok {
@@ -435,15 +471,43 @@ func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
 			return true
 		}
 		ast.Inspect(rng.Body, func(b ast.Node) bool {
-			if id, ok := b.(*ast.Ident); ok && id.Name == "priorityIDs" {
-				fed = true
+			if as, ok := b.(*ast.AssignStmt); ok {
+				for _, lhs := range as.Lhs {
+					if isPriorityIndex(lhs) && (mergePos == token.NoPos || lhs.Pos() < mergePos) {
+						mergePos = lhs.Pos()
+					}
+				}
 			}
 			return true
 		})
 		return true
 	})
-	if !fed {
-		t.Errorf("statusWorkerCycle binds syncHookStatuses' result to %q but never merges it "+
-			"into priorityIDs — the sessions it consumed still wait for the round-robin", bound)
+	if mergePos == token.NoPos {
+		t.Fatalf("statusWorkerCycle binds syncHookStatuses' result to %q but never assigns it "+
+			"into priorityIDs — the sessions it consumed still wait for the round-robin. "+
+			"(If the merge was refactored into a helper or maps.Copy, keep the invariant and "+
+			"update this guard: every id must land in priorityIDs before that map is read.)", bound)
+	}
+
+	// The consume: the first read of priorityIDs — an index that is not a write.
+	firstRead := token.NoPos
+	ast.Inspect(fn, func(n ast.Node) bool {
+		ix, ok := n.(*ast.IndexExpr)
+		if !ok || !isPriorityIndex(ix) || writes[ix.Pos()] {
+			return true
+		}
+		if firstRead == token.NoPos || ix.Pos() < firstRead {
+			firstRead = ix.Pos()
+		}
+		return true
+	})
+	if firstRead == token.NoPos {
+		t.Fatal("nothing reads priorityIDs in statusWorkerCycle — the priority set is built " +
+			"and never consumed, so no session is updated ahead of the round-robin")
+	}
+	if mergePos > firstRead {
+		t.Errorf("statusWorkerCycle merges %q into priorityIDs at offset %d, after the map is "+
+			"first read at offset %d — the sessions this cycle's sync consumed are missing from "+
+			"that read and fall back to the round-robin", bound, mergePos, firstRead)
 	}
 }
