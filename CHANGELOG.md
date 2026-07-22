@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.1] - 2026-07-22
+
+### Fixed
+
+- **Fresh status on detach.** Even after the freeze was fixed, a session you prompted while attached kept its old status for up to ~26 seconds after you detached. It now updates in ~100ms.
+
 ## [2.23.0] - 2026-07-22
 
 ### Added
@@ -446,7 +452,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.23.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.23.1...HEAD
+[2.23.1]: https://github.com/brizzai/fleet/releases/tag/v2.23.1
 [2.23.0]: https://github.com/brizzai/fleet/releases/tag/v2.23.0
 [2.22.0]: https://github.com/brizzai/fleet/releases/tag/v2.22.0
 [2.21.0]: https://github.com/brizzai/fleet/releases/tag/v2.21.0
