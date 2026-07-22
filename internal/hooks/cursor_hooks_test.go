@@ -59,7 +59,9 @@ func TestInjectCursorHooks(t *testing.T) {
 
 func TestInjectCursorHooksPreservesUserHooks(t *testing.T) {
 	dir := t.TempDir()
-	// Pre-existing user hook on an event we don't manage + on one we do.
+	// Pre-existing user hook on an event we don't manage (afterFileEdit); a
+	// managed event with a pre-existing user hook is covered separately by
+	// TestInjectCursorHooksPreservesUnknownFieldsAndPromptHooks.
 	seed := `{"version":1,"hooks":{"afterFileEdit":[{"command":".cursor/hooks/format.sh"}]}}`
 	if err := os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(seed), 0644); err != nil {
 		t.Fatal(err)
