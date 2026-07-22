@@ -1123,6 +1123,24 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case reportSnapshotMsg:
+		// Silent on failure: the dialog renders the reason inline, and a toast
+		// behind a modal would only stack noise the reporter can't act on.
+		h.bugReport.SetSnapshot(msg.snap)
+		return h, nil
+
+	case statusMisdetectedMsg:
+		analytics.Track(analytics.EventStatusMisdetected, map[string]interface{}{
+			"shown":            msg.shown,
+			"expected":         msg.expected,
+			"agent":            msg.agent,
+			"hook_status":      msg.hookStatus,
+			"pane_detected":    msg.paneDetect,
+			"mismatch":         msg.mismatch,
+			"included_content": msg.wroteContent,
+		})
+		return h, nil
+
 	case previewMsg:
 		h.previewCache[msg.sessionID] = msg.content
 		h.previewCacheTime[msg.sessionID] = time.Now()
@@ -2483,10 +2501,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.dismissActiveTip()
 		return h, nil
 	case "!":
-		h.actionLog.Add("open bug report", "", true)
-		h.bugReport.Show(h.version, len(h.sessions), h.errorHistory, h.actionLog, h.width, h.height, &h.renderStats, time.Since(h.startTime))
-		analytics.Track(analytics.EventBugReportOpened, nil)
-		return h, nil
+		return h.openBugReport()
 	case "D":
 		s := h.selectedSession()
 		if s == nil {
@@ -2495,7 +2510,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.actionLog.Add("status snapshot", s.Title, true)
 		hb := h.workerHeartbeat()
 		return h, func() tea.Msg {
-			return captureStatusSnapshot(s, s.ID, hb)
+			snap := captureStatusSnapshot(s, s.ID, hb, true, true)
+			return statusSnapshotMsg{path: snap.path, err: snap.err}
 		}
 	case "?":
 		h.helpOverlay.Show()
@@ -6440,6 +6456,36 @@ func (h *Home) setError(err error) {
 	}
 }
 
+// openBugReport shows the report dialog and, when a session is under the
+// cursor, freezes its status evidence in the same breath.
+//
+// The capture fires at the keypress rather than at submit because status is a
+// moving target: by the time someone has typed a description, the session may
+// have self-corrected, and re-reading it then would capture a state nobody is
+// complaining about. The Cmd keeps the blocking tmux I/O off the Update loop,
+// the same way the `D` key's capture does.
+//
+// It captures in memory only (persist=false). This fires on every `!` press,
+// before a report kind is even chosen, so persisting would litter
+// ~/.config/fleet/snapshots/ with cancelled dialogs and feature requests — and
+// would put a full-process goroutine dump on a hot key. The filed issue is
+// unaffected: its body is built from the returned values, not read off disk.
+func (h *Home) openBugReport() (tea.Model, tea.Cmd) {
+	h.actionLog.Add("open bug report", "", true)
+	s := h.selectedSession()
+	h.bugReport.Show(h.version, len(h.sessions), h.errorHistory, h.actionLog,
+		h.width, h.height, &h.renderStats, time.Since(h.startTime), s)
+	analytics.Track(analytics.EventBugReportOpened, nil)
+
+	if s == nil {
+		return h, nil
+	}
+	hb := h.workerHeartbeat()
+	return h, func() tea.Msg {
+		return reportSnapshotMsg{snap: captureStatusSnapshot(s, s.ID, hb, false, false)}
+	}
+}
+
 func (h *Home) setInfo(msg string) {
 	h.infoMsg = msg
 	h.infoTime = time.Now()
@@ -6981,10 +7027,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
 	case "bug_report":
-		h.actionLog.Add("open bug report", "", true)
-		h.bugReport.Show(h.version, len(h.sessions), h.errorHistory, h.actionLog, h.width, h.height, &h.renderStats, time.Since(h.startTime))
-		analytics.Track(analytics.EventBugReportOpened, nil)
-		return h, nil
+		return h.openBugReport()
 	case "help":
 		h.helpOverlay.Show()
 		return h, nil

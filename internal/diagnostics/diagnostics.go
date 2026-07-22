@@ -171,6 +171,33 @@ func (r *Report) formatMarkdown(description string) string {
 		b.WriteString("\n")
 	}
 
+	b.WriteString(r.FormatEnvironmentMarkdown(true))
+
+	return b.String()
+}
+
+// FormatEnvironmentMarkdown renders everything about the machine — versions,
+// terminal environment, and optionally the debug log and config — with no
+// description, errors, or action log. Split out of formatMarkdown so a report
+// that supplies its own narrative (the wrong-status report, whose evidence is a
+// signals table) can append the environment without a second "## Bug Report"
+// heading and an empty description placeholder underneath it.
+//
+// includeLogs gates the debug log and the config block — both of which are the
+// reporter's content, not the machine's. A wrong-status report offers to leave
+// content out, and neither the global log tail nor config.json may smuggle
+// itself back in past that choice.
+func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
+	home, _ := os.UserHomeDir()
+	sanitize := func(s string) string {
+		if home != "" {
+			return strings.ReplaceAll(s, home, "~")
+		}
+		return s
+	}
+
+	var b strings.Builder
+
 	// Diagnostics.
 	b.WriteString("### Diagnostics\n")
 	fmt.Fprintf(&b, "- **Version**: %s\n", r.Version)
@@ -234,14 +261,17 @@ func (r *Report) formatMarkdown(description string) string {
 	b.WriteString("\n")
 
 	// Debug logs.
-	if r.RecentLogs != "" {
+	if includeLogs && r.RecentLogs != "" {
 		b.WriteString("<details><summary>Debug Log (last 100 lines)</summary>\n\n```\n")
 		b.WriteString(sanitize(r.RecentLogs))
 		b.WriteString("\n```\n</details>\n\n")
 	}
 
-	// Config.
-	if r.Config != "" {
+	// Config. Gated alongside the log: config.json carries
+	// default_project_path, which can be confidential in its own right (client
+	// names live in directory names), and a reporter who unticked the content
+	// box was never shown it and never had it named to them.
+	if includeLogs && r.Config != "" {
 		b.WriteString("<details><summary>Config</summary>\n\n```json\n")
 		b.WriteString(sanitize(r.Config))
 		b.WriteString("\n```\n</details>\n")
