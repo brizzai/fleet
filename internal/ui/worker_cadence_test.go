@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 	"time"
 
@@ -143,4 +146,132 @@ func TestHeavyCycleDue(t *testing.T) {
 	if !heavyCycleDue(base, base.Add(tickInterval)) {
 		t.Error(">= tickInterval gap should be due")
 	}
+}
+
+// callees returns the names of every function/method called in the body of the
+// named top-level func in app.go. Used by the guards below, which pin *which
+// goroutine* a call runs on — a property no runtime assertion can reach,
+// because the damage only shows up when a real attach suspends the Tea loop.
+func callees(t *testing.T, fnName string) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "app.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse app.go: %v", err)
+	}
+	out := map[string]bool{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != fnName {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch c := call.Fun.(type) {
+			case *ast.Ident:
+				out[c.Name] = true
+			case *ast.SelectorExpr:
+				out[c.Sel.Name] = true
+			}
+			return true
+		})
+	}
+	if len(out) == 0 {
+		t.Fatalf("no calls found in %s — did it get renamed?", fnName)
+	}
+	return out
+}
+
+// TestStatusWorkerCycleDoesNotRunGitFanout pins the fix for the status freeze:
+// the git+PR fan-out must not share a goroutine with the ~500ms fast pass.
+//
+// The fan-out is unbounded (N repos at 4-wide, each a serial git refresh plus
+// up to two 15s `gh` calls) and every result has to reach the Update loop —
+// which tea.Exec suspends for the duration of an attach. While it lived inline
+// in statusWorkerCycle, one 16-minute cycle froze every session's status for
+// its whole duration. That matters most for waiting→running: approving a
+// permission fires no hook, so the flip is pane-detection-only and rides the
+// fast pass exclusively.
+func TestStatusWorkerCycleDoesNotRunGitFanout(t *testing.T) {
+	if callees(t, "statusWorkerCycle")["refreshAllGitAndPR"] {
+		t.Error("statusWorkerCycle calls refreshAllGitAndPR — the git+PR fan-out is back " +
+			"on the fast pass's goroutine and will starve pane detection during slow " +
+			"cycles. It belongs in gitWorkerCycle.")
+	}
+	if !callees(t, "gitWorkerCycle")["refreshAllGitAndPR"] {
+		t.Error("gitWorkerCycle no longer calls refreshAllGitAndPR — git/PR info will never refresh")
+	}
+}
+
+// TestGitFanoutPublishesWithoutTheUpdateLoop pins the second half of the fix.
+//
+// Bubble Tea's msgs channel is UNBUFFERED (v2 tea.go: `msgs: make(chan Msg)`)
+// and Send is a bare rendezvous with no deadline, so while tea.Exec holds the
+// loop suspended nothing drains it. The fan-out used to push each repo's result
+// through h.send, which parked one goroutine per repo for the entire attach,
+// each holding a semaphore slot, wedging the fan-out until detach — 16 of 18
+// captured stall dumps had all four slots stuck exactly there.
+//
+// So the fan-out must publish through writeGitInfo (a lock-free COW swap, safe
+// from any goroutine) and treat the message as a repaint hint only.
+func TestGitFanoutPublishesWithoutTheUpdateLoop(t *testing.T) {
+	got := callees(t, "refreshAllGitAndPR")
+	if !got["writeGitInfo"] {
+		t.Error("refreshAllGitAndPR no longer calls writeGitInfo — results are " +
+			"presumably routed through h.send again, which blocks for the whole " +
+			"attach on Tea's unbuffered channel")
+	}
+	if got["gitInfoUpdateMsg"] {
+		t.Error("refreshAllGitAndPR sends gitInfoUpdateMsg — that carries the payload " +
+			"through the Update loop, reintroducing the blocking rendezvous. Write the " +
+			"cache directly and send gitRepaintMsg as a hint instead.")
+	}
+}
+
+// TestWorkerWatchdogIgnoresAttach: an attach suspends the Tea loop for as long
+// as the user is in the session, so worker latency measured across one says
+// nothing about a wedge. Without this gate the watchdog fired on every attach
+// longer than workerStallThreshold — 18 stall dumps in a single day of normal
+// use, which is enough noise to hide a real one.
+func TestWorkerWatchdogIgnoresAttach(t *testing.T) {
+	if !mentions(t, "workerWatchdog", "isAttaching") {
+		t.Error("workerWatchdog no longer consults isAttaching — every attach over " +
+			"workerStallThreshold will dump a false stall")
+	}
+	// The gitWorker skips its cycle during an attach for the same reason: the
+	// sidebar isn't on screen, and the detach path rebuilds it wholesale.
+	if !mentions(t, "gitWorkerCycle", "isAttaching") {
+		t.Error("gitWorkerCycle no longer consults isAttaching — the fan-out will run " +
+			"against a Tea loop that tea.Exec has suspended")
+	}
+}
+
+// mentions reports whether the named top-level func in app.go references the
+// given identifier anywhere in its body.
+func mentions(t *testing.T, fnName, ident string) bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "app.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse app.go: %v", err)
+	}
+	found := false
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != fnName {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == ident {
+				found = true
+			}
+			return true
+		})
+		return found
+	}
+	t.Fatalf("func %s not found in app.go — renamed?", fnName)
+	return false
 }

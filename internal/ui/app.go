@@ -166,6 +166,13 @@ type (
 		repo string
 		info *git.RepoInfo
 	}
+	// gitRepaintMsg tells Update that a worker already wrote fresh git info
+	// into the cache and the sidebar should reflect it. Deliberately carries
+	// no data: the git+PR fan-out publishes via writeGitInfo and only signals
+	// here, so a dropped message costs a repaint, never correctness.
+	gitRepaintMsg struct {
+		structural bool // origin/worktree changed — needs a full flat-item rebuild
+	}
 	// splashFrameMsg advances the boot-splash spinner. Self-rescheduled
 	// while !booted; not emitted after bootstrapDoneMsg.
 	splashFrameMsg time.Time
@@ -1388,6 +1395,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case gitRepaintMsg:
+		// The cache is already current (the fan-out wrote it); this only
+		// decides how much of the sidebar has to be recomputed.
+		if msg.structural {
+			h.rebuildFlatItems()
+		} else {
+			h.sidebarDirty = true
+		}
+		return h, nil
+
 	case bootstrapDoneMsg:
 		h.booted = true
 		h.rebuildFlatItems()
@@ -1399,6 +1416,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.syncViewport()
 		}
 		go h.statusWorker()
+		// Started here, not earlier: gitWorker and the bootstrap probe both
+		// touch repoLastHotAt unlocked, and bootstrap is done by now.
+		go h.gitWorker()
 		return h, nil
 
 	case splashFrameMsg:
@@ -5282,16 +5302,70 @@ drainPriority:
 	// which is why it lives here on the worker, not the Update loop.
 	h.maybeSuspendIdleSessions(sessions)
 
-	// 5. Git+PR refresh: fan out across all session repos in parallel,
-	// bounded to 4 concurrent goroutines so the subprocess load stays
-	// flat. Branch/dirty lands within the 2s tick; PR refresh respects
-	// the per-repo TTL gate (60s hot / 2 min cold) inside the goroutine.
-	//
-	// First: stamp `repoLastHotAt` so the TTL classifier (next call) can
-	// see who's active right now. A repo is "hot" if any of its sessions
-	// is currently Running — checked every cycle, cheap. repoLastHotAt
-	// is only ever touched from this worker cycle and from bootstrap; the
-	// two never run concurrently, so no lock needed.
+	// 5. Git+PR refresh used to run here, inline. It now lives on its own
+	// goroutine (gitWorker) — see the comment there for why sharing this
+	// one was a bug.
+
+	// 6. Repaint tmux status bars for sessions whose state changed since the
+	// last cycle. Sessions whose status + theme key matches the last applied
+	// value are skipped — a single tmux set-option round-trip is fast but
+	// running it for 100 idle sessions every 2s is wasteful.
+	h.refreshTmuxStatusBars(sessions)
+}
+
+// gitWorker refreshes per-repo git + PR state on its own goroutine and cadence.
+//
+// This is deliberately NOT part of statusWorkerCycle. The fan-out is unbounded:
+// N repos at 4-wide, each costing a serial git refresh plus up to two 15s `gh`
+// calls, and every result has to reach the Update loop. Sharing a goroutine
+// with the ~500ms fast pass meant a slow fan-out starved the active-session
+// pane re-checks — and a permission grant fires no hook, so waiting→running is
+// pane-only. A 16-minute cycle once froze every session's status for its whole
+// duration.
+func (h *Home) gitWorker() {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		h.gitWorkerCycle()
+	}
+}
+
+func (h *Home) gitWorkerCycle() {
+	defer func() {
+		if r := recover(); r != nil {
+			debuglog.Logger.Error("gitWorkerCycle panic recovered", "panic", r)
+		}
+	}()
+
+	// Nothing to refresh for while attached: tea.Exec has taken over the
+	// terminal, View() renders blank, and the detach path (statusUpdateMsg)
+	// rebuilds the sidebar wholesale anyway. Skipping also keeps the fan-out
+	// away from a Tea loop that is not draining messages.
+	if h.isAttaching.Load() {
+		return
+	}
+
+	h.workerMu.Lock()
+	sessions := make([]*session.Session, len(h.sessions))
+	copy(sessions, h.sessions)
+	h.workerMu.Unlock()
+
+	if len(sessions) == 0 {
+		return
+	}
+
+	// Stamp `repoLastHotAt` so the TTL classifier (next call) can see who's
+	// active right now. A repo is "hot" if any of its sessions is currently
+	// Running — checked every cycle, cheap. repoLastHotAt is only ever touched
+	// from this cycle and from bootstrap; gitWorker starts on bootstrapDoneMsg,
+	// so the two never run concurrently and no lock is needed.
 	now := time.Now()
 	for _, s := range sessions {
 		if s.GetStatus() == session.StatusRunning {
@@ -5299,14 +5373,10 @@ drainPriority:
 		}
 	}
 
-	repos := h.uniqueRepoPathsFromSessions(sessions)
-	h.refreshAllGitAndPR(repos, 4, 0, nil)
-
-	// 6. Repaint tmux status bars for sessions whose state changed since the
-	// last cycle. Sessions whose status + theme key matches the last applied
-	// value are skipped — a single tmux set-option round-trip is fast but
-	// running it for 100 idle sessions every 2s is wasteful.
-	h.refreshTmuxStatusBars(sessions)
+	// Fan out bounded to 4 concurrent goroutines so subprocess load stays flat.
+	// Branch/dirty lands within the 2s tick; PR refresh respects the per-repo
+	// TTL gate (60s hot / 2 min cold) inside the goroutine.
+	h.refreshAllGitAndPR(h.uniqueRepoPathsFromSessions(sessions), 4, 0, nil)
 }
 
 // workerStallThreshold is how long the status worker may go without completing a
@@ -5333,6 +5403,14 @@ func (h *Home) workerWatchdog() {
 		case <-h.ctx.Done():
 			return
 		case <-ticker.C:
+		}
+
+		// An attach suspends the Tea loop for as long as the user is in the
+		// session, so any worker latency measured across one says nothing about
+		// a wedge. Dumping there produced a stall report for every attach over
+		// 90s — normal usage, buried in false positives.
+		if h.isAttaching.Load() {
+			continue
 		}
 
 		last := h.lastWorkerCycleNano.Load()
@@ -5575,11 +5653,34 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 					}
 				}
 
-				// Push the refresh result to Update — Update is the sole
-				// writer of h.gitInfoCache. Send is buffered + drained
-				// synchronously by Tea's main loop, so the next worker
-				// cycle's carry-forward read sees this update.
-				h.send(gitInfoUpdateMsg{repo: r, info: info})
+				// Publish the result by writing the cache directly. It is a
+				// lock-free COW swap, safe from any goroutine, and it makes
+				// the data live immediately for View and for the next cycle's
+				// carry-forward read.
+				//
+				// This must NOT go through h.send. Bubble Tea's msgs channel
+				// is UNBUFFERED (v2 tea.go: `msgs: make(chan Msg)`) and Send
+				// is a bare rendezvous with no deadline — while tea.Exec has
+				// the loop suspended for an attach, nothing drains it. Sending
+				// here parked one goroutine per repo for the whole attach,
+				// each holding a semaphore slot, wedging the fan-out until
+				// detach. Compare inside the mutation so the before/after read
+				// is atomic with the write.
+				var structural bool
+				h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+					structural = structuralGitChange(next[r], info)
+					next[r] = info
+					return true
+				})
+
+				// Update still owns the sidebar rebuild. The message carries no
+				// data — the cache write above already published it — so if this
+				// is dropped or delayed the cost is a late repaint, never stale
+				// state. Skipped while attached: the sidebar isn't on screen, and
+				// the detach path rebuilds it wholesale.
+				if !h.isAttaching.Load() {
+					h.send(gitRepaintMsg{structural: structural})
+				}
 
 				// Persist to SQLite so the next launch can carry this forward
 				// instead of re-firing gh. Storage method logs errors itself;
