@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/brizzai/fleet/internal/debuglog"
 )
 
 // claudeProjectDirReplacer mirrors Claude Code's per-cwd transcript dir naming.
@@ -75,7 +77,7 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 	jsonlPath := filepath.Join(projectDir, claudeSessionID+".jsonl")
 
 	var lastCustom, lastAI string
-	forEachTranscriptLine(jsonlPath, func(line string) bool {
+	_ = forEachTranscriptLine(jsonlPath, func(line string) bool {
 		// Quick check before JSON parsing. Matches both "custom-title" and
 		// "ai-title"; the Type check below filters any incidental hits.
 		if !strings.Contains(line, "-title") {
@@ -278,7 +280,7 @@ func transcriptParentLink(path string) string {
 		return ""
 	}
 	var link string
-	forEachTranscriptLine(path, func(line string) bool {
+	_ = forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, "logicalParentUuid") {
 			return true
 		}
@@ -319,9 +321,18 @@ const transcriptLineCap = 8 << 20 // 8MB
 // uuid reported absent — and every consumer treats them as authoritative. That
 // silently disabled the between-bursts tiebreaker in conversationActivePastHook and
 // biased sessionRotationVerdict toward rejecting genuine rotations.
+// Callers that only need a best-effort answer discard the returned error; the
+// helper has already logged anything beyond a routine missing file.
 func forEachTranscriptLine(path string, fn func(line string) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
+		// A missing transcript is routine — the session may not have written one
+		// yet, or belongs to an agent that keeps none. Anything else (permissions,
+		// a bad path) leaves callers returning a zero value that reads exactly like
+		// "nothing happened", so it must not pass in silence.
+		if !errors.Is(err, os.ErrNotExist) {
+			debuglog.Logger.Warn("transcript: open failed", "path", path, "err", err)
+		}
 		return err
 	}
 	defer f.Close()
@@ -353,6 +364,11 @@ func forEachTranscriptLine(path string, fn func(line string) bool) error {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+			// Partial walk. Whatever the caller returns is derived from a prefix of
+			// the file, which is precisely the failure this helper exists to end —
+			// so say so rather than letting a stale answer look authoritative.
+			debuglog.Logger.Warn("transcript: read failed, result is partial",
+				"path", path, "err", err)
 			return err
 		}
 	}
@@ -366,7 +382,7 @@ func transcriptContainsUUID(path, uuid string) bool {
 		return false
 	}
 	found := false
-	forEachTranscriptLine(path, func(line string) bool {
+	_ = forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, uuid) {
 			return true
 		}
@@ -414,7 +430,7 @@ func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time
 		return time.Time{}
 	}
 	var result time.Time
-	forEachTranscriptLine(path, func(line string) bool {
+	_ = forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, `"timestamp"`) {
 			return true
 		}
