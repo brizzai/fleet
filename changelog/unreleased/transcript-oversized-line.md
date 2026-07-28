@@ -2,4 +2,4 @@
 type: fixed
 ---
 
-**Long transcripts stop lying.** A session whose conversation contained a very large entry — a pasted image, a big tool result — could show as finished while it was still working. fleet read the transcript only up to that entry; it now reads all of it.
+**Large transcripts read fully.** A conversation entry over 1MB — a pasted image, a big tool result — used to stop fleet mid-file, so a session that was still working showed as finished. You now get the right status whatever the entry size.
