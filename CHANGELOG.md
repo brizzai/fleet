@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.2] - 2026-07-28
+
+### Fixed
+
+- **No more idle flicker.** Sessions whose activity line showed no token counter (`· Improvising… (51s)`) could read idle for a single frame and snap back, so a working session flashed the wrong dot. You now get a steady status for the whole turn.
+- **Compaction reads as running.** A session part-way through `/compact` no longer sits at idle waiting on a hook — the pane detects it directly.
+- **Large transcripts read fully.** A conversation entry over 1MB — a pasted image, a big tool result — used to stop fleet mid-file, so a session that was still working showed as finished. You now get the right status whatever the entry size.
+
 ## [2.23.1] - 2026-07-22
 
 ### Fixed
@@ -452,7 +460,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.23.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.23.2...HEAD
+[2.23.2]: https://github.com/brizzai/fleet/releases/tag/v2.23.2
 [2.23.1]: https://github.com/brizzai/fleet/releases/tag/v2.23.1
 [2.23.0]: https://github.com/brizzai/fleet/releases/tag/v2.23.0
 [2.22.0]: https://github.com/brizzai/fleet/releases/tag/v2.22.0
