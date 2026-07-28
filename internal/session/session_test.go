@@ -47,16 +47,39 @@ func TestDetectStatus(t *testing.T) {
 		{"busy pattern", "some output\nctrl+c to interrupt\n", StatusRunning},
 		{"esc busy pattern", "output\nesc to interrupt\n", StatusRunning},
 		{"spinner char", "⠋ Working...\n", StatusRunning},
-		// Every activity line Claude renders opens with a rotating glyph (37/37 real
-		// captures), and the glyph is what separates a live indicator from prose that
-		// happens to close on a parenthesised duration — so it is required here.
 		{"whimsical pattern", "· Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
-		// The glyph set rotates wider than spinnerChars covers (`·` and `✻` are absent
-		// from it), so these two must be carried by isWhimsicalActivity alone. Neither
-		// has a token counter — requiring one made them read as finished mid-turn.
+		// Shape A, glyph-less. Kept because a frame can capture with the animated glyph
+		// cell blank or clipped, and because it is what master matched — the token
+		// counter stays a valid alternative to the glyph, not a thing replaced by it.
+		{"whimsical token counter without glyph", "Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
+		// Shape B. spinnerChars covers only part of the rotating glyph set — `·` (U+00B7)
+		// and `✻` (U+273B) are absent — so with no token counter these matched nothing
+		// and read as finished mid-turn.
 		{"whimsical thinking without token counter", "· Improvising… (51s · almost done thinking with xhigh effort)\n", StatusRunning},
 		{"whimsical bare duration", "✻ Marinating… (33s)\n", StatusRunning},
-		{"prose with duration but no glyph not matched", "we cut cold start… (2s) after the rewrite\n❯\n", StatusFinished},
+		// Shape B's gate, one case per clause. Each of these satisfies every other
+		// condition (trailing `)`, an `…`, a duration after it), so each fails if its
+		// clause is dropped — the previous version of this guard ended in `e` and so
+		// never reached the gate at all.
+		{"prose with duration but no glyph not matched", "we cut cold start… (2s)\n❯\n", StatusFinished},
+		{"accented prose not matched", "Éclair… (2s)\n❯\n", StatusFinished},
+		{"lowercase prose behind a glyph not matched", "· quoted example… (2s)\n❯\n", StatusFinished},
+		// Isolates the letter/digit clause. The separator check tests the rune right
+		// after the first, so only a single-character opener reaches this clause — a
+		// numbered list item in scrollback is the realistic shape.
+		{"numbered list item not matched", "1 Compiling… (2s)\n❯\n", StatusFinished},
+		// Isolates the trailing-`)` clause: glyph, capitalised word, ellipsis and
+		// duration all present, but the line continues past the parenthesis.
+		{"activity shape trailing into prose not matched", "· Marinating… (33s) and then some prose\n❯\n", StatusFinished},
+		// Isolates the whitespace clause: a real glyph, but fused to the word.
+		{"glyph fused to word not matched", "·Marinating… (33s)\n❯\n", StatusFinished},
+		// Isolates the `waiting for` clause: glyph-prefixed and capitalised, so only
+		// that guard rejects it. The boxed rendering below is caught by `│` instead.
+		{"unboxed team-waiting line not matched", "· Waiting for team lead approval… (2m 13s)\n❯ \n⏵⏵\n", StatusFinished},
+		// A bash tool row ticking under a prompt must not outrank it: detectRunning runs
+		// before detectWaiting, so matching this would hide a live permission menu.
+		{"bash tool gutter row not matched", "⎿  Running… (9s · timeout 5m)\n❯\n", StatusFinished},
+		{"team waiting box with counter not matched", "│ ✢ Waiting for team lead approval… (2m 13s)\n❯ \n⏵⏵\n", StatusWaiting},
 		{"approval yes allow", "some text\nYes, allow once\n", StatusWaiting},
 		{"approval no tell claude", "No, and tell Claude\n❯\n", StatusWaiting},
 		{"permission menu 3 options", "output\n❯ 1. Yes\n  2. Yes, during this session\n  3. No\nEsc to cancel · Tab to amend\n", StatusWaiting},
