@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -301,6 +302,36 @@ func transcriptParentLink(path string) string {
 	return link
 }
 
+// transcriptWarnInterval throttles the warnings below. They sit on per-cycle paths
+// — ReadClaudeSessionName re-reads a transcript on every worker cycle while a
+// session is still unnamed (app.go sets recheck=0 inside agentNameFreshPollWindow),
+// then ~every 30s — and the conditions they report are sticky: EACCES does not clear
+// itself, and an over-cap entry is re-encountered on every scan. Unthrottled, one
+// broken transcript writes a line per session per cycle for the life of the process.
+// debug.log's last 100 lines are what the bug-report flow pastes into a public issue,
+// so that drip would evict the diagnostics these warnings exist to preserve. Same
+// shape and interval as rotRejectLogInterval.
+const transcriptWarnInterval = time.Minute
+
+// transcriptWarnedAt maps reason+path to the last time that pair was logged.
+var transcriptWarnedAt sync.Map
+
+// warnTranscript logs at Warn at most once per transcriptWarnInterval per
+// (reason, path).
+//
+// Warn rather than Debug on purpose: debuglog only enables Debug when FLEET_DEBUG is
+// set, so a Debug line would be absent from exactly the bug reports these warnings
+// are for. Throttling is what makes Warn affordable on a per-cycle path.
+func warnTranscript(reason, path string, args ...any) {
+	key := reason + "\x00" + path
+	now := time.Now()
+	if prev, ok := transcriptWarnedAt.Load(key); ok && now.Sub(prev.(time.Time)) < transcriptWarnInterval {
+		return
+	}
+	transcriptWarnedAt.Store(key, now)
+	debuglog.Logger.Warn(reason, append([]any{"path", path}, args...)...)
+}
+
 // transcriptLineCap bounds how much of one JSONL line is held in memory. Past it
 // the remainder of that line is discarded and the walk continues with the next —
 // losing one entry is recoverable (its neighbours are usually seconds away),
@@ -331,7 +362,7 @@ func forEachTranscriptLine(path string, fn func(line string) bool) error {
 		// a bad path) leaves callers returning a zero value that reads exactly like
 		// "nothing happened", so it must not pass in silence.
 		if !errors.Is(err, os.ErrNotExist) {
-			debuglog.Logger.Warn("transcript: open failed", "path", path, "err", err)
+			warnTranscript("transcript: open failed", path, "err", err)
 		}
 		return err
 	}
@@ -347,6 +378,13 @@ func forEachTranscriptLine(path string, fn func(line string) bool) error {
 			if !overCap {
 				if len(buf)+len(chunk) > transcriptLineCap {
 					overCap, buf = true, nil
+					// Say so. A skipped entry leaves a complete-looking walk that is
+					// missing one line, and if that line was the last, the callers here
+					// return the entry before it — stale, and indistinguishable from a
+					// real answer. That is the failure this helper replaced, at a
+					// smaller scale, so it must not be the one it reintroduces.
+					warnTranscript("transcript: entry over cap, skipped", path,
+						"cap_bytes", transcriptLineCap)
 				} else {
 					buf = append(buf, chunk...)
 				}
@@ -367,8 +405,7 @@ func forEachTranscriptLine(path string, fn func(line string) bool) error {
 			// Partial walk. Whatever the caller returns is derived from a prefix of
 			// the file, which is precisely the failure this helper exists to end —
 			// so say so rather than letting a stale answer look authoritative.
-			debuglog.Logger.Warn("transcript: read failed, result is partial",
-				"path", path, "err", err)
+			warnTranscript("transcript: read failed, result is partial", path, "err", err)
 			return err
 		}
 	}

@@ -1,12 +1,16 @@
 package session
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/brizzai/fleet/internal/debuglog"
 )
 
 func TestClaudeProjectDirName(t *testing.T) {
@@ -532,5 +536,41 @@ func TestForEachTranscriptLineReportsReadErrors(t *testing.T) {
 	}
 	if len(got) != 2 || got[1] != `{"b":2}` {
 		t.Errorf("lines = %q, want both entries including the unterminated last one", got)
+	}
+}
+
+// TestWarnTranscriptThrottles guards the property that makes these warnings
+// affordable. They sit on per-cycle paths — ReadClaudeSessionName re-reads a
+// transcript on every worker cycle while a session is unnamed — and report sticky
+// conditions (EACCES does not clear itself; an over-cap entry recurs on every
+// scan). Unthrottled they write a line per session per cycle forever, and since
+// debug.log's last 100 lines are what the bug-report flow publishes, that drip
+// evicts the diagnostics the warnings exist to preserve.
+func TestWarnTranscriptThrottles(t *testing.T) {
+	var buf bytes.Buffer
+	prev := debuglog.Logger
+	debuglog.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	t.Cleanup(func() { debuglog.Logger = prev })
+
+	const reason = "transcript: test reason"
+	warnTranscript(reason, "/tmp/a.jsonl")
+	warnTranscript(reason, "/tmp/a.jsonl") // same pair — suppressed
+	warnTranscript(reason, "/tmp/a.jsonl") // still suppressed
+
+	if got := strings.Count(buf.String(), reason); got != 1 {
+		t.Errorf("same (reason, path) logged %d times, want 1", got)
+	}
+
+	// A different path is a different condition and must still be reported —
+	// throttling per-pair rather than globally keeps one noisy transcript from
+	// masking a second one.
+	warnTranscript(reason, "/tmp/b.jsonl")
+	if got := strings.Count(buf.String(), reason); got != 2 {
+		t.Errorf("second path logged %d total, want 2 (a distinct path must not be throttled)", got)
+	}
+
+	// The path is always attached, so a report names the transcript at fault.
+	if !strings.Contains(buf.String(), "/tmp/b.jsonl") {
+		t.Error("warning omitted the transcript path")
 	}
 }
