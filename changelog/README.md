@@ -13,6 +13,17 @@ type: added
 Description of the change for end users
 ```
 
+**One file is one bullet.** At release time the roller prefixes each *fragment*
+with `- ` — not each paragraph inside it. A fragment holding two paragraphs
+therefore emits a bullet followed by a bare line, which markdown treats as a lazy
+continuation of the bullet above: two ideas render glued into one, in both the
+GitHub Release and the in-app Release Notes view. This happened in v2.23.2 and
+had to be patched on the release branch.
+
+So when a change really is two ideas — which "one idea per bullet" below asks you
+to split — give each one **its own file**. Splitting inside a single fragment
+looks right in the source and comes out wrong.
+
 ## Keep it concise
 
 Aim for **1–2 sentences** that lead with the user-facing change. A reader
