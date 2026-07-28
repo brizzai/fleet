@@ -52,6 +52,10 @@ func TestDetectStatus(t *testing.T) {
 		// cell blank or clipped, and because it is what master matched — the token
 		// counter stays a valid alternative to the glyph, not a thing replaced by it.
 		{"whimsical token counter without glyph", "Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
+		// Shape A must stay on master's exact terms: master required no ellipsis, so
+		// hoisting shape B's ellipsis gate above it would silently narrow this line out
+		// of detection — and an ellipsis is as droppable as the glyph cell A covers for.
+		{"whimsical token counter without ellipsis", "Clauding (53s · ↓ 749 tokens)\n", StatusRunning},
 		// Shape B. spinnerChars covers only part of the rotating glyph set — `·` (U+00B7)
 		// and `✻` (U+273B) are absent — so with no token counter these matched nothing
 		// and read as finished mid-turn.
@@ -64,13 +68,20 @@ func TestDetectStatus(t *testing.T) {
 		{"prose with duration but no glyph not matched", "we cut cold start… (2s)\n❯\n", StatusFinished},
 		{"accented prose not matched", "Éclair… (2s)\n❯\n", StatusFinished},
 		{"lowercase prose behind a glyph not matched", "· quoted example… (2s)\n❯\n", StatusFinished},
-		// Isolates the letter/digit clause. The separator check tests the rune right
-		// after the first, so only a single-character opener reaches this clause — a
-		// numbered list item in scrollback is the realistic shape.
+		// Isolates the non-ASCII clause. Claude writes its replies in markdown, so a
+		// bullet or blockquote closing on a duration is an ordinary line for it to emit —
+		// and each of these clears every other condition, including capitalisation.
+		{"markdown bullet not matched", "- Ran the suite… (12s)\n❯\n", StatusFinished},
+		{"markdown star bullet not matched", "* Marinating… (33s)\n❯\n", StatusFinished},
+		{"blockquote not matched", "> Marinating… (33s)\n❯\n", StatusFinished},
+		{"heading not matched", "# Marinating… (33s)\n❯\n", StatusFinished},
 		{"numbered list item not matched", "1 Compiling… (2s)\n❯\n", StatusFinished},
 		// Isolates the trailing-`)` clause: glyph, capitalised word, ellipsis and
 		// duration all present, but the line continues past the parenthesis.
 		{"activity shape trailing into prose not matched", "· Marinating… (33s) and then some prose\n❯\n", StatusFinished},
+		// Isolates shape B's duration clause — the only thing separating an activity
+		// line from any glyph-prefixed capitalised note that closes on a parenthetical.
+		{"parenthetical without a duration not matched", "· Note… (see below)\n❯\n", StatusFinished},
 		// Isolates the whitespace clause: a real glyph, but fused to the word.
 		{"glyph fused to word not matched", "·Marinating… (33s)\n❯\n", StatusFinished},
 		// Isolates the `waiting for` clause: glyph-prefixed and capitalised, so only

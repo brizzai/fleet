@@ -39,7 +39,7 @@ var goldenTests = []struct {
 	{"pane_running_background_agents_multi.txt", StatusRunning, "three in-flight background Explore agents in the dock (`◯ Explore … · ↓ tokens`) while the lead is parked → running"},
 	{"pane_finished_quoted_dock_row.txt", StatusFinished, "idle pane whose conversation quotes a dock row verbatim (`◯ Explore … · ↓ tokens`) above the chrome — must NOT read as running (position guard: dock only scanned in bottom 3 lines)"},
 	{"pane_waiting_permission_with_dock.txt", StatusWaiting, "permission menu with live dock rows below it — waiting must win over the dock's running (detectWaiting precedes the dock check)"},
-	{"pane_finished_compacting.txt", StatusRunning, "mid-`/compact` pane — the compaction activity line (`· Compacting conversation… (2m 27s)`) is matched now that the activity check no longer requires a token counter, so the pane reads running on its own instead of leaning entirely on the PreCompact hook"},
+	{"pane_running_compacting.txt", StatusRunning, "mid-`/compact` pane — the compaction activity line (`· Compacting conversation… (2m 27s)`) is matched now that the activity check no longer requires a token counter, so the pane reads running on its own instead of leaning entirely on the PreCompact hook. Safe because the line is replaced by the `⎿  Compacted (ctrl+o …)` result row on completion rather than left in scrollback — no captured pane holds both"},
 }
 
 func TestGoldenDetection(t *testing.T) {
