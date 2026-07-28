@@ -9,9 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -83,6 +86,13 @@ type Session struct {
 	// rejected we short-circuit until the owner or the foreign id changes.
 	rotRejectOwner   string
 	rotRejectForeign string
+	// When we last logged that this pair is still being rejected. The rejection
+	// itself is logged once, on the cycle it is cached — but a neg-cached pair then
+	// drops every subsequent hook silently, so a session whose hook layer is dead
+	// looks identical in the log to one that is simply quiet. Re-announcing it on a
+	// throttle is what makes "the hook is frozen because we rejected its id"
+	// greppable instead of a whole-pipeline trace.
+	rotRejectLoggedAt time.Time
 
 	// Bounded retry tracking for an undecidable (owner, foreign) pair — one
 	// sessionRotationVerdict can't yet classify because a transcript hasn't flushed a
@@ -428,6 +438,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		forkParent := s.forkParentID
 		projectPath := s.ProjectPath
 		negCached := owner != "" && s.rotRejectOwner == owner && s.rotRejectForeign == hs.SessionID
+		frozenHook, frozenHookAt := s.hookStatus, s.hookUpdatedAt
 		s.mu.RUnlock()
 		if owner != "" && hs.SessionID != owner {
 			switch {
@@ -449,7 +460,31 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				debuglog.Logger.Info("adopting forked claude session",
 					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
-				return false // already rejected this (owner, foreign) pair
+				// Already rejected this (owner, foreign) pair. Re-announce it on a
+				// throttle: this branch is the steady state of a session whose hook
+				// layer has gone dead, and dropping every hook in silence is what
+				// made that state cost a full pipeline trace to identify.
+				// Check and stamp under ONE lock: the worker and the UI path both reach
+				// here (app.go calls syncHookStatuses from each), so a snapshot-then-write
+				// split lets both pass the interval check and log the same drop twice.
+				now := time.Now()
+				shouldLog := false
+				s.mu.Lock()
+				if now.Sub(s.rotRejectLoggedAt) >= rotRejectLogInterval {
+					s.rotRejectLoggedAt = now
+					shouldLog = true
+				}
+				s.mu.Unlock()
+				if shouldLog {
+					// frozenHookAge is the diagnostic: it is the age of the hook we are
+					// KEEPING, not of the one we just dropped. A large value next to a
+					// fresh dropped status is the signature of this failure.
+					debuglog.Logger.Info("hook dropped: claude session id still rejected",
+						"id", s.ID, "owner", owner, "foreign", hs.SessionID,
+						"dropped", hs.Status, "frozenHook", frozenHook,
+						"frozenHookAge", time.Since(frozenHookAt).Truncate(time.Second))
+				}
+				return false
 			case !resolveRotation:
 				// UI path: the rotation check reads transcripts off disk, which must not
 				// block the render loop. Defer to the next worker cycle (~500ms), which
@@ -555,6 +590,13 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 // transcripts on every pass forever.
 const rotationUndecidedRetryCap = 10
 
+// rotRejectLogInterval throttles the "hook dropped" line for an already-rejected
+// (owner, foreign) pair. The worker re-offers the same hook every fast cycle
+// (~500ms), so this must not log per attempt — but the state can persist for a
+// session's whole life, so it must not log only once either: debug.log rotates,
+// and the one line explaining a dead hook layer is exactly the line that gets lost.
+const rotRejectLogInterval = time.Minute
+
 // bumpUndecidedRotation records that the (owner, foreign) pair was undecidable this
 // cycle and reports whether to keep deferring. It returns false once the pair has been
 // undecidable for rotationUndecidedRetryCap consecutive cycles, signalling the caller to
@@ -579,6 +621,13 @@ func (s *Session) negCacheRotation(owner, foreign string) {
 	defer s.mu.Unlock()
 	s.rotRejectOwner = owner
 	s.rotRejectForeign = foreign
+	// Stamp the throttle for the NEW pair. The caller logs "ignoring foreign claude
+	// session" on this same cycle, so the first negCached hit that follows would only
+	// repeat it; starting the interval here makes the throttled line a pure
+	// still-happening heartbeat. Stamping per pair also stops a pair rejected moments
+	// after another from inheriting the previous pair's spent interval — that silence
+	// would land squarely in the window where a user hits `!` and files a report.
+	s.rotRejectLoggedAt = time.Now()
 	s.rotUndecidedOwner = ""
 	s.rotUndecidedForeign = ""
 	s.rotUndecidedCount = 0
@@ -700,6 +749,9 @@ func (s *Session) clearHookState() {
 	s.ownerSessionID = ""
 	s.rotRejectOwner = ""
 	s.rotRejectForeign = ""
+	// Zero the throttle with the pair it belongs to, so a restart re-arms the
+	// "hook dropped" line instead of inheriting a spent interval from the old pair.
+	s.rotRejectLoggedAt = time.Time{}
 	// Clear the fork parent link too. Restart()/RespawnClaude() call this without
 	// going through Start() (the only place forkParentID is set), so without this an
 	// un-diverged fork that resumes the parent id would re-claim owner==forkParent on
@@ -1655,10 +1707,10 @@ func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
 		}
 	}
 
-	// Whimsical activity pattern (Claude 2.1.25+). Two known formats:
-	//   "· Clauding… (53s · ↓ 749 tokens)"                                    — standard
-	//   "· Gesticulating… (5m 42s · ↓ 4.2k tokens · thinking with high effort)" — extended thinking
-	// Both contain `tokens` and `· ↓`/`· ↑` inside a trailing ")".
+	// Whimsical activity pattern (Claude 2.1.25+) — see isWhimsicalActivity for the
+	// two shapes. This is the signal that catches the glyphs spinnerChars above does
+	// not cover (`·` U+00B7, `✻` U+273B), so it carries an activity frame whose glyph
+	// rotated off that set and which has no token counter to fall back on.
 	//
 	// Scanned in the bottom 20 lines (not all 50): plan execution can push the
 	// activity line down via checklist items rendered below it (deepest known
@@ -1666,8 +1718,8 @@ func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
 	// headroom. Scanning all 50 false-positives on quoted activity lines that
 	// can land in scrollback when Claude's prior response embeds an example
 	// pane capture or crash-dump snippet — those satisfy every textual guard
-	// (`)` suffix, `tokens`, `· ↓`/`· ↑`, real duration string) but are not
-	// live indicators.
+	// (leading glyph, ellipsis, real duration, `)` suffix) but are not live
+	// indicators.
 	whimsicalN := min(20, len(recentLines))
 	for _, line := range recentLines[:whimsicalN] {
 		if isWhimsicalActivity(line) {
@@ -1678,22 +1730,108 @@ func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
 	return ""
 }
 
-// isWhimsicalActivity reports whether a line matches Claude's whimsical activity
-// indicator. The leading glyph can vary (middle dot, spinner char, etc.) —
-// matching is based on the duration/counter and token pattern, not the prefix.
-// Both standard and extended thinking formats are supported, e.g.:
+// activityGutterGlyphs are the structural glyphs Claude uses for tool-result
+// gutters and agent-team boxes. The rotating spinner set is deliberately NOT
+// enumerated below (Claude keeps extending it), but these are stable chrome, so
+// naming them is safe and does not reintroduce that churn.
 //
-//	"· Clauding… (53s · ↓ 749 tokens)"
-//	"✳ Newspapering… (5m 21s · ↓ 3.7k tokens)"
-//	"· Gesticulating… (5m 42s · ↓ 4.2k tokens · thinking with high effort)"
+// Excluding them is load-bearing for COUNTER-LESS rows, not tidiness: a gutter row
+// carries its own elapsed counter (`⎿  Running… (9s · timeout 5m)` — present
+// verbatim in captured panes), and detectRunning runs BEFORE detectWaiting. A bash
+// task ticking under a live permission menu would therefore return Running,
+// detectWaiting would never run, applyHookWaiting would never set
+// waitingPaneConfirmed, and after waitingHookRenderBackstop the pane would pin
+// Status to Running — dropping an unanswered prompt out of the Space rotation and
+// making Y refuse it.
+//
+// The protection stops there. A gutter row that DOES carry a token counter
+// (`⎿  Running… (12s · ↓ 3.4k tokens)`) is claimed by shape A below before this
+// list is ever consulted, so it can still mask Waiting — unchanged from master,
+// which had no gutter check at all, and not present in any captured pane. Left
+// that way deliberately rather than hoisting this check above shape A, which
+// would narrow a shape whose whole purpose is to preserve prior behaviour.
+var activityGutterGlyphs = []rune{'⎿', '⏺', '│', '├', '└'}
+
+// isWhimsicalActivity reports whether a line is one of Claude's live activity
+// indicators. Two shapes qualify, and they are alternatives on purpose:
+//
+//	A. a token counter — "Clauding… (53s · ↓ 749 tokens)"
+//	                     "✳ Newspapering… (5m 21s · ↓ 3.7k tokens)"
+//	B. a glyph + capitalised activity word — "· Improvising… (51s · thinking with xhigh effort)"
+//	                                         "✻ Marinating… (33s)"
+//	                                         "· Compacting conversation… (2m 27s)"
+//
+// B exists because Claude renders plenty of activity lines with no counter, and
+// spinnerChars covers only part of the rotating glyph set (`·` U+00B7 and `✻`
+// U+273B are absent) — so such a frame matched nothing and fell through to the
+// prompt check, reading a mid-turn session as finished. That only surfaces when
+// the hook layer is also down, but then the status flips frame-to-frame as the
+// glyph rotates.
+//
+// A is kept as an alternative rather than replaced by B: it is the older, proven
+// anchor, and it is the shape that still matches if a frame captures with its
+// glyph cell blank or clipped. Keeping both means B can afford a strict gate
+// without risking a false negative.
+//
+// A is therefore evaluated on EXACTLY master's terms, and every tightening this
+// function adds lives inside B. In particular the ellipsis requirement must not be
+// hoisted above A: master required no ellipsis, so `Clauding (53s · ↓ 749 tokens)`
+// matched there, and gating A behind a character that a blank-or-clipped frame may
+// equally lack would defeat the reason A is kept. Same for `waiting for` — scoping
+// it to B keeps A's long-standing behaviour intact.
 //
 // Used by detectRunning (status detection) and normalizeForHash (content hashing).
 func isWhimsicalActivity(line string) bool {
-	lower := strings.ToLower(strings.TrimRight(line, " \t"))
-	return strings.HasSuffix(lower, ")") &&
-		strings.Contains(lower, "tokens") &&
+	trimmed := strings.TrimSpace(line)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasSuffix(lower, ")") {
+		return false
+	}
+	if strings.Contains(lower, "tokens") &&
 		(strings.Contains(lower, "· ↓") || strings.Contains(lower, "· ↑")) &&
-		hasWhimsicalDuration(lower)
+		hasWhimsicalDuration(lower) {
+		return true // shape A — master's predicate, unchanged
+	}
+	// Shape B. The duration must follow the activity word rather than merely appear
+	// on the line, or prose quoting a timing figure would satisfy the check. The
+	// `waiting for` guard mirrors the spinner branch in detectRunning, which skips a
+	// glyph-prefixed team-waiting line for the same reason.
+	ellipsis := strings.Index(lower, "…")
+	if ellipsis < 0 || !hasWhimsicalDuration(lower[ellipsis:]) {
+		return false
+	}
+	return hasActivityGlyphPrefix(trimmed) && !strings.Contains(lower, "waiting for")
+}
+
+// hasActivityGlyphPrefix reports whether s opens the way Claude's activity lines
+// do: one non-ASCII glyph, whitespace, then a capitalised activity word.
+//
+// The glyph is not matched against a list — that set rotates and grows. But it must
+// be non-ASCII, because Claude renders its own replies as markdown: a bullet or
+// blockquote closing on a duration (`- Ran the suite… (12s)`, `> Marinating… (33s)`)
+// otherwise qualifies as "the glyph" and pins an idle session to Running until the
+// line scrolls out of the bottom-20 window. Capitalisation alone does not separate
+// those from an activity word — a bullet is capitalised too.
+//
+// Requiring the following word to be capitalised rejects lowercase prose behind a
+// real glyph (`· quoted example… (2s)`), and unlike "the ellipsis must terminate the
+// first token" it still admits the two-word `Compacting conversation…`. Accented
+// prose (`Éclair… (2s)`) is rejected by the separator check: nothing follows the
+// first rune but more letters.
+func hasActivityGlyphPrefix(s string) bool {
+	glyph, size := utf8.DecodeRuneInString(s)
+	if glyph == utf8.RuneError || glyph < utf8.RuneSelf {
+		return false
+	}
+	if slices.Contains(activityGutterGlyphs, glyph) {
+		return false
+	}
+	rest := strings.TrimLeft(s[size:], " \t")
+	if rest == s[size:] {
+		return false // glyph not separated from the word by whitespace
+	}
+	word, _ := utf8.DecodeRuneInString(rest)
+	return unicode.IsUpper(word)
 }
 
 // hasWhimsicalDuration checks for Claude's duration counter pattern "(Ns", "(Nm Ns",
