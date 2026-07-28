@@ -132,7 +132,7 @@ Read it as:
 - `status` is Claude Code's own flag: **`busy`** (processing a turn) → running, **`idle`** (done / at prompt) → finished/idle, **`shell`** (running a shell command) → running. Keyed by pid but carries `sessionId`, so match on the hook's `session_id`.
 - **Trust the value, not the timestamp.** `statusUpdatedAt` is event-driven, not a heartbeat — a genuinely-busy turn can show a `statusUpdatedAt` minutes old. Don't read "stale ⇒ wrong"; gate on **liveness** (is the pid alive?) instead. A dead pid's file is just its last-known status.
 - **No `waiting` value exists.** A permission prompt still reads `idle`/`busy` here, so this **corroborates Running vs Idle but cannot source Waiting** — use hooks/pane for waiting.
-- **Blind to `/compact`.** Compaction is not counted as `busy`, so the file stays `idle` through a multi-minute compaction — the same blind spot the hook, pane, and transcript all share. If the symptom is "idle during compaction," this file won't rescue it; the fix is detection-side (a `PreCompact` hook → running).
+- **Blind to `/compact`.** Compaction is not counted as `busy`, so the file stays `idle` through a multi-minute compaction — a blind spot it shares with the hook and the transcript. If the symptom is "idle during compaction," this file won't rescue it. The **pane** does see it: `detectRunning` matches the `· Compacting conversation… (2m 27s)` activity line, so a session reading idle mid-compaction points at the pane layer (or at nothing reaching it), not at compaction being undetectable.
 
 ## Step 3: Find the divergence
 

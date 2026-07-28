@@ -83,6 +83,13 @@ type Session struct {
 	// rejected we short-circuit until the owner or the foreign id changes.
 	rotRejectOwner   string
 	rotRejectForeign string
+	// When we last logged that this pair is still being rejected. The rejection
+	// itself is logged once, on the cycle it is cached — but a neg-cached pair then
+	// drops every subsequent hook silently, so a session whose hook layer is dead
+	// looks identical in the log to one that is simply quiet. Re-announcing it on a
+	// throttle is what makes "the hook is frozen because we rejected its id"
+	// greppable instead of a whole-pipeline trace.
+	rotRejectLoggedAt time.Time
 
 	// Bounded retry tracking for an undecidable (owner, foreign) pair — one
 	// sessionRotationVerdict can't yet classify because a transcript hasn't flushed a
@@ -428,6 +435,8 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		forkParent := s.forkParentID
 		projectPath := s.ProjectPath
 		negCached := owner != "" && s.rotRejectOwner == owner && s.rotRejectForeign == hs.SessionID
+		rejectLoggedAt := s.rotRejectLoggedAt
+		frozenHook, frozenHookAt := s.hookStatus, s.hookUpdatedAt
 		s.mu.RUnlock()
 		if owner != "" && hs.SessionID != owner {
 			switch {
@@ -449,7 +458,23 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				debuglog.Logger.Info("adopting forked claude session",
 					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
-				return false // already rejected this (owner, foreign) pair
+				// Already rejected this (owner, foreign) pair. Re-announce it on a
+				// throttle: this branch is the steady state of a session whose hook
+				// layer has gone dead, and dropping every hook in silence is what
+				// made that state cost a full pipeline trace to identify.
+				if time.Since(rejectLoggedAt) >= rotRejectLogInterval {
+					s.mu.Lock()
+					s.rotRejectLoggedAt = time.Now()
+					s.mu.Unlock()
+					// frozenHookAge is the diagnostic: it is the age of the hook we are
+					// KEEPING, not of the one we just dropped. A large value next to a
+					// fresh dropped status is the signature of this failure.
+					debuglog.Logger.Info("hook dropped: claude session id still rejected",
+						"id", s.ID, "owner", owner, "foreign", hs.SessionID,
+						"dropped", hs.Status, "frozenHook", frozenHook,
+						"frozenHookAge", time.Since(frozenHookAt).Truncate(time.Second))
+				}
+				return false
 			case !resolveRotation:
 				// UI path: the rotation check reads transcripts off disk, which must not
 				// block the render loop. Defer to the next worker cycle (~500ms), which
@@ -554,6 +579,13 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 // (e.g. a permanently unreadable owner transcript) and would otherwise rescan
 // transcripts on every pass forever.
 const rotationUndecidedRetryCap = 10
+
+// rotRejectLogInterval throttles the "hook dropped" line for an already-rejected
+// (owner, foreign) pair. The worker re-offers the same hook every fast cycle
+// (~500ms), so this must not log per attempt — but the state can persist for a
+// session's whole life, so it must not log only once either: debug.log rotates,
+// and the one line explaining a dead hook layer is exactly the line that gets lost.
+const rotRejectLogInterval = time.Minute
 
 // bumpUndecidedRotation records that the (owner, foreign) pair was undecidable this
 // cycle and reports whether to keep deferring. It returns false once the pair has been
@@ -1655,10 +1687,9 @@ func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
 		}
 	}
 
-	// Whimsical activity pattern (Claude 2.1.25+). Two known formats:
-	//   "· Clauding… (53s · ↓ 749 tokens)"                                    — standard
-	//   "· Gesticulating… (5m 42s · ↓ 4.2k tokens · thinking with high effort)" — extended thinking
-	// Both contain `tokens` and `· ↓`/`· ↑` inside a trailing ")".
+	// Whimsical activity pattern (Claude 2.1.25+) — see isWhimsicalActivity for the
+	// formats. This is the signal that catches the glyphs spinnerChars above does
+	// not cover, so it carries every activity frame whose glyph rotated off that set.
 	//
 	// Scanned in the bottom 20 lines (not all 50): plan execution can push the
 	// activity line down via checklist items rendered below it (deepest known
@@ -1666,8 +1697,8 @@ func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
 	// headroom. Scanning all 50 false-positives on quoted activity lines that
 	// can land in scrollback when Claude's prior response embeds an example
 	// pane capture or crash-dump snippet — those satisfy every textual guard
-	// (`)` suffix, `tokens`, `· ↓`/`· ↑`, real duration string) but are not
-	// live indicators.
+	// (leading glyph, ellipsis, real duration, `)` suffix) but are not live
+	// indicators.
 	whimsicalN := min(20, len(recentLines))
 	for _, line := range recentLines[:whimsicalN] {
 		if isWhimsicalActivity(line) {
@@ -1679,21 +1710,46 @@ func detectRunning(recentLines []string, _ string, log *slog.Logger) Status {
 }
 
 // isWhimsicalActivity reports whether a line matches Claude's whimsical activity
-// indicator. The leading glyph can vary (middle dot, spinner char, etc.) —
-// matching is based on the duration/counter and token pattern, not the prefix.
-// Both standard and extended thinking formats are supported, e.g.:
+// indicator. Matching is anchored on the line's *shape* — a leading glyph, an
+// ellipsis-terminated activity word, then a parenthesised duration — because both
+// the glyph and the suffix vary:
 //
-//	"· Clauding… (53s · ↓ 749 tokens)"
-//	"✳ Newspapering… (5m 21s · ↓ 3.7k tokens)"
-//	"· Gesticulating… (5m 42s · ↓ 4.2k tokens · thinking with high effort)"
+//	"· Clauding… (53s · ↓ 749 tokens)"                                       — standard
+//	"✳ Newspapering… (5m 21s · ↓ 3.7k tokens)"                               — standard
+//	"· Gesticulating… (5m 42s · ↓ 4.2k tokens · thinking with high effort)"   — extended thinking
+//	"✽ Improvising… (51s · almost done thinking with xhigh effort)"           — thinking, NO token counter
+//	"✢ Marinating… (33s)"                                                    — bare duration
+//
+// The last two are why the token counter can't be required: Claude renders plenty
+// of activity lines without one, and requiring `tokens` + `· ↓`/`· ↑` made them
+// invisible here. Combined with a spinnerChars set that covers only some of the
+// rotating glyphs (`·` and `✻` are absent), a frame could match neither signal and
+// fall through to the prompt check — reading a mid-turn session as finished. That
+// only surfaces when the hook layer is also down, but then it flips the status
+// frame-to-frame as the glyph rotates.
+//
+// The leading glyph is required (and deliberately not enumerated — Claude keeps
+// adding them): it is what separates a live indicator from prose that happens to
+// end in a parenthesised duration. Every glyph observed so far is non-ASCII, so a
+// non-ASCII first byte stands in for "starts with a glyph, not a sentence".
 //
 // Used by detectRunning (status detection) and normalizeForHash (content hashing).
 func isWhimsicalActivity(line string) bool {
-	lower := strings.ToLower(strings.TrimRight(line, " \t"))
-	return strings.HasSuffix(lower, ")") &&
-		strings.Contains(lower, "tokens") &&
-		(strings.Contains(lower, "· ↓") || strings.Contains(lower, "· ↑")) &&
-		hasWhimsicalDuration(lower)
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || trimmed[0] < 0x80 {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if !strings.HasSuffix(lower, ")") {
+		return false
+	}
+	// The duration must follow the activity word, not merely appear somewhere on
+	// the line — otherwise prose quoting a timing figure could satisfy the check.
+	ellipsis := strings.Index(lower, "…")
+	if ellipsis < 0 {
+		return false
+	}
+	return hasWhimsicalDuration(lower[ellipsis:])
 }
 
 // hasWhimsicalDuration checks for Claude's duration counter pattern "(Ns", "(Nm Ns",

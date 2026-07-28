@@ -47,7 +47,16 @@ func TestDetectStatus(t *testing.T) {
 		{"busy pattern", "some output\nctrl+c to interrupt\n", StatusRunning},
 		{"esc busy pattern", "output\nesc to interrupt\n", StatusRunning},
 		{"spinner char", "⠋ Working...\n", StatusRunning},
-		{"whimsical pattern", "Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
+		// Every activity line Claude renders opens with a rotating glyph (37/37 real
+		// captures), and the glyph is what separates a live indicator from prose that
+		// happens to close on a parenthesised duration — so it is required here.
+		{"whimsical pattern", "· Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
+		// The glyph set rotates wider than spinnerChars covers (`·` and `✻` are absent
+		// from it), so these two must be carried by isWhimsicalActivity alone. Neither
+		// has a token counter — requiring one made them read as finished mid-turn.
+		{"whimsical thinking without token counter", "· Improvising… (51s · almost done thinking with xhigh effort)\n", StatusRunning},
+		{"whimsical bare duration", "✻ Marinating… (33s)\n", StatusRunning},
+		{"prose with duration but no glyph not matched", "we cut cold start… (2s) after the rewrite\n❯\n", StatusFinished},
 		{"approval yes allow", "some text\nYes, allow once\n", StatusWaiting},
 		{"approval no tell claude", "No, and tell Claude\n❯\n", StatusWaiting},
 		{"permission menu 3 options", "output\n❯ 1. Yes\n  2. Yes, during this session\n  3. No\nEsc to cancel · Tab to amend\n", StatusWaiting},
