@@ -74,22 +74,12 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 	}
 	jsonlPath := filepath.Join(projectDir, claudeSessionID+".jsonl")
 
-	f, err := os.Open(jsonlPath)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max buffer
-
 	var lastCustom, lastAI string
-	for scanner.Scan() {
-		line := scanner.Text()
+	forEachTranscriptLine(jsonlPath, func(line string) bool {
 		// Quick check before JSON parsing. Matches both "custom-title" and
 		// "ai-title"; the Type check below filters any incidental hits.
 		if !strings.Contains(line, "-title") {
-			continue
+			return true
 		}
 
 		var entry struct {
@@ -98,7 +88,7 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 			AITitle     string `json:"aiTitle"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+			return true
 		}
 		switch entry.Type {
 		case "custom-title":
@@ -110,7 +100,8 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 				lastAI = entry.AITitle
 			}
 		}
-	}
+		return true
+	})
 
 	if lastCustom != "" {
 		return lastCustom
@@ -286,18 +277,10 @@ func transcriptParentLink(path string) string {
 	if path == "" {
 		return ""
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
+	var link string
+	forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, "logicalParentUuid") {
-			continue
+			return true
 		}
 		var entry struct {
 			Type              string `json:"type"`
@@ -305,13 +288,74 @@ func transcriptParentLink(path string) string {
 			LogicalParentUUID string `json:"logicalParentUuid"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+			return true
 		}
 		if entry.LogicalParentUUID != "" && (entry.Subtype == "compact_boundary" || entry.Type == "summary") {
-			return entry.LogicalParentUUID
+			link = entry.LogicalParentUUID
+			return false
+		}
+		return true
+	})
+	return link
+}
+
+// transcriptLineCap bounds how much of one JSONL line is held in memory. Past it
+// the remainder of that line is discarded and the walk continues with the next —
+// losing one entry is recoverable (its neighbours are usually seconds away),
+// whereas abandoning the walk silently turns the entire rest of the file into
+// "doesn't exist", which is the failure this helper exists to prevent.
+const transcriptLineCap = 8 << 20 // 8MB
+
+// forEachTranscriptLine calls fn for each non-empty line of the JSONL transcript
+// at path, stopping early when fn returns false.
+//
+// Deliberately not bufio.Scanner. A Scanner has a maximum token size and reports
+// an over-long line by ending the loop with ErrTooLong — which reads exactly like
+// a clean EOF unless the caller checks scanner.Err(), and none of the callers here
+// did. Transcript lines routinely get large: an entry carrying a pasted image or a
+// big tool result is one JSON line, and 4 of 554 local transcripts held a line over
+// 1MB, the worst of them 2% of the way into the file. The answers that came back
+// were not visibly broken, just stale — a timestamp from sixteen days earlier, a
+// uuid reported absent — and every consumer treats them as authoritative. That
+// silently disabled the between-bursts tiebreaker in conversationActivePastHook and
+// biased sessionRotationVerdict toward rejecting genuine rotations.
+func forEachTranscriptLine(path string, fn func(line string) bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	r := bufio.NewReaderSize(f, 64*1024)
+	var buf []byte
+	overCap := false
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Mid-line: accumulate until the cap, then drop the rest of this line.
+			if !overCap {
+				if len(buf)+len(chunk) > transcriptLineCap {
+					overCap, buf = true, nil
+				} else {
+					buf = append(buf, chunk...)
+				}
+			}
+			continue
+		}
+		if !overCap {
+			buf = append(buf, chunk...)
+			if line := strings.TrimRight(string(buf), "\r\n"); line != "" && !fn(line) {
+				return nil
+			}
+		}
+		buf, overCap = buf[:0], false
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
 	}
-	return ""
 }
 
 // transcriptContainsUUID reports whether any entry in the transcript at path
@@ -321,27 +365,21 @@ func transcriptContainsUUID(path, uuid string) bool {
 	if path == "" || uuid == "" {
 		return false
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
+	found := false
+	forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, uuid) {
-			continue
+			return true
 		}
 		var entry struct {
 			UUID string `json:"uuid"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.UUID == uuid {
-			return true
+			found = true
+			return false
 		}
-	}
-	return false
+		return true
+	})
+	return found
 }
 
 // firstTranscriptTimestamp returns the timestamp of the earliest timestamped JSONL
@@ -375,41 +413,29 @@ func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time
 	if path == "" {
 		return time.Time{}
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return time.Time{}
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
-
 	var result time.Time
-	for scanner.Scan() {
-		line := scanner.Text()
+	forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, `"timestamp"`) {
-			continue
+			return true
 		}
 		var entry struct {
 			Timestamp   string `json:"timestamp"`
 			IsSidechain bool   `json:"isSidechain"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
-			continue
+			return true
 		}
 		if excludeSidechain && entry.IsSidechain {
-			continue
+			return true
 		}
 		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
 		// "...:04.226Z"). The layout also parses entries with no fractional part.
 		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
 		if err != nil {
-			continue
-		}
-		if !last {
-			return ts
+			return true
 		}
 		result = ts
-	}
+		return last // first match wins when we only want the earliest entry
+	})
 	return result
 }
