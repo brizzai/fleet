@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **No more idle flicker.** Sessions whose activity line showed no token counter (`· Improvising… (51s)`) could read idle for a single frame and snap back, so a working session flashed the wrong dot. You now get a steady status for the whole turn.
-**Compaction reads as running.** A session part-way through `/compact` no longer sits at idle waiting on a hook — the pane detects it directly.
+- **Compaction reads as running.** A session part-way through `/compact` no longer sits at idle waiting on a hook — the pane detects it directly.
 - **Large transcripts read fully.** A conversation entry over 1MB — a pasted image, a big tool result — used to stop fleet mid-file, so a session that was still working showed as finished. You now get the right status whatever the entry size.
 
 ## [2.23.1] - 2026-07-22
