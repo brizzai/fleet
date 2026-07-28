@@ -35,10 +35,15 @@ const (
 	// Dialogs.
 	EventSettingsOpened  = "settings_opened"
 	EventBugReportOpened = "bug_report_opened"
-	EventCommandPalette  = "command_palette"
-	EventDialogOpened    = "dialog_opened"
-	EventDialogSubmitted = "dialog_submitted"
-	EventDialogCanceled  = "dialog_canceled"
+	// EventStatusMisdetected carries a user-confirmed status misdetection:
+	// which status was shown, which was correct, and what each signal said.
+	// Enum values and booleans only — no paths, no screen content. Fires on
+	// submit, so it survives the reporter abandoning the GitHub issue.
+	EventStatusMisdetected = "status_misdetected"
+	EventCommandPalette    = "command_palette"
+	EventDialogOpened      = "dialog_opened"
+	EventDialogSubmitted   = "dialog_submitted"
+	EventDialogCanceled    = "dialog_canceled"
 
 	// Navigation / filtering.
 	EventFilterUsed = "filter_used"

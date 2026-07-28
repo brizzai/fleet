@@ -156,15 +156,26 @@ type (
 	// finishes (or hits its deadline). It dismisses the boot splash and
 	// hands control to the steady-state status worker.
 	bootstrapDoneMsg struct{}
-	// gitInfoUpdateMsg carries a per-repo refresh result from a worker
-	// goroutine back to Update — Update is the sole writer of
-	// h.gitInfoCache, so workers push proposed updates through this msg
-	// instead of taking workerMu and mutating the map directly. nil info
-	// is allowed (signals "no data yet"); Update overwrites whatever was
-	// in the cache for `repo`.
+	// gitInfoUpdateMsg carries a per-repo refresh result to Update, which
+	// applies it via writeGitInfo. nil info is allowed (signals "no data
+	// yet"); Update overwrites whatever was in the cache for `repo`.
+	//
+	// Update is NOT the only writer of h.gitInfoCache: the git+PR fan-out
+	// writes it directly (writeGitInfo is a lock-free COW swap, safe from
+	// any goroutine) because routing payloads through Update blocks on
+	// Tea's unbuffered channel for the length of an attach. Readers that
+	// span several h.gitInfo() loads across one decision must therefore
+	// take a single snapshot and index it — see confirmDeleteOrigin.
 	gitInfoUpdateMsg struct {
 		repo string
 		info *git.RepoInfo
+	}
+	// gitRepaintMsg tells Update that a worker already wrote fresh git info
+	// into the cache and the sidebar should reflect it. Deliberately carries
+	// no data: the git+PR fan-out publishes via writeGitInfo and only signals
+	// here, so a dropped message costs a repaint, never correctness.
+	gitRepaintMsg struct {
+		structural bool // origin/worktree changed — needs a full flat-item rebuild
 	}
 	// splashFrameMsg advances the boot-splash spinner. Self-rescheduled
 	// while !booted; not emitted after bootstrapDoneMsg.
@@ -305,6 +316,16 @@ type Home struct {
 	// responsive (it waits synchronously on the per-cycle git+PR fan-out).
 	lastWorkerCycleNano  atomic.Int64
 	workerCycleStartNano atomic.Int64
+	// Same pair for gitWorker. The git+PR fan-out is the blocking work the
+	// watchdog exists to catch, and it no longer runs on statusWorker — without
+	// its own stamps a permanently wedged gitWorker would leave branch/dirty/PR
+	// frozen while workerHeartbeat() still read healthy off statusWorker's.
+	lastGitCycleNano  atomic.Int64
+	gitCycleStartNano atomic.Int64
+	// attachStartedAt is when the current tea.Exec attach began (0 when not
+	// attached). The watchdog subtracts this window instead of skipping its
+	// check, so an attach can't manufacture a stall — nor hide a real one.
+	attachStartedAt atomic.Int64
 
 	// lastTmuxStatusBar tracks the most recent (status, theme) tuple applied
 	// to each session's tmux status bar so the worker can skip no-op
@@ -406,6 +427,7 @@ type Home struct {
 
 	// Background worker for async status/git/PR updates.
 	statusTrigger         chan struct{} // buffered(1), triggers worker
+	gitTrigger            chan struct{} // buffered(1), triggers gitWorker out of band
 	priorityStatusUpdates chan string   // buffered, session IDs with fresh hook changes — drained before round-robin
 	// workerMu now protects only h.sessions (worker snapshots the slice at
 	// the top of each cycle; Update mutates on add/remove/restore). The
@@ -419,9 +441,12 @@ type Home struct {
 
 	// program is the running tea.Program, injected by cmd/fleet/main.go via
 	// SetProgram before p.Run(). Worker goroutines push state updates back
-	// to Update via h.send(msg) so Update remains the sole writer of model
-	// fields — no lock contracts to honor at call sites. Nil during tests
-	// that drive Update directly; send() is a no-op in that case.
+	// to Update via h.send(msg) so Update remains the writer of model fields
+	// — no lock contracts to honor at call sites. The exception is
+	// gitInfoCache, which the git+PR fan-out writes directly via its atomic
+	// COW swap; h.send blocks for the whole of an attach, which is too long
+	// to hold a fan-out goroutine. Nil during tests that drive Update
+	// directly; send() is a no-op in that case.
 	program *tea.Program
 
 	startTime time.Time // app start time for uptime tracking
@@ -507,6 +532,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		errorHistory:           NewErrorHistory(50),
 		actionLog:              NewActionLog(100),
 		statusTrigger:          make(chan struct{}, 1),
+		gitTrigger:             make(chan struct{}, 1),
 		priorityStatusUpdates:  make(chan string, 256),
 		ctx:                    ctx,
 		cancel:                 cancel,
@@ -581,25 +607,17 @@ func (h *Home) writeGitInfo(mutate func(m map[string]*git.RepoInfo) bool) {
 }
 
 // send pushes a message to the Update loop from a background goroutine.
-// In production h.program is wired by main.go; tests skip that, so we
-// fall back to applying state-mutating messages directly. writeGitInfo
-// is safe to call from any goroutine — it COWs the underlying map and
-// atomic-swaps; the test asserts end state, not the path it took.
+// In production h.program is wired by main.go; tests skip that, leaving this a
+// no-op — every remaining sender already applies its own state and uses the
+// message purely as a repaint/toast hint.
+//
+// Callers on the status or git worker MUST guard this with isAttaching:
+// program.Send is a rendezvous on Tea's unbuffered msgs channel, and tea.Exec
+// suspends the loop that drains it for the whole of an attach.
 func (h *Home) send(msg tea.Msg) {
 	if h.program != nil {
 		h.program.Send(msg)
 		return
-	}
-	switch m := msg.(type) {
-	case gitInfoUpdateMsg:
-		if m.repo != "" {
-			h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
-				next[m.repo] = m.info
-				return true
-			})
-		}
-	default:
-		_ = m
 	}
 }
 
@@ -769,6 +787,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		h.enqueuePriorityUpdates(changed)
 		// Also trigger full background refresh for pane captures, git, etc.
+		// Both workers: git skipped every cycle during the attach we just left,
+		// so branch/dirty/PR are as stale as the attach was long.
+		h.triggerGitRefresh()
 		select {
 		case h.statusTrigger <- struct{}{}:
 		default:
@@ -1108,7 +1129,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		refresh := func() tea.Msg {
 			return gitInfoUpdateMsg{repo: repoPath, info: git.RefreshGitInfo(repoPath)}
 		}
-		// Trigger PR refresh for new branch.
+		// Trigger PR refresh for new branch. Git lives on its own worker now, so
+		// this needs gitTrigger — statusTrigger would only wake pane detection.
+		h.triggerGitRefresh()
 		select {
 		case h.statusTrigger <- struct{}{}:
 		default:
@@ -1121,6 +1144,24 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			h.setInfo("Snapshot saved: " + msg.path)
 		}
+		return h, nil
+
+	case reportSnapshotMsg:
+		// Silent on failure: the dialog renders the reason inline, and a toast
+		// behind a modal would only stack noise the reporter can't act on.
+		h.bugReport.SetSnapshot(msg.snap)
+		return h, nil
+
+	case statusMisdetectedMsg:
+		analytics.Track(analytics.EventStatusMisdetected, map[string]interface{}{
+			"shown":            msg.shown,
+			"expected":         msg.expected,
+			"agent":            msg.agent,
+			"hook_status":      msg.hookStatus,
+			"pane_detected":    msg.paneDetect,
+			"mismatch":         msg.mismatch,
+			"included_content": msg.wroteContent,
+		})
 		return h, nil
 
 	case previewMsg:
@@ -1388,6 +1429,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case gitRepaintMsg:
+		// The cache is already current (the fan-out wrote it); this only
+		// decides how much of the sidebar has to be recomputed.
+		if msg.structural {
+			h.rebuildFlatItems()
+		} else {
+			h.sidebarDirty = true
+		}
+		return h, nil
+
 	case bootstrapDoneMsg:
 		h.booted = true
 		h.rebuildFlatItems()
@@ -1399,6 +1450,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.syncViewport()
 		}
 		go h.statusWorker()
+		// Started here, not earlier: gitWorker and the bootstrap probe both
+		// touch repoLastHotAt unlocked, and bootstrap is done by now.
+		go h.gitWorker()
 		return h, nil
 
 	case splashFrameMsg:
@@ -1415,6 +1469,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !h.booted {
 			h.booted = true
 			go h.statusWorker()
+			// Empty fleet still needs git/PR refresh: this path never emits
+			// bootstrapDoneMsg, so without this gitWorker would never start and
+			// branch/dirty/PR would stay blank for the whole process lifetime.
+			// No bootstrap probe runs here, so the repoLastHotAt reasoning holds.
+			go h.gitWorker()
 		}
 		if len(msg.items) > 0 {
 			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
@@ -2483,10 +2542,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.dismissActiveTip()
 		return h, nil
 	case "!":
-		h.actionLog.Add("open bug report", "", true)
-		h.bugReport.Show(h.version, len(h.sessions), h.errorHistory, h.actionLog, h.width, h.height, &h.renderStats, time.Since(h.startTime))
-		analytics.Track(analytics.EventBugReportOpened, nil)
-		return h, nil
+		return h.openBugReport()
 	case "D":
 		s := h.selectedSession()
 		if s == nil {
@@ -2495,7 +2551,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.actionLog.Add("status snapshot", s.Title, true)
 		hb := h.workerHeartbeat()
 		return h, func() tea.Msg {
-			return captureStatusSnapshot(s, s.ID, hb)
+			snap := captureStatusSnapshot(s, s.ID, hb, true, true)
+			return statusSnapshotMsg{path: snap.path, err: snap.err}
 		}
 	case "?":
 		h.helpOverlay.Show()
@@ -2645,6 +2702,7 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 	}
 
 	h.isAttaching.Store(true)
+	h.attachStartedAt.Store(time.Now().UnixNano())
 	// Record the attached session so the memory-pressure sweep never hibernates
 	// the pane the user is sitting in (LastAccessedAt doesn't refresh mid-attach).
 	// Guarded by workerMu — the worker reads it.
@@ -2657,6 +2715,7 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 		// CRITICAL: Clear isAttaching before returning the message.
 		// Prevents race where View() returns empty string after detach.
 		h.isAttaching.Store(false)
+		h.attachStartedAt.Store(0)
 		h.workerMu.Lock()
 		h.attachedSessionID = ""
 		h.workerMu.Unlock()
@@ -3058,13 +3117,18 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 // reach every checkout even when the origin group is collapsed — collapsed
 // checkouts aren't present in flatItems.
 func (h *Home) checkoutsForOrigin(origin string) []string {
+	return h.checkoutsForOriginIn(h.gitInfo(), origin)
+}
+
+// checkoutsForOriginIn resolves against a caller-supplied snapshot — see originOfIn.
+func (h *Home) checkoutsForOriginIn(m map[string]*git.RepoInfo, origin string) []string {
 	if origin == "" {
 		return nil
 	}
 	seen := make(map[string]struct{})
 	var out []string
 	add := func(repo string) {
-		if repo == "" || h.originOf(repo) != origin {
+		if repo == "" || originOfIn(m, repo) != origin {
 			return
 		}
 		if _, ok := seen[repo]; ok {
@@ -3094,7 +3158,15 @@ func (h *Home) checkoutsForOrigin(origin string) []string {
 // the origin_delete_removes_worktrees setting (default on); the main repo's
 // folder is always kept.
 func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
-	checkouts := h.checkoutsForOrigin(item.OriginKey)
+	// One git snapshot for the whole decision. The git+PR fan-out swaps this
+	// map from its own goroutine, so re-loading per lookup would let the set of
+	// checkouts and the per-checkout destroy decisions come from two different
+	// generations — the dialog counts N worktrees while a different set gets
+	// `git worktree remove`. Most reachable right after boot or just after a
+	// worktree is created, when OriginKey/IsWorktreeRepo are still settling.
+	gitSnap := h.gitInfo()
+
+	checkouts := h.checkoutsForOriginIn(gitSnap, item.OriginKey)
 	if len(checkouts) == 0 {
 		return nil
 	}
@@ -3113,12 +3185,12 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 	dirtyWorktrees := 0
 	hasImmediateDestroy := false
 	for _, repo := range checkouts {
-		isWorktree := h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo]
+		isWorktree := repoIsWorktreeIn(gitSnap, repo) || h.failedWorktreeRemovals[repo]
 		destroy := removeWorktrees && isWorktree
 		targets = append(targets, originDeleteTarget{repoPath: repo, destroy: destroy})
 		if destroy {
 			destroyDirs = append(destroyDirs, repo)
-			if info := h.gitInfo()[repo]; info != nil && info.IsDirty {
+			if info := gitSnap[repo]; info != nil && info.IsDirty {
 				dirtyWorktrees++
 			}
 			// An empty worktree is removed immediately (deferDeleteRepo's
@@ -3337,7 +3409,12 @@ func (h *Home) killShellsForRepo(repoPath string) tea.Cmd {
 // `git worktree remove` it manually. Never shells out, so Update() stays
 // blocking-I/O-free per project rules.
 func (h *Home) repoIsWorktree(repoPath string) bool {
-	if info := h.gitInfo()[repoPath]; info != nil {
+	return repoIsWorktreeIn(h.gitInfo(), repoPath)
+}
+
+// repoIsWorktreeIn resolves against a caller-supplied snapshot — see originOfIn.
+func repoIsWorktreeIn(m map[string]*git.RepoInfo, repoPath string) bool {
+	if info := m[repoPath]; info != nil {
 		return info.IsWorktreeRepo
 	}
 	return false
@@ -3616,7 +3693,18 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 		// on top of the per-session `session suspend` lines from Suspend().
 		debuglog.Logger.Info("memory sweep: suspended idle sessions",
 			"count", n, "mode", mode, "pressure", level, "swapFreeMB", swapFreeMB, "minIdle", minIdle.String())
-		h.send(sessionsSuspendedMsg{n: n, auto: true})
+		// Runs on the status worker, so this send must not be able to park:
+		// program.Send is a rendezvous on Tea's unbuffered channel and tea.Exec
+		// suspends the loop that drains it, which would freeze every session's
+		// status for the rest of the attach — the exact wedge this file's
+		// git fan-out was moved off this goroutine to avoid.
+		//
+		// Skipping costs only the toast. Status was already written under
+		// workerMu by Suspend(), so the ~2s tick re-derives the sidebar anyway;
+		// nothing here carries state the UI cannot recover on its own.
+		if !h.isAttaching.Load() {
+			h.send(sessionsSuspendedMsg{n: n, auto: true})
+		}
 	} else {
 		// act==true but nothing was idle enough (e.g. balanced's 4h housekeeping
 		// with no session that old). Debug-only, so no ~20s Info churn.
@@ -5151,7 +5239,25 @@ func (h *Home) statusWorkerCycle() {
 
 	// 3. Sync hook status (fast: in-memory map lookups; worker may resolve a
 	// session-id rotation here — off the UI loop, so its transcript I/O is safe).
-	h.syncHookStatuses(sessions, true)
+	//
+	// The returned IDs MUST be carried into this cycle's priority set, and the merge
+	// below stays adjacent to this call on purpose. syncHookStatuses diffs against
+	// the session's in-memory hook state and then overwrites it, so a transition is
+	// consume-once: whichever caller syncs first eats it. During an attach tea.Exec
+	// suspends the Update loop, so hookChangedMsg never runs and this worker call is
+	// always the first to observe — dropping the result here left the session on the
+	// round-robin (≈26s at 65 sessions), and the post-detach catch-up sync in
+	// statusUpdateMsg found nothing left to enqueue.
+	//
+	// Nothing may come between the consume and the merge: the cycle's defer recover()
+	// swallows a panic from anything in between (step 3b reads transcripts and writes
+	// SQLite), and the transitions this call already ate would be gone for good —
+	// the same failure reached a different way.
+	hookChanged := h.syncHookStatuses(sessions, true)
+	priorityIDs := make(map[string]bool, len(hookChanged))
+	for _, id := range hookChanged {
+		priorityIDs[id] = true
+	}
 
 	// 3b. Auto-name: generate title for ONE session per cycle (heavy cadence).
 	// Priority: manual (R key) > the agent's own title (Claude custom-title, then
@@ -5209,10 +5315,10 @@ func (h *Home) statusWorkerCycle() {
 		}
 	}
 
-	// 4. Priority updates first — sessions whose hook file just changed.
+	// 4. Priority updates first — sessions whose hook just changed, seeded above
+	// from this cycle's own sync and topped up here from the UI path's queue.
 	// These bypass round-robin so the UI reflects fresh hook status within
 	// ~100ms of the hook firing (vs. up to (N/statusRoundRobin)*tickInterval seconds).
-	priorityIDs := make(map[string]bool)
 drainPriority:
 	for {
 		select {
@@ -5227,10 +5333,22 @@ drainPriority:
 	// status bars are repainted immediately below so the in-pane pill tracks
 	// the sidebar within ~500ms instead of lagging until the next heavy cycle.
 	var changedBars []*session.Session
+	prio := make([]*session.Session, 0, len(priorityIDs))
 	for _, s := range sessions {
-		if !priorityIDs[s.ID] {
-			continue
+		if priorityIDs[s.ID] {
+			prio = append(prio, s)
 		}
+	}
+	// Batch-capture their panes in one tmux call, exactly as the fast pass does
+	// below. This loop marks them processed and fastPassSessions skips processed,
+	// so without this they never reach that batch and each shells out to its own
+	// capture-pane inside UpdateStatus — captureCacheTTL (400ms) is already stale
+	// against the ~500ms cycle. That cost scales with hook bursts, not session
+	// count: the startup pass (loadExisting seeds every session's hook file before
+	// the first cycle, so every session reports changed) or Reload All Sessions
+	// would fork one capture-pane per session, serially, inside a single cycle.
+	h.seedActiveCaptures(prio)
+	for _, s := range prio {
 		if h.updateAndPersistStatus(s) {
 			changedBars = append(changedBars, s)
 		}
@@ -5282,16 +5400,88 @@ drainPriority:
 	// which is why it lives here on the worker, not the Update loop.
 	h.maybeSuspendIdleSessions(sessions)
 
-	// 5. Git+PR refresh: fan out across all session repos in parallel,
-	// bounded to 4 concurrent goroutines so the subprocess load stays
-	// flat. Branch/dirty lands within the 2s tick; PR refresh respects
-	// the per-repo TTL gate (60s hot / 2 min cold) inside the goroutine.
-	//
-	// First: stamp `repoLastHotAt` so the TTL classifier (next call) can
-	// see who's active right now. A repo is "hot" if any of its sessions
-	// is currently Running — checked every cycle, cheap. repoLastHotAt
-	// is only ever touched from this worker cycle and from bootstrap; the
-	// two never run concurrently, so no lock needed.
+	// 5. Git+PR refresh used to run here, inline. It now lives on its own
+	// goroutine (gitWorker) — see the comment there for why sharing this
+	// one was a bug.
+
+	// 6. Repaint tmux status bars for sessions whose state changed since the
+	// last cycle. Sessions whose status + theme key matches the last applied
+	// value are skipped — a single tmux set-option round-trip is fast but
+	// running it for 100 idle sessions every 2s is wasteful.
+	h.refreshTmuxStatusBars(sessions)
+}
+
+// gitWorker refreshes per-repo git + PR state on its own goroutine and cadence.
+//
+// This is deliberately NOT part of statusWorkerCycle. The fan-out is unbounded:
+// N repos at 4-wide, each costing a serial git refresh plus up to two 15s `gh`
+// calls, and every result has to reach the Update loop. Sharing a goroutine
+// with the ~500ms fast pass meant a slow fan-out starved the active-session
+// pane re-checks — and a permission grant fires no hook, so waiting→running is
+// pane-only. A 16-minute cycle once froze every session's status for its whole
+// duration.
+func (h *Home) gitWorker() {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-h.gitTrigger:
+		case <-ticker.C:
+		}
+
+		h.gitWorkerCycle()
+	}
+}
+
+// triggerGitRefresh asks gitWorker for an out-of-band cycle. Non-blocking: the
+// channel is buffered(1), so a pending request coalesces with this one.
+func (h *Home) triggerGitRefresh() {
+	select {
+	case h.gitTrigger <- struct{}{}:
+	default:
+	}
+}
+
+func (h *Home) gitWorkerCycle() {
+	// Liveness stamps for the watchdog, mirroring statusWorkerCycle. Registered
+	// first so the deferred completion stamp runs last.
+	h.gitCycleStartNano.Store(time.Now().UnixNano())
+	defer func() {
+		h.lastGitCycleNano.Store(time.Now().UnixNano())
+		h.gitCycleStartNano.Store(0)
+	}()
+
+	defer func() {
+		if r := recover(); r != nil {
+			debuglog.Logger.Error("gitWorkerCycle panic recovered", "panic", r)
+		}
+	}()
+
+	// Nothing to refresh for while attached: tea.Exec has taken over the
+	// terminal, View() renders blank, and the detach path (statusUpdateMsg)
+	// rebuilds the sidebar wholesale anyway. Skipping also keeps the fan-out
+	// away from a Tea loop that is not draining messages.
+	if h.isAttaching.Load() {
+		return
+	}
+
+	h.workerMu.Lock()
+	sessions := make([]*session.Session, len(h.sessions))
+	copy(sessions, h.sessions)
+	h.workerMu.Unlock()
+
+	if len(sessions) == 0 {
+		return
+	}
+
+	// Stamp `repoLastHotAt` so the TTL classifier (next call) can see who's
+	// active right now. A repo is "hot" if any of its sessions is currently
+	// Running — checked every cycle, cheap. repoLastHotAt is only ever touched
+	// from this cycle and from bootstrap; gitWorker starts on bootstrapDoneMsg,
+	// so the two never run concurrently and no lock is needed.
 	now := time.Now()
 	for _, s := range sessions {
 		if s.GetStatus() == session.StatusRunning {
@@ -5299,14 +5489,10 @@ drainPriority:
 		}
 	}
 
-	repos := h.uniqueRepoPathsFromSessions(sessions)
-	h.refreshAllGitAndPR(repos, 4, 0, nil)
-
-	// 6. Repaint tmux status bars for sessions whose state changed since the
-	// last cycle. Sessions whose status + theme key matches the last applied
-	// value are skipped — a single tmux set-option round-trip is fast but
-	// running it for 100 idle sessions every 2s is wasteful.
-	h.refreshTmuxStatusBars(sessions)
+	// Fan out bounded to 4 concurrent goroutines so subprocess load stays flat.
+	// Branch/dirty lands within the 2s tick; PR refresh respects the per-repo
+	// TTL gate (60s hot / 2 min cold) inside the goroutine.
+	h.refreshAllGitAndPR(h.uniqueRepoPathsFromSessions(sessions), 4, 0, nil)
 }
 
 // workerStallThreshold is how long the status worker may go without completing a
@@ -5319,15 +5505,40 @@ drainPriority:
 // only when a call ignores its deadline or a real deadlock occurs.
 const workerStallThreshold = 90 * time.Second
 
-// workerWatchdog auto-captures a goroutine dump when the status worker stops
-// completing cycles — the failure mode where every session's status freezes
-// while the UI stays responsive (the worker waits synchronously on its
-// per-cycle git+PR fan-out). Launched only on dev (`make run`) builds.
+// attachAdjustedStall converts a raw since-last-cycle latency into one that
+// excludes the current attach window.
+//
+// An attach suspends the Tea loop, and both workers deliberately skip sends (and
+// gitWorker skips its whole cycle) while it lasts — so latency measured across
+// one says nothing about a wedge. Skipping the check outright was the first
+// attempt and it was wrong in the other direction: a genuine wedge starting
+// mid-attach went uncaptured, which is exactly the freeze this watchdog is for.
+// Subtracting the window keeps both properties.
+func attachAdjustedStall(stalledFor time.Duration, attachStart int64, now time.Time) time.Duration {
+	if attachStart == 0 {
+		return stalledFor
+	}
+	attached := now.Sub(time.Unix(0, attachStart))
+	if attached <= 0 {
+		return stalledFor
+	}
+	if attached >= stalledFor {
+		return 0
+	}
+	return stalledFor - attached
+}
+
+// workerWatchdog auto-captures a goroutine dump when either worker stops
+// completing cycles — the failure mode where status (or branch/dirty/PR) freezes
+// while the UI stays responsive, because a worker waits synchronously on
+// blocking I/O. Launched only on dev (`make run`) builds.
 func (h *Home) workerWatchdog() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	var dumpedForCycle int64 // episode stamp we already dumped for
+	// One episode stamp per watched worker: the stamp is frozen while wedged, so
+	// dump once and wait for it to advance (worker recovered) before re-arming.
+	dumpedFor := map[string]int64{}
 	for {
 		select {
 		case <-h.ctx.Done():
@@ -5335,40 +5546,50 @@ func (h *Home) workerWatchdog() {
 		case <-ticker.C:
 		}
 
-		last := h.lastWorkerCycleNano.Load()
-		start := h.workerCycleStartNano.Load()
-		// Normally measure the stall from the last completed cycle. Before the
-		// first cycle ever completes (last==0), fall back to the in-flight
-		// cycle's start so a wedge on the very first cycle is still caught.
-		episode := last
-		var stalledFor time.Duration
-		switch {
-		case last != 0:
-			stalledFor = time.Since(time.Unix(0, last))
-		case start != 0:
-			episode = start
-			stalledFor = time.Since(time.Unix(0, start))
-		default:
-			continue // worker hasn't started a cycle yet
-		}
-		if stalledFor < workerStallThreshold {
-			continue
-		}
-		// One dump per stall episode: the episode stamp is frozen while wedged,
-		// so dump once and wait for it to advance (worker recovered) before arming
-		// again.
-		if episode == dumpedForCycle {
-			continue
-		}
-		dumpedForCycle = episode
+		now := time.Now()
+		attachStart := h.attachStartedAt.Load()
 
-		var cycleStart time.Time
-		if start != 0 {
-			cycleStart = time.Unix(0, start)
+		// Both workers are watched. The git+PR fan-out — the blocking work this
+		// watchdog was written for — now lives on gitWorker, so watching only
+		// statusWorker would report healthy through a permanent git wedge.
+		for _, w := range []struct {
+			name  string
+			last  int64
+			start int64
+		}{
+			{"status", h.lastWorkerCycleNano.Load(), h.workerCycleStartNano.Load()},
+			{"git", h.lastGitCycleNano.Load(), h.gitCycleStartNano.Load()},
+		} {
+			// Normally measure the stall from the last completed cycle. Before the
+			// first cycle ever completes (last==0), fall back to the in-flight
+			// cycle's start so a wedge on the very first cycle is still caught.
+			episode := w.last
+			var stalledFor time.Duration
+			switch {
+			case w.last != 0:
+				stalledFor = now.Sub(time.Unix(0, w.last))
+			case w.start != 0:
+				episode = w.start
+				stalledFor = now.Sub(time.Unix(0, w.start))
+			default:
+				continue // worker hasn't started a cycle yet
+			}
+			if attachAdjustedStall(stalledFor, attachStart, now) < workerStallThreshold {
+				continue
+			}
+			if episode == dumpedFor[w.name] {
+				continue
+			}
+			dumpedFor[w.name] = episode
+
+			var cycleStart time.Time
+			if w.start != 0 {
+				cycleStart = time.Unix(0, w.start)
+			}
+			dir := writeWorkerStallDump(stalledFor, cycleStart)
+			debuglog.Logger.Warn("worker stalled — goroutine dump written",
+				"worker", w.name, "stalled_for", stalledFor.Round(time.Millisecond), "dir", dir)
 		}
-		dir := writeWorkerStallDump(stalledFor, cycleStart)
-		debuglog.Logger.Warn("status worker stalled — goroutine dump written",
-			"stalled_for", stalledFor.Round(time.Millisecond), "dir", dir)
 	}
 }
 
@@ -5381,6 +5602,12 @@ func (h *Home) workerHeartbeat() workerHeartbeat {
 	}
 	if n := h.workerCycleStartNano.Load(); n != 0 {
 		hb.CycleStartAt = time.Unix(0, n)
+	}
+	if n := h.lastGitCycleNano.Load(); n != 0 {
+		hb.LastGitCycleAt = time.Unix(0, n)
+	}
+	if n := h.gitCycleStartNano.Load(); n != 0 {
+		hb.GitCycleStartAt = time.Unix(0, n)
 	}
 	return hb
 }
@@ -5575,15 +5802,34 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 					}
 				}
 
-				// Push the refresh result to Update — Update is the sole
-				// writer of h.gitInfoCache. Send is buffered + drained
-				// synchronously by Tea's main loop, so the next worker
-				// cycle's carry-forward read sees this update.
-				h.send(gitInfoUpdateMsg{repo: r, info: info})
+				// Publish the result by writing the cache directly. It is a
+				// lock-free COW swap, safe from any goroutine, and it makes
+				// the data live immediately for View and for the next cycle's
+				// carry-forward read.
+				//
+				// This must NOT go through h.send. Bubble Tea's msgs channel
+				// is UNBUFFERED (v2 tea.go: `msgs: make(chan Msg)`) and Send
+				// is a bare rendezvous with no deadline — while tea.Exec has
+				// the loop suspended for an attach, nothing drains it. Sending
+				// here parked one goroutine per repo for the whole attach,
+				// each holding a semaphore slot, wedging the fan-out until
+				// detach. Compare inside the mutation so the before/after read
+				// is atomic with the write.
+				var structural bool
+				h.writeGitInfo(func(next map[string]*git.RepoInfo) bool {
+					structural = structuralGitChange(next[r], info)
+					next[r] = info
+					return true
+				})
 
 				// Persist to SQLite so the next launch can carry this forward
 				// instead of re-firing gh. Storage method logs errors itself;
 				// a failed write doesn't affect the in-memory cache.
+				//
+				// Ordered BEFORE the send deliberately: the send can still park
+				// on a suspended loop (see below), and a fleet killed during a
+				// long attach would otherwise lose these rows and re-fire gh for
+				// every repo on the next launch.
 				_ = h.storage.SavePRCacheRow(&session.PRCacheRow{
 					RepoPath:        r,
 					Branch:          info.Branch,
@@ -5592,6 +5838,22 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 					LastPRRefresh:   info.LastPRRefresh,
 					PRRateLimitedAt: info.PRRateLimitedAt,
 				})
+
+				// Update still owns the sidebar rebuild. The message carries no
+				// data — the cache write above already published it — so if this
+				// is dropped or delayed the cost is a late repaint, never stale
+				// state. Skipped while attached: the sidebar isn't on screen, and
+				// the detach path rebuilds it wholesale.
+				//
+				// This check-then-send is not atomic: an attach starting between
+				// the Load and the Send parks this goroutine until detach. That
+				// window is left open on purpose — closing it needs a different
+				// transport than program.Send, and the cost is now bounded to
+				// this decoupled worker (status detection is unaffected) with the
+				// hint droppable by construction.
+				if !h.isAttaching.Load() {
+					h.send(gitRepaintMsg{structural: structural})
+				}
 			}(repo)
 		}
 		wg.Wait()
@@ -6205,7 +6467,15 @@ func structuralGitChange(prev, next *git.RepoInfo) bool {
 // "local:<basename>" for repos whose RepoInfo hasn't been refreshed yet.
 // Lock-free read from the atomic gitInfo snapshot.
 func (h *Home) originOf(repoRoot string) string {
-	if info := h.gitInfo()[repoRoot]; info != nil && info.OriginKey != "" {
+	return originOfIn(h.gitInfo(), repoRoot)
+}
+
+// originOfIn resolves against a caller-supplied snapshot. Callers that make one
+// decision out of several lookups must use this with a single h.gitInfo() load:
+// the git+PR fan-out swaps the map from its own goroutine, so two loads can
+// straddle a refresh and disagree.
+func originOfIn(m map[string]*git.RepoInfo, repoRoot string) string {
+	if info := m[repoRoot]; info != nil && info.OriginKey != "" {
 		return info.OriginKey
 	}
 	return "local:" + filepath.Base(repoRoot)
@@ -6444,6 +6714,36 @@ func (h *Home) setError(err error) {
 		analytics.Track(analytics.EventErrorOccurred, map[string]interface{}{
 			"category": strings.SplitN(err.Error(), ":", 2)[0],
 		})
+	}
+}
+
+// openBugReport shows the report dialog and, when a session is under the
+// cursor, freezes its status evidence in the same breath.
+//
+// The capture fires at the keypress rather than at submit because status is a
+// moving target: by the time someone has typed a description, the session may
+// have self-corrected, and re-reading it then would capture a state nobody is
+// complaining about. The Cmd keeps the blocking tmux I/O off the Update loop,
+// the same way the `D` key's capture does.
+//
+// It captures in memory only (persist=false). This fires on every `!` press,
+// before a report kind is even chosen, so persisting would litter
+// ~/.config/fleet/snapshots/ with cancelled dialogs and feature requests — and
+// would put a full-process goroutine dump on a hot key. The filed issue is
+// unaffected: its body is built from the returned values, not read off disk.
+func (h *Home) openBugReport() (tea.Model, tea.Cmd) {
+	h.actionLog.Add("open bug report", "", true)
+	s := h.selectedSession()
+	h.bugReport.Show(h.version, len(h.sessions), h.errorHistory, h.actionLog,
+		h.width, h.height, &h.renderStats, time.Since(h.startTime), s)
+	analytics.Track(analytics.EventBugReportOpened, nil)
+
+	if s == nil {
+		return h, nil
+	}
+	hb := h.workerHeartbeat()
+	return h, func() tea.Msg {
+		return reportSnapshotMsg{snap: captureStatusSnapshot(s, s.ID, hb, false, false)}
 	}
 }
 
@@ -6988,10 +7288,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
 	case "bug_report":
-		h.actionLog.Add("open bug report", "", true)
-		h.bugReport.Show(h.version, len(h.sessions), h.errorHistory, h.actionLog, h.width, h.height, &h.renderStats, time.Since(h.startTime))
-		analytics.Track(analytics.EventBugReportOpened, nil)
-		return h, nil
+		return h.openBugReport()
 	case "help":
 		h.helpOverlay.Show()
 		return h, nil
