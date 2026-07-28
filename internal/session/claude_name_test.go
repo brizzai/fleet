@@ -1,12 +1,16 @@
 package session
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/brizzai/fleet/internal/debuglog"
 )
 
 func TestClaudeProjectDirName(t *testing.T) {
@@ -441,4 +445,132 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 			t.Errorf("expected zero time when all entries are sidechain, got %v", got)
 		}
 	})
+}
+
+// TestTranscriptScanSurvivesOversizedLine covers the bug where a single JSONL line
+// larger than the reader's buffer silently ended every transcript walk.
+//
+// bufio.Scanner reports an over-long line by returning false from Scan() and
+// setting ErrTooLong — indistinguishable from a clean EOF unless Err() is checked,
+// which none of these callers did. The scan therefore answered from whatever it had
+// read *before* the long line, and answered confidently: on a real 12,826-line
+// transcript whose first oversized entry sat at line 4,341, lastLeadTranscriptTimestamp
+// returned a timestamp sixteen days stale. That silently disabled the
+// conversationActivePastHook tiebreaker, so one between-bursts frame flipped a
+// mid-turn session to finished.
+//
+// An entry carrying a pasted image or a large tool result is a single JSON line, so
+// this is ordinary transcript content, not corruption.
+func TestTranscriptScanSurvivesOversizedLine(t *testing.T) {
+	early := time.Date(2026, 7, 12, 14, 26, 47, 0, time.UTC)
+	late := time.Date(2026, 7, 28, 12, 31, 53, 0, time.UTC)
+	lateUUID := "11111111-2222-3333-4444-555555555555"
+
+	entry := func(ts time.Time, pad int, uuid string) string {
+		var b strings.Builder
+		b.WriteString(`{"type":"user","uuid":"` + uuid + `","timestamp":"`)
+		b.WriteString(ts.UTC().Format(time.RFC3339Nano))
+		b.WriteString(`","data":"` + strings.Repeat("x", pad) + `"}` + "\n")
+		return b.String()
+	}
+
+	// Oversized but under transcriptLineCap: its own timestamp must still be read.
+	// Ordering matters — everything the bug hid lives after the long line.
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	body := entry(early, 10, "aaaaaaaa-0000-0000-0000-000000000000") +
+		entry(early.Add(time.Minute), 2<<20, "bbbbbbbb-0000-0000-0000-000000000000") +
+		entry(late, 10, lateUUID)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := lastLeadTranscriptTimestamp(path); !got.Equal(late) {
+		t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (scan stopped at the oversized line)", got, late)
+	}
+	if got := lastTranscriptTimestamp(path); !got.Equal(late) {
+		t.Errorf("lastTranscriptTimestamp = %v, want %v", got, late)
+	}
+	// sessionRotationVerdict's parent-link signal reads the owner transcript this
+	// way; a uuid past the long line must not read as absent.
+	if !transcriptContainsUUID(path, lateUUID) {
+		t.Error("transcriptContainsUUID missed a uuid located after the oversized line")
+	}
+
+	// Past the cap the line itself is dropped, but the walk must continue: the entry
+	// after it is still found. Losing one entry is recoverable; losing the tail is not.
+	huge := filepath.Join(t.TempDir(), "huge.jsonl")
+	body = entry(early, 10, "aaaaaaaa-0000-0000-0000-000000000000") +
+		entry(early.Add(time.Minute), transcriptLineCap+1, "bbbbbbbb-0000-0000-0000-000000000000") +
+		entry(late, 10, lateUUID)
+	if err := os.WriteFile(huge, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastLeadTranscriptTimestamp(huge); !got.Equal(late) {
+		t.Errorf("over-cap line aborted the walk: got %v, want %v", got, late)
+	}
+	if !transcriptContainsUUID(huge, lateUUID) {
+		t.Error("over-cap line aborted the walk before a later uuid")
+	}
+}
+
+// TestForEachTranscriptLineReportsReadErrors guards the property whose absence caused
+// the bug: a truncated walk must be distinguishable from a complete one.
+func TestForEachTranscriptLineReportsReadErrors(t *testing.T) {
+	if err := forEachTranscriptLine(filepath.Join(t.TempDir(), "missing.jsonl"), func(string) bool {
+		return true
+	}); err == nil {
+		t.Error("expected an error for a missing transcript, got nil")
+	}
+
+	// A final line with no trailing newline must still be delivered.
+	path := filepath.Join(t.TempDir(), "noeol.jsonl")
+	if err := os.WriteFile(path, []byte("{\"a\":1}\n{\"b\":2}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	if err := forEachTranscriptLine(path, func(line string) bool {
+		got = append(got, line)
+		return true
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || got[1] != `{"b":2}` {
+		t.Errorf("lines = %q, want both entries including the unterminated last one", got)
+	}
+}
+
+// TestWarnTranscriptThrottles guards the property that makes these warnings
+// affordable. They sit on per-cycle paths — ReadClaudeSessionName re-reads a
+// transcript on every worker cycle while a session is unnamed — and report sticky
+// conditions (EACCES does not clear itself; an over-cap entry recurs on every
+// scan). Unthrottled they write a line per session per cycle forever, and since
+// debug.log's last 100 lines are what the bug-report flow publishes, that drip
+// evicts the diagnostics the warnings exist to preserve.
+func TestWarnTranscriptThrottles(t *testing.T) {
+	var buf bytes.Buffer
+	prev := debuglog.Logger
+	debuglog.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	t.Cleanup(func() { debuglog.Logger = prev })
+
+	const reason = "transcript: test reason"
+	warnTranscript(reason, "/tmp/a.jsonl")
+	warnTranscript(reason, "/tmp/a.jsonl") // same pair — suppressed
+	warnTranscript(reason, "/tmp/a.jsonl") // still suppressed
+
+	if got := strings.Count(buf.String(), reason); got != 1 {
+		t.Errorf("same (reason, path) logged %d times, want 1", got)
+	}
+
+	// A different path is a different condition and must still be reported —
+	// throttling per-pair rather than globally keeps one noisy transcript from
+	// masking a second one.
+	warnTranscript(reason, "/tmp/b.jsonl")
+	if got := strings.Count(buf.String(), reason); got != 2 {
+		t.Errorf("second path logged %d total, want 2 (a distinct path must not be throttled)", got)
+	}
+
+	// The path is always attached, so a report names the transcript at fault.
+	if !strings.Contains(buf.String(), "/tmp/b.jsonl") {
+		t.Error("warning omitted the transcript path")
+	}
 }

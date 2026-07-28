@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/brizzai/fleet/internal/debuglog"
 )
 
 // claudeProjectDirReplacer mirrors Claude Code's per-cwd transcript dir naming.
@@ -74,22 +77,12 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 	}
 	jsonlPath := filepath.Join(projectDir, claudeSessionID+".jsonl")
 
-	f, err := os.Open(jsonlPath)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max buffer
-
 	var lastCustom, lastAI string
-	for scanner.Scan() {
-		line := scanner.Text()
+	_ = forEachTranscriptLine(jsonlPath, func(line string) bool {
 		// Quick check before JSON parsing. Matches both "custom-title" and
 		// "ai-title"; the Type check below filters any incidental hits.
 		if !strings.Contains(line, "-title") {
-			continue
+			return true
 		}
 
 		var entry struct {
@@ -98,7 +91,7 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 			AITitle     string `json:"aiTitle"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+			return true
 		}
 		switch entry.Type {
 		case "custom-title":
@@ -110,7 +103,8 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 				lastAI = entry.AITitle
 			}
 		}
-	}
+		return true
+	})
 
 	if lastCustom != "" {
 		return lastCustom
@@ -286,18 +280,10 @@ func transcriptParentLink(path string) string {
 	if path == "" {
 		return ""
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
+	var link string
+	_ = forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, "logicalParentUuid") {
-			continue
+			return true
 		}
 		var entry struct {
 			Type              string `json:"type"`
@@ -305,13 +291,124 @@ func transcriptParentLink(path string) string {
 			LogicalParentUUID string `json:"logicalParentUuid"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+			return true
 		}
 		if entry.LogicalParentUUID != "" && (entry.Subtype == "compact_boundary" || entry.Type == "summary") {
-			return entry.LogicalParentUUID
+			link = entry.LogicalParentUUID
+			return false
+		}
+		return true
+	})
+	return link
+}
+
+// transcriptWarnInterval throttles the warnings below. They sit on per-cycle paths
+// — ReadClaudeSessionName re-reads a transcript on every worker cycle while a
+// session is still unnamed (app.go sets recheck=0 inside agentNameFreshPollWindow),
+// then ~every 30s — and the conditions they report are sticky: EACCES does not clear
+// itself, and an over-cap entry is re-encountered on every scan. Unthrottled, one
+// broken transcript writes a line per session per cycle for the life of the process.
+// debug.log's last 100 lines are what the bug-report flow pastes into a public issue,
+// so that drip would evict the diagnostics these warnings exist to preserve. Same
+// shape and interval as rotRejectLogInterval.
+const transcriptWarnInterval = time.Minute
+
+// transcriptWarnedAt maps reason+path to the last time that pair was logged.
+var transcriptWarnedAt sync.Map
+
+// warnTranscript logs at Warn at most once per transcriptWarnInterval per
+// (reason, path).
+//
+// Warn rather than Debug on purpose: debuglog only enables Debug when FLEET_DEBUG is
+// set, so a Debug line would be absent from exactly the bug reports these warnings
+// are for. Throttling is what makes Warn affordable on a per-cycle path.
+func warnTranscript(reason, path string, args ...any) {
+	key := reason + "\x00" + path
+	now := time.Now()
+	if prev, ok := transcriptWarnedAt.Load(key); ok && now.Sub(prev.(time.Time)) < transcriptWarnInterval {
+		return
+	}
+	transcriptWarnedAt.Store(key, now)
+	debuglog.Logger.Warn(reason, append([]any{"path", path}, args...)...)
+}
+
+// transcriptLineCap bounds how much of one JSONL line is held in memory. Past it
+// the remainder of that line is discarded and the walk continues with the next —
+// losing one entry is recoverable (its neighbours are usually seconds away),
+// whereas abandoning the walk silently turns the entire rest of the file into
+// "doesn't exist", which is the failure this helper exists to prevent.
+const transcriptLineCap = 8 << 20 // 8MB
+
+// forEachTranscriptLine calls fn for each non-empty line of the JSONL transcript
+// at path, stopping early when fn returns false.
+//
+// Deliberately not bufio.Scanner. A Scanner has a maximum token size and reports
+// an over-long line by ending the loop with ErrTooLong — which reads exactly like
+// a clean EOF unless the caller checks scanner.Err(), and none of the callers here
+// did. Transcript lines routinely get large: an entry carrying a pasted image or a
+// big tool result is one JSON line, and 4 of 554 local transcripts held a line over
+// 1MB, the worst of them 2% of the way into the file. The answers that came back
+// were not visibly broken, just stale — a timestamp from sixteen days earlier, a
+// uuid reported absent — and every consumer treats them as authoritative. That
+// silently disabled the between-bursts tiebreaker in conversationActivePastHook and
+// biased sessionRotationVerdict toward rejecting genuine rotations.
+// Callers that only need a best-effort answer discard the returned error; the
+// helper has already logged anything beyond a routine missing file.
+func forEachTranscriptLine(path string, fn func(line string) bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		// A missing transcript is routine — the session may not have written one
+		// yet, or belongs to an agent that keeps none. Anything else (permissions,
+		// a bad path) leaves callers returning a zero value that reads exactly like
+		// "nothing happened", so it must not pass in silence.
+		if !errors.Is(err, os.ErrNotExist) {
+			warnTranscript("transcript: open failed", path, "err", err)
+		}
+		return err
+	}
+	defer f.Close()
+
+	r := bufio.NewReaderSize(f, 64*1024)
+	var buf []byte
+	overCap := false
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Mid-line: accumulate until the cap, then drop the rest of this line.
+			if !overCap {
+				if len(buf)+len(chunk) > transcriptLineCap {
+					overCap, buf = true, nil
+					// Say so. A skipped entry leaves a complete-looking walk that is
+					// missing one line, and if that line was the last, the callers here
+					// return the entry before it — stale, and indistinguishable from a
+					// real answer. That is the failure this helper replaced, at a
+					// smaller scale, so it must not be the one it reintroduces.
+					warnTranscript("transcript: entry over cap, skipped", path,
+						"cap_bytes", transcriptLineCap)
+				} else {
+					buf = append(buf, chunk...)
+				}
+			}
+			continue
+		}
+		if !overCap {
+			buf = append(buf, chunk...)
+			if line := strings.TrimRight(string(buf), "\r\n"); line != "" && !fn(line) {
+				return nil
+			}
+		}
+		buf, overCap = buf[:0], false
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			// Partial walk. Whatever the caller returns is derived from a prefix of
+			// the file, which is precisely the failure this helper exists to end —
+			// so say so rather than letting a stale answer look authoritative.
+			warnTranscript("transcript: read failed, result is partial", path, "err", err)
+			return err
 		}
 	}
-	return ""
 }
 
 // transcriptContainsUUID reports whether any entry in the transcript at path
@@ -321,27 +418,21 @@ func transcriptContainsUUID(path, uuid string) bool {
 	if path == "" || uuid == "" {
 		return false
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
+	found := false
+	_ = forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, uuid) {
-			continue
+			return true
 		}
 		var entry struct {
 			UUID string `json:"uuid"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.UUID == uuid {
-			return true
+			found = true
+			return false
 		}
-	}
-	return false
+		return true
+	})
+	return found
 }
 
 // firstTranscriptTimestamp returns the timestamp of the earliest timestamped JSONL
@@ -375,41 +466,29 @@ func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time
 	if path == "" {
 		return time.Time{}
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return time.Time{}
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
-
 	var result time.Time
-	for scanner.Scan() {
-		line := scanner.Text()
+	_ = forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, `"timestamp"`) {
-			continue
+			return true
 		}
 		var entry struct {
 			Timestamp   string `json:"timestamp"`
 			IsSidechain bool   `json:"isSidechain"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
-			continue
+			return true
 		}
 		if excludeSidechain && entry.IsSidechain {
-			continue
+			return true
 		}
 		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
 		// "...:04.226Z"). The layout also parses entries with no fractional part.
 		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
 		if err != nil {
-			continue
-		}
-		if !last {
-			return ts
+			return true
 		}
 		result = ts
-	}
+		return last // first match wins when we only want the earliest entry
+	})
 	return result
 }
