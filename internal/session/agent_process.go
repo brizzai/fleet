@@ -6,17 +6,38 @@ import (
 	"syscall"
 )
 
-// agentProcessAlive reports whether the agent process that fired a hook is still
-// running. pid 0 means the status file predates StatusFile.AgentPID, which is not
-// evidence of death — callers must treat false-with-unknown-pid separately.
+// conversationSucceeds reports whether a hook arriving from newPID, under a session
+// id we don't own, is the owner conversation continued rather than a nested agent
+// running beside it. known=false means one side has no pid (a status file older
+// than StatusFile.AgentPID) and the caller must fall back to transcripts.
 //
-// This is the signal a nested agent cannot produce. A `claude` spawned inside a
-// tool call inherits FLEET_INSTANCE_ID and fires hooks under its own conversation
-// id, which is indistinguishable from a session-id rotation by every transcript
-// signal we have: both leave one conversation writing and another silent. The
-// difference is that a rotation happens *inside* the owner process — the old
-// conversation's process is gone — while a nested agent runs *alongside* an owner
-// that is very much alive.
+// This is the signal a nested agent cannot produce, and it is about identity, not
+// just liveness:
+//
+//   - Same process, new session id. Claude rotates its id in place — `/clear`
+//     starts a fresh conversation inside the running process — so the report is
+//     the owner itself, under a new name. A rotation, unambiguously.
+//   - Different process, owner gone. The conversation that held this session
+//     ended; whatever is reporting now succeeded it.
+//   - Different process, owner alive. Two agents at once: a `claude` spawned
+//     inside a tool call inherited FLEET_INSTANCE_ID and is firing hooks under
+//     its own id while its parent waits. Adopting it would hand the session's
+//     status and resume id to a scratch conversation.
+//
+// Liveness alone cannot make that call. It gets the third case right and the first
+// one exactly wrong — an in-process `/clear` leaves the owner's pid very much
+// alive, which is the shape issue #226 was reported in.
+func conversationSucceeds(ownerPID, newPID int) (succeeds, known bool) {
+	if ownerPID <= 0 || newPID <= 0 {
+		return false, false
+	}
+	if ownerPID == newPID {
+		return true, true // in-process rotation
+	}
+	return !agentProcessAlive(ownerPID), true
+}
+
+// agentProcessAlive reports whether a process is still running.
 //
 // Signal 0 checks for existence and permission without delivering anything. It
 // answers for zombies too (a not-yet-reaped child is still a process), which is the

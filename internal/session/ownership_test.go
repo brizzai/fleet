@@ -269,6 +269,21 @@ func TestUpdateHookStatusCapsUndecidedRotation(t *testing.T) {
 	}
 }
 
+// otherLivePID returns the pid of a live process that is not the test's own.
+// Stands in for a nested agent running beside the owner.
+func otherLivePID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn long-lived process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	return cmd.Process.Pid
+}
+
 // reapedPID returns the pid of a process that has run and been waited on, so it is
 // reliably gone. Stands in for an agent whose conversation ended.
 func reapedPID(t *testing.T) int {
@@ -283,10 +298,11 @@ func reapedPID(t *testing.T) int {
 // negCachedSession returns a session whose live-bbb hook has been rejected against
 // owner-aaa and neg-cached — the frozen state issue #226 was reported in — with the
 // recovery clock wound back so the next worker-path hook rechecks immediately.
-// ownerPID is the agent process recorded for the owner (0 = a status file older
-// than the field, which forces the transcript fallback); ownerLast/liveLast set
-// where each conversation last wrote.
-func negCachedSession(t *testing.T, ownerPID int, ownerLast, liveLast time.Time) (*Session, string) {
+// ownerPID/livePID are the agent processes recorded for each conversation (0 = a
+// status file older than the field, which forces the transcript fallback); equal
+// pids are an in-process rotation. ownerLast/liveLast set where each conversation
+// last wrote.
+func negCachedSession(t *testing.T, ownerPID, livePID int, ownerLast, liveLast time.Time) (*Session, string) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	proj := t.TempDir()
@@ -299,7 +315,7 @@ func negCachedSession(t *testing.T, ownerPID int, ownerLast, liveLast time.Time)
 
 	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
 	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-aaa", UpdatedAt: time.Now(), AgentPID: ownerPID}, true)
-	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true)
+	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now(), AgentPID: livePID}, true)
 	if s.rotRejects["live-bbb"] == nil {
 		t.Fatalf("setup: foreign id not neg-cached (rotRejects=%v)", s.rotRejects)
 	}
@@ -317,9 +333,9 @@ func negCachedSession(t *testing.T, ownerPID int, ownerLast, liveLast time.Time)
 // fork/restart resume. A dead owner process ends the argument.
 func TestUpdateHookStatusRecoversWhenOwnerProcessGone(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, reapedPID(t), now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, reapedPID(t), os.Getpid(), now.Add(-2*time.Hour), now.Add(-time.Minute))
 
-	changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true)
+	changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now(), AgentPID: os.Getpid()}, true)
 	if !changed {
 		t.Errorf("dead owner process: hook should register as changed")
 	}
@@ -331,6 +347,39 @@ func TestUpdateHookStatusRecoversWhenOwnerProcessGone(t *testing.T) {
 	}
 }
 
+// TestUpdateHookStatusRecoversInProcessRotation is the shape issue #226 was
+// actually reported in, and the one a pure liveness check gets exactly wrong:
+// `/clear` starts a fresh conversation INSIDE the running agent, so the owner's
+// process is still very much alive. What identifies it is that the new id is
+// reported by that same process.
+func TestUpdateHookStatusRecoversInProcessRotation(t *testing.T) {
+	now := time.Now().UTC()
+	agent := otherLivePID(t)
+	// Same pid on both sides: one process, two conversation ids.
+	s, _ := negCachedSession(t, agent, agent, now.Add(-time.Hour), now.Add(-time.Minute))
+
+	changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now(), AgentPID: agent}, true)
+	if !changed {
+		t.Errorf("in-process rotation: hook should register as changed")
+	}
+	if s.ClaudeSessionID != "live-bbb" {
+		t.Errorf("in-process rotation stayed frozen: %q, want live-bbb", s.ClaudeSessionID)
+	}
+}
+
+// TestResolveLaunchIDHealsInProcessRotation is the same case on the launch path —
+// the one that decides what `f`, `F` and `r` actually open.
+func TestResolveLaunchIDHealsInProcessRotation(t *testing.T) {
+	now := time.Now().UTC()
+	agent := otherLivePID(t)
+	s, _ := negCachedSession(t, agent, agent, now.Add(-time.Hour), now.Add(-time.Minute))
+
+	launchID, stale := s.ResolveLaunchID()
+	if launchID != "live-bbb" || stale != "owner-aaa" {
+		t.Errorf("ResolveLaunchID() = (%q, %q), want (live-bbb, owner-aaa)", launchID, stale)
+	}
+}
+
 // TestUpdateHookStatusKeepsOwnerWhileProcessAlive is the case transcripts cannot
 // decide and this one can: a nested agent that inherited FLEET_INSTANCE_ID writes
 // for hours while its parent, blocked on the tool call that spawned it, writes
@@ -339,9 +388,9 @@ func TestUpdateHookStatusRecoversWhenOwnerProcessGone(t *testing.T) {
 // otherwise, and the rejection must hold.
 func TestUpdateHookStatusKeepsOwnerWhileProcessAlive(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, os.Getpid(), now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, os.Getpid(), otherLivePID(t), now.Add(-2*time.Hour), now.Add(-time.Minute))
 
-	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true); changed {
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now(), AgentPID: otherLivePID(t)}, true); changed {
 		t.Errorf("owner process alive: nested agent hook should stay rejected")
 	}
 	if s.ClaudeSessionID != "owner-aaa" {
@@ -354,7 +403,7 @@ func TestUpdateHookStatusKeepsOwnerWhileProcessAlive(t *testing.T) {
 // so owner silence has to carry the decision.
 func TestUpdateHookStatusFallsBackToTranscriptWithoutPID(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, 0, now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, 0, 0, now.Add(-2*time.Hour), now.Add(-time.Minute))
 
 	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true); !changed {
 		t.Errorf("no pid + owner silent 2h: fallback should adopt")
@@ -368,7 +417,7 @@ func TestUpdateHookStatusFallsBackToTranscriptWithoutPID(t *testing.T) {
 // owner that wrote moments ago is not abandoned, whatever else is reporting.
 func TestUpdateHookStatusFallbackHoldsForRecentOwner(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, 0, now.Add(-2*time.Minute), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, 0, 0, now.Add(-2*time.Minute), now.Add(-time.Minute))
 
 	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true); changed {
 		t.Errorf("owner wrote 2m ago: fallback should hold the rejection")
@@ -386,7 +435,7 @@ func TestUpdateHookStatusFallbackHoldsForRecentOwner(t *testing.T) {
 func TestUpdateHookStatusRotationShortlyAfterClearRecovers(t *testing.T) {
 	now := time.Now().UTC()
 	// Owner cleared an hour ago; the new conversation ran six minutes and stopped.
-	s, _ := negCachedSession(t, 0, now.Add(-time.Hour), now.Add(-54*time.Minute))
+	s, _ := negCachedSession(t, 0, 0, now.Add(-time.Hour), now.Add(-54*time.Minute))
 
 	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true); !changed {
 		t.Errorf("short post-/clear session should still recover")
@@ -401,16 +450,16 @@ func TestUpdateHookStatusRotationShortlyAfterClearRecovers(t *testing.T) {
 // to the worker rather than touch the disk.
 func TestUpdateHookStatusDeadOwnerRecoveryStaysOffUIPath(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, reapedPID(t), now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, reapedPID(t), os.Getpid(), now.Add(-2*time.Hour), now.Add(-time.Minute))
 
-	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, false); changed {
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now(), AgentPID: os.Getpid()}, false); changed {
 		t.Errorf("UI path must not adopt (it must not read transcripts)")
 	}
 	if s.ClaudeSessionID != "owner-aaa" {
 		t.Errorf("UI path adopted anyway: %q, want owner-aaa", s.ClaudeSessionID)
 	}
 	// The worker path, same instant, recovers — proving the UI path only deferred.
-	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true); !changed {
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now(), AgentPID: os.Getpid()}, true); !changed {
 		t.Errorf("worker path should recover after the UI path deferred")
 	}
 }
@@ -421,7 +470,7 @@ func TestUpdateHookStatusDeadOwnerRecoveryStaysOffUIPath(t *testing.T) {
 // cycle, and had its recovery clock reset before it could ever fire.
 func TestNegCacheKeyedByForeignID(t *testing.T) {
 	now := time.Now().UTC()
-	s, proj := negCachedSession(t, os.Getpid(), now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, proj := negCachedSession(t, os.Getpid(), otherLivePID(t), now.Add(-2*time.Hour), now.Add(-time.Minute))
 
 	// A second foreign id reports and is rejected in its turn.
 	writeTranscript(t, proj, "child-ccc", now.Add(-3*time.Hour), now.Add(-2*time.Hour))
@@ -461,7 +510,7 @@ func TestDeadOwnerRecheckThrottled(t *testing.T) {
 // otherwise fork or restart into a conversation nobody is in.
 func TestResolveLaunchIDHealsFrozenID(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, reapedPID(t), now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, reapedPID(t), os.Getpid(), now.Add(-2*time.Hour), now.Add(-time.Minute))
 
 	launchID, stale := s.ResolveLaunchID()
 	if launchID != "live-bbb" || stale != "owner-aaa" {
@@ -473,7 +522,7 @@ func TestResolveLaunchIDHealsFrozenID(t *testing.T) {
 // is a nested agent, and launching must not follow it.
 func TestResolveLaunchIDKeepsOwnerWhileProcessAlive(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, os.Getpid(), now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, os.Getpid(), otherLivePID(t), now.Add(-2*time.Hour), now.Add(-time.Minute))
 
 	launchID, stale := s.ResolveLaunchID()
 	if launchID != "owner-aaa" || stale != "" {
@@ -500,7 +549,7 @@ func TestResolveLaunchIDKeepsHealthyID(t *testing.T) {
 // restart that cleared first would resume the frozen id every time.
 func TestAdoptResolvedLaunchIDBeforeClear(t *testing.T) {
 	now := time.Now().UTC()
-	s, _ := negCachedSession(t, reapedPID(t), now.Add(-2*time.Hour), now.Add(-time.Minute))
+	s, _ := negCachedSession(t, reapedPID(t), os.Getpid(), now.Add(-2*time.Hour), now.Add(-time.Minute))
 
 	s.adoptResolvedLaunchID("test")
 	if s.ClaudeSessionID != "live-bbb" {
@@ -581,19 +630,21 @@ func TestUpdateHookStatusIgnoresNestedChildWithCompaction(t *testing.T) {
 	)
 
 	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
-	// The owner's process is alive, which is what keeps this rejected on the second
-	// delivery too: its transcript has been silent for four hours, so silence alone
-	// would eventually read as abandonment.
-	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-x", UpdatedAt: time.Now(), AgentPID: os.Getpid()}, true)
+	// Two live processes: the owner, and a child reporting under its own pid. That
+	// pairing is what keeps this rejected on the second delivery, where the recovery
+	// check lives — the owner's transcript has been silent for four hours, so silence
+	// alone would read as abandonment.
+	ownerPID, childPID := os.Getpid(), otherLivePID(t)
+	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-x", UpdatedAt: time.Now(), AgentPID: ownerPID}, true)
 
-	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "child-x", UpdatedAt: time.Now()}, true); changed {
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "child-x", UpdatedAt: time.Now(), AgentPID: childPID}, true); changed {
 		t.Errorf("nested child with foreign compaction link should be ignored")
 	}
 	// Again, now through the neg-cached branch where the recovery check lives.
 	s.mu.Lock()
 	s.rotRejects["child-x"].checkedAt = time.Time{}
 	s.mu.Unlock()
-	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "child-x", UpdatedAt: time.Now()}, true); changed {
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "dead", SessionID: "child-x", UpdatedAt: time.Now(), AgentPID: childPID}, true); changed {
 		t.Errorf("nested child should stay ignored while the owner process is alive")
 	}
 	if s.GetHookStatus() != "running" || s.ClaudeSessionID != "owner-x" {

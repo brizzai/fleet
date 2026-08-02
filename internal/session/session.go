@@ -136,9 +136,10 @@ type Session struct {
 // or permanent (recovery). Per foreign id, so one noisy nested agent can neither
 // evict another id's rejection nor reset its clocks.
 type rotReject struct {
-	owner     string
-	loggedAt  time.Time // last "still rejected" line; a dropped hook must never be silent
-	checkedAt time.Time // last recovery check; throttles the fallback's transcript I/O
+	owner      string
+	foreignPID int       // process that reported the rejected id, so ResolveLaunchID can ask conversationSucceeds too
+	loggedAt   time.Time // last "still rejected" line; a dropped hook must never be silent
+	checkedAt  time.Time // last recovery check; throttles the fallback's transcript I/O
 }
 
 // NewSession creates a new session for the given project path.
@@ -445,7 +446,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	//     resume id, so it must be ignored.
 	// sessionRotationVerdict distinguishes them from the transcripts; a persistent
 	// rejection is cached so a nested child doesn't rescan them every cycle. When
-	// that verdict is wrong, ownerStillRunning is what unsticks it — see the
+	// that verdict is wrong, conversationSucceeds is what unsticks it — see the
 	// negCached branch.
 	var owner string
 	if hs.SessionID != "" {
@@ -480,17 +481,18 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				// Normally this id stays rejected for the session's whole life — right
 				// for a nested agent, wrong for a rotation we simply could not prove.
 				// Nothing else releases the owner (an in-process rotation fires no
-				// SessionEnd for the id it abandons), so ask the one question the
-				// transcripts cannot answer: is the owner's process still running?
+				// SessionEnd for the id it abandons), so ask the question the transcripts
+				// cannot answer: which PROCESS is reporting? See conversationSucceeds.
 				if resolveRotation && s.dueForDeadOwnerRecheck(hs.SessionID) {
-					if alive, known := s.ownerStillRunning(ownerPID); known && !alive {
-						debuglog.Logger.Info("adopting claude session: owner process gone",
-							"id", s.ID, "old", owner, "ownerPID", ownerPID, "new", hs.SessionID,
+					if verdict, known := conversationSucceeds(ownerPID, hs.AgentPID); known && verdict {
+						debuglog.Logger.Info("adopting claude session: process says rotation",
+							"id", s.ID, "old", owner, "ownerPID", ownerPID,
+							"new", hs.SessionID, "newPID", hs.AgentPID,
 							"frozenHookAge", time.Since(frozenHookAt).Truncate(time.Second))
 						break // recovered — fall through to the adoption block below
 					} else if !known && ownerConversationAbandoned(projectPath, owner, hs.SessionID) {
-						// No pid recorded (status file from an older handler). Fall back to
-						// transcript silence, which cannot separate a dead owner from one
+						// No pid on one side (a status file from an older handler). Fall back
+						// to transcript silence, which cannot separate a dead owner from one
 						// blocked on this very child — accepted only because the alternative
 						// is staying frozen forever, and because it self-clears: the next
 						// hook from the current handler records a pid.
@@ -550,7 +552,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 					// stayed undecidable past the retry cap (e.g. a permanently unreadable
 					// owner transcript). Neg-cache so a persistent foreign id doesn't rescan
 					// transcripts every cycle.
-					s.negCacheRotation(owner, hs.SessionID)
+					s.negCacheRotation(owner, hs.SessionID, hs.AgentPID)
 					debuglog.Logger.Info("ignoring foreign claude session",
 						"id", s.ID, "owner", owner, "foreign", hs.SessionID)
 					return false
@@ -685,21 +687,10 @@ func (s *Session) dueForDeadOwnerRecheck(foreign string) bool {
 	return true
 }
 
-// ownerStillRunning reports whether the agent process behind the current owner is
-// alive, and whether we know at all. known=false means no pid was recorded (a
-// status file written before StatusFile.AgentPID), which callers must not read as
-// death — it is the one case that still needs the transcript fallback.
-func (s *Session) ownerStillRunning(ownerPID int) (alive, known bool) {
-	if ownerPID <= 0 {
-		return false, false
-	}
-	return agentProcessAlive(ownerPID), true
-}
-
 // negCacheRotation records foreign as a confirmed non-rotation against owner, so
 // future hooks for it short-circuit without rescanning transcripts, and clears any
 // undecided-retry tracking for it.
-func (s *Session) negCacheRotation(owner, foreign string) {
+func (s *Session) negCacheRotation(owner, foreign string, foreignPID int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rotRejects == nil {
@@ -714,7 +705,7 @@ func (s *Session) negCacheRotation(owner, foreign string) {
 	// silence would land squarely in the window where a user hits `!` and files a
 	// report. The recovery clock starts here for the same reason plus one of its own:
 	// an id rejected this instant cannot yet show an abandoned owner.
-	s.rotRejects[foreign] = &rotReject{owner: owner, loggedAt: now, checkedAt: now}
+	s.rotRejects[foreign] = &rotReject{owner: owner, foreignPID: foreignPID, loggedAt: now, checkedAt: now}
 	s.rotUndecidedOwner = ""
 	s.rotUndecidedForeign = ""
 	s.rotUndecidedCount = 0
@@ -868,11 +859,19 @@ func (s *Session) ResolveLaunchID() (launchID, healedFrom string) {
 	s.mu.RLock()
 	stored, owner, ownerPID := s.ClaudeSessionID, s.ownerSessionID, s.ownerPID
 	projectPath := s.ProjectPath
+	// Pick the rejection standing against the current owner. Several can, when an
+	// eval harness has been spawning sub-agents, so prefer one reported by the
+	// owner's own process — that is a rotation by identity, where the others are
+	// merely other processes. Map order is random, so without this tie-break the
+	// launch id would vary run to run.
 	var rejected string
+	var rejectedPID int
 	for foreign, r := range s.rotRejects {
-		if r.owner == owner {
-			rejected = foreign
-			break
+		if r.owner != owner {
+			continue
+		}
+		if rejected == "" || (r.foreignPID == ownerPID && ownerPID > 0) {
+			rejected, rejectedPID = foreign, r.foreignPID
 		}
 	}
 	s.mu.RUnlock()
@@ -884,9 +883,9 @@ func (s *Session) ResolveLaunchID() (launchID, healedFrom string) {
 	if rejected == "" || stored != owner {
 		return stored, ""
 	}
-	if alive, known := s.ownerStillRunning(ownerPID); known {
-		if alive {
-			return stored, "" // owner is running — the rejected id is a nested agent
+	if succeeds, known := conversationSucceeds(ownerPID, rejectedPID); known {
+		if !succeeds {
+			return stored, "" // another live process — a nested agent, not our successor
 		}
 		return rejected, stored
 	}
