@@ -96,7 +96,14 @@ func mapEventToStatus(event, status string) string {
 		}
 		return "finished"
 	case "sessionEnd":
-		return "dead"
+		// Not "dead". Observed payload (cursor-agent 2026.07.23-e383d2b):
+		// {reason: "completed", final_status, duration_ms, ...} — this fires when
+		// a *conversation* ends, with the process alive and back at its prompt.
+		// Routing it to "dead" sets StatusError and writes a crash dump for a
+		// healthy session, then Reload All Sessions restarts a live agent.
+		// Cursor's real process death comes from tmux pane-death, same as Codex
+		// and OpenCode, neither of which maps an end-of-session hook to dead.
+		return "finished"
 	default:
 		return ""
 	}

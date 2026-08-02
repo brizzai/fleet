@@ -32,8 +32,8 @@ func TestMapEventToStatus(t *testing.T) {
 		{"stop", "completed", "finished"},
 		{"stop", "aborted", "finished"}, // user-initiated cancel: over, not broken
 		{"stop", "error", "error"},
-		{"stop", "", "finished"}, // absent status: treat as a normal finish
-		{"sessionEnd", "", "dead"},
+		{"stop", "", "finished"},       // absent status: treat as a normal finish
+		{"sessionEnd", "", "finished"}, // conversation end, not process death — see mapEventToStatus
 		// Cursor's lowerCamelCase "sessionStart" is deliberately unmapped —
 		// distinct from Claude/Codex's PascalCase "SessionStart" above, which
 		// does map to "finished". See the no-sessionStart-case comment in
