@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.24.0] - 2026-08-02
+
+### Added
+
+- **Worktrees from your shell.** `fleet worktree <branch>` creates the worktree and starts a session in it without opening the TUI — `--base`, `--path` and `--agent` to steer it, `--no-session` to print just the path for `cd "$(fleet worktree foo --no-session)"`.
+
+### Improved
+
+- **No restart needed.** A session created from another terminal — `fleet worktree`, `fleet add` — now shows up in a running fleet within ~5 seconds, instead of waiting until the next launch.
+
+### Fixed
+
+- **Forks follow the conversation.** Forking a session that had started a fresh conversation (after `/clear`, typically) could copy the one it left behind, so you got back work you finished an hour ago. You now fork whatever the session is actually in.
+- **Stuck sessions recover.** A session could pin itself to a conversation that had already ended and then ignore every status update for the rest of its life, so you got a frozen dot and an `r` that reopened the wrong conversation. Both come back the moment the old conversation's process is gone.
+
 ## [2.23.2] - 2026-07-28
 
 ### Fixed
@@ -460,7 +475,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.23.2...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.24.0...HEAD
+[2.24.0]: https://github.com/brizzai/fleet/releases/tag/v2.24.0
 [2.23.2]: https://github.com/brizzai/fleet/releases/tag/v2.23.2
 [2.23.1]: https://github.com/brizzai/fleet/releases/tag/v2.23.1
 [2.23.0]: https://github.com/brizzai/fleet/releases/tag/v2.23.0
