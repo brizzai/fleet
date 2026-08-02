@@ -63,6 +63,8 @@ func main() {
 			os.Exit(1)
 		}
 		runRemove(args[1])
+	case "worktree", "wt":
+		runWorktree(args[1:])
 	case "hook-handler":
 		handleHookHandler()
 	case "chrome-host":
@@ -348,6 +350,8 @@ Usage:
   fleet add <path>   Add a new session
   fleet list         List all sessions
   fleet remove <id>  Remove a session
+  fleet worktree <branch>  Create a git worktree and start a session in it
+                           (--base, --path, --agent, --no-session)
   fleet hooks <install|uninstall|status>  Manage Claude Code hooks
   fleet update       Update to latest version
   fleet version      Show version

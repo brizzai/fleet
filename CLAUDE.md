@@ -44,6 +44,7 @@ Use [conventional commits](https://www.conventionalcommits.org/). Version is aut
 ## Package Structure
 ```text
 cmd/fleet/main.go      # CLI entry point
+cmd/fleet/worktree.go  # `fleet worktree <branch>` — worktree + session from the shell
 internal/tmux/tmux.go        # Tmux abstraction (create, kill, capture)
 internal/tmux/pty.go         # PTY-based attach with Ctrl+Q detach
 internal/session/session.go  # Session model, status detection, claude --resume
@@ -86,6 +87,8 @@ chrome-extension/                # Chrome MV3 extension (service worker, manifes
 - Tmux session prefix: `fleet_` (agent sessions); drawer shells use a distinct `fleetsh_` prefix — intentionally not a prefix of `fleet_`, so shells never leak into agent-session enumeration (`tmux.ListSessions`)
 - Session ID format: `<8hex>-<unix_timestamp>`
 - SQLite DB: `~/.config/fleet/state.db`
+- `fleet worktree <branch>` (alias `wt`, `cmd/fleet/worktree.go`): the TUI's `w` key as a CLI command — create the worktree, copy `.claude/settings.local.json` + `copy_files` entries, start a session. Flags: `--base` (defaults to `git.GetDefaultBranch`), `--path` (defaults to cwd), `--agent` (defaults to `default_agent`; **validated explicitly** — `agent.Parse` falls back to Claude for anything unrecognized, so a typo would silently launch the wrong agent), `--no-session` (print only the worktree path, so `cd "$(fleet worktree foo --no-session)"` composes; conflicts with `--agent`). Flags parse on **either side** of the branch (a loop peeling one positional per `fs.Parse` — a single Parse stops at the first positional and would reject `fleet worktree foo --no-session`). It resolves to the **main** worktree (`git.GetMainWorktreePath`) before creating, so running it from inside `repo-foo` yields `repo-bar`, not `repo-foo-bar` — same as pressing `w` on an origin header. It calls `debuglog.Init()` first: `debuglog.Logger`'s fallback writes to **stderr**, and the provider/`Session.Start` log at Info, so without it the command spews slog lines over the user's terminal (`fleet add` still does).
+- External-session adoption: the TUI reads sessions from SQLite exactly **once**, at startup (`loadSessions`), so a session created by another fleet process would be invisible until restart. `maybeAdoptExternalSessions` (heavy worker pass, self-throttled to `adoptSweepInterval`=5s) diffs the table against the cycle's snapshot via the pure `unknownSessions` and sends `adoptSessionsMsg`; `handleAdoptSessions` re-checks `sessionByID` (the snapshot is taken at cycle start, so the Update goroutine is the only authoritative dedupe point) then mirrors `handleSessionCreateResult` minus `SaveSession`/analytics. **Adoption only** — rows deleted elsewhere are never dropped. Unlike a session the user just created, an adopted row arrives on a timer, so the cursor must not move: it's captured with `targetForCursor()` and restored by identity via `target.find` after the rebuild. No resurrection risk — `deferDelete` deletes the SQLite row immediately, ahead of the 5s undo window.
 - Sessions grouped by git repo root in sidebar with tree lines (├─/└─)
 - Status: Running, Waiting, Finished, Idle, Error, Starting, Suspended
 - Status icons: ● (running/finished), ◐ (waiting), ○ (idle/starting), ✕ (error), · dim (suspended — same dot as idle; dim style + "suspended" label distinguish it)
