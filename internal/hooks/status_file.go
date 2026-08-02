@@ -26,6 +26,17 @@ type StatusFile struct {
 	// FLEET_INSTANCE_ID (owner alive) — a distinction no amount of transcript
 	// reading can make. Omitted by handlers older than this field; readers must
 	// treat 0 as "unknown", not "dead".
+	//
+	// getppid() only names the agent because the installed hook command is a
+	// SINGLE SIMPLE COMMAND: Claude and Codex run GetHookCommand()'s
+	// `'<path>' hook-handler --fleet-hook` through a shell, which execs rather
+	// than forks, and OpenCode spawns the binary directly with no shell at all.
+	// A compound command (`;`, `&&`, `|`, a redirection) makes the shell fork,
+	// and getppid() would then record that shell — a process that exits
+	// immediately, which conversationSucceeds reads as "the owner is gone" for
+	// every foreign session id it is ever asked about. Only reachable by hand-
+	// editing settings.json today, but keep the installed command simple: the
+	// failure is a silently inverted ownership gate, not a missing signal.
 	AgentPID int `json:"agent_pid,omitempty"`
 }
 

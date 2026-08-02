@@ -5240,9 +5240,18 @@ func (h *Home) syncHookStatuses(sessions []*session.Session, resolveRotation boo
 			oldFirstPrompt := s.FirstPrompt
 			oldPromptCount := s.PromptCount
 			if s.UpdateHookStatus(&session.HookStatus{
-				Status:      hs.Status,
-				SessionID:   hs.SessionID,
-				UpdatedAt:   hs.UpdatedAt,
+				Status:    hs.Status,
+				SessionID: hs.SessionID,
+				UpdatedAt: hs.UpdatedAt,
+				// AgentPID is what lets ownership ask "is the conversation that owns
+				// this session still running?" — the only question that releases a
+				// neg-cached rotation. Dropping it here (this is the sole production
+				// caller of UpdateHookStatus) leaves both sides of that comparison at
+				// 0, so conversationSucceeds answers "unknown" forever and the
+				// process-based recovery never fires. The ownership tests inject
+				// AgentPID straight into UpdateHookStatus, so they stay green while
+				// production runs blind — hence TestSyncHookStatusesPropagatesAgentPID.
+				AgentPID:    hs.AgentPID,
 				UserPrompt:  hs.UserPrompt,
 				PromptCount: hs.PromptCount,
 			}, resolveRotation) {
