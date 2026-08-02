@@ -115,6 +115,38 @@ func TestBugReportClosedMsg_HidesDialogAndConfirms(t *testing.T) {
 	}
 }
 
+// bugReportClosedMsg carries no identity, so a submit that is still in flight
+// when the user escapes out and opens a fresh report would close the new form
+// and take the description typed into it — Show() blanks descInput on the next
+// open, making it unrecoverable. Only a form that is itself mid-submit can be
+// the one a result belongs to.
+func TestBugReportClosedMsg_LeavesANewerFormAlone(t *testing.T) {
+	h := &Home{bugReport: bugFormDialog(), toasts: NewToastStack()}
+	h.bugReport.submitting = true
+
+	// esc while submitting: hides the form, emits a bare closed msg, and leaves
+	// the gh call still running.
+	h.bugReport.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+
+	// `!` again — a fresh report, part-way through being typed.
+	h.bugReport.Show("v0.0.0-test", 0, NewErrorHistory(50), NewActionLog(100), 100, 40, nil, 0, nil)
+	h.bugReport.stage = stageForm
+	h.bugReport.descInput.SetValue("half-written second report")
+
+	// The first submission finally returns.
+	h.Update(bugReportClosedMsg{url: "https://github.com/brizzai/fleet/issues/1"})
+
+	if !h.bugReport.IsVisible() {
+		t.Fatal("a stale submit result closed the report the user was typing into")
+	}
+	if got := h.bugReport.descInput.Value(); got != "half-written second report" {
+		t.Fatalf("description lost to the stale result, got %q", got)
+	}
+	if !strings.Contains(h.infoMsg, "issues/1") {
+		t.Fatalf("the filed issue must still be confirmed, got %q", h.infoMsg)
+	}
+}
+
 func TestBugReportDialog_Esc_Hides(t *testing.T) {
 	d := bugFormDialog()
 	d.submitting = true
