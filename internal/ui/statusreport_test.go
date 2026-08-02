@@ -34,8 +34,11 @@ func statusFormFixture() *statusReportForm {
 				"file_session_id":      "61fd77f6-2b1a-4c0d-9e88-1122aabbccdd",
 				"file_age":             "1.2s",
 				"applied_matches_file": false,
-				"owner_session_id":     "0aa11bb2-3c4d-5e6f-8899-aabbccddeeff",
-				"owner_pid":            4242,
+				// Far enough behind that lag can't explain it — the dropped-hook shape.
+				"divergence_significant": true,
+				"file_newer_by":          "5m33s",
+				"owner_session_id":       "0aa11bb2-3c4d-5e6f-8899-aabbccddeeff",
+				"owner_pid":              4242,
 				"file_contents": map[string]any{
 					"event":       "PermissionRequest",
 					"user_prompt": secretPrompt,
@@ -134,6 +137,69 @@ func TestBuildStatusReportBody_CarriesAppliedVsDiskDivergence(t *testing.T) {
 	// pasting full conversation ids into a public issue.
 	if strings.Contains(body, "61fd77f6-2b1a-4c0d-9e88-1122aabbccdd") {
 		t.Fatal("issue body carried a full session id; want the shortened form")
+	}
+}
+
+// The applied hook lags disk by design (fsnotify debounce + a worker cycle), so a
+// capture landing mid-write reads `false` for the same reason a dropped hook does.
+// Only the gap tells them apart, so only the large gap gets the bold — otherwise
+// the loudest row in the table cries wolf on a healthy session.
+func TestBuildStatusReportBody_BoldsOnlySignificantDivergence(t *testing.T) {
+	r := &diagnostics.Report{Version: "v2.22.0", OS: "darwin", Arch: "arm64"}
+
+	significant := statusFormFixture()
+	significant.includeContent = false
+	body := buildStatusReportBody("desc", session.StatusIdle, significant, r)
+	if !strings.Contains(body, "| **applied matches disk** | **false** (applied hook is 5m34s old) |") {
+		t.Fatalf("a real divergence should be bolded and dated:\n%s", body)
+	}
+
+	// Same false, gap under divergenceLagGrace: a write still in flight.
+	inFlight := statusFormFixture()
+	inFlight.includeContent = false
+	hook := inFlight.snap.meta["hook"].(map[string]any)
+	hook["divergence_significant"] = false
+	hook["file_newer_by"] = "412ms"
+	body = buildStatusReportBody("desc", session.StatusIdle, inFlight, r)
+	if !strings.Contains(body, "| applied matches disk | false (file 412ms newer — in flight) |") {
+		t.Fatalf("an in-flight write should render unbolded and qualified:\n%s", body)
+	}
+	if strings.Contains(body, "**applied matches disk**") {
+		t.Fatalf("in-flight divergence must not be bolded:\n%s", body)
+	}
+}
+
+// 0 is not a pid — it is "no pid was recorded", which is exactly the state where
+// conversationSucceeds returns known=false and the recovery cannot run. Rendering
+// it as `0` disguises an unavailable mechanism as a reading.
+func TestBuildStatusReportBody_UnknownOwnerPIDRendersAsAbsent(t *testing.T) {
+	f := statusFormFixture()
+	f.includeContent = false
+	f.snap.meta["hook"].(map[string]any)["owner_pid"] = 0
+	r := &diagnostics.Report{Version: "v2.22.0", OS: "darwin", Arch: "arm64"}
+
+	body := buildStatusReportBody("desc", session.StatusIdle, f, r)
+
+	if !strings.Contains(body, "| owner pid | - |") {
+		t.Fatalf("unknown owner pid should render as `-`:\n%s", body)
+	}
+	if strings.Contains(body, "| owner pid | 0 |") {
+		t.Fatal("owner pid 0 rendered as a pid")
+	}
+}
+
+func TestShortPID(t *testing.T) {
+	for _, tc := range []struct {
+		pid  int
+		want string
+	}{
+		{0, "-"},
+		{-1, "-"},
+		{4242, "4242"},
+	} {
+		if got := shortPID(tc.pid); got != tc.want {
+			t.Errorf("shortPID(%d) = %q, want %q", tc.pid, got, tc.want)
+		}
 	}
 }
 

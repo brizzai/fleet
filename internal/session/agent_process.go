@@ -27,6 +27,13 @@ import (
 // Liveness alone cannot make that call. It gets the third case right and the first
 // one exactly wrong — an in-process `/clear` leaves the owner's pid very much
 // alive, which is the shape issue #226 was reported in.
+//
+// It trusts both pids to be agent processes, which is StatusFile.AgentPID's
+// contract, not something checked here. Note how this fails if that contract
+// breaks: a pid belonging to something short-lived is never alive, so the third
+// case collapses into the second and EVERY foreign session id is adopted — the
+// gate inverts rather than degrades. See StatusFile.AgentPID for what the
+// contract rests on.
 func conversationSucceeds(ownerPID, newPID int) (succeeds, known bool) {
 	if ownerPID <= 0 || newPID <= 0 {
 		return false, false

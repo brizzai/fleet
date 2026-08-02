@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -371,7 +372,22 @@ func shortSessionID(id string) string {
 	return id
 }
 
-// metaString/metaBool/metaSub read named fields out of the snapshot.json map.
+// shortPID renders a recorded agent pid, or "-" when there is none.
+//
+// 0 is not a pid. It is what a status file written before StatusFile.AgentPID
+// existed leaves behind — every session already running across an upgrade — and
+// it is exactly the state in which conversationSucceeds returns known=false, so
+// the pid recovery cannot run at all. Printing "0" spells "the mechanism was
+// unavailable" as "here is the pid", which is the opposite of what this row is
+// for. "-" matches how shortSessionID spells an absent id.
+func shortPID(pid int) string {
+	if pid <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(pid)
+}
+
+// metaString/metaInt/metaSub read named fields out of the snapshot.json map.
 //
 // Everything filed goes through these. The map is NOT marshalled wholesale —
 // it embeds hook.file_contents.user_prompt, the reporter's verbatim prompt
@@ -384,6 +400,23 @@ func metaSub(m map[string]any, key string) map[string]any {
 	}
 	sub, _ := m[key].(map[string]any)
 	return sub
+}
+
+// metaInt reads a numeric field. The map is built in-process (int), but a
+// snapshot.json round-tripped through encoding/json yields float64 — accept both
+// so a reader of a persisted capture gets the same answer as the live dialog.
+func metaInt(m map[string]any, key string) int {
+	if m == nil {
+		return 0
+	}
+	switch v := m[key].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
 }
 
 func metaString(m map[string]any, key string) string {
@@ -453,21 +486,37 @@ func buildStatusReportBody(desc string, expected session.Status, f *statusReport
 	if ev := metaString(metaSub(hook, "file_contents"), "event"); ev != "" {
 		fmt.Fprintf(&b, "| hook event (on disk) | `%s` |\n", ev)
 	}
+	// Only a divergence too large to be lag gets the bold. Applied lags disk by
+	// design, so a capture landing mid-write reads false benignly — bolding that
+	// trains people to quote the row without reading the ages that qualify it.
 	if am := metaString(hook, "applied_matches_file"); am != "" {
-		fmt.Fprintf(&b, "| **applied matches disk** | **%s** |\n", am)
+		switch {
+		case am != "false":
+			fmt.Fprintf(&b, "| applied matches disk | %s |\n", am)
+		case metaString(hook, "divergence_significant") == "true":
+			fmt.Fprintf(&b, "| **applied matches disk** | **false** (applied hook is %s old) |\n", metaString(hook, "age"))
+		case metaString(hook, "file_newer_by") != "":
+			fmt.Fprintf(&b, "| applied matches disk | false (file %s newer — in flight) |\n", metaString(hook, "file_newer_by"))
+		default:
+			fmt.Fprintf(&b, "| applied matches disk | false |\n")
+		}
 	}
 	fmt.Fprintf(&b, "| hook age (applied) | %s |\n", metaString(hook, "age"))
 	if fa := metaString(hook, "file_age"); fa != "" {
 		fmt.Fprintf(&b, "| hook file age (on disk) | %s |\n", fa)
 	}
-	// Ownership: a hook whose session_id is not the owner is dropped, and for a
-	// non-Claude agent it can never be adopted (the rotation check reads Claude
-	// transcripts), so it is dropped for the session's life. Short ids — enough to
-	// answer "same or different", which is the whole question.
+	// Ownership: a hook whose session_id is not the owner is dropped. For a
+	// non-Claude agent the transcript check that decides "rotation or nested child?"
+	// can never resolve — it reads Claude transcripts — so the pair is neg-cached
+	// and recovery falls entirely to comparing the two agent pids
+	// (conversationSucceeds, which has no agent gate). That is why the pid sits here
+	// beside the ids: without it there is no telling a gate that could not decide
+	// from one that decided against. Short ids — enough to answer "same or
+	// different", which is the whole question.
 	if hookSess, ownerSess := metaString(hook, "file_session_id"), metaString(hook, "owner_session_id"); hookSess != "" || ownerSess != "" {
 		fmt.Fprintf(&b, "| hook session (on disk) | `%s` |\n", shortSessionID(hookSess))
 		fmt.Fprintf(&b, "| owner session (latched) | `%s` |\n", shortSessionID(ownerSess))
-		fmt.Fprintf(&b, "| owner pid | %s |\n", metaString(hook, "owner_pid"))
+		fmt.Fprintf(&b, "| owner pid | %s |\n", shortPID(metaInt(hook, "owner_pid")))
 	}
 	if ov := metaString(hook, "overridden_at"); ov != "" {
 		fmt.Fprintf(&b, "| hook overridden | %s ago |\n", ov)

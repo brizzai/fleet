@@ -19,6 +19,17 @@ import (
 	"github.com/brizzai/fleet/internal/session"
 )
 
+// divergenceLagGrace is how far the hook file may sit ahead of the applied hook
+// before the gap stops being explainable as ordinary lag.
+//
+// Two sources feed it. The pipeline itself costs ~600ms (a 100ms fsnotify
+// debounce plus up to a 500ms fast worker cycle). The larger term is precision:
+// the applied timestamp comes from the status file's `ts`, which is Unix
+// SECONDS, while ModTime is sub-second — so re-reading the very same file yields
+// a skew anywhere in [0, 1s) with nothing wrong at all. 3s clears both with room
+// to spare, and the case this exists to catch is off by hours, not seconds.
+const divergenceLagGrace = 3 * time.Second
+
 type statusSnapshotMsg struct {
 	path string
 	err  error
@@ -254,6 +265,20 @@ func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFile
 	if hookFileInfo != nil {
 		hookMap["file_mod_time"] = hookFileInfo.ModTime().Format(time.RFC3339)
 		hookMap["file_age"] = fmtSnapshotAge(hookFileInfo.ModTime(), now)
+
+		// A false applied_matches_file has two very different causes, and they carry
+		// the same value. The applied side lags the file by design — fsnotify debounce
+		// plus a worker cycle — so a capture landing mid-write reads false benignly,
+		// identically to a hook fleet dropped and never applied. The skew separates
+		// them: benign lag is sub-cycle, a dropped hook leaves the applied side
+		// arbitrarily far behind (18h27m in #220). Report it rather than asking the
+		// reader to infer it from two age rows.
+		if !snap.HookUpdatedAt.IsZero() {
+			if skew := hookFileInfo.ModTime().Sub(snap.HookUpdatedAt); skew > 0 {
+				hookMap["file_newer_by"] = skew.Round(time.Millisecond).String()
+				hookMap["divergence_significant"] = skew > divergenceLagGrace
+			}
+		}
 	}
 	m["hook"] = hookMap
 
