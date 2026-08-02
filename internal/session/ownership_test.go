@@ -268,6 +268,138 @@ func TestUpdateHookStatusCapsUndecidedRotation(t *testing.T) {
 	}
 }
 
+// negCachedSession returns a session whose (owner-aaa, live-bbb) pair has been
+// rejected and neg-cached — the frozen state issue #226 was reported in — with the
+// recovery clock wound back so the next worker-path hook rechecks immediately.
+// ownerLast/liveLast set where each conversation last wrote.
+func negCachedSession(t *testing.T, ownerLast, liveLast time.Time) (*Session, string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+
+	// No parent link, and the live session's FIRST entry sits hours before the
+	// owner's last — a handoff gap way past rotationHandoffWindow — so
+	// sessionRotationVerdict rejects the pair however close their last writes are.
+	writeTranscript(t, proj, "owner-aaa", ownerLast.Add(-3*time.Hour), ownerLast)
+	writeTranscript(t, proj, "live-bbb", ownerLast.Add(-2*time.Hour), liveLast)
+
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
+	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-aaa", UpdatedAt: time.Now()}, true)
+	s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true)
+	if s.rotRejectForeign != "live-bbb" {
+		t.Fatalf("setup: pair not neg-cached (rotRejectForeign=%q)", s.rotRejectForeign)
+	}
+	// negCacheRotation stamps the recovery clock; rewind it so the next hook is due.
+	s.mu.Lock()
+	s.rotRejectCheckedAt = time.Time{}
+	s.mu.Unlock()
+	return s, proj
+}
+
+// TestUpdateHookStatusRecoversFromDeadOwner covers issue #226: a rotation we could
+// not prove gets neg-cached, and nothing ever releases the owner — an in-process
+// rotation fires no SessionEnd for the id it abandons. Every hook from the live
+// conversation is then dropped, freezing the status and the id that fork/restart
+// resume. Once the owner has gone silent while the live session keeps writing, the
+// rejection must give way.
+func TestUpdateHookStatusRecoversFromDeadOwner(t *testing.T) {
+	now := time.Now().UTC()
+	s, _ := negCachedSession(t, now.Add(-2*time.Hour), now.Add(-time.Minute))
+
+	changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true)
+	if !changed {
+		t.Errorf("superseded owner: hook should register as changed")
+	}
+	if got := s.GetHookStatus(); got != "waiting" {
+		t.Errorf("superseded owner: hook not adopted: %q, want waiting", got)
+	}
+	if s.ClaudeSessionID != "live-bbb" {
+		t.Errorf("superseded owner: resume id still stale: %q, want live-bbb", s.ClaudeSessionID)
+	}
+}
+
+// TestUpdateHookStatusKeepsOwnerWhileStillWriting is the other side: an owner
+// blocked on a nested child claude (an eval harness inside a tool call) writes
+// nothing while the child does, which looks like a dead owner in miniature. Inside
+// deadOwnerSupersedeMargin the rejection must hold.
+func TestUpdateHookStatusKeepsOwnerWhileStillWriting(t *testing.T) {
+	now := time.Now().UTC()
+	s, _ := negCachedSession(t, now.Add(-2*time.Minute), now.Add(-time.Minute))
+
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true); changed {
+		t.Errorf("owner still writing: nested child hook should stay rejected")
+	}
+	if s.ClaudeSessionID != "owner-aaa" {
+		t.Errorf("owner still writing: resume id clobbered: %q, want owner-aaa", s.ClaudeSessionID)
+	}
+}
+
+// TestUpdateHookStatusDeadOwnerRecoveryStaysOffUIPath keeps the transcript I/O off
+// the Bubble Tea Update loop: the UI path passes resolveRotation=false and must
+// defer to the worker rather than scan.
+func TestUpdateHookStatusDeadOwnerRecoveryStaysOffUIPath(t *testing.T) {
+	now := time.Now().UTC()
+	s, _ := negCachedSession(t, now.Add(-2*time.Hour), now.Add(-time.Minute))
+
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, false); changed {
+		t.Errorf("UI path must not adopt (it must not read transcripts)")
+	}
+	if s.ClaudeSessionID != "owner-aaa" {
+		t.Errorf("UI path adopted anyway: %q, want owner-aaa", s.ClaudeSessionID)
+	}
+	// The worker path, same instant, recovers — proving the UI path only deferred.
+	if changed := s.UpdateHookStatus(&HookStatus{Status: "waiting", SessionID: "live-bbb", UpdatedAt: time.Now()}, true); !changed {
+		t.Errorf("worker path should recover after the UI path deferred")
+	}
+}
+
+// TestDeadOwnerRecheckThrottled pins the throttle: the neg-cache exists to keep a
+// full transcript scan off every ~500ms worker cycle, so the recovery check must
+// not reopen that cost on every hook.
+func TestDeadOwnerRecheckThrottled(t *testing.T) {
+	s := &Session{ID: "x"}
+	if !s.dueForDeadOwnerRecheck() {
+		t.Fatal("first check should be due")
+	}
+	if s.dueForDeadOwnerRecheck() {
+		t.Error("second check within the interval should be throttled")
+	}
+	s.mu.Lock()
+	s.rotRejectCheckedAt = time.Now().Add(-deadOwnerRecheckInterval - time.Second)
+	s.mu.Unlock()
+	if !s.dueForDeadOwnerRecheck() {
+		t.Error("check should be due again after the interval")
+	}
+}
+
+// TestResolveForkParentHealsFrozenID covers the fork half of #226. The worker's
+// recovery only runs when a hook arrives, and a session that rotated and then went
+// quiet fires none — so the fork itself must not copy a conversation nobody is in.
+func TestResolveForkParentHealsFrozenID(t *testing.T) {
+	now := time.Now().UTC()
+	s, _ := negCachedSession(t, now.Add(-2*time.Hour), now.Add(-time.Minute))
+
+	parent, stale := s.ResolveForkParent()
+	if parent != "live-bbb" || stale != "owner-aaa" {
+		t.Errorf("ResolveForkParent() = (%q, %q), want (live-bbb, owner-aaa)", parent, stale)
+	}
+}
+
+// TestResolveForkParentKeepsHealthyID guards the common path: with no standing
+// rejection the fork parent is simply the stored id, and nothing is reported as
+// healed.
+func TestResolveForkParentKeepsHealthyID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+	s := &Session{ID: "x", ProjectPath: proj, Status: StatusRunning}
+	s.UpdateHookStatus(&HookStatus{Status: "running", SessionID: "owner-aaa", UpdatedAt: time.Now()}, true)
+
+	parent, stale := s.ResolveForkParent()
+	if parent != "owner-aaa" || stale != "" {
+		t.Errorf("ResolveForkParent() = (%q, %q), want (owner-aaa, \"\")", parent, stale)
+	}
+}
+
 // writeTranscriptRaw writes arbitrary JSONL lines for a session under the
 // HOME-rooted projects dir, for tests that need uuid / compact_boundary entries.
 func writeTranscriptRaw(t *testing.T, projectPath, sessionID string, lines ...string) {

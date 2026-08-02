@@ -818,14 +818,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// source session's ClaudeSessionID; if that id is stale (a missed
 		// rotation), the fork opens the wrong conversation (issue #142). Logging
 		// the source id + parent claude id here lets a bug report pin whether the
-		// parent we forked was the source's current conversation.
-		debuglog.Logger.Info("forking session",
+		// parent we forked was the source's current conversation. staleClaude is
+		// set only when ResolveForkParent caught a frozen id and forked past it
+		// (issue #226) — the one line that says the recovery fired.
+		forkLog := []any{
 			"newID", s.ID,
 			"newTitle", msg.title,
 			"sourceID", msg.sourceSessionID,
 			"sourceTitle", msg.sourceTitle,
 			"parentClaude", msg.parentClaudeSessionID,
-			"destPath", msg.path)
+			"destPath", msg.path,
+		}
+		if msg.staleClaudeSessionID != "" {
+			forkLog = append(forkLog, "staleClaude", msg.staleClaudeSessionID)
+		}
+		debuglog.Logger.Info("forking session", forkLog...)
 		parentSessionID := msg.parentClaudeSessionID
 		sourcePath := msg.sourcePath
 		destPath := msg.path
@@ -3827,20 +3834,23 @@ func (h *Home) forkSelected() tea.Cmd {
 		h.setError(fmt.Errorf("cannot fork: no session selected"))
 		return nil
 	}
-	if s.ClaudeSessionID == "" {
+	if s.GetClaudeSessionID() == "" {
 		h.setError(fmt.Errorf("cannot fork: session has no Claude conversation ID yet"))
 		return nil
 	}
+	h.actionLog.Add("fork session", s.Title, true)
 	title := s.Title + " (fork)"
-	claudeSessionID := s.ClaudeSessionID
 	sourceID := s.ID
 	sourceTitle := s.Title
 	path := s.ProjectPath
 	workspaceName := s.WorkspaceName
 	parentAgent := s.Agent
 	return func() tea.Msg {
+		// Off the Update loop: ResolveForkParent reads transcripts.
+		claudeSessionID, stale := s.ResolveForkParent()
 		return forkSessionMsg{
 			parentClaudeSessionID: claudeSessionID,
+			staleClaudeSessionID:  stale,
 			sourceSessionID:       sourceID,
 			sourceTitle:           sourceTitle,
 			sourcePath:            path,
@@ -3856,10 +3866,10 @@ func (h *Home) forkSelected() tea.Cmd {
 // worktree picker, so the deferred result handlers can build a forkSessionMsg
 // targeting the chosen destination.
 type forkContext struct {
-	parentClaudeSessionID string
-	parentSessionID       string // fleet id of the session being forked (for diagnostics)
-	parentProjectPath     string
-	parentTitle           string
+	parentSession     *session.Session
+	parentSessionID   string // fleet id of the session being forked (for diagnostics)
+	parentProjectPath string
+	parentTitle       string
 }
 
 // clearPendingFork resets fork-target picker state. Safe to call when nothing
@@ -3882,13 +3892,16 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 	if destWorkspaceName != "" {
 		title = ctx.parentTitle + " (" + destWorkspaceName + ")"
 	}
-	parentClaudeSessionID := ctx.parentClaudeSessionID
+	parent := ctx.parentSession
 	sourceID := ctx.parentSessionID
 	sourceTitle := ctx.parentTitle
 	sourcePath := ctx.parentProjectPath
 	return func() tea.Msg {
+		// Off the Update loop: ResolveForkParent reads transcripts.
+		parentClaudeSessionID, stale := parent.ResolveForkParent()
 		return forkSessionMsg{
 			parentClaudeSessionID: parentClaudeSessionID,
+			staleClaudeSessionID:  stale,
 			sourceSessionID:       sourceID,
 			sourceTitle:           sourceTitle,
 			sourcePath:            sourcePath,
@@ -3916,7 +3929,7 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 		h.setError(fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this session in place"))
 		return nil
 	}
-	if s.ClaudeSessionID == "" {
+	if s.GetClaudeSessionID() == "" {
 		h.setError(fmt.Errorf("cannot fork to worktree: session has no Claude conversation ID yet"))
 		return nil
 	}
@@ -3925,11 +3938,12 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 		h.setError(fmt.Errorf("cannot fork to worktree: session is not inside a git repo"))
 		return nil
 	}
+	h.actionLog.Add("fork to worktree", s.Title, true)
 	h.pendingForkCtx = &forkContext{
-		parentClaudeSessionID: s.ClaudeSessionID,
-		parentSessionID:       s.ID,
-		parentProjectPath:     s.ProjectPath,
-		parentTitle:           s.Title,
+		parentSession:     s,
+		parentSessionID:   s.ID,
+		parentProjectPath: s.ProjectPath,
+		parentTitle:       s.Title,
 	}
 	h.worktreeDialog.ShowLoading()
 	return tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)

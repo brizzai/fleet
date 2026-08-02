@@ -270,6 +270,51 @@ func sessionRotationVerdict(projectPath, ownerSessionID, newSessionID string) ro
 	return rotationNo
 }
 
+// deadOwnerSupersedeMargin is how far a rejected session's transcript must have
+// advanced past the owner's last entry before ownerConversationSuperseded accepts
+// that the owner conversation is dead.
+//
+// The margin has to clear the one benign way a foreign id outlives the owner's
+// last write: a nested child claude spawned from a tool call, during which the
+// parent writes nothing until the child returns. Fifteen minutes is far longer
+// than such a call runs, and far shorter than the "forever" a wrongly rejected
+// rotation otherwise lasts.
+const deadOwnerSupersedeMargin = 15 * time.Minute
+
+// ownerConversationSuperseded reports whether newSessionID's transcript has
+// demonstrably taken over from ownerSessionID's: the owner stopped writing at
+// least deadOwnerSupersedeMargin before the new session's latest entry, and that
+// entry is itself recent — we only ever heal toward a conversation that is alive
+// now, never toward one that merely outlived the owner at some point in the past.
+//
+// This is the recovery path for a rotation sessionRotationVerdict could not prove
+// — a /clear whose handoff timestamps were unreadable, or a pair that stayed
+// undecidable past the retry cap. Those get neg-cached, and a neg-cached owner is
+// released by nothing: an in-process rotation fires no SessionEnd for the id it
+// leaves behind, so the session's status and its resume/fork id stay pinned to a
+// conversation nobody is in (issue #226).
+//
+// Deliberately a different question from sessionRotationVerdict's. That one asks
+// "is this the same conversation continued?" and answers from lineage. This one
+// asks only "is the owner still being written to?", because by the time it runs
+// the lineage answer has already come back no and been wrong. Liveness is the one
+// signal a dead owner cannot fake.
+func ownerConversationSuperseded(projectPath, ownerSessionID, newSessionID string) bool {
+	if projectPath == "" || ownerSessionID == "" || newSessionID == "" {
+		return false
+	}
+	ownerLast := lastTranscriptTimestamp(ClaudeTranscriptPath(ownerSessionID, projectPath))
+	newLast := lastTranscriptTimestamp(ClaudeTranscriptPath(newSessionID, projectPath))
+	// An unreadable transcript on either side is not evidence of anything.
+	if ownerLast.IsZero() || newLast.IsZero() {
+		return false
+	}
+	if time.Since(newLast) > deadOwnerSupersedeMargin {
+		return false
+	}
+	return newLast.Sub(ownerLast) >= deadOwnerSupersedeMargin
+}
+
 // transcriptParentLink returns the logicalParentUuid of the first
 // compact_boundary/summary entry in the transcript at path — the link a
 // continue/resume/fork rotation records to its parent session's tail uuid — or

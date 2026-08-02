@@ -93,6 +93,11 @@ type Session struct {
 	// throttle is what makes "the hook is frozen because we rejected its id"
 	// greppable instead of a whole-pipeline trace.
 	rotRejectLoggedAt time.Time
+	// When we last paid the transcript I/O to ask whether a rejected pair has become
+	// recoverable (ownerConversationSuperseded). The neg-cache exists precisely to
+	// keep that scan off the ~500ms worker cycle, so the recovery check rides a
+	// slower clock of its own rather than reopening the cost the cache saved.
+	rotRejectCheckedAt time.Time
 
 	// Bounded retry tracking for an undecidable (owner, foreign) pair — one
 	// sessionRotationVerdict can't yet classify because a transcript hasn't flushed a
@@ -460,10 +465,22 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				debuglog.Logger.Info("adopting forked claude session",
 					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
-				// Already rejected this (owner, foreign) pair. Re-announce it on a
-				// throttle: this branch is the steady state of a session whose hook
-				// layer has gone dead, and dropping every hook in silence is what
-				// made that state cost a full pipeline trace to identify.
+				// Normally this pair stays rejected for the session's whole life — right
+				// for a nested child, wrong for a rotation we simply could not prove.
+				// Nothing else releases the owner (an in-process rotation fires no
+				// SessionEnd for the id it abandons), so recheck on a slow clock whether
+				// the owner conversation has gone silent while this one keeps writing.
+				if resolveRotation && s.dueForDeadOwnerRecheck() &&
+					ownerConversationSuperseded(projectPath, owner, hs.SessionID) {
+					debuglog.Logger.Info("adopting superseded claude session",
+						"id", s.ID, "old", owner, "new", hs.SessionID,
+						"frozenHookAge", time.Since(frozenHookAt).Truncate(time.Second))
+					break // recovered — fall through to the adoption block below
+				}
+				// Re-announce the rejection on a throttle: this branch is the steady
+				// state of a session whose hook layer has gone dead, and dropping every
+				// hook in silence is what made that state cost a full pipeline trace to
+				// identify.
 				// Check and stamp under ONE lock: the worker and the UI path both reach
 				// here (app.go calls syncHookStatuses from each), so a snapshot-then-write
 				// split lets both pass the interval check and log the same drop twice.
@@ -613,6 +630,27 @@ func (s *Session) bumpUndecidedRotation(owner, foreign string) bool {
 	return s.rotUndecidedCount <= rotationUndecidedRetryCap
 }
 
+// deadOwnerRecheckInterval throttles the ownerConversationSuperseded scan for a
+// neg-cached pair. The state it recovers from has already lasted minutes by the
+// time it is reachable at all (deadOwnerSupersedeMargin), so checking once a
+// minute costs nothing and loses nothing.
+const deadOwnerRecheckInterval = time.Minute
+
+// dueForDeadOwnerRecheck reports whether enough time has passed to re-examine a
+// neg-cached rejection, stamping the clock when it does. Check and stamp under ONE
+// lock: the worker calls this on every fast cycle, and a snapshot-then-write split
+// would let two cycles both pass and pay the scan twice.
+func (s *Session) dueForDeadOwnerRecheck() bool {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if now.Sub(s.rotRejectCheckedAt) < deadOwnerRecheckInterval {
+		return false
+	}
+	s.rotRejectCheckedAt = now
+	return true
+}
+
 // negCacheRotation records the (owner, foreign) pair as a confirmed non-rotation so
 // future hooks for it short-circuit without rescanning transcripts, and clears any
 // undecided-retry tracking for it.
@@ -628,6 +666,10 @@ func (s *Session) negCacheRotation(owner, foreign string) {
 	// after another from inheriting the previous pair's spent interval — that silence
 	// would land squarely in the window where a user hits `!` and files a report.
 	s.rotRejectLoggedAt = time.Now()
+	// Same for the recovery clock: a pair rejected this instant cannot yet show a
+	// superseded owner (the margin is minutes wide), so start its interval here
+	// rather than letting the very next cycle spend a transcript scan proving it.
+	s.rotRejectCheckedAt = time.Now()
 	s.rotUndecidedOwner = ""
 	s.rotUndecidedForeign = ""
 	s.rotUndecidedCount = 0
@@ -736,6 +778,36 @@ func (s *Session) GetClaudeSessionID() string {
 	return s.ClaudeSessionID
 }
 
+// ResolveForkParent returns the conversation id a fork of this session should
+// resume, plus the stale id it replaced when one was healed ("" when nothing was
+// wrong). Read-only: the source session heals itself through UpdateHookStatus on
+// its next hook.
+//
+// Normally the answer is just ClaudeSessionID. It is not when a foreign id is
+// neg-cached against the owner: the pane may be in that other conversation while
+// ClaudeSessionID still names the one we froze on, and a fork of a dead id silently
+// copies a conversation the user stopped working in an hour ago (issue #226). The
+// worker's own recovery can't be relied on here — it only reruns when a hook
+// arrives, and a session that rotated and then went quiet fires none.
+//
+// Does transcript I/O. Call it off the Bubble Tea Update loop.
+func (s *Session) ResolveForkParent() (parentID, healedFrom string) {
+	s.mu.RLock()
+	stored, owner, rejected := s.ClaudeSessionID, s.ownerSessionID, s.rotRejectForeign
+	rejectedAgainst, projectPath := s.rotRejectOwner, s.ProjectPath
+	s.mu.RUnlock()
+
+	// Only a rejection standing against the *current* owner says anything about the
+	// id we are about to fork.
+	if rejected == "" || rejected == stored || owner == "" || rejectedAgainst != owner || stored != owner {
+		return stored, ""
+	}
+	if !ownerConversationSuperseded(projectPath, owner, rejected) {
+		return stored, ""
+	}
+	return rejected, stored
+}
+
 // clearHookState drops the previous Claude process's hook state — both the
 // in-memory cache and the on-disk status file at
 // ~/.config/fleet/hooks/<id>.json. Called before relaunching Claude so the
@@ -752,6 +824,7 @@ func (s *Session) clearHookState() {
 	// Zero the throttle with the pair it belongs to, so a restart re-arms the
 	// "hook dropped" line instead of inheriting a spent interval from the old pair.
 	s.rotRejectLoggedAt = time.Time{}
+	s.rotRejectCheckedAt = time.Time{}
 	// Clear the fork parent link too. Restart()/RespawnClaude() call this without
 	// going through Start() (the only place forkParentID is set), so without this an
 	// un-diverged fork that resumes the parent id would re-claim owner==forkParent on
