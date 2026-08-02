@@ -23,6 +23,9 @@ type HookStatus struct {
 	UpdatedAt   time.Time
 	UserPrompt  string
 	PromptCount int
+	// AgentPID is the agent process that fired the hook, or 0 when the status file
+	// predates the field. See StatusFile.AgentPID.
+	AgentPID int
 }
 
 // HookWatcher watches ~/.config/fleet/hooks/ for status file changes
@@ -210,6 +213,7 @@ func (w *HookWatcher) processFile(filePath string) {
 		UpdatedAt:   time.Unix(sf.Timestamp, 0),
 		UserPrompt:  sf.UserPrompt,
 		PromptCount: sf.PromptCount,
+		AgentPID:    sf.AgentPID,
 	}
 
 	w.mu.Lock()

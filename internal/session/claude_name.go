@@ -270,6 +270,53 @@ func sessionRotationVerdict(projectPath, ownerSessionID, newSessionID string) ro
 	return rotationNo
 }
 
+// deadOwnerSilenceWindow is how long the owner conversation must have been silent
+// before ownerConversationAbandoned accepts, on transcript evidence alone, that it
+// is gone.
+//
+// Only the fallback path uses it — when the owner's pid is known, liveness answers
+// the question outright. It exists because the case the neg-cache guards against
+// (a nested agent that inherited FLEET_INSTANCE_ID) leaves the same trace as a
+// rotation: an owner that stopped writing. A parent blocked on a child inside a
+// tool call is silent for as long as the call runs, so the window has to clear
+// that, and fifteen minutes does — while staying far shorter than the "forever" a
+// wrongly rejected rotation otherwise lasts.
+const deadOwnerSilenceWindow = 15 * time.Minute
+
+// ownerConversationAbandoned reports whether the owner conversation looks dead from
+// its transcript alone: silent for at least deadOwnerSilenceWindow while the new
+// session has written since.
+//
+// This is the FALLBACK. The question it approximates — "has the conversation that
+// owns this session ended?" — is answered exactly by agentProcessAlive when the
+// owner's pid is known, and this is what remains when it isn't: a status file
+// written by a handler older than StatusFile.AgentPID. That is a one-launch
+// transient, since the next hook from the current handler records a pid.
+//
+// It asks how long the owner has been silent, NOT how far the new session has run
+// past it. The difference matters: a /clear followed by six minutes of work and
+// then a pause never advances a "new session ran N past the owner" measure beyond
+// six minutes, so the session would stay frozen for the rest of its life — and a
+// short piece of work after a /clear is the common shape, since /clear is usually
+// how new work starts.
+func ownerConversationAbandoned(projectPath, ownerSessionID, newSessionID string) bool {
+	if projectPath == "" || ownerSessionID == "" || newSessionID == "" {
+		return false
+	}
+	ownerLast := lastTranscriptTimestamp(ClaudeTranscriptPath(ownerSessionID, projectPath))
+	newLast := lastTranscriptTimestamp(ClaudeTranscriptPath(newSessionID, projectPath))
+	// An unreadable transcript on either side is not evidence of anything.
+	if ownerLast.IsZero() || newLast.IsZero() {
+		return false
+	}
+	// The new conversation must have outlived the owner, not merely coexisted with
+	// it: a child that finished before the owner's last write is no successor.
+	if !newLast.After(ownerLast) {
+		return false
+	}
+	return time.Since(ownerLast) >= deadOwnerSilenceWindow
+}
+
 // transcriptParentLink returns the logicalParentUuid of the first
 // compact_boundary/summary entry in the transcript at path — the link a
 // continue/resume/fork rotation records to its parent session's tail uuid — or

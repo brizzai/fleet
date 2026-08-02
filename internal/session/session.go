@@ -78,21 +78,21 @@ type Session struct {
 	hookUpdatedAt    time.Time
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
 	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
+	ownerPID         int       // agent process behind ownerSessionID (0 = unknown: pre-AgentPID status file)
 	forkParentID     string    // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
 
-	// Negative cache for the rotation check: the last (owner, foreign) pair that
-	// sessionRotationVerdict rejected. A persistent foreign id (a nested-child eval
-	// harness) would otherwise rescan transcripts every worker cycle; once
-	// rejected we short-circuit until the owner or the foreign id changes.
-	rotRejectOwner   string
-	rotRejectForeign string
-	// When we last logged that this pair is still being rejected. The rejection
-	// itself is logged once, on the cycle it is cached — but a neg-cached pair then
-	// drops every subsequent hook silently, so a session whose hook layer is dead
-	// looks identical in the log to one that is simply quiet. Re-announcing it on a
-	// throttle is what makes "the hook is frozen because we rejected its id"
-	// greppable instead of a whole-pipeline trace.
-	rotRejectLoggedAt time.Time
+	// Negative cache for the rotation check, keyed by the FOREIGN session id that
+	// was rejected. A persistent foreign id (a nested agent) would otherwise rescan
+	// transcripts every worker cycle; once rejected we short-circuit until the owner
+	// changes.
+	//
+	// Keyed rather than a single (owner, foreign) slot: an eval harness spawning
+	// sub-agents produces a stream of foreign ids, and one slot meant each new id
+	// evicted the last. Two ids alternating then paid a full sessionRotationVerdict
+	// — two transcript walks — on every ~500ms cycle, the exact cost this cache
+	// exists to avoid, and the recovery clock below was reset by every eviction so
+	// it never accumulated.
+	rotRejects map[string]*rotReject
 
 	// Bounded retry tracking for an undecidable (owner, foreign) pair — one
 	// sessionRotationVerdict can't yet classify because a transcript hasn't flushed a
@@ -129,6 +129,17 @@ type Session struct {
 	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
 	convActiveFn func() bool  // optional override for testing; if nil, reads the real transcript
 	mu           sync.RWMutex
+}
+
+// rotReject is one rejected foreign session id: which owner it was rejected
+// against, and the two clocks that keep the rejection from going silent (logging)
+// or permanent (recovery). Per foreign id, so one noisy nested agent can neither
+// evict another id's rejection nor reset its clocks.
+type rotReject struct {
+	owner      string
+	foreignPID int       // process that reported the rejected id, so ResolveLaunchID can ask conversationSucceeds too
+	loggedAt   time.Time // last "still rejected" line; a dropped hook must never be silent
+	checkedAt  time.Time // last recovery check; throttles the fallback's transcript I/O
 }
 
 // NewSession creates a new session for the given project path.
@@ -393,6 +404,10 @@ type HookStatus struct {
 	UpdatedAt   time.Time
 	UserPrompt  string
 	PromptCount int
+	// AgentPID is the agent process that fired the hook, or 0 when unknown (a
+	// status file written before the field existed). Ownership uses it to ask
+	// whether the conversation currently owning this session is still running.
+	AgentPID int
 }
 
 // UpdateHookStatus updates the session's hook-based status.
@@ -429,15 +444,18 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	//   - A nested child `claude` (an eval harness spawning sub-Claudes)
 	//     inherited FLEET_INSTANCE_ID. Adopting it would clobber our status and
 	//     resume id, so it must be ignored.
-	// sessionRotationVerdict distinguishes them; a persistent rejection is cached so
-	// a nested child doesn't rescan transcripts every cycle.
+	// sessionRotationVerdict distinguishes them from the transcripts; a persistent
+	// rejection is cached so a nested child doesn't rescan them every cycle. When
+	// that verdict is wrong, conversationSucceeds is what unsticks it — see the
+	// negCached branch.
 	var owner string
 	if hs.SessionID != "" {
 		s.mu.RLock()
 		owner = s.ownerSessionID
+		ownerPID := s.ownerPID
 		forkParent := s.forkParentID
 		projectPath := s.ProjectPath
-		negCached := owner != "" && s.rotRejectOwner == owner && s.rotRejectForeign == hs.SessionID
+		negCached := owner != "" && s.rotRejects[hs.SessionID] != nil && s.rotRejects[hs.SessionID].owner == owner
 		frozenHook, frozenHookAt := s.hookStatus, s.hookUpdatedAt
 		s.mu.RUnlock()
 		if owner != "" && hs.SessionID != owner {
@@ -460,18 +478,42 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 				debuglog.Logger.Info("adopting forked claude session",
 					"id", s.ID, "parent", owner, "new", hs.SessionID)
 			case negCached:
-				// Already rejected this (owner, foreign) pair. Re-announce it on a
-				// throttle: this branch is the steady state of a session whose hook
-				// layer has gone dead, and dropping every hook in silence is what
-				// made that state cost a full pipeline trace to identify.
+				// Normally this id stays rejected for the session's whole life — right
+				// for a nested agent, wrong for a rotation we simply could not prove.
+				// Nothing else releases the owner (an in-process rotation fires no
+				// SessionEnd for the id it abandons), so ask the question the transcripts
+				// cannot answer: which PROCESS is reporting? See conversationSucceeds.
+				if resolveRotation && s.dueForDeadOwnerRecheck(hs.SessionID) {
+					if verdict, known := conversationSucceeds(ownerPID, hs.AgentPID); known && verdict {
+						debuglog.Logger.Info("adopting claude session: process says rotation",
+							"id", s.ID, "old", owner, "ownerPID", ownerPID,
+							"new", hs.SessionID, "newPID", hs.AgentPID,
+							"frozenHookAge", time.Since(frozenHookAt).Truncate(time.Second))
+						break // recovered — fall through to the adoption block below
+					} else if !known && ownerConversationAbandoned(projectPath, owner, hs.SessionID) {
+						// No pid on one side (a status file from an older handler). Fall back
+						// to transcript silence, which cannot separate a dead owner from one
+						// blocked on this very child — accepted only because the alternative
+						// is staying frozen forever, and because it self-clears: the next
+						// hook from the current handler records a pid.
+						debuglog.Logger.Info("adopting claude session: owner transcript abandoned",
+							"id", s.ID, "old", owner, "new", hs.SessionID,
+							"frozenHookAge", time.Since(frozenHookAt).Truncate(time.Second))
+						break // recovered — fall through to the adoption block below
+					}
+				}
+				// Re-announce the rejection on a throttle: this branch is the steady
+				// state of a session whose hook layer has gone dead, and dropping every
+				// hook in silence is what made that state cost a full pipeline trace to
+				// identify.
 				// Check and stamp under ONE lock: the worker and the UI path both reach
 				// here (app.go calls syncHookStatuses from each), so a snapshot-then-write
 				// split lets both pass the interval check and log the same drop twice.
 				now := time.Now()
 				shouldLog := false
 				s.mu.Lock()
-				if now.Sub(s.rotRejectLoggedAt) >= rotRejectLogInterval {
-					s.rotRejectLoggedAt = now
+				if r := s.rotRejects[hs.SessionID]; r != nil && now.Sub(r.loggedAt) >= rotRejectLogInterval {
+					r.loggedAt = now
 					shouldLog = true
 				}
 				s.mu.Unlock()
@@ -510,7 +552,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 					// stayed undecidable past the retry cap (e.g. a permanently unreadable
 					// owner transcript). Neg-cache so a persistent foreign id doesn't rescan
 					// transcripts every cycle.
-					s.negCacheRotation(owner, hs.SessionID)
+					s.negCacheRotation(owner, hs.SessionID, hs.AgentPID)
 					debuglog.Logger.Info("ignoring foreign claude session",
 						"id", s.ID, "owner", owner, "foreign", hs.SessionID)
 					return false
@@ -538,6 +580,15 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 			return false
 		}
 		s.ownerSessionID = hs.SessionID
+		// Track the process behind the owning conversation. Every hook re-stamps it,
+		// so a resume that reuses the same session id under a new process is followed
+		// too. 0 (a status file older than the field) is recorded as-is: "unknown"
+		// must not read as "dead", and it self-clears on the next hook.
+		s.ownerPID = hs.AgentPID
+		// A newly owned id is no longer a rejected one. Without this, an id adopted
+		// through the recovery path above would still be in the reject map, so the
+		// negCached branch would fire against the wrong owner if it ever came back.
+		delete(s.rotRejects, hs.SessionID)
 		// Once we own an id other than the fork parent, the fork has diverged to its
 		// own session — drop the parent link so it can't influence later hooks.
 		if s.forkParentID != "" && hs.SessionID != s.forkParentID {
@@ -613,21 +664,48 @@ func (s *Session) bumpUndecidedRotation(owner, foreign string) bool {
 	return s.rotUndecidedCount <= rotationUndecidedRetryCap
 }
 
-// negCacheRotation records the (owner, foreign) pair as a confirmed non-rotation so
-// future hooks for it short-circuit without rescanning transcripts, and clears any
-// undecided-retry tracking for it.
-func (s *Session) negCacheRotation(owner, foreign string) {
+// deadOwnerRecheckInterval throttles the recovery check for a rejected foreign id.
+// The liveness half is a signal 0 and could run every cycle, but the fallback half
+// walks two transcripts — and the state being recovered from has already lasted
+// minutes by the time it is reachable at all, so a one-minute clock costs nothing
+// and keeps the expensive path off the ~500ms pass.
+const deadOwnerRecheckInterval = time.Minute
+
+// dueForDeadOwnerRecheck reports whether enough time has passed to re-examine the
+// rejection of foreign, stamping its clock when it does. Check and stamp under ONE
+// lock: the worker calls this on every fast cycle, and a snapshot-then-write split
+// would let two cycles both pass and pay the scan twice.
+func (s *Session) dueForDeadOwnerRecheck(foreign string) bool {
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rotRejectOwner = owner
-	s.rotRejectForeign = foreign
-	// Stamp the throttle for the NEW pair. The caller logs "ignoring foreign claude
+	r := s.rotRejects[foreign]
+	if r == nil || now.Sub(r.checkedAt) < deadOwnerRecheckInterval {
+		return false
+	}
+	r.checkedAt = now
+	return true
+}
+
+// negCacheRotation records foreign as a confirmed non-rotation against owner, so
+// future hooks for it short-circuit without rescanning transcripts, and clears any
+// undecided-retry tracking for it.
+func (s *Session) negCacheRotation(owner, foreign string, foreignPID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rotRejects == nil {
+		s.rotRejects = make(map[string]*rotReject, 1)
+	}
+	now := time.Now()
+	// Stamp both clocks for the NEW entry. The caller logs "ignoring foreign claude
 	// session" on this same cycle, so the first negCached hit that follows would only
 	// repeat it; starting the interval here makes the throttled line a pure
-	// still-happening heartbeat. Stamping per pair also stops a pair rejected moments
-	// after another from inheriting the previous pair's spent interval — that silence
-	// would land squarely in the window where a user hits `!` and files a report.
-	s.rotRejectLoggedAt = time.Now()
+	// still-happening heartbeat. Per entry rather than per session, so an id rejected
+	// moments after another can't inherit the previous one's spent interval — that
+	// silence would land squarely in the window where a user hits `!` and files a
+	// report. The recovery clock starts here for the same reason plus one of its own:
+	// an id rejected this instant cannot yet show an abandoned owner.
+	s.rotRejects[foreign] = &rotReject{owner: owner, foreignPID: foreignPID, loggedAt: now, checkedAt: now}
 	s.rotUndecidedOwner = ""
 	s.rotUndecidedForeign = ""
 	s.rotUndecidedCount = 0
@@ -636,6 +714,10 @@ func (s *Session) negCacheRotation(owner, foreign string) {
 // Restart kills and recreates the tmux session with the same config.
 func (s *Session) Restart() error {
 	debuglog.Logger.Info("session restart", "id", s.ID, "title", s.Title)
+	// Resolve the id to resume BEFORE clearHookState() wipes the rejection state it
+	// is derived from. Otherwise a session frozen on a dead conversation restarts
+	// straight back into it (issue #226).
+	s.adoptResolvedLaunchID("restart")
 	// Kill old tmux session if it still exists.
 	if s.tmuxSession.Exists() {
 		_ = s.tmuxSession.Kill()
@@ -673,10 +755,27 @@ func (s *Session) Restart() error {
 	return nil
 }
 
+// adoptResolvedLaunchID promotes a healed conversation id onto ClaudeSessionID so
+// the relaunch resumes it, logging when it changes anything. Must run before
+// clearHookState(), which drops the rejection state ResolveLaunchID reads.
+func (s *Session) adoptResolvedLaunchID(why string) {
+	launchID, stale := s.ResolveLaunchID()
+	if stale == "" {
+		return
+	}
+	s.mu.Lock()
+	s.ClaudeSessionID = launchID
+	s.mu.Unlock()
+	debuglog.Logger.Info("healed stale conversation id before relaunch",
+		"id", s.ID, "title", s.Title, "why", why, "stale", stale, "resuming", launchID)
+}
+
 // RespawnClaude restarts the claude process in an existing tmux session.
 func (s *Session) RespawnClaude() error {
 	resuming := s.ClaudeSessionID != ""
 	debuglog.Logger.Info("session respawn", "id", s.ID, "title", s.Title, "resuming", resuming)
+	// Same ordering constraint as Restart: resolve before the state is cleared.
+	s.adoptResolvedLaunchID("respawn")
 	s.clearHookState()
 	s.mu.Lock()
 	s.Status = StatusStarting
@@ -736,6 +835,66 @@ func (s *Session) GetClaudeSessionID() string {
 	return s.ClaudeSessionID
 }
 
+// ResolveLaunchID returns the conversation id this session should resume — for a
+// fork, a restart, or a resume — plus the stale id it replaced when one was healed
+// ("" when nothing was wrong). Read-only: the session itself heals through
+// UpdateHookStatus.
+//
+// Normally the answer is just ClaudeSessionID. It is not when a foreign id is
+// rejected against the current owner: the pane may be in that other conversation
+// while ClaudeSessionID still names the one we froze on, and relaunching a dead id
+// silently reopens a conversation the user stopped working in an hour ago (issue
+// #226).
+//
+// This duplicates the rule in UpdateHookStatus's negCached branch on purpose, and
+// not for the reason it might look like — the worker does re-evaluate on its own,
+// since syncHookStatuses re-offers the last cached hook every cycle whether or not
+// a new one fired. What it buys is the gap: the recovery runs on a one-minute clock,
+// and a key pressed inside that window would otherwise launch the stale id. Restart
+// has a second reason — clearHookState() wipes the rejection state, so by the time
+// buildAgentCmd runs the evidence is gone. Both callers must resolve BEFORE that.
+//
+// May do transcript I/O (the no-pid fallback). Call it off the Bubble Tea Update loop.
+func (s *Session) ResolveLaunchID() (launchID, healedFrom string) {
+	s.mu.RLock()
+	stored, owner, ownerPID := s.ClaudeSessionID, s.ownerSessionID, s.ownerPID
+	projectPath := s.ProjectPath
+	// Pick the rejection standing against the current owner. Several can, when an
+	// eval harness has been spawning sub-agents, so prefer one reported by the
+	// owner's own process — that is a rotation by identity, where the others are
+	// merely other processes. Map order is random, so without this tie-break the
+	// launch id would vary run to run.
+	var rejected string
+	var rejectedPID int
+	for foreign, r := range s.rotRejects {
+		if r.owner != owner {
+			continue
+		}
+		if rejected == "" || (r.foreignPID == ownerPID && ownerPID > 0) {
+			rejected, rejectedPID = foreign, r.foreignPID
+		}
+	}
+	s.mu.RUnlock()
+
+	// Only a rejection standing against the id we are about to launch says anything.
+	// (`stored != owner` also covers owner == "": a rejection implies a non-empty
+	// owner, and negCacheRotation is only ever reached with foreign != owner, so
+	// `rejected == stored` cannot happen here.)
+	if rejected == "" || stored != owner {
+		return stored, ""
+	}
+	if succeeds, known := conversationSucceeds(ownerPID, rejectedPID); known {
+		if !succeeds {
+			return stored, "" // another live process — a nested agent, not our successor
+		}
+		return rejected, stored
+	}
+	if !ownerConversationAbandoned(projectPath, owner, rejected) {
+		return stored, ""
+	}
+	return rejected, stored
+}
+
 // clearHookState drops the previous Claude process's hook state — both the
 // in-memory cache and the on-disk status file at
 // ~/.config/fleet/hooks/<id>.json. Called before relaunching Claude so the
@@ -747,11 +906,12 @@ func (s *Session) clearHookState() {
 	s.hookUpdatedAt = time.Time{}
 	s.hookOverriddenAt = time.Time{}
 	s.ownerSessionID = ""
-	s.rotRejectOwner = ""
-	s.rotRejectForeign = ""
-	// Zero the throttle with the pair it belongs to, so a restart re-arms the
-	// "hook dropped" line instead of inheriting a spent interval from the old pair.
-	s.rotRejectLoggedAt = time.Time{}
+	s.ownerPID = 0
+	// Drop the rejections along with the owner they were judged against — and with
+	// them both clocks, so a restart re-arms the "hook dropped" line instead of
+	// inheriting a spent interval. Callers that need the rejection state must read it
+	// BEFORE calling this (see Restart/RespawnClaude → ResolveLaunchID).
+	s.rotRejects = nil
 	// Clear the fork parent link too. Restart()/RespawnClaude() call this without
 	// going through Start() (the only place forkParentID is set), so without this an
 	// un-diverged fork that resumes the parent id would re-claim owner==forkParent on
