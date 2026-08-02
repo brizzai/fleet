@@ -218,20 +218,42 @@ func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFile
 	}
 	m["worker"] = worker
 
+	// `status` is what fleet APPLIED (in memory); `file_contents` is what the agent
+	// last WROTE. They are separate sources read at the same instant, and they can
+	// disagree: the ownership gate drops a hook whose session_id is not the owner,
+	// so memory stays frozen while the file moves on. owner_session_id/owner_pid are
+	// the gate's own state — without them that divergence can only be guessed at.
 	hookMap := map[string]any{
-		"status":        snap.HookStatus,
-		"updated_at":    snap.HookUpdatedAt.Format(time.RFC3339),
-		"age":           fmtSnapshotAge(snap.HookUpdatedAt, now),
-		"overridden_at": fmtSnapshotAge(snap.HookOverriddenAt, now),
+		"status":           snap.HookStatus,
+		"updated_at":       snap.HookUpdatedAt.Format(time.RFC3339),
+		"age":              fmtSnapshotAge(snap.HookUpdatedAt, now),
+		"overridden_at":    fmtSnapshotAge(snap.HookOverriddenAt, now),
+		"owner_session_id": snap.OwnerSessionID,
+		"owner_pid":        snap.OwnerPID,
 	}
 	if len(hookFileRaw) > 0 {
 		var parsed any
 		if json.Unmarshal(hookFileRaw, &parsed) == nil {
 			hookMap["file_contents"] = parsed
+			// Lift the two fields the divergence turns on out of file_contents, and
+			// state the comparison outright. file_contents is never published (it
+			// carries the reporter's verbatim prompt), so a report that only showed
+			// the applied status left "is fleet even reading this file?" to be
+			// re-derived by hand from the fact that the handler maps event→status.
+			if fc, ok := parsed.(map[string]any); ok {
+				fileStatus, _ := fc["status"].(string)
+				fileSession, _ := fc["session_id"].(string)
+				hookMap["file_status"] = fileStatus
+				hookMap["file_session_id"] = fileSession
+				if fileStatus != "" {
+					hookMap["applied_matches_file"] = fileStatus == snap.HookStatus
+				}
+			}
 		}
 	}
 	if hookFileInfo != nil {
 		hookMap["file_mod_time"] = hookFileInfo.ModTime().Format(time.RFC3339)
+		hookMap["file_age"] = fmtSnapshotAge(hookFileInfo.ModTime(), now)
 	}
 	m["hook"] = hookMap
 

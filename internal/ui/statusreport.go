@@ -356,6 +356,21 @@ func sanitizeHome(s string) string {
 	return strings.ReplaceAll(s, home, "~")
 }
 
+// shortSessionID trims an agent session id to its leading block for the issue
+// table. The only question asked of these ids is whether the one on disk is the
+// one fleet latched onto, and 8 hex chars settle that without pasting two full
+// UUIDs into a public issue. "-" reads as absent, where an empty cell would look
+// like a rendering bug.
+func shortSessionID(id string) string {
+	if id == "" {
+		return "-"
+	}
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
 // metaString/metaBool/metaSub read named fields out of the snapshot.json map.
 //
 // Everything filed goes through these. The map is NOT marshalled wholesale —
@@ -426,11 +441,34 @@ func buildStatusReportBody(desc string, expected session.Status, f *statusReport
 	b.WriteString("| Signal | Value |\n|--------|-------|\n")
 	fmt.Fprintf(&b, "| agent | `%s` |\n", f.agent)
 	fmt.Fprintf(&b, "| captured at | %s |\n", metaString(meta, "captured_at"))
-	fmt.Fprintf(&b, "| hook status | `%s` |\n", metaString(hook, "status"))
-	if ev := metaString(metaSub(hook, "file_contents"), "event"); ev != "" {
-		fmt.Fprintf(&b, "| hook event | `%s` |\n", ev)
+	// Applied vs on-disk are two different sources read at the same instant, so they
+	// are labelled as such. Reading one row as "the hook status" is what turns a
+	// dropped-hook report into a guess: the handler maps event→status
+	// deterministically, so `Stop` next to an applied `running` means fleet is not
+	// applying the file at all — a fact worth stating rather than re-deriving.
+	fmt.Fprintf(&b, "| hook status (applied) | `%s` |\n", metaString(hook, "status"))
+	if fs := metaString(hook, "file_status"); fs != "" {
+		fmt.Fprintf(&b, "| hook status (on disk) | `%s` |\n", fs)
 	}
-	fmt.Fprintf(&b, "| hook age | %s |\n", metaString(hook, "age"))
+	if ev := metaString(metaSub(hook, "file_contents"), "event"); ev != "" {
+		fmt.Fprintf(&b, "| hook event (on disk) | `%s` |\n", ev)
+	}
+	if am := metaString(hook, "applied_matches_file"); am != "" {
+		fmt.Fprintf(&b, "| **applied matches disk** | **%s** |\n", am)
+	}
+	fmt.Fprintf(&b, "| hook age (applied) | %s |\n", metaString(hook, "age"))
+	if fa := metaString(hook, "file_age"); fa != "" {
+		fmt.Fprintf(&b, "| hook file age (on disk) | %s |\n", fa)
+	}
+	// Ownership: a hook whose session_id is not the owner is dropped, and for a
+	// non-Claude agent it can never be adopted (the rotation check reads Claude
+	// transcripts), so it is dropped for the session's life. Short ids — enough to
+	// answer "same or different", which is the whole question.
+	if hookSess, ownerSess := metaString(hook, "file_session_id"), metaString(hook, "owner_session_id"); hookSess != "" || ownerSess != "" {
+		fmt.Fprintf(&b, "| hook session (on disk) | `%s` |\n", shortSessionID(hookSess))
+		fmt.Fprintf(&b, "| owner session (latched) | `%s` |\n", shortSessionID(ownerSess))
+		fmt.Fprintf(&b, "| owner pid | %s |\n", metaString(hook, "owner_pid"))
+	}
 	if ov := metaString(hook, "overridden_at"); ov != "" {
 		fmt.Fprintf(&b, "| hook overridden | %s ago |\n", ov)
 	}

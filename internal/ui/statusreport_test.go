@@ -28,12 +28,18 @@ func statusFormFixture() *statusReportForm {
 		meta: map[string]any{
 			"captured_at": "2026-07-22T14:00:00Z",
 			"hook": map[string]any{
-				"status": "waiting",
-				"age":    "5m34s",
+				"status":               "waiting",
+				"age":                  "5m34s",
+				"file_status":          "running",
+				"file_session_id":      "61fd77f6-2b1a-4c0d-9e88-1122aabbccdd",
+				"file_age":             "1.2s",
+				"applied_matches_file": false,
+				"owner_session_id":     "0aa11bb2-3c4d-5e6f-8899-aabbccddeeff",
+				"owner_pid":            4242,
 				"file_contents": map[string]any{
 					"event":       "PermissionRequest",
 					"user_prompt": secretPrompt,
-					"session_id":  "61fd77f6",
+					"session_id":  "61fd77f6-2b1a-4c0d-9e88-1122aabbccdd",
 				},
 			},
 			"detection": map[string]any{
@@ -93,6 +99,64 @@ func TestBuildStatusReportBody_AlwaysCarriesSignals(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("signals block missing %q:\n%s", want, body)
 		}
+	}
+}
+
+// Issue #220 arrived showing `hook status: running` beside `hook event: Stop` —
+// two rows read from different sources (memory vs the file on disk) under labels
+// that implied one. Since the handler maps event→status deterministically, that
+// pair means fleet was not applying the file at all, but the report gave no way
+// to tell WHY: the session ids that decide it were captured and then dropped on
+// the way to the issue body. These rows are what makes the next one answerable
+// without a follow-up round trip.
+func TestBuildStatusReportBody_CarriesAppliedVsDiskDivergence(t *testing.T) {
+	f := statusFormFixture()
+	f.includeContent = false
+	r := &diagnostics.Report{Version: "v2.22.0", OS: "darwin", Arch: "arm64"}
+
+	body := buildStatusReportBody("stuck running forever", session.StatusIdle, f, r)
+
+	for _, want := range []string{
+		"hook status (applied) | `waiting`",
+		"hook status (on disk) | `running`",
+		"applied matches disk", "false",
+		"hook file age (on disk) | 1.2s",
+		"hook session (on disk) | `61fd77f6`",
+		"owner session (latched) | `0aa11bb2`",
+		"owner pid | 4242",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("divergence rows missing %q:\n%s", want, body)
+		}
+	}
+
+	// Short ids are the point: enough to answer "same or different" without
+	// pasting full conversation ids into a public issue.
+	if strings.Contains(body, "61fd77f6-2b1a-4c0d-9e88-1122aabbccdd") {
+		t.Fatal("issue body carried a full session id; want the shortened form")
+	}
+}
+
+// A session that has never had a hook has neither file nor owner. The rows must
+// drop out rather than render blank or "0" cells that read as real readings.
+func TestBuildStatusReportBody_OmitsDivergenceRowsWithoutHookFile(t *testing.T) {
+	f := statusFormFixture()
+	f.includeContent = false
+	hook := f.snap.meta["hook"].(map[string]any)
+	for _, k := range []string{"file_status", "file_session_id", "file_age", "applied_matches_file", "owner_session_id", "owner_pid", "file_contents"} {
+		delete(hook, k)
+	}
+	r := &diagnostics.Report{Version: "v2.22.0", OS: "darwin", Arch: "arm64"}
+
+	body := buildStatusReportBody("desc", session.StatusIdle, f, r)
+
+	for _, unwanted := range []string{"hook status (on disk)", "applied matches disk", "owner session (latched)"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("row %q rendered with no hook file:\n%s", unwanted, body)
+		}
+	}
+	if !strings.Contains(body, "hook status (applied)") {
+		t.Fatal("applied status must still render")
 	}
 }
 
