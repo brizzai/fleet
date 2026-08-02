@@ -1106,6 +1106,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, h.ensureWhatsNewShimmer()
 
 	case bugReportClosedMsg:
+		// Closing here covers the submit path too: it files the issue from inside
+		// a tea.Cmd, which cannot reach the dialog, so without this the form sat
+		// on "Creating issue..." forever and had to be dismissed by hand (#233).
+		h.bugReport.Hide()
+		if msg.url != "" {
+			// The submit path also opens the URL in a browser, but that is only a
+			// logged warning when it fails — this line is the confirmation the
+			// user is guaranteed to get.
+			h.setInfo("Issue created: " + msg.url)
+		}
 		return h, nil
 
 	case bugReportOpenErrMsg:

@@ -97,6 +97,24 @@ func TestReportTitlesAndFeatureBodySanitizeHome(t *testing.T) {
 	}
 }
 
+// The submit path files the issue from inside a tea.Cmd, so it cannot hide the
+// dialog itself — only the handler can. Asserting on the *dialog* would pass
+// with the bug present (esc had already hidden it), so this drives the real
+// Update to prove a submitted report closes without a keypress.
+func TestBugReportClosedMsg_HidesDialogAndConfirms(t *testing.T) {
+	h := &Home{bugReport: bugFormDialog(), toasts: NewToastStack()}
+	h.bugReport.submitting = true
+
+	h.Update(bugReportClosedMsg{url: "https://github.com/brizzai/fleet/issues/1"})
+
+	if h.bugReport.IsVisible() {
+		t.Fatal("expected the report dialog to close once the issue was filed")
+	}
+	if !strings.Contains(h.infoMsg, "issues/1") {
+		t.Fatalf("expected the issue URL confirmed on screen, got %q", h.infoMsg)
+	}
+}
+
 func TestBugReportDialog_Esc_Hides(t *testing.T) {
 	d := bugFormDialog()
 	d.submitting = true
