@@ -270,36 +270,36 @@ func sessionRotationVerdict(projectPath, ownerSessionID, newSessionID string) ro
 	return rotationNo
 }
 
-// deadOwnerSupersedeMargin is how far a rejected session's transcript must have
-// advanced past the owner's last entry before ownerConversationSuperseded accepts
-// that the owner conversation is dead.
+// deadOwnerSilenceWindow is how long the owner conversation must have been silent
+// before ownerConversationAbandoned accepts, on transcript evidence alone, that it
+// is gone.
 //
-// The margin has to clear the one benign way a foreign id outlives the owner's
-// last write: a nested child claude spawned from a tool call, during which the
-// parent writes nothing until the child returns. Fifteen minutes is far longer
-// than such a call runs, and far shorter than the "forever" a wrongly rejected
-// rotation otherwise lasts.
-const deadOwnerSupersedeMargin = 15 * time.Minute
+// Only the fallback path uses it — when the owner's pid is known, liveness answers
+// the question outright. It exists because the case the neg-cache guards against
+// (a nested agent that inherited FLEET_INSTANCE_ID) leaves the same trace as a
+// rotation: an owner that stopped writing. A parent blocked on a child inside a
+// tool call is silent for as long as the call runs, so the window has to clear
+// that, and fifteen minutes does — while staying far shorter than the "forever" a
+// wrongly rejected rotation otherwise lasts.
+const deadOwnerSilenceWindow = 15 * time.Minute
 
-// ownerConversationSuperseded reports whether newSessionID's transcript has
-// demonstrably taken over from ownerSessionID's: the owner stopped writing at
-// least deadOwnerSupersedeMargin before the new session's latest entry, and that
-// entry is itself recent — we only ever heal toward a conversation that is alive
-// now, never toward one that merely outlived the owner at some point in the past.
+// ownerConversationAbandoned reports whether the owner conversation looks dead from
+// its transcript alone: silent for at least deadOwnerSilenceWindow while the new
+// session has written since.
 //
-// This is the recovery path for a rotation sessionRotationVerdict could not prove
-// — a /clear whose handoff timestamps were unreadable, or a pair that stayed
-// undecidable past the retry cap. Those get neg-cached, and a neg-cached owner is
-// released by nothing: an in-process rotation fires no SessionEnd for the id it
-// leaves behind, so the session's status and its resume/fork id stay pinned to a
-// conversation nobody is in (issue #226).
+// This is the FALLBACK. The question it approximates — "has the conversation that
+// owns this session ended?" — is answered exactly by agentProcessAlive when the
+// owner's pid is known, and this is what remains when it isn't: a status file
+// written by a handler older than StatusFile.AgentPID. That is a one-launch
+// transient, since the next hook from the current handler records a pid.
 //
-// Deliberately a different question from sessionRotationVerdict's. That one asks
-// "is this the same conversation continued?" and answers from lineage. This one
-// asks only "is the owner still being written to?", because by the time it runs
-// the lineage answer has already come back no and been wrong. Liveness is the one
-// signal a dead owner cannot fake.
-func ownerConversationSuperseded(projectPath, ownerSessionID, newSessionID string) bool {
+// It asks how long the owner has been silent, NOT how far the new session has run
+// past it. The difference matters: a /clear followed by six minutes of work and
+// then a pause never advances a "new session ran N past the owner" measure beyond
+// six minutes, so the session would stay frozen for the rest of its life — and a
+// short piece of work after a /clear is the common shape, since /clear is usually
+// how new work starts.
+func ownerConversationAbandoned(projectPath, ownerSessionID, newSessionID string) bool {
 	if projectPath == "" || ownerSessionID == "" || newSessionID == "" {
 		return false
 	}
@@ -309,10 +309,12 @@ func ownerConversationSuperseded(projectPath, ownerSessionID, newSessionID strin
 	if ownerLast.IsZero() || newLast.IsZero() {
 		return false
 	}
-	if time.Since(newLast) > deadOwnerSupersedeMargin {
+	// The new conversation must have outlived the owner, not merely coexisted with
+	// it: a child that finished before the owner's last write is no successor.
+	if !newLast.After(ownerLast) {
 		return false
 	}
-	return newLast.Sub(ownerLast) >= deadOwnerSupersedeMargin
+	return time.Since(ownerLast) >= deadOwnerSilenceWindow
 }
 
 // transcriptParentLink returns the logicalParentUuid of the first

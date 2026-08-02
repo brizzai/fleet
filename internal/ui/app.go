@@ -819,7 +819,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// rotation), the fork opens the wrong conversation (issue #142). Logging
 		// the source id + parent claude id here lets a bug report pin whether the
 		// parent we forked was the source's current conversation. staleClaude is
-		// set only when ResolveForkParent caught a frozen id and forked past it
+		// set only when ResolveLaunchID caught a frozen id and forked past it
 		// (issue #226) — the one line that says the recovery fired.
 		forkLog := []any{
 			"newID", s.ID,
@@ -3846,8 +3846,8 @@ func (h *Home) forkSelected() tea.Cmd {
 	workspaceName := s.WorkspaceName
 	parentAgent := s.Agent
 	return func() tea.Msg {
-		// Off the Update loop: ResolveForkParent reads transcripts.
-		claudeSessionID, stale := s.ResolveForkParent()
+		// Off the Update loop: ResolveLaunchID may read transcripts.
+		claudeSessionID, stale := s.ResolveLaunchID()
 		return forkSessionMsg{
 			parentClaudeSessionID: claudeSessionID,
 			staleClaudeSessionID:  stale,
@@ -3897,8 +3897,8 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 	sourceTitle := ctx.parentTitle
 	sourcePath := ctx.parentProjectPath
 	return func() tea.Msg {
-		// Off the Update loop: ResolveForkParent reads transcripts.
-		parentClaudeSessionID, stale := parent.ResolveForkParent()
+		// Off the Update loop: ResolveLaunchID may read transcripts.
+		parentClaudeSessionID, stale := parent.ResolveLaunchID()
 		return forkSessionMsg{
 			parentClaudeSessionID: parentClaudeSessionID,
 			staleClaudeSessionID:  stale,
