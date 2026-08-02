@@ -139,6 +139,11 @@ type (
 		prCache      map[string]*session.PRCacheRow
 		err          error
 	}
+	// adoptSessionsMsg carries session rows found in SQLite that this TUI
+	// doesn't know about — created by another fleet process while it ran.
+	adoptSessionsMsg struct {
+		sessions []*session.Session
+	}
 	openEditorMsg        struct{ err error }
 	openPRMsg            struct{ err error }
 	quickApproveMsg      struct{ err error }
@@ -283,6 +288,9 @@ type Home struct {
 	// lastSuspendSweepAt throttles the memory-pressure idle-suspend sweep so it
 	// runs on its own slow cadence inside the ~2s heavy pass.
 	lastSuspendSweepAt time.Time
+	// lastAdoptSweepAt throttles the externally-created-session sweep, mirroring
+	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
+	lastAdoptSweepAt time.Time
 
 	// groupSnooze maps a sidebar group key ("origin:<key>" or a checkout path)
 	// to its umbrella snooze deadline. Read only while building the sidebar
@@ -847,6 +855,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionCreateResultMsg:
 		return h.handleSessionCreateResult(msg)
+
+	case adoptSessionsMsg:
+		return h.handleAdoptSessions(msg)
 
 	case tccProbeResultMsg:
 		if !msg.determined {
@@ -3003,6 +3014,59 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 	return h, tea.Batch(h.probeTCCCmd(s.ProjectPath), h.fetchPreviewForSelected())
 }
 
+// handleAdoptSessions folds sessions created by another fleet process into the
+// running TUI. It mirrors handleSessionCreateResult's bookkeeping minus the
+// parts that don't apply: the DB row already exists (no SaveSession), and this
+// isn't a session *this* user just asked for (no analytics, no auto-select).
+func (h *Home) handleAdoptSessions(msg adoptSessionsMsg) (tea.Model, tea.Cmd) {
+	// The worker diffed against a snapshot taken at cycle start, so it can offer
+	// a session the Update loop created in the meantime. This is the only place
+	// the check is authoritative.
+	fresh := make([]*session.Session, 0, len(msg.sessions))
+	for _, s := range msg.sessions {
+		if _, exists := h.sessionByID[s.ID]; !exists {
+			fresh = append(fresh, s)
+		}
+	}
+	if len(fresh) == 0 {
+		return h, nil
+	}
+
+	// Unlike a session the user just created, an adopted row arrives on a timer.
+	// Inserting it above the cursor would silently move the selection out from
+	// under whoever is mid-keystroke, so re-find the row by identity afterwards.
+	target := h.targetForCursor()
+
+	h.workerMu.Lock()
+	h.sessions = append(h.sessions, fresh...)
+	h.rebuildSessionMap()
+	h.workerMu.Unlock()
+
+	cmds := make([]tea.Cmd, 0, len(fresh))
+	for _, s := range fresh {
+		repo := session.GetRepoRoot(s.ProjectPath)
+		h.setExpanded(repo, true)
+		if !h.pinnedRepos[repo] {
+			h.pinnedRepos[repo] = true
+			if err := h.storage.PinRepo(repo); err != nil {
+				debuglog.Logger.Error("failed to pin repo", "repo", repo, "err", err)
+			}
+		}
+		// The creating process already spun up the tmux server, so the probe
+		// runs against a live one. Self-guards: nil unless the path sits under
+		// an unprobed macOS-protected folder.
+		if cmd := h.probeTCCCmd(s.ProjectPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	h.rebuildFlatItems()
+	if idx := target.find(h.flatItems); idx >= 0 {
+		h.cursor = idx
+		h.syncViewport()
+	}
+	return h, tea.Batch(cmds...)
+}
+
 // deleteAtCursor runs the delete whose scope follows the cursor: an origin
 // header forgets the whole group, any other header acts on the container
 // (§ confirmDeleteHeader), and a session row deletes just that session. Shared by
@@ -3712,6 +3776,71 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 			"mode", mode, "pressure", level, "minIdle", minIdle.String(),
 			"idleCandidates", len(cands), "maxIdle", cands[0].idle.Round(time.Second).String())
 	}
+}
+
+// adoptSweepInterval throttles the externally-created-session sweep to its own
+// cadence inside the ~2s heavy worker pass. Re-reading the sessions table every
+// heavy cycle would buy nothing: the payoff is a CLI-created session showing up
+// without a restart, and a few seconds is a fine latency for that.
+const adoptSweepInterval = 5 * time.Second
+
+// maybeAdoptExternalSessions picks up session rows written by another fleet
+// process — `fleet worktree`, `fleet add` — while this TUI is running. Sessions
+// are otherwise read from SQLite exactly once, at startup (loadSessions), so
+// without this a session created from the shell stays invisible until restart.
+//
+// Adoption only: rows deleted by another process are NOT dropped from the
+// in-memory list. Runs on the worker goroutine (it reads SQLite); the actual
+// mutation happens on the Update goroutine via adoptSessionsMsg.
+func (h *Home) maybeAdoptExternalSessions(known []*session.Session) {
+	if !h.lastAdoptSweepAt.IsZero() && time.Since(h.lastAdoptSweepAt) < adoptSweepInterval {
+		return
+	}
+	h.lastAdoptSweepAt = time.Now()
+
+	rows, err := h.storage.LoadSessions()
+	if err != nil {
+		debuglog.Logger.Error("adopt sweep: failed to load sessions", "err", err)
+		return
+	}
+	adopted := unknownSessions(rows, known, os.Getenv("FLEET_DEMO_PREFIX"))
+	if len(adopted) == 0 {
+		return
+	}
+	debuglog.Logger.Info("adopting externally-created sessions", "count", len(adopted))
+	// Same rendezvous hazard as the suspend sweep's send: program.Send blocks on
+	// Tea's unbuffered channel, and tea.Exec suspends the loop that drains it.
+	// Skipping costs nothing — the next sweep re-finds these rows.
+	if !h.isAttaching.Load() {
+		h.send(adoptSessionsMsg{sessions: adopted})
+	}
+}
+
+// unknownSessions returns the stored rows that aren't in known, hydrated into
+// sessions. demoPrefix mirrors the FLEET_DEMO_PREFIX filter loadSessions
+// applies, so a demo-mode TUI doesn't adopt back the sessions it was launched
+// to hide; "" disables it.
+//
+// This is a cheap pre-filter only: the caller's snapshot is taken at worker
+// cycle start, so it can miss a session the Update loop created since. The
+// adoptSessionsMsg handler re-checks sessionByID, which is where dedupe is
+// authoritative.
+func unknownSessions(rows []*session.SessionRow, known []*session.Session, demoPrefix string) []*session.Session {
+	seen := make(map[string]bool, len(known))
+	for _, s := range known {
+		seen[s.ID] = true
+	}
+	var out []*session.Session
+	for _, row := range rows {
+		if seen[row.ID] {
+			continue
+		}
+		if demoPrefix != "" && !strings.HasPrefix(row.ProjectPath, demoPrefix) {
+			continue
+		}
+		out = append(out, session.FromRow(row))
+	}
+	return out
 }
 
 // suspendIdleThreshold returns the minimum idle duration a StatusIdle session must
@@ -5399,6 +5528,11 @@ drainPriority:
 	// shared tmux server. Self-throttled to a slow cadence; probes sysctl (blocking)
 	// which is why it lives here on the worker, not the Update loop.
 	h.maybeSuspendIdleSessions(sessions)
+
+	// 5c. Adopt sessions another fleet process created (e.g. `fleet worktree`
+	// from a shell) since the last sweep. Self-throttled; reads SQLite, which is
+	// why it lives here rather than on the Update loop.
+	h.maybeAdoptExternalSessions(sessions)
 
 	// 5. Git+PR refresh used to run here, inline. It now lives on its own
 	// goroutine (gitWorker) — see the comment there for why sharing this
