@@ -70,6 +70,13 @@ func InjectCursorHooks(configDir string) (bool, error) {
 			return false, fmt.Errorf("parse hooks.json: %w", err)
 		}
 	}
+	if root == nil {
+		// The file held a bare JSON null: Unmarshal leaves the map nil and
+		// returns no error, so the parse check above lets it through and the
+		// root["hooks"] assignment below would panic. Same hazard the events
+		// map guards against further down.
+		root = make(map[string]json.RawMessage)
+	}
 
 	var events map[string]json.RawMessage
 	if raw, ok := root["hooks"]; ok {
@@ -189,8 +196,12 @@ func mergeCursorHookEvent(existing json.RawMessage) (json.RawMessage, error) {
 	for i, raw := range entries {
 		var probe cursorHookEntryProbe
 		if err := json.Unmarshal(raw, &probe); err != nil {
-			continue // not a command-hook object (e.g. a prompt hook) — leave it untouched
+			continue // not a JSON object at all — leave it untouched
 		}
+		// Anything that isn't fleet's own command hook is left alone. This is
+		// the check that skips other users' command hooks *and* non-command
+		// entries such as prompt hooks, which unmarshal cleanly into the probe
+		// with an empty Command rather than erroring above.
 		if !isFleetHook(probe.Command) {
 			continue
 		}

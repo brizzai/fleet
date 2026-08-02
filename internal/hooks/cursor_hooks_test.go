@@ -184,3 +184,56 @@ func TestInjectCursorHooksHandlesNullHooksSection(t *testing.T) {
 		t.Errorf("fleet event not added:\n%s", data)
 	}
 }
+
+func TestInjectCursorHooksHandlesNullRoot(t *testing.T) {
+	dir := t.TempDir()
+	// Same nil-map hazard as the null hooks section above, one level up: a
+	// hooks.json holding a bare null unmarshals into a nil root map without
+	// erroring, so the root["hooks"] assignment would panic and take the whole
+	// TUI down at startup (InjectCursorHooks runs from loadSessions).
+	path := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(path, []byte("null"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := InjectCursorHooks(dir)
+	if err != nil {
+		t.Fatalf("InjectCursorHooks: %v", err)
+	}
+	if !changed {
+		t.Errorf("expected changed=true when populating a null root")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "stop") {
+		t.Errorf("fleet event not added:\n%s", data)
+	}
+}
+
+func TestMergeCursorHookEventMigratesStaleFleetPath(t *testing.T) {
+	// The patch path in mergeCursorHookEvent runs on every install whose binary
+	// path changed (brew version bump, `go install` over a dev build). If it
+	// ever regressed to appending instead of patching, every launch would add
+	// another entry and Cursor would spawn N handlers per event — the exact
+	// failure the marker arg exists to prevent.
+	seed := `[{"command":"/old/path/fleet hook-handler --fleet-hook","type":"command","timeout":30}]`
+	out, err := mergeCursorHookEvent(json.RawMessage(seed))
+	if err != nil {
+		t.Fatalf("mergeCursorHookEvent: %v", err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(out, &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected the stale entry patched in place, got %d entries: %s", len(entries), out)
+	}
+	if got := entries[0]["command"]; got != GetHookCommand() {
+		t.Errorf("command not migrated: got %v, want %v", got, GetHookCommand())
+	}
+	// Sibling keys on the entry must survive the patch.
+	if _, ok := entries[0]["timeout"]; !ok {
+		t.Errorf("unrelated field dropped by the patch: %s", out)
+	}
+}
