@@ -16,8 +16,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// bugReportClosedMsg is sent when the bug report dialog closes.
-type bugReportClosedMsg struct{}
+// bugReportClosedMsg asks app.go to close the report dialog. The esc paths have
+// already hidden themselves by the time they emit it, but the submit path runs
+// inside a tea.Cmd and cannot touch dialog state, so the handler — not the
+// emitter — is what actually closes it. url is set only on a successful file.
+type bugReportClosedMsg struct{ url string }
 
 // bugReportOpenErrMsg is sent when opening the GitHub issue fails.
 type bugReportOpenErrMsg struct{ err error }
@@ -378,7 +381,7 @@ func (d *BugReportDialog) createGitHubIssue(title, body, label string) tea.Cmd {
 				debuglog.Logger.Warn("bug report: failed to open issue URL", "url", issueURL, "err", err)
 			}
 		}
-		return bugReportClosedMsg{}
+		return bugReportClosedMsg{url: issueURL}
 	}
 }
 

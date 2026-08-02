@@ -1106,6 +1106,24 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, h.ensureWhatsNewShimmer()
 
 	case bugReportClosedMsg:
+		// Closing here covers the submit path too: it files the issue from inside
+		// a tea.Cmd, which cannot reach the dialog, so without this the form sat
+		// on "Creating issue..." forever and had to be dismissed by hand (#233).
+		//
+		// Gated on submitting because the message carries no identity: esc during
+		// a submit hides the form and emits one, so pressing `!` again lands a
+		// fresh form that the still-pending gh result would otherwise close —
+		// taking the description typed into it. A form that isn't mid-submit is
+		// never the one this result belongs to.
+		if h.bugReport.submitting {
+			h.bugReport.Hide()
+		}
+		if msg.url != "" {
+			// The submit path also opens the URL in a browser, but that is only a
+			// logged warning when it fails — this line is the confirmation the
+			// user is guaranteed to get.
+			h.setInfo("Issue created: " + msg.url)
+		}
 		return h, nil
 
 	case bugReportOpenErrMsg:
