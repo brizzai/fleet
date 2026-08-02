@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/hooks"
+	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -38,19 +40,38 @@ type worktreeOpts struct {
 	noSession bool
 }
 
-// parseWorktreeArgs parses and validates the `fleet worktree` flags. Kept pure
-// (no git, no config, no filesystem) so the argument rules are testable.
-func parseWorktreeArgs(args []string) (worktreeOpts, error) {
+// worktreeFlagSet builds the `fleet worktree` flag set, binding into o.
+//
+// The flag package is kept silent — `flag.ContinueOnError` does NOT suppress
+// output: Parse calls failf, which writes the error to fs.Output() and then
+// runs Usage. Left alone, a bad flag prints the error, the usage block, and
+// then the error again from the caller. printWorktreeUsage owns the usage text
+// and runWorktree owns the errors, so each is emitted exactly once, in order.
+func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs := flag.NewFlagSet("fleet worktree", flag.ContinueOnError)
-	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), worktreeUsage)
-		fs.PrintDefaults()
-	}
-	var o worktreeOpts
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	fs.StringVar(&o.base, "base", "", "base branch to branch from (default: the repo's default branch)")
 	fs.StringVar(&o.repoPath, "path", "", "repo to create the worktree in (default: current directory)")
 	fs.StringVar(&o.agentName, "agent", "", "agent to run: claude, codex, or opencode (default: default_agent config)")
 	fs.BoolVar(&o.noSession, "no-session", false, "create the worktree only, print its path, and start no session")
+	return fs
+}
+
+// printWorktreeUsage writes the usage line and flag defaults to w.
+func printWorktreeUsage(w io.Writer) {
+	fmt.Fprintln(w, worktreeUsage)
+	var discard worktreeOpts
+	fs := worktreeFlagSet(&discard)
+	fs.SetOutput(w)
+	fs.PrintDefaults()
+}
+
+// parseWorktreeArgs parses and validates the `fleet worktree` flags. Kept pure
+// (no git, no config, no filesystem) so the argument rules are testable.
+func parseWorktreeArgs(args []string) (worktreeOpts, error) {
+	var o worktreeOpts
+	fs := worktreeFlagSet(&o)
 	// Parse in a loop, peeling off one positional at a time: Go's flag package
 	// stops at the first non-flag argument, so a single Parse would reject
 	// `fleet worktree my-branch --no-session` — the order most people type.
@@ -97,14 +118,26 @@ func runWorktree(args []string) {
 	opts, err := parseWorktreeArgs(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return // flag package already printed usage
+			printWorktreeUsage(os.Stdout) // `-h` is a request, not a failure
+			return
 		}
 		fmt.Fprintln(os.Stderr, err)
-		if errors.Is(err, errMissingBranch) {
-			fmt.Fprintln(os.Stderr, worktreeUsage)
+		// A bad flag or a missing branch is a usage error — show the flags. A
+		// bad *value* (branch name, agent) isn't: the message already says what
+		// to fix, and the flag list would bury it.
+		if errors.Is(err, errMissingBranch) || strings.HasPrefix(err.Error(), "flag ") {
+			printWorktreeUsage(os.Stderr)
 		}
 		os.Exit(1)
 	}
+
+	// Migrate a legacy `brizz-code` config dir before anything below creates
+	// `~/.config/fleet/` — debuglog.Init does, and session.Open creates
+	// state.db. Once state.db exists, migrateConfigDir permanently bails out
+	// ("both dirs have state.db") and still writes its marker, silently
+	// stranding the user's sessions, pins and slot bindings. runTUI does this
+	// for the same reason and in the same order.
+	migration.Run()
 
 	// Both the workspace provider and Session.Start log at Info level, and
 	// debuglog's fallback logger writes to stderr — without Init those lines
@@ -147,6 +180,32 @@ func runWorktree(args []string) {
 		os.Exit(1)
 	}
 
+	// GitWorktreeProvider.Create retries without `-b` when the branch already
+	// exists, which silently drops --base too. In the TUI you'd have seen the
+	// branch in the existing-worktrees list first; from a shell there's no
+	// signal at all, and "Created … (branch X)" reads as "made X off your base".
+	// Say it up front instead. Git provider only — a ShellProvider defines its
+	// own branch semantics.
+	reusedBranch := !provider.IsCustom() && branchExists(repoPath, opts.branch)
+	if reusedBranch {
+		fmt.Fprintf(os.Stderr, "Branch %q already exists — reusing it.\n", opts.branch)
+		if opts.base != "" {
+			fmt.Fprintf(os.Stderr, "--base %s ignored: the branch already has a base.\n", opts.base)
+		}
+	}
+
+	// Open the DB before anything touches the disk: a database that can't be
+	// opened at all should fail before a worktree exists, not after.
+	var storage *session.StateDB
+	if !opts.noSession {
+		storage, err = session.Open(session.DefaultDBPath())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
+			os.Exit(1)
+		}
+		defer storage.Close()
+	}
+
 	info, err := provider.Create(repoPath, name, opts.branch, base)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create worktree: %v\n", err)
@@ -175,13 +234,6 @@ func runWorktree(args []string) {
 	// isn't being launched.
 	installAgentHooks(ag, info.Path)
 
-	storage, err := session.Open(session.DefaultDBPath())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
-		os.Exit(1)
-	}
-	defer storage.Close()
-
 	s := session.NewSession(name, info.Path)
 	s.Agent = ag
 	s.WorkspaceName = name
@@ -190,7 +242,16 @@ func runWorktree(args []string) {
 		os.Exit(1)
 	}
 	if err := storage.SaveSession(s.ToRow()); err != nil {
+		// The tmux session is already live but nothing will ever point at it —
+		// no DB row means the TUI can't list it, adopt it, or offer to delete
+		// it. Tear it down so the failure is clean; if that also fails, name it
+		// so the user can find it with `tmux ls`.
 		fmt.Fprintf(os.Stderr, "Failed to save session: %v\n", err)
+		if killErr := s.GetTmuxSession().Kill(); killErr != nil {
+			fmt.Fprintf(os.Stderr, "Also failed to stop its tmux session %q: %v\n", s.TmuxSessionName, killErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "Stopped the orphaned tmux session. The worktree %s was kept.\n", info.Path)
+		}
 		os.Exit(1)
 	}
 	// Pin the new checkout so it shows in the sidebar even before it has a
@@ -199,7 +260,7 @@ func runWorktree(args []string) {
 		debuglog.Logger.Error("failed to pin repo", "repo", info.Path, "err", err)
 	}
 
-	fmt.Printf("Created worktree %s (branch %s)\n", info.Path, opts.branch)
+	fmt.Printf("Created worktree %s (%s)\n", info.Path, branchNote(opts.branch, reusedBranch))
 	fmt.Printf("Started %s session '%s' (%s)\n", ag.DisplayName(), name, s.ID)
 }
 
@@ -239,6 +300,26 @@ func repoRootOf(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// branchNote describes what happened to the branch, so the success line can't
+// imply a fresh branch off --base when an existing one was checked out.
+func branchNote(branch string, reused bool) string {
+	if reused {
+		return fmt.Sprintf("existing branch %s", branch)
+	}
+	return fmt.Sprintf("branch %s", branch)
+}
+
+// branchExists reports whether repoPath already has a local branch named
+// branch. Used to warn that the worktree reuses it and that --base is moot,
+// since GitWorktreeProvider.Create silently falls back to the existing branch.
+func branchExists(repoPath, branch string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run()
+	return err == nil
 }
 
 // installAgentHooks installs the status hooks for the agent about to be

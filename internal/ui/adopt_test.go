@@ -3,6 +3,7 @@ package ui
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
@@ -138,6 +139,94 @@ func TestHandleAdoptSessionsKeepsCursorOnItsRow(t *testing.T) {
 	if h.cursor != idxAfter {
 		t.Fatalf("cursor moved off its row: parked session is at %d, cursor is at %d", idxAfter, h.cursor)
 	}
+}
+
+// statusWorkerCycle returns early when there are no sessions and no shells.
+// The adoption sweep has to run anyway: an empty sidebar is the likeliest place
+// to be driving fleet from the shell, and it's the one case where a session
+// appearing is the whole point. Regression guard for the bug where the sweep
+// sat below that guard and was unreachable.
+func TestStatusWorkerCycleAdoptsOnEmptyFleet(t *testing.T) {
+	h := adoptTestHome(t)
+	storeSession(t, h, "from-cli", t.TempDir())
+
+	if len(h.sessions) != 0 || len(h.shells) != 0 {
+		t.Fatalf("precondition: fleet must be empty, got %d sessions / %d shells", len(h.sessions), len(h.shells))
+	}
+
+	h.statusWorkerCycle()
+
+	// h.send is a no-op without a running program, so the adopted session can't
+	// land in h.sessions here — what's under test is that the sweep was reached
+	// at all past the empty-fleet guard.
+	if h.lastAdoptSweepAt.IsZero() {
+		t.Fatal("adoption sweep never ran on an empty fleet")
+	}
+}
+
+// A "Creating…" phantom is the row handleWorkspaceCreate auto-selects, so it's
+// exactly where the cursor sits while a TUI-side worktree create is in flight —
+// the window a shell `fleet worktree` lands in. targetForCursor has to know it,
+// or the cursor silently drifts when an adopted row is inserted above.
+func TestHandleAdoptSessionsKeepsCursorOnPendingRow(t *testing.T) {
+	h := adoptTestHome(t)
+	above, pendingRepo := t.TempDir(), t.TempDir()
+
+	h.pinnedRepos[pendingRepo] = true
+	pw := &PendingWorkspace{ID: "pending-test", Name: "creating", RepoPath: pendingRepo}
+	h.pendingWorkspaces = append(h.pendingWorkspaces, pw)
+	h.rebuildFlatItems()
+
+	idxBefore := indexOfPending(h, pw.ID)
+	if idxBefore < 0 {
+		t.Fatal("phantom row not in the sidebar")
+	}
+	h.cursor = idxBefore
+
+	newRow := storeSession(t, h, "adopted", above)
+	h.handleAdoptSessions(adoptSessionsMsg{
+		sessions:  []*session.Session{session.FromRow(newRow)},
+		repoRoots: map[string]string{newRow.ID: above},
+	})
+
+	idxAfter := indexOfPending(h, pw.ID)
+	if idxAfter == idxBefore {
+		t.Fatalf("test is vacuous: the adopted row did not shift the phantom (still at %d)", idxBefore)
+	}
+	if h.cursor != idxAfter {
+		t.Fatalf("cursor drifted off the phantom: phantom is at %d, cursor is at %d", idxAfter, h.cursor)
+	}
+}
+
+// setExpanded persists, so auto-expanding on a 5s timer would overwrite a
+// collapse the user chose. Snooze is the sharp case: it collapses its group on
+// purpose, and re-opening leaves an expanded group still showing a ☾ countdown.
+func TestCanAutoExpandRespectsCollapseAndSnooze(t *testing.T) {
+	h := adoptTestHome(t)
+
+	if !h.canAutoExpand("/repo/untouched") {
+		t.Error("a group with no explicit state should be expandable")
+	}
+
+	h.repoExpanded["/repo/collapsed"] = false
+	if h.canAutoExpand("/repo/collapsed") {
+		t.Error("a deliberately collapsed group must not be auto-expanded")
+	}
+
+	h.repoExpanded["/repo/snoozed"] = false
+	h.groupSnooze["/repo/snoozed"] = time.Now().Add(time.Hour)
+	if h.canAutoExpand("/repo/snoozed") {
+		t.Error("a snoozed group must not be auto-expanded")
+	}
+}
+
+func indexOfPending(h *Home, id string) int {
+	for i, item := range h.flatItems {
+		if item.Pending != nil && item.Pending.ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func indexOfSession(h *Home, id string) int {
