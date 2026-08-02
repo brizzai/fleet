@@ -5,7 +5,7 @@
     <strong>Run 10 coding agents. Stay sane.</strong>
   </p>
   <p align="center">
-    A terminal cockpit for orchestrating Claude Code, Codex &amp; OpenCode sessions in parallel.
+    A terminal cockpit for orchestrating Claude Code, Codex, OpenCode &amp; Cursor sessions in parallel.
     <br />
     See which agents need you. Jump in, direct, jump out.
   </p>
@@ -82,7 +82,7 @@ sudo apt install ./fleet_*.deb
 
 - macOS or Linux
 - [tmux](https://github.com/tmux/tmux) — `brew install tmux` / `apt install tmux` (≥ 3.3 recommended on Linux; older versions work with terminal passthrough disabled)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex), or [OpenCode](https://opencode.ai) — at least one
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex), [OpenCode](https://opencode.ai), or [Cursor CLI](https://cursor.com/cli) — at least one
 - Linux clipboard (optional): `wl-clipboard`, `xclip`, or `xsel` for copy-mode → system clipboard; without one, fleet falls back to OSC 52
 
 ## Quick Start
@@ -92,16 +92,16 @@ sudo apt install ./fleet_*.deb
 fleet
 
 # 'a' — new session in current repo (default agent)
-# 'A' — new session, pick the agent (Claude Code / Codex / OpenCode)
+# 'A' — new session, pick the agent (Claude Code / Codex / OpenCode / Cursor)
 # 'n' — new session at any path (autocomplete)
 # '?' — all keybindings
 ```
 
 ## Features
 
-### Claude Code, Codex, or OpenCode — per session
+### Claude Code, Codex, OpenCode, or Cursor — per session
 
-Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run Claude, Codex, and OpenCode sessions side by side in the same repo. Status, resume, and auto-naming work identically across all three — driven by each agent's own hook events, with pane heuristics filling the rare states that fire no hook.
+Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run Claude, Codex, OpenCode, and Cursor sessions side by side in the same repo. Status, resume, and auto-naming work identically across all four — driven by each agent's own hook events, with pane heuristics filling the rare states that fire no hook.
 
 ### Real-Time Status
 
@@ -131,7 +131,7 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 ### And more
 
-- **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume` / `opencode --session`)
+- **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume` / `opencode --session` / `cursor-agent --resume`)
 - **Idle-session suspend** — when memory runs low, fleet hibernates your most-idle sessions (each resumed agent holds ~400MB) and brings them back right where they were on **`Enter`**
 - **Full terminal attach** — **`Enter`** for full PTY, **`Tab`** for split mode (beta), **`Ctrl+Q`** to detach
 - **Auto-naming** — sessions title themselves from your prompt
@@ -143,7 +143,7 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 There are a dozen multi-agent session managers now. Most try to support every AI CLI under the sun by shimming keystrokes and scraping terminal output — broad support, shallow understanding of any one agent.
 
-fleet goes the other way: **deep integration with the agents that expose real hooks — Claude Code, Codex, and OpenCode.** Every feature is built on how those agents actually work — hook events, conversation resume, session IDs, prompt structure — not a generic "send keystrokes and hope" layer. Pick the agent per session (**`A`**), or set a default and fire with **`a`**.
+fleet goes the other way: **deep integration with the agents that expose real hooks — Claude Code, Codex, OpenCode, and Cursor.** Every feature is built on how those agents actually work — hook events, conversation resume, session IDs, prompt structure — not a generic "send keystrokes and hope" layer. Pick the agent per session (**`A`**), or set a default and fire with **`a`**.
 
 ### vs. the alternatives
 
@@ -156,14 +156,14 @@ fleet goes the other way: **deep integration with the agents that expose real ho
 | **Open PR in browser**             | ✅ | — | — | — |
 | **Session resume**                  | ✅ | — | — | ✅ |
 | **Git worktrees**                   | ✅ | ✅ | ✅ | ✅ |
-| **Hook-based multi-agent**          | ✅ Claude + Codex + OpenCode | — | — | — |
+| **Hook-based multi-agent**          | ✅ Claude + Codex + OpenCode + Cursor | — | — | — |
 | **Many agents** (Gemini, Aider…)    | — | ✅ | ✅ | ✅ |
 | **Linux**                           | ✅ | ✅ | ✅ | ✅ |
 | **No tmux dependency**              | — | — | ✅ | — |
 
-**The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code, Codex, and OpenCode, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
+**The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code, Codex, OpenCode, and Cursor, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
 
-If you drive Claude Code, Codex, or OpenCode and want the tightest integration, this is it.
+If you drive Claude Code, Codex, OpenCode, or Cursor and want the tightest integration, this is it.
 
 ## Keybindings
 
@@ -175,7 +175,7 @@ If you drive Claude Code, Codex, or OpenCode and want the tightest integration, 
 | `Tab` | Focus/unfocus preview (split mode, beta) |
 | `Space` | Jump to next waiting/finished session |
 | `a` | New session (current repo, default agent) |
-| `A` | New session (pick agent: Claude Code / Codex / OpenCode) |
+| `A` | New session (pick agent: Claude Code / Codex / OpenCode / Cursor) |
 | `n` | New session (any path, autocomplete) |
 | `w` | New worktree session |
 | `Y` | Quick approve waiting prompt |
