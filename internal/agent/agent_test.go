@@ -39,6 +39,10 @@ func TestBuildLaunchCmd(t *testing.T) {
 		{"opencode fork wins over resume", OpenCode, LaunchOpts{ResumeID: "r", ForkID: "f"}, "opencode --session f --fork"},
 		{"cursor new", Cursor, LaunchOpts{}, "cursor-agent"},
 		{"cursor resume", Cursor, LaunchOpts{ResumeID: "abc"}, "cursor-agent --resume abc"},
+		// Cursor has no fork primitive, so a ForkID has nowhere to go. Callers
+		// must gate on SupportsFork rather than relying on this — pinned here so
+		// the drop stays deliberate and visible.
+		{"cursor ignores fork id", Cursor, LaunchOpts{ForkID: "abc"}, "cursor-agent"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -46,6 +50,23 @@ func TestBuildLaunchCmd(t *testing.T) {
 				t.Errorf("BuildLaunchCmd() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestSupportsFork(t *testing.T) {
+	// Every agent whose BuildLaunchCmd honors ForkID must report true, and the
+	// one that drops it must report false — otherwise a UI fork gate lights up
+	// a row that silently launches an empty conversation.
+	for _, typ := range []Type{Claude, Codex, OpenCode} {
+		if !typ.SupportsFork() {
+			t.Errorf("%s should support fork", typ)
+		}
+		if got := typ.BuildLaunchCmd(LaunchOpts{ForkID: "abc"}); got == typ.BuildLaunchCmd(LaunchOpts{}) {
+			t.Errorf("%s claims fork support but ForkID changes nothing: %q", typ, got)
+		}
+	}
+	if Cursor.SupportsFork() {
+		t.Errorf("Cursor has no fork primitive but SupportsFork() = true")
 	}
 }
 

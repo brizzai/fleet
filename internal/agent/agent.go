@@ -67,6 +67,13 @@ func (t Type) DisplayName() string {
 // String implements fmt.Stringer.
 func (t Type) String() string { return string(t) }
 
+// SupportsFork reports whether the agent CLI can branch an existing conversation
+// into a new one (Claude's --fork-session, `codex fork`, opencode's --fork).
+// Cursor exposes no fork primitive, so BuildLaunchCmd has nowhere to put a
+// ForkID and would launch an empty conversation instead. UI gates must consult
+// this so a fork action can't dead-click.
+func (t Type) SupportsFork() bool { return t != Cursor }
+
 // LaunchOpts carries the per-session details that shape the launch command.
 type LaunchOpts struct {
 	// ResumeID resumes an existing agent conversation when set (and ForkID is empty).
@@ -125,6 +132,9 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	}
 
 	if t == Cursor {
+		// No ForkID branch: Cursor has no fork primitive (see SupportsFork).
+		// Callers must gate on that rather than passing a ForkID here, which
+		// would silently launch an empty conversation.
 		if o.ResumeID != "" {
 			return fmt.Sprintf("cursor-agent --resume %s", o.ResumeID)
 		}
