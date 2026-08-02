@@ -235,6 +235,10 @@ func handleHookHandler() {
 		UserPrompt:  userPrompt,
 		PromptCount: promptCount,
 		Reason:      payload.Reason,
+		// The agent runs the hook command directly, so our parent IS the agent
+		// process whose conversation this status describes. Recording it lets the
+		// TUI later ask whether that conversation is still alive.
+		AgentPID: os.Getppid(),
 	}
 
 	if err := hooks.WriteStatusFile(hooksDir, instanceID, sf); err != nil {

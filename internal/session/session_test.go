@@ -47,7 +47,50 @@ func TestDetectStatus(t *testing.T) {
 		{"busy pattern", "some output\nctrl+c to interrupt\n", StatusRunning},
 		{"esc busy pattern", "output\nesc to interrupt\n", StatusRunning},
 		{"spinner char", "⠋ Working...\n", StatusRunning},
-		{"whimsical pattern", "Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
+		{"whimsical pattern", "· Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
+		// Shape A, glyph-less. Kept because a frame can capture with the animated glyph
+		// cell blank or clipped, and because it is what master matched — the token
+		// counter stays a valid alternative to the glyph, not a thing replaced by it.
+		{"whimsical token counter without glyph", "Clauding… (53s · ↓ 749 tokens)\n", StatusRunning},
+		// Shape A must stay on master's exact terms: master required no ellipsis, so
+		// hoisting shape B's ellipsis gate above it would silently narrow this line out
+		// of detection — and an ellipsis is as droppable as the glyph cell A covers for.
+		{"whimsical token counter without ellipsis", "Clauding (53s · ↓ 749 tokens)\n", StatusRunning},
+		// Shape B. spinnerChars covers only part of the rotating glyph set — `·` (U+00B7)
+		// and `✻` (U+273B) are absent — so with no token counter these matched nothing
+		// and read as finished mid-turn.
+		{"whimsical thinking without token counter", "· Improvising… (51s · almost done thinking with xhigh effort)\n", StatusRunning},
+		{"whimsical bare duration", "✻ Marinating… (33s)\n", StatusRunning},
+		// Shape B's gate, one case per clause. Each of these satisfies every other
+		// condition (trailing `)`, an `…`, a duration after it), so each fails if its
+		// clause is dropped — the previous version of this guard ended in `e` and so
+		// never reached the gate at all.
+		{"prose with duration but no glyph not matched", "we cut cold start… (2s)\n❯\n", StatusFinished},
+		{"accented prose not matched", "Éclair… (2s)\n❯\n", StatusFinished},
+		{"lowercase prose behind a glyph not matched", "· quoted example… (2s)\n❯\n", StatusFinished},
+		// Isolates the non-ASCII clause. Claude writes its replies in markdown, so a
+		// bullet or blockquote closing on a duration is an ordinary line for it to emit —
+		// and each of these clears every other condition, including capitalisation.
+		{"markdown bullet not matched", "- Ran the suite… (12s)\n❯\n", StatusFinished},
+		{"markdown star bullet not matched", "* Marinating… (33s)\n❯\n", StatusFinished},
+		{"blockquote not matched", "> Marinating… (33s)\n❯\n", StatusFinished},
+		{"heading not matched", "# Marinating… (33s)\n❯\n", StatusFinished},
+		{"numbered list item not matched", "1 Compiling… (2s)\n❯\n", StatusFinished},
+		// Isolates the trailing-`)` clause: glyph, capitalised word, ellipsis and
+		// duration all present, but the line continues past the parenthesis.
+		{"activity shape trailing into prose not matched", "· Marinating… (33s) and then some prose\n❯\n", StatusFinished},
+		// Isolates shape B's duration clause — the only thing separating an activity
+		// line from any glyph-prefixed capitalised note that closes on a parenthetical.
+		{"parenthetical without a duration not matched", "· Note… (see below)\n❯\n", StatusFinished},
+		// Isolates the whitespace clause: a real glyph, but fused to the word.
+		{"glyph fused to word not matched", "·Marinating… (33s)\n❯\n", StatusFinished},
+		// Isolates the `waiting for` clause: glyph-prefixed and capitalised, so only
+		// that guard rejects it. The boxed rendering below is caught by `│` instead.
+		{"unboxed team-waiting line not matched", "· Waiting for team lead approval… (2m 13s)\n❯ \n⏵⏵\n", StatusFinished},
+		// A bash tool row ticking under a prompt must not outrank it: detectRunning runs
+		// before detectWaiting, so matching this would hide a live permission menu.
+		{"bash tool gutter row not matched", "⎿  Running… (9s · timeout 5m)\n❯\n", StatusFinished},
+		{"team waiting box with counter not matched", "│ ✢ Waiting for team lead approval… (2m 13s)\n❯ \n⏵⏵\n", StatusWaiting},
 		{"approval yes allow", "some text\nYes, allow once\n", StatusWaiting},
 		{"approval no tell claude", "No, and tell Claude\n❯\n", StatusWaiting},
 		{"permission menu 3 options", "output\n❯ 1. Yes\n  2. Yes, during this session\n  3. No\nEsc to cancel · Tab to amend\n", StatusWaiting},

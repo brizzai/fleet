@@ -18,6 +18,15 @@ type StatusFile struct {
 	// ("clear", "logout", "prompt_input_exit", "other"). "other" combined with
 	// no exit info typically means the process was killed externally.
 	Reason string `json:"reason,omitempty"`
+	// AgentPID is the process that fired this hook — the agent itself, since a
+	// hook command runs as its direct child (verified: a hook's getppid() is the
+	// `claude` process). It is what lets the status pipeline ask whether the
+	// conversation that owns a session is still running, which separates a
+	// session-id rotation (owner gone) from a nested agent that inherited
+	// FLEET_INSTANCE_ID (owner alive) — a distinction no amount of transcript
+	// reading can make. Omitted by handlers older than this field; readers must
+	// treat 0 as "unknown", not "dead".
+	AgentPID int `json:"agent_pid,omitempty"`
 }
 
 // WriteStatusFile atomically writes a status file to the hooks directory.
