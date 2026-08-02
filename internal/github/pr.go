@@ -101,10 +101,11 @@ type ghPRResponse struct {
 }
 
 type statusCheckEntry struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-	StartedAt  string `json:"startedAt"` // RFC3339; used to pick the latest run when a check has several
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	StartedAt    string `json:"startedAt"`    // RFC3339; used to pick the latest run when a check has several
+	WorkflowName string `json:"workflowName"` // empty for status contexts; called workflows report their caller
 }
 
 // GetPRForBranch returns the PR associated with the current branch, or nil if none.
@@ -263,26 +264,72 @@ func latestRunPerCheck(checks []statusCheckEntry) []statusCheckEntry {
 	return out
 }
 
+func isFailedCheck(c statusCheckEntry) bool {
+	switch strings.ToUpper(c.Conclusion) {
+	case "FAILURE", "ERROR", "TIMED_OUT":
+		return true
+	}
+	return false
+}
+
+func isInFlightCheck(c statusCheckEntry) bool {
+	switch strings.ToUpper(c.Status) {
+	case "IN_PROGRESS", "QUEUED", "PENDING":
+		return true
+	}
+	return c.Conclusion == ""
+}
+
+// newestInFlightPerWorkflow returns, per workflow, the StartedAt of the most
+// recently started check still running. Status contexts (no workflow) are
+// excluded: they'd all share the "" key and suppress each other unrelated.
+func newestInFlightPerWorkflow(checks []statusCheckEntry) map[string]string {
+	newest := make(map[string]string)
+	for _, c := range checks {
+		if c.WorkflowName == "" || !isInFlightCheck(c) {
+			continue
+		}
+		if c.StartedAt > newest[c.WorkflowName] {
+			newest[c.WorkflowName] = c.StartedAt
+		}
+	}
+	return newest
+}
+
 // deriveCIStatus determines overall CI status from status check rollup.
 // Checks whose name matches any ignorePatterns glob are dropped before rollup.
+//
+// FAILURE is reserved for failures worth acting on. A workflow that re-runs
+// under a different job name — a gate that publishes a verdict before its
+// suites are triggered, say — leaves a red job behind from the earlier run,
+// and latestRunPerCheck can't collapse it because the names differ. Once that
+// same workflow is running again, its old verdict is being recomputed, so it
+// reports PENDING (wait) rather than FAILURE (go look).
 func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 	if len(checks) == 0 {
 		return ""
 	}
 
+	considered := make([]statusCheckEntry, 0, len(checks))
+	for _, c := range latestRunPerCheck(checks) {
+		if matchesAnyPattern(c.Name, ignorePatterns) {
+			continue
+		}
+		considered = append(considered, c)
+	}
+	inFlight := newestInFlightPerWorkflow(considered)
+
 	hasFailure := false
 	hasPending := false
 
-	for _, check := range latestRunPerCheck(checks) {
-		if matchesAnyPattern(check.Name, ignorePatterns) {
-			continue
-		}
-		conclusion := strings.ToUpper(check.Conclusion)
-		status := strings.ToUpper(check.Status)
-
-		if conclusion == "FAILURE" || conclusion == "ERROR" || conclusion == "TIMED_OUT" {
+	for _, check := range considered {
+		switch {
+		case isFailedCheck(check):
+			if since, ok := inFlight[check.WorkflowName]; ok && check.StartedAt < since {
+				continue // superseded by a newer run of the same workflow
+			}
 			hasFailure = true
-		} else if status == "IN_PROGRESS" || status == "QUEUED" || status == "PENDING" || conclusion == "" {
+		case isInFlightCheck(check):
 			hasPending = true
 		}
 	}
