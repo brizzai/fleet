@@ -21,6 +21,8 @@ type hookPayload struct {
 	Prompt        string          `json:"prompt,omitempty"`
 	// Reason is set on SessionEnd: "clear", "logout", "prompt_input_exit", "other".
 	Reason string `json:"reason,omitempty"`
+	// Status is set on Cursor's stop hook: "completed", "aborted", or "error".
+	Status string `json:"status,omitempty"`
 }
 
 // mapEventToStatus maps a hook event to a fleet status string. Claude and Codex
@@ -28,7 +30,7 @@ type hookPayload struct {
 // names (session.busy/session.idle/permission.asked); Cursor CLI's hooks.json
 // sends its own lowerCamelCase event names — these are all additive, no agent
 // emits another's names, so the handler stays agent-neutral.
-func mapEventToStatus(event string) string {
+func mapEventToStatus(event, status string) string {
 	switch event {
 	case "UserPromptSubmit":
 		return "running"
@@ -64,12 +66,14 @@ func mapEventToStatus(event string) string {
 		// doesn't re-emit session.status{busy} after an in-flight approval.
 		return "running"
 	// Cursor CLI events (from hooks.json, see internal/hooks/cursor_hooks.go).
-	// Cursor has no dedicated permission/approval hook, so beforeShellExecution/
-	// afterShellExecution bracket the interactive approval prompt instead: the
-	// hook fires and returns immediately, then (unless auto-approved) Cursor's
-	// own UI blocks on a y/n prompt before the command actually runs and
-	// afterShellExecution fires — so "waiting" is only wrong for auto-approved
-	// commands, which resolve to "running" again almost immediately.
+	// Both shell hooks map to running, never waiting: afterShellExecution's
+	// payload carries `output` and `duration`, so it fires when the command
+	// *completes*, not when an approval clears. Mapping beforeShellExecution to
+	// waiting would therefore hold the row at ◐ for the entire runtime of every
+	// command the agent runs — and Cursor is on the pure-hook path with no pane
+	// fallback to correct it, so `Space` would rotate to a busy session and `Y`
+	// would inject a stray "y"+Enter into a pane showing no prompt. Cursor has
+	// no dedicated approval hook, so fleet simply has no waiting signal for it.
 	//
 	// No sessionStart case: unlike Claude, Cursor's initial status (see
 	// initialRunStatus in session.go) starts idle, not running — so there's
@@ -80,11 +84,16 @@ func mapEventToStatus(event string) string {
 	// cursorHookEvents in internal/hooks/cursor_hooks.go).
 	case "beforeSubmitPrompt":
 		return "running"
-	case "beforeShellExecution":
-		return "waiting"
-	case "afterShellExecution":
+	case "beforeShellExecution", "afterShellExecution":
 		return "running"
 	case "stop":
+		// Cursor's stop payload reports how the turn ended. Only "completed" is
+		// finished work; "error" surfaces as an error so a failed turn doesn't
+		// render with the same "done, come look" dot as a successful one.
+		// "aborted" is a user-initiated cancel — the turn is over, not broken.
+		if status == "error" {
+			return "error"
+		}
 		return "finished"
 	case "sessionEnd":
 		return "dead"
@@ -138,7 +147,14 @@ func handleHookHandler() {
 
 	instanceID := os.Getenv("FLEET_INSTANCE_ID")
 	if instanceID == "" {
-		log.Warn("hook-handler: no FLEET_INSTANCE_ID env var",
+		// Debug, not Warn: fleet installs Cursor's hooks into the user-global
+		// ~/.cursor/hooks.json, which the Cursor IDE reads too — so this fires
+		// for every prompt and shell command in the editor, none of which is
+		// fleet's business. At Warn it always writes, and since debug.log is
+		// size-truncated and the `!` bug-report flow pastes its last 100 lines
+		// into a public issue, an editing session would evict the diagnostics
+		// the report exists to carry.
+		log.Debug("hook-handler: no FLEET_INSTANCE_ID env var (not a fleet session)",
 			"event", payload.HookEventName,
 			"claudeSession", payload.SessionID,
 			"source", payload.Source,
@@ -154,7 +170,7 @@ func handleHookHandler() {
 		return
 	}
 
-	status := mapEventToStatus(payload.HookEventName)
+	status := mapEventToStatus(payload.HookEventName, payload.Status)
 
 	// Special handling for Notification events.
 	if payload.HookEventName == "Notification" && payload.Matcher != nil {
