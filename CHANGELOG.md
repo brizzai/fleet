@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.24.1] - 2026-08-02
+
+### Improved
+
+- **Wrong-status reports explain themselves.** A report filed with `!` now shows the hook status fleet applied beside the one sitting on disk, which conversation id it latched onto, and whether the two agree — so a stuck session can be diagnosed from the issue instead of a round trip asking for more.
+
+### Fixed
+
+- **Stuck sessions recover.** The v2.24.0 fix for this never took effect — the check that decides whether a session's old conversation has ended was never handed the process id it needs, so a frozen dot stayed frozen. Now wired through.
+- **Reports close themselves.** Filing a report left the form frozen on `Creating issue...` until you pressed `esc` — the issue was already filed. It now closes on submit and confirms with the issue URL.
+
 ## [2.24.0] - 2026-08-02
 
 ### Added
@@ -475,7 +486,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.24.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.24.1...HEAD
+[2.24.1]: https://github.com/brizzai/fleet/releases/tag/v2.24.1
 [2.24.0]: https://github.com/brizzai/fleet/releases/tag/v2.24.0
 [2.23.2]: https://github.com/brizzai/fleet/releases/tag/v2.23.2
 [2.23.1]: https://github.com/brizzai/fleet/releases/tag/v2.23.1
