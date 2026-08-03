@@ -2,4 +2,4 @@
 type: fixed
 ---
 
-**Red PR badge means act now** — a check that failed in an earlier run no longer shows red while the same workflow is running again, so a gate that goes red before its suites are triggered reads as pending until the real verdict lands.
+**Stale CI failures** — A PR badge no longer goes red for a failure a later run of the same workflow is already recomputing; you see pending until the new verdict lands.

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os/exec"
 	"path"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +108,7 @@ type statusCheckEntry struct {
 	Conclusion   string `json:"conclusion"`
 	StartedAt    string `json:"startedAt"`    // RFC3339; used to pick the latest run when a check has several
 	WorkflowName string `json:"workflowName"` // empty for status contexts; called workflows report their caller
+	DetailsURL   string `json:"detailsUrl"`   // .../actions/runs/<run>/job/<job> for check runs; carries run identity
 }
 
 // GetPRForBranch returns the PR associated with the current branch, or nil if none.
@@ -280,17 +283,42 @@ func isInFlightCheck(c statusCheckEntry) bool {
 	return c.Conclusion == ""
 }
 
-// newestInFlightPerWorkflow returns, per workflow, the StartedAt of the most
-// recently started check still running. Status contexts (no workflow) are
-// excluded: they'd all share the "" key and suppress each other unrelated.
-func newestInFlightPerWorkflow(checks []statusCheckEntry) map[string]string {
-	newest := make(map[string]string)
+var runIDPattern = regexp.MustCompile(`/actions/runs/(\d+)`)
+
+// runID extracts the workflow run id from a check run's details URL
+// (`.../actions/runs/<run_id>/job/<job_id>`), or 0 when there is none —
+// status contexts point wherever their publisher likes.
+//
+// Run identity has to come from here because the rollup's own timestamps are
+// per *job*: jobs of one run start seconds to minutes apart (`needs:` chains,
+// runner acquisition), so comparing StartedAt cannot tell a later run from a
+// later-starting sibling of the same run.
+func runID(c statusCheckEntry) int64 {
+	m := runIDPattern.FindStringSubmatch(c.DetailsURL)
+	if m == nil {
+		return 0
+	}
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0 // absurdly long digit string; treat as unidentified
+	}
+	return id
+}
+
+// newestInFlightRunPerWorkflow returns, per workflow, the highest run id that
+// still has a check running. Run ids ascend over time within a repo, so a
+// greater id is a later run.
+//
+// Status contexts (no workflow) are excluded: they'd all share the "" key and
+// suppress each other unrelated.
+func newestInFlightRunPerWorkflow(checks []statusCheckEntry) map[string]int64 {
+	newest := make(map[string]int64)
 	for _, c := range checks {
 		if c.WorkflowName == "" || !isInFlightCheck(c) {
 			continue
 		}
-		if c.StartedAt > newest[c.WorkflowName] {
-			newest[c.WorkflowName] = c.StartedAt
+		if id := runID(c); id > newest[c.WorkflowName] {
+			newest[c.WorkflowName] = id
 		}
 	}
 	return newest
@@ -302,9 +330,14 @@ func newestInFlightPerWorkflow(checks []statusCheckEntry) map[string]string {
 // FAILURE is reserved for failures worth acting on. A workflow that re-runs
 // under a different job name — a gate that publishes a verdict before its
 // suites are triggered, say — leaves a red job behind from the earlier run,
-// and latestRunPerCheck can't collapse it because the names differ. Once that
-// same workflow is running again, its old verdict is being recomputed, so it
-// reports PENDING (wait) rather than FAILURE (go look).
+// and latestRunPerCheck can't collapse it because the names differ. Once a
+// *later run* of that same workflow is going, the old verdict is being
+// recomputed, so it reports PENDING (wait) rather than FAILURE (go look).
+//
+// "Later run" is a strictly greater run id, never a later timestamp: a failure
+// must still go red while its own run's other jobs finish. A failure whose run
+// id doesn't parse is never suppressed — an unrecognized URL shape should cost
+// a false red, not a missed one.
 func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 	if len(checks) == 0 {
 		return ""
@@ -317,7 +350,7 @@ func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 		}
 		considered = append(considered, c)
 	}
-	inFlight := newestInFlightPerWorkflow(considered)
+	inFlightRun := newestInFlightRunPerWorkflow(considered)
 
 	hasFailure := false
 	hasPending := false
@@ -325,8 +358,8 @@ func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 	for _, check := range considered {
 		switch {
 		case isFailedCheck(check):
-			if since, ok := inFlight[check.WorkflowName]; ok && check.StartedAt < since {
-				continue // superseded by a newer run of the same workflow
+			if id := runID(check); id != 0 && inFlightRun[check.WorkflowName] > id {
+				continue // superseded by a later run of the same workflow
 			}
 			hasFailure = true
 		case isInFlightCheck(check):
