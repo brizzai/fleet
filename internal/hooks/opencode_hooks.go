@@ -36,8 +36,14 @@ func GetOpenCodeConfigDir() string {
 //	session.status{busy} -> session.busy        (running)
 //	session.status{idle} / session.idle -> session.idle  (finished)
 //	session.error        -> session.error        (error)
-//	permission.asked     -> permission.asked     (waiting)
-//	permission.replied   -> permission.replied   (running; leaves waiting)
+//	question.asked / permission.asked     -> permission.asked   (waiting)
+//	question.replied / question.rejected /
+//	  permission.replied                  -> permission.replied (running)
+//
+// Both event families are live in OpenCode 1.14.x and mean different things:
+// question.* is the AskUserQuestion tool prompt, permission.* is a tool-permission
+// prompt (the user's `permission: ask` config). Listening for only one is the
+// stuck-at-running bug — add to these branches, never swap them.
 //
 // Root vs sub-agents: the session fleet launched goes busy before any sub-agent
 // spawns, so the first event carrying a sessionID is always the root. The plugin
@@ -91,9 +97,13 @@ export const FleetStatus = async (_ctx) => ({
       notify("session.idle", sessionID)
     } else if (type === "session.error") {
       notify("session.error", sessionID)
-    } else if (type === "permission.asked") {
+    } else if (type === "question.asked" || type === "permission.asked") {
       notify("permission.asked", sessionID)
-    } else if (type === "permission.replied") {
+    } else if (
+      type === "question.replied" ||
+      type === "question.rejected" ||
+      type === "permission.replied"
+    ) {
       notify("permission.replied", sessionID)
     }
   },

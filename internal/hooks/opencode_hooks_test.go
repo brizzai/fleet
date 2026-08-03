@@ -37,13 +37,31 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 		"session.busy",
 		"session.idle",
 		"session.error",
-		"permission.asked",
-		"permission.replied",
 		"FLEET_INSTANCE_ID", // non-fleet sessions skip the spawn
 		"rootId",            // root-session latch (sub-agents filtered out)
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("plugin missing %q:\n%s", want, content)
+		}
+	}
+
+	// The prompt branches are asserted whole, not by event name. Both
+	// `permission.asked` and `permission.replied` appear twice in the generated
+	// plugin — in the condition AND as the notify() argument — so a bare-name
+	// check passes even with the condition deleted. Deleting one family from a
+	// condition is exactly the stuck-at-running regression this guards, so the
+	// assertion has to pin the `type ===` chain itself.
+	//
+	// question.* is the AskUserQuestion prompt, permission.* is a tool-permission
+	// prompt (the user's `permission: ask` config). Both are live in OpenCode
+	// 1.14.x — these lists are additive, never a swap.
+	flat := strings.Join(strings.Fields(content), " ")
+	for _, want := range []string{
+		`if (type === "question.asked" || type === "permission.asked") { notify("permission.asked", sessionID)`,
+		`type === "question.replied" || type === "question.rejected" || type === "permission.replied" ) { notify("permission.replied", sessionID)`,
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("plugin missing event branch %q:\n%s", want, content)
 		}
 	}
 
