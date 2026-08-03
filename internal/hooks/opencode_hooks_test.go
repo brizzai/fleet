@@ -37,6 +37,12 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 		"session.busy",
 		"session.idle",
 		"session.error",
+		// Both families are live and distinct: question.* is the AskUserQuestion
+		// prompt, permission.* is a tool-permission prompt. Dropping either is a
+		// stuck-at-running bug.
+		"question.asked",
+		"question.replied",
+		"question.rejected",
 		"permission.asked",
 		"permission.replied",
 		"FLEET_INSTANCE_ID", // non-fleet sessions skip the spawn
