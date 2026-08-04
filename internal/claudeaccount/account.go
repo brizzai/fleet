@@ -311,6 +311,12 @@ func (s *Store) Reorder(email string, delta int) bool {
 // sibling. Redaction is the one place where over-matching is the safe error.
 var tokenPattern = regexp.MustCompile(`sk-ant-[a-z0-9]{3,8}-[A-Za-z0-9_-]{16,}`)
 
+// anyCredentialish is deliberately looser than tokenPattern: it eats anything
+// beginning `sk-ant-`, however short or malformed. Used where whole captured
+// text is logged, since a half-printed token is exactly the case tokenPattern's
+// length floor lets through.
+var anyCredentialish = regexp.MustCompile(`sk-ant-\S*`)
+
 // Redact replaces any Anthropic credential in s with a placeholder.
 //
 // Required anywhere text can reach a public GitHub issue or the debug log: the
@@ -319,6 +325,13 @@ var tokenPattern = regexp.MustCompile(`sk-ant-[a-z0-9]{3,8}-[A-Za-z0-9_-]{16,}`)
 // prompt never reaches an issue body.
 func Redact(s string) string {
 	return tokenPattern.ReplaceAllString(s, "sk-ant-<redacted>")
+}
+
+// RedactCaptured scrubs a whole captured screen for logging, using the looser
+// pattern. Call this — never Redact — when the text is raw pane content, where
+// a truncated or mid-print token would slip under Redact's length floor.
+func RedactCaptured(s string) string {
+	return anyCredentialish.ReplaceAllString(s, "sk-ant-<redacted>")
 }
 
 // ExtractToken pulls the first Anthropic token out of arbitrary text, which is

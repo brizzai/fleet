@@ -684,19 +684,36 @@ func (h *Home) runSetupToken() tea.Cmd {
 		}
 		token, found := claudeaccount.ExtractToken(pane)
 		if !found {
-			// Size and line count only — never the pane. A partial run can still
-			// hold a token, and debug.log is what bug reports paste. An empty
-			// capture means they quit early; a large one means the token
-			// scrolled off or the format changed.
+			// Log the tail, aggressively redacted. Size alone can't distinguish
+			// "quit before the browser flow finished" from "the output format
+			// changed", and those need opposite fixes. RedactCaptured (not
+			// Redact) because a half-printed token would slip under Redact's
+			// length floor.
 			debuglog.Logger.Warn("no token in setup-token output",
 				"tmux", ts.Name, "pane_bytes", len(pane),
-				"pane_lines", strings.Count(pane, "\n"), "exec_err", execErr)
+				"pane_lines", strings.Count(pane, "\n"), "exec_err", execErr,
+				"tail", claudeaccount.RedactCaptured(lastLines(pane, 12)))
 			return accountValidatedMsg{capture: true, err: fmt.Errorf("no token found in the setup-token output — paste it instead")}
 		}
 		debuglog.Logger.Info("captured token from setup-token pane",
 			"tmux", ts.Name, "token_len", len(token))
 		return accountValidateMsg{token: token}
 	})
+}
+
+// lastLines returns the final n non-blank lines of s, which is where a command
+// leaves its result and any error.
+func lastLines(s string, n int) string {
+	var keep []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			keep = append(keep, strings.TrimSpace(l))
+		}
+	}
+	if len(keep) > n {
+		keep = keep[len(keep)-n:]
+	}
+	return strings.Join(keep, " | ")
 }
 
 // validateAccount identifies a token off the Update goroutine. Claude is

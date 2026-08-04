@@ -40,6 +40,26 @@ func TestRedactCoversCredentialFamilies(t *testing.T) {
 	}
 }
 
+// Whole captured screens get the looser pattern: a half-printed token — the
+// exact case a failed capture leaves behind — is shorter than tokenPattern's
+// floor and would sail through the strict one.
+func TestRedactCapturedCatchesTruncatedTokens(t *testing.T) {
+	partial := "sk-ant-oat01-AbC" // cut off mid-print
+	if !strings.Contains(Redact(partial), partial) {
+		t.Fatal("premise wrong: Redact was expected to miss a short fragment")
+	}
+	if got := RedactCaptured("pane: " + partial); strings.Contains(got, partial) {
+		t.Errorf("RedactCaptured let a truncated token through: %q", got)
+	}
+	if got := RedactCaptured("pane: " + fakeToken); strings.Contains(got, fakeToken) {
+		t.Errorf("RedactCaptured let a whole token through: %q", got)
+	}
+	// Surrounding text has to survive or the excerpt diagnoses nothing.
+	if got := RedactCaptured("error: browser did not open"); got != "error: browser did not open" {
+		t.Errorf("RedactCaptured mangled clean text: %q", got)
+	}
+}
+
 func TestRedactLeavesOrdinaryTextAlone(t *testing.T) {
 	in := "no credentials here, just sk-ant- and some words"
 	if got := Redact(in); got != in {
