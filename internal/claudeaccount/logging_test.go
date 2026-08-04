@@ -111,12 +111,12 @@ func TestFingerprintIsStableAndDistinct(t *testing.T) {
 	}
 }
 
-func TestFetchUsageNeverLogsTheToken(t *testing.T) {
+func TestProbeNeverLogsTheToken(t *testing.T) {
 	buf := captureLog(t)
 
-	// Hits the real endpoint with a bogus credential: expected to 401, which is
-	// exactly the branch that logs a response body.
-	if _, err := FetchUsage(context.Background(), fakeToken); err == nil {
+	// Hits the real endpoint with a bogus credential: expected to be rejected,
+	// which is the branch that logs a response body.
+	if _, _, err := ProbeUsage(context.Background(), fakeToken); err == nil {
 		t.Skip("bogus token unexpectedly accepted; nothing to assert")
 	}
 	if strings.Contains(buf.String(), fakeToken) {

@@ -9,12 +9,15 @@ import (
 	"github.com/brizzai/fleet/internal/claudeaccount"
 )
 
-// The header readout shows the **weekly** window rather than the 5-hour one.
-// The 5-hour bucket is what actually gates the next message, but it swings all
-// day and would make the header twitch; the weekly figure is the one worth
-// glancing at. The 5-hour window still gets its say — an account whose 5-hour
-// bucket is spent flips its chip to a reset countdown, so the readout is quiet
-// until the number you can't act on is the one that matters.
+// The readout alternates between the two windows rather than picking one. The
+// 5-hour bucket gates your next message; the weekly one gates your week, and
+// both are worth a glance. Showing them side by side would double the width in
+// a corner already shared with the What's New badge, so each takes a turn and
+// carries a label saying which it is.
+//
+// The phase comes from the wall clock, not a ticker. The header re-renders on
+// the existing UI tick regardless, so deriving it from `now` costs no new
+// state, no goroutine, and no timer that could outlive what it animates.
 const (
 	// accountBarCells is the width of the mini gauge. Short on purpose: this
 	// shares the header row with the What's New badge and must never crowd it.
@@ -25,10 +28,44 @@ const (
 	// accountHeaderCompactWidth is where labels are dropped and only the gauges
 	// and percentages survive.
 	accountHeaderCompactWidth = 100
+	// accountWindowRotateSecs is how long each window holds the corner: long
+	// enough to read, short enough that you don't wait for the other one.
+	accountWindowRotateSecs = 6
 )
 
-// renderAccountUsageHeader draws a compact per-account weekly-quota readout, or
-// "" when there is nothing worth showing.
+// quotaWindow is which bucket the readout is currently showing.
+type quotaWindow int
+
+const (
+	windowSevenDay quotaWindow = iota
+	windowFiveHour
+)
+
+func (w quotaWindow) label() string {
+	if w == windowFiveHour {
+		return "5h"
+	}
+	return "7d"
+}
+
+func (w quotaWindow) pct(u claudeaccount.Usage) int {
+	if w == windowFiveHour {
+		return u.FiveHourPct
+	}
+	return u.SevenDayPct
+}
+
+// windowAt derives the displayed window from the clock, so every surface that
+// renders in the same frame agrees without sharing state.
+func windowAt(now time.Time) quotaWindow {
+	if (now.Unix()/accountWindowRotateSecs)%2 == 1 {
+		return windowFiveHour
+	}
+	return windowSevenDay
+}
+
+// renderAccountUsageHeader draws a compact per-account quota readout, or "" when
+// there is nothing worth showing.
 //
 // Returns empty for a single account: with one subscription there is no choice
 // being made, so the number is trivia rather than information, and the header
@@ -38,25 +75,29 @@ func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string
 		return ""
 	}
 
+	win := windowAt(now)
 	chips := make([]string, 0, len(accounts))
 	for _, a := range accounts {
 		u, ok := usage[a.Email]
 		if !ok || !u.Known() {
 			continue
 		}
-		chips = append(chips, accountChip(a, u, width, now))
+		chips = append(chips, accountChip(a, u, win, width, now))
 	}
 	if len(chips) == 0 {
 		return ""
 	}
 
+	dim := lipgloss.NewStyle().Foreground(ColorTextDim)
 	sep := lipgloss.NewStyle().Foreground(ColorBorder).Render(" │ ")
-	return strings.Join(chips, sep)
+	// One label for the whole readout rather than one per chip: both chips show
+	// the same window, so repeating it would be noise that costs real columns.
+	return strings.Join(chips, sep) + dim.Render(" "+win.label())
 }
 
 // accountChip renders one account as "label ▰▰▱▱▱▱ 34%", or as a reset
 // countdown when its 5-hour window is spent.
-func accountChip(a claudeaccount.Account, u claudeaccount.Usage, width int, now time.Time) string {
+func accountChip(a claudeaccount.Account, u claudeaccount.Usage, win quotaWindow, width int, now time.Time) string {
 	dim := lipgloss.NewStyle().Foreground(ColorTextDim)
 
 	label := ""
@@ -65,12 +106,12 @@ func accountChip(a claudeaccount.Account, u claudeaccount.Usage, width int, now 
 	}
 
 	// A spent 5-hour bucket is the one thing here you can act on, so it
-	// displaces the weekly figure entirely rather than sitting beside it.
+	// displaces the percentage in either window rather than waiting its turn.
 	if u.Exhausted(now) {
 		return label + lipgloss.NewStyle().Foreground(ColorRed).Render("spent "+resetIn(u, now))
 	}
 
-	pct := u.SevenDayPct
+	pct := win.pct(u)
 	return label + renderQuotaBar(pct) + " " + quotaStyle(pct).Render(fmt.Sprintf("%d%%", pct))
 }
 

@@ -7375,28 +7375,6 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 
 	// Each clause names the reason it actually failed — a constant note here
 	// would contradict the account the readout shows on the same screen.
-	// The label names both ends of the move. Nothing else in the UI says which
-	// account a session is on — the header readout is quota-driven and stays
-	// hidden when quota is unreadable, which is every setup-token account — so
-	// a bare "Move to Next Account" asks the user to act blind.
-	moveAccount := ContextMenuItem{ID: "move_account", Label: "Move to Next Account"}
-	if next, ok := nextAccountAfter(h.accounts.List(), s.Account); ok {
-		moveAccount.Label = "Move to " + next.Name()
-	}
-	switch {
-	case agentOf(s) != agent.Claude:
-		moveAccount.Note = "Claude only"
-	case h.accounts.Len() < 2:
-		moveAccount.Note = "needs a second account"
-	case !resumable:
-		// Without a conversation id the restart starts a fresh chat on the new
-		// account, silently discarding the work — worse than refusing.
-		moveAccount.Note = "no session id yet"
-	default:
-		moveAccount.Enabled = true
-		moveAccount.Note = "on " + h.accountLabel(s.Account)
-	}
-
 	suspend := ContextMenuItem{ID: "suspend_session", Label: "Suspend Session"}
 	switch {
 	case status == session.StatusSuspended:
@@ -7428,7 +7406,6 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 			Note:    "no session id yet",
 		},
 		forkWorktree,
-		moveAccount,
 		suspend,
 		h.snoozeMenuItem(),
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
@@ -7501,7 +7478,6 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
-		{Kind: PaletteKindCommand, ID: "move_account", Name: "Move Session to Next Account"},
 		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -7703,8 +7679,6 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
-	case "move_account":
-		return h, h.moveSelectedAccount()
 	case "new_repo":
 		h.newDialog.Show()
 		return h, nil

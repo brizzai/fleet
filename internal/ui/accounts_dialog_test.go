@@ -103,7 +103,7 @@ func TestDialogNeverWraps(t *testing.T) {
 		{"list with quota", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{long, fp}, map[string]claudeaccount.Usage{
 				long.Email: {FiveHourPct: 42, FiveHourReset: hdrNow.Add(time.Hour), FetchedAt: hdrNow},
-				fp.Email:   {Err: claudeaccount.ErrQuotaScope, FetchedAt: hdrNow},
+				fp.Email:   {Err: claudeaccount.ErrNoQuotaHeaders, FetchedAt: hdrNow},
 			}, "")
 		}},
 		{"manual default", func(d *AccountsDialog) {
@@ -161,23 +161,31 @@ func TestDialogNeverWraps(t *testing.T) {
 	}
 }
 
-// "unreadable" read as a fault. Nothing is broken — a setup-token credential
-// simply isn't entitled to the usage endpoint, so the cell stays empty.
-func TestScopeLimitedAccountShowsNoQuotaNoise(t *testing.T) {
+// Quota now reaches every account via the header probe, so the row shows a
+// real number — and a *failure* to read one is a genuine fault worth saying,
+// not the expected silence it used to be.
+func TestQuotaRowShowsTheNumberAndNamesTheGap(t *testing.T) {
 	d := NewAccountsDialog()
 	d.SetSize(120, 40)
 	d.Show(nil, nil, "", false)
-	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8"}
-	d.Refresh([]claudeaccount.Account{fp},
-		map[string]claudeaccount.Usage{fp.Email: {Err: claudeaccount.ErrQuotaScope, FetchedAt: hdrNow}}, "")
+
+	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8", Order: 0}
+	ok := claudeaccount.Account{Email: "real@x.com", Order: 1}
+	d.Refresh([]claudeaccount.Account{fp, ok}, map[string]claudeaccount.Usage{
+		// Unnamed, and its poll failed.
+		fp.Email: {Err: claudeaccount.ErrNoQuotaHeaders, FetchedAt: hdrNow},
+		// Named, with a live reading.
+		ok.Email: {FiveHourPct: 42, FiveHourReset: hdrNow.Add(time.Hour), FetchedAt: hdrNow},
+	}, "")
 
 	view := d.View()
-	for _, bad := range []string{"unreadable", "not checked yet", "quota unavailable"} {
-		if strings.Contains(view, bad) {
-			t.Errorf("scope-limited account shows %q, which reads as a fault:\n%s", bad, view)
-		}
+	if !strings.Contains(view, "42%") {
+		t.Errorf("a polled account does not show its utilization:\n%s", view)
 	}
-	// But it should still point at the fix for its unreadable name.
+	if !strings.Contains(view, "quota unavailable") {
+		t.Errorf("a failed poll is silent; it should say so now that quota is expected:\n%s", view)
+	}
+	// The unnamed row still points at its own fix.
 	if !strings.Contains(view, "r to name") {
 		t.Errorf("unnamed account gives no hint that it can be named:\n%s", view)
 	}

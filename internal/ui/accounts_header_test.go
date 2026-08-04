@@ -11,6 +11,19 @@ import (
 
 var hdrNow = time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 
+// The readout alternates windows on a wall-clock phase, so tests pick the
+// phase they mean rather than depending on where hdrNow happens to land.
+func atWindow(w quotaWindow) time.Time {
+	t := hdrNow
+	for i := 0; i < 2*accountWindowRotateSecs; i++ {
+		if windowAt(t) == w {
+			return t
+		}
+		t = t.Add(time.Second)
+	}
+	panic("no time found in the rotation for the requested window")
+}
+
 func hdrAccounts(emails ...string) []claudeaccount.Account {
 	out := make([]claudeaccount.Account, len(emails))
 	for i, e := range emails {
@@ -61,25 +74,46 @@ func TestAccountHeaderHiddenBeforeFirstPoll(t *testing.T) {
 	}
 }
 
-func TestAccountHeaderShowsWeeklyPercentages(t *testing.T) {
-	// The readout is the *weekly* window: the 5-hour bucket swings all day and
-	// would make the header twitch.
-	got := renderAccountUsageHeader(
-		hdrAccounts("yuval@x.com", "work@x.com"),
-		map[string]claudeaccount.Usage{
-			"yuval@x.com": hdrUsage(10, 34),
-			"work@x.com":  hdrUsage(20, 71),
-		},
-		140, hdrNow)
+// The readout alternates between the two windows, and each turn must show one
+// window's numbers only — mixing them would be worse than showing either.
+func TestAccountHeaderRotatesBetweenWindows(t *testing.T) {
+	usage := map[string]claudeaccount.Usage{
+		"yuval@x.com": hdrUsage(10, 34),
+		"work@x.com":  hdrUsage(20, 71),
+	}
+	accts := hdrAccounts("yuval@x.com", "work@x.com")
 
-	for _, want := range []string{"34%", "71%", "yuval", "work"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("header missing %q: %q", want, got)
+	weekly := renderAccountUsageHeader(accts, usage, 140, atWindow(windowSevenDay))
+	for _, want := range []string{"34%", "71%", "7d", "yuval", "work"} {
+		if !strings.Contains(weekly, want) {
+			t.Errorf("weekly turn missing %q: %q", want, weekly)
 		}
 	}
-	// The 5-hour figures must not appear — they're a different question.
-	if strings.Contains(got, "10%") || strings.Contains(got, "20%") {
-		t.Errorf("header leaked the 5-hour window: %q", got)
+	if strings.Contains(weekly, "10%") || strings.Contains(weekly, "20%") {
+		t.Errorf("weekly turn leaked the 5-hour figures: %q", weekly)
+	}
+
+	fiveHour := renderAccountUsageHeader(accts, usage, 140, atWindow(windowFiveHour))
+	for _, want := range []string{"10%", "20%", "5h"} {
+		if !strings.Contains(fiveHour, want) {
+			t.Errorf("5-hour turn missing %q: %q", want, fiveHour)
+		}
+	}
+	if strings.Contains(fiveHour, "34%") || strings.Contains(fiveHour, "71%") {
+		t.Errorf("5-hour turn leaked the weekly figures: %q", fiveHour)
+	}
+}
+
+// The phase has to actually change, or the rotation is a no-op that only looks
+// implemented.
+func TestWindowRotationAdvances(t *testing.T) {
+	base := atWindow(windowSevenDay)
+	if windowAt(base) == windowAt(base.Add(accountWindowRotateSecs*time.Second)) {
+		t.Fatal("window did not change after a full rotation period")
+	}
+	// And it must be stable *within* a period, or the header flickers.
+	if windowAt(base) != windowAt(base.Add(time.Second)) {
+		t.Error("window changed within a single rotation period")
 	}
 }
 
@@ -157,27 +191,5 @@ func TestRenderQuotaBarEdges(t *testing.T) {
 	}
 	if strings.Contains(renderQuotaBar(0), "▰") {
 		t.Error("0% usage rendered as partially filled")
-	}
-}
-
-func TestNextAccountAfterWraps(t *testing.T) {
-	accts := hdrAccounts("a@x.com", "b@x.com", "c@x.com")
-
-	got, ok := nextAccountAfter(accts, "a@x.com")
-	if !ok || got.Email != "b@x.com" {
-		t.Errorf("next after a = %q, want b", got.Email)
-	}
-	got, ok = nextAccountAfter(accts, "c@x.com")
-	if !ok || got.Email != "a@x.com" {
-		t.Errorf("next after last = %q, want a (wraps)", got.Email)
-	}
-	// A session on the ambient login, or on an account since removed, moves to
-	// the first configured one rather than nowhere.
-	got, ok = nextAccountAfter(accts, "")
-	if !ok || got.Email != "a@x.com" {
-		t.Errorf("next after unknown = %q, want a", got.Email)
-	}
-	if _, ok := nextAccountAfter(hdrAccounts("only@x.com"), "only@x.com"); ok {
-		t.Error("a single account has nowhere to move to")
 	}
 }

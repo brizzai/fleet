@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -553,8 +552,6 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 		switch {
 		case u.Known():
 			right = renderQuotaCell(u)
-		case errors.Is(u.Err, claudeaccount.ErrQuotaScope):
-			right = ""
 		case u.Err != nil:
 			right = dimStyle.Render("quota unavailable")
 		}
@@ -834,28 +831,16 @@ func (h *Home) maybePollAccountUsage() {
 			continue
 		}
 
-		// Two routes to the same numbers. The usage endpoint is free but needs
-		// the `user:profile` scope; the probe costs about nine tokens but works
-		// with the inference-only credential `claude setup-token` mints. Once
-		// an account is known to be refused, go straight to the probe — the
-		// refusal is a property of the token and will not change.
-		var (
-			u   claudeaccount.Usage
-			err error
-		)
-		if a.UsageEndpointForbidden {
-			u, _, err = claudeaccount.ProbeUsage(context.Background(), a.Token)
-		} else if u, err = claudeaccount.FetchUsage(context.Background(), a.Token); errors.Is(err, claudeaccount.ErrQuotaScope) {
-			debuglog.Logger.Info("usage endpoint refuses this token on scope; reading quota from response headers instead",
-				"account", a.Email)
-			if h.accounts.MarkUsageEndpointForbidden(a.Email) {
-				if saveErr := h.accounts.Save(); saveErr != nil {
-					debuglog.Logger.Error("could not persist usage-endpoint verdict", "err", saveErr)
-				}
-			}
-			u, _, err = claudeaccount.ProbeUsage(context.Background(), a.Token)
-		}
-
+		// The probe is the only route, deliberately.
+		//
+		// /api/oauth/usage is free but needs the `user:profile` scope that
+		// `claude setup-token` withholds, so for fleet's accounts it answers
+		// 403 — and when rate-limited it answers 429 instead, which is
+		// indistinguishable from a transient failure and left accounts with no
+		// quota at all. It also only tolerates callers claiming to be
+		// claude-code. One mechanism that works for every token type, under
+		// fleet's own name, is worth roughly nine tokens a poll.
+		u, _, err := claudeaccount.ProbeUsage(context.Background(), a.Token)
 		if err != nil {
 			{
 				// Warn, not Error: quota is an optimization and a dead endpoint
@@ -885,72 +870,20 @@ func (h *Home) maybePollAccountUsage() {
 	h.accountUsage.Store(&next)
 }
 
-// nextAccountAfter returns the account following email in configured order,
-// wrapping. Reports false when there is nowhere else to go.
-func nextAccountAfter(accounts []claudeaccount.Account, email string) (claudeaccount.Account, bool) {
-	if len(accounts) < 2 {
-		return claudeaccount.Account{}, false
-	}
-	idx := -1
-	for i, a := range accounts {
-		if a.Email == email {
-			idx = i
-			break
-		}
-	}
-	// An unknown current account (removed, or a session still on the ambient
-	// login) moves to the first configured account rather than nowhere.
-	if idx < 0 {
-		return accounts[0], true
-	}
-	return accounts[(idx+1)%len(accounts)], true
-}
-
-// moveSelectedAccount moves the selected session to the next account and
-// relaunches it there.
-//
-// Restart rebuilds the environment from sessionEnv and relaunches with
-// `--resume <id>`, and ~/.claude/projects is shared across accounts, so the
-// conversation survives intact. What does not survive is the prompt cache,
-// which is per-account — hence this is an explicit action rather than something
-// fleet does on its own.
-func (h *Home) moveSelectedAccount() tea.Cmd {
-	s := h.selectedSession()
-	if s == nil {
+// persistAccounts saves the store, re-points the token resolver and refreshes
+// the dialog. Every account mutation goes through here so those three can't
+// drift apart.
+func (h *Home) persistAccounts(notice string) tea.Cmd {
+	if err := h.accounts.Save(); err != nil {
+		h.setError(fmt.Errorf("could not save accounts: %w", err))
 		return nil
 	}
-	if agentOf(s) != agent.Claude {
-		h.setError(fmt.Errorf("accounts apply to Claude sessions only"))
-		return nil
+	session.SetAccountTokenFunc(h.accounts.TokenFor)
+	h.accountsDialog.Refresh(h.accounts.List(), h.accountUsageSnapshot(), h.cfg.DefaultAccount)
+	if notice != "" {
+		h.setInfo(notice)
 	}
-	next, ok := nextAccountAfter(h.accounts.List(), s.Account)
-	if !ok {
-		h.setError(fmt.Errorf("add a second Claude account to move sessions between them"))
-		return nil
-	}
-	if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
-		h.setError(fmt.Errorf("%s is set and overrides fleet's account selection — unset it first", conflict))
-		return nil
-	}
-
-	s.Account = next.Email
-	if err := h.storage.UpdateAccount(s.ID, next.Email); err != nil {
-		debuglog.Logger.Error("failed to persist session account", "id", s.ID, "err", err)
-	}
-	h.actionLog.Add("move session account", next.Email, true)
-	h.setInfo("Moving to " + next.Name() + " — resuming the conversation there")
-
-	id, title := s.ID, s.Title
-	return func() tea.Msg {
-		// Always a full Restart, never RespawnClaude: the token is a tmux
-		// session-level env var set at creation, so respawning the pane inside
-		// the existing session would relaunch under the OLD account.
-		if err := s.Restart(); err != nil {
-			debuglog.Logger.Error("account move restart failed", "id", id, "title", title, "err", err)
-			return sessionRestartMsg{id: id, err: err}
-		}
-		return sessionRestartMsg{id: id}
-	}
+	return nil
 }
 
 // accountLabel is the human name for an account key, for use in UI text.
@@ -969,22 +902,6 @@ func (h *Home) accountLabel(email string) string {
 // agentOf resolves a session's agent, treating the legacy empty value as Claude
 // the same way the launch path does.
 func agentOf(s *session.Session) agent.Type { return agent.Parse(string(s.Agent)) }
-
-// persistAccounts saves the store, re-points the token resolver and refreshes
-// the dialog. Every account mutation goes through here so those three can't
-// drift apart.
-func (h *Home) persistAccounts(notice string) tea.Cmd {
-	if err := h.accounts.Save(); err != nil {
-		h.setError(fmt.Errorf("could not save accounts: %w", err))
-		return nil
-	}
-	session.SetAccountTokenFunc(h.accounts.TokenFor)
-	h.accountsDialog.Refresh(h.accounts.List(), h.accountUsageSnapshot(), h.cfg.DefaultAccount)
-	if notice != "" {
-		h.setInfo(notice)
-	}
-	return nil
-}
 
 // previewAccountLabel names the account for the preview footer, or "" when
 // there is nothing worth saying.
