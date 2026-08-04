@@ -35,12 +35,23 @@ type Account struct {
 	Order int    `json:"order"` // waterfall order; also the tie-break for least-used
 }
 
+// FingerprintPrefix marks an account the API declined to identify, whose key is
+// a hash of its token rather than an email.
+const FingerprintPrefix = "account-"
+
 // Name is what the UI shows: the user's label if they set one, else the email.
 func (a Account) Name() string {
 	if a.Label != "" {
 		return a.Label
 	}
 	return a.Email
+}
+
+// NeedsLabel reports that this account has no human-meaningful name — the API
+// wouldn't identify the token and the user hasn't labelled it. Callers use this
+// to ask for a name at the moment the user still knows which account it is.
+func (a Account) NeedsLabel() bool {
+	return a.Label == "" && strings.HasPrefix(a.Email, FingerprintPrefix)
 }
 
 // Store is the on-disk set of accounts.

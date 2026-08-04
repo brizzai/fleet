@@ -86,6 +86,37 @@ func (d *AccountsDialog) Refresh(accounts []claudeaccount.Account, usage map[str
 	if d.cursor >= len(accounts) {
 		d.cursor = max(0, len(accounts)-1)
 	}
+	// A refresh only happens once an operation has finished, so the in-flight
+	// state is over by definition. Without this the dialog sits on "Checking
+	// the token…" forever after a *successful* add — the account is saved and
+	// the UI still says it is working.
+	if d.mode == accountsWaitingToken {
+		d.mode = accountsList
+		d.notice = ""
+	}
+}
+
+// Added puts the dialog back on the list with the new account selected, and
+// opens the rename box when the API declined to name it.
+//
+// Asking for the name here rather than leaving the row as `account-7ee6c0f8`
+// is the whole point: the user has just finished a browser login, so this is
+// the one moment they certainly know which account it is.
+func (d *AccountsDialog) Added(email string, needsLabel bool) {
+	d.mode = accountsList
+	d.err = ""
+	d.notice = ""
+	for i, a := range d.accounts {
+		if a.Email == email {
+			d.cursor = i
+			break
+		}
+	}
+	if needsLabel {
+		d.mode = accountsRename
+		d.input.SetValue("")
+		d.input.Focus()
+	}
 }
 
 func (d *AccountsDialog) Hide()           { d.visible = false }
@@ -284,9 +315,16 @@ func (d *AccountsDialog) View() string {
 		b.WriteString(d.input.View() + "\n")
 
 	case accountsRename:
-		b.WriteString(dimStyle.Render("Name for "+d.selectedEmail()) + "\n\n")
+		if a, ok := d.selected(); ok && a.NeedsLabel() {
+			// Anthropic won't identify a setup-token credential, so the row is
+			// keyed by a hash. Say so, or the box reads as a pointless chore.
+			b.WriteString(dimStyle.Render("Added. Anthropic doesn't reveal which account a") + "\n")
+			b.WriteString(dimStyle.Render("token belongs to, so give it a name you'll recognise:") + "\n\n")
+		} else {
+			b.WriteString(dimStyle.Render("Name for "+d.selectedEmail()) + "\n\n")
+		}
 		b.WriteString(d.input.View() + "\n")
-		b.WriteString(dimStyle.Render("Leave empty to clear the label.") + "\n")
+		b.WriteString(dimStyle.Render("e.g. personal, work — leave empty to skip.") + "\n")
 
 	case accountsWaitingToken:
 		b.WriteString(d.notice + "\n")
@@ -564,7 +602,10 @@ func (h *Home) handleAccountValidated(msg accountValidatedMsg) (tea.Model, tea.C
 		return h, nil
 	}
 	h.accounts.Upsert(msg.account)
-	return h, h.persistAccounts("Added " + msg.account.Name())
+	cmd := h.persistAccounts("Added " + msg.account.Name())
+	// After persistAccounts, so the dialog is looking at the refreshed list.
+	h.accountsDialog.Added(msg.account.Email, msg.account.NeedsLabel())
+	return h, cmd
 }
 
 // maybePollAccountUsage refreshes each account's quota, throttled per account.

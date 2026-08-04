@@ -115,7 +115,7 @@ func Validate(ctx context.Context, token string) (Account, error) {
 		// Valid but unnamed. Fingerprint the token so the name is stable across
 		// re-adds of the same token and distinct between accounts, without the
 		// credential being recoverable from it.
-		email = "account-" + fingerprint(token)
+		email = FingerprintPrefix + fingerprint(token)
 		debuglog.Logger.Warn("token is valid but carries no identity; using a fingerprint name",
 			"name", email)
 	}
