@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/diagnostics"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/x/ansi"
@@ -344,12 +345,20 @@ func (d *BugReportDialog) viewStatusForm() string {
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, box)
 }
 
-// sanitizeHome rewrites the user's home directory to "~" in anything bound for
-// a public issue. Every report kind must run its text through this, including
-// issue *titles*: a body that sanitizes while the title above it publishes
-// /Users/<name>/... verbatim leaks on the one line GitHub shows in search
-// results and notification mail.
-func sanitizeHome(s string) string {
+// sanitizeForIssue scrubs anything bound for a public issue. Every report kind
+// must run its text through this, including issue *titles*: a body that
+// sanitizes while the title above it publishes /Users/<name>/... verbatim leaks
+// on the one line GitHub shows in search results and notification mail.
+//
+// Two things are removed:
+//
+//   - The user's home directory, rewritten to "~".
+//   - Anthropic credentials. The add-account flow puts a year-long
+//     CLAUDE_CODE_OAUTH_TOKEN on a real tmux pane, and pane excerpts are
+//     published here — so the redaction lives at the chokepoint rather than at
+//     each call site, where a future caller could forget it.
+func sanitizeForIssue(s string) string {
+	s = claudeaccount.Redact(s)
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return s
@@ -447,7 +456,7 @@ func metaString(m map[string]any, key string) string {
 // debug log are the reporter's actual content and ride only when includeContent
 // is set, which the dialog previews and lets them switch off.
 func buildStatusReportBody(desc string, expected session.Status, f *statusReportForm, r *diagnostics.Report) string {
-	sanitize := sanitizeHome
+	sanitize := sanitizeForIssue
 
 	var b strings.Builder
 	b.WriteString("## Wrong Status Detected\n\n")

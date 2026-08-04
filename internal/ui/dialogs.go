@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
@@ -24,6 +25,9 @@ type sessionCreateMsg struct {
 	workspaceName  string
 	agent          agent.Type
 	resumeClaudeID string
+	// account is the Claude account (email) to authenticate as. Empty means
+	// "let the configured strategy pick", resolved in handleSessionCreate.
+	account string
 }
 
 // forkSessionMsg is sent when the user forks an existing session.
@@ -41,7 +45,36 @@ type forkSessionMsg struct {
 	title                 string
 	workspaceName         string
 	agent                 agent.Type // inherited from the parent session
+	// account is inherited from the parent session and must not be re-picked:
+	// the fork resumes the parent's conversation, and that conversation's
+	// prompt cache lives on the parent's account.
+	account string
 }
+
+// Claude-account management messages, emitted by AccountsDialog and handled in
+// app.go. The dialog owns no storage of its own — every mutation round-trips
+// through the store so the on-disk set and the token resolver stay in step.
+type (
+	// accountSetupTokenMsg asks fleet to run `claude setup-token` in a pane the
+	// user drives, then capture the token it prints.
+	accountSetupTokenMsg struct{}
+	// accountValidateMsg carries a token to identify against `claude auth status`.
+	accountValidateMsg struct{ token string }
+	// accountValidatedMsg is the result. capture reports whether the token came
+	// from the pane capture rather than the paste field, which decides whether a
+	// failure falls back to the paste box or just reports.
+	accountValidatedMsg struct {
+		account claudeaccount.Account
+		capture bool
+		err     error
+	}
+	accountRemoveMsg  struct{ email string }
+	accountReorderMsg struct {
+		email string
+		delta int
+	}
+	accountSetDefaultMsg struct{ email string }
+)
 
 // NewSessionDialog handles the new session creation flow with directory autocomplete.
 type NewSessionDialog struct {

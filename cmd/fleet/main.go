@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/brizzai/fleet/internal/analytics"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/migration"
@@ -236,6 +237,24 @@ func runAdd(path string) {
 
 	title := session.TitleFromPath(path)
 	s := session.NewSession(title, path)
+
+	// `fleet add` leaves Agent empty, which resolves to Claude at launch — so
+	// the session is account-eligible and needs one picked, or it silently
+	// ignores a configured multi-account setup.
+	accounts := claudeaccount.Load()
+	session.SetAccountTokenFunc(accounts.TokenFor)
+	cfg := config.Load()
+	if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
+		Accounts: accounts.List(),
+		Strategy: cfg.GetAccountStrategy(),
+		Manual:   cfg.DefaultAccount,
+	}); ok {
+		if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
+			fmt.Fprintf(os.Stderr, "%s is set and overrides fleet's account selection — unset it to use %s\n", conflict, acct.Email)
+			os.Exit(1)
+		}
+		s.Account = acct.Email
+	}
 
 	if err := s.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start session: %v\n", err)

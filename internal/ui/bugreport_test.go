@@ -77,8 +77,8 @@ func TestReportTitlesAndFeatureBodySanitizeHome(t *testing.T) {
 	}
 	desc := "add a way to open " + home + "/code/foo without leaving fleet"
 
-	if got := sanitizeHome(desc); strings.Contains(got, home) {
-		t.Fatalf("sanitizeHome left the home path in place: %q", got)
+	if got := sanitizeForIssue(desc); strings.Contains(got, home) {
+		t.Fatalf("sanitizeForIssue left the home path in place: %q", got)
 	}
 
 	d := bugFormDialog()
@@ -88,11 +88,11 @@ func TestReportTitlesAndFeatureBodySanitizeHome(t *testing.T) {
 	// Exercise the real submit path with gh absent, so nothing is filed: the
 	// title and body are built before the gh lookup either way.
 	t.Setenv("PATH", t.TempDir())
-	body := "## Feature Request\n\n### Problem\n" + sanitizeHome(desc)
+	body := "## Feature Request\n\n### Problem\n" + sanitizeForIssue(desc)
 	if strings.Contains(body, home) {
 		t.Fatal("feature request body must not carry the raw home path")
 	}
-	if title := ansi.Truncate(sanitizeHome(desc), 60, "…"); strings.Contains(title, home) {
+	if title := ansi.Truncate(sanitizeForIssue(desc), 60, "…"); strings.Contains(title, home) {
 		t.Fatal("issue title must not carry the raw home path")
 	}
 }

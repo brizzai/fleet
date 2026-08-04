@@ -52,6 +52,7 @@ type Session struct {
 	Title                string
 	ProjectPath          string
 	Agent                agent.Type // which coding agent runs in this session (claude/codex)
+	Account              string     // Claude account (email) this session authenticates as; "" = ambient /login
 	Status               Status
 	TmuxSessionName      string
 	CreatedAt            time.Time
@@ -178,12 +179,80 @@ func (s *Session) initialRunStatus() Status {
 	return StatusRunning
 }
 
+// accountTokenFn resolves a Claude account email to its OAuth token. Set once
+// at startup from the accounts store.
+//
+// A package-level resolver rather than a field on Session because sessionEnv is
+// reached from Start, Restart and RespawnClaude — including for sessions rebuilt
+// by FromRow, which has no store to consult — and because re-adding an account
+// with a fresh token must take effect on the next relaunch without touching
+// every live Session.
+var (
+	accountTokenMu sync.RWMutex
+	accountTokenFn func(string) string
+)
+
+// SetAccountTokenFunc installs the account-token resolver. Passing nil disables
+// per-account auth, which is the state fleet runs in when no accounts are
+// configured.
+func SetAccountTokenFunc(fn func(string) string) {
+	accountTokenMu.Lock()
+	defer accountTokenMu.Unlock()
+	accountTokenFn = fn
+}
+
+func accountToken(email string) string {
+	if email == "" {
+		return ""
+	}
+	accountTokenMu.RLock()
+	fn := accountTokenFn
+	accountTokenMu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn(email)
+}
+
 // sessionEnv returns the env vars to set on the tmux session for this fleet session.
 func (s *Session) sessionEnv() []string {
-	return []string{
+	env := []string{
 		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
 	}
+	// Per-account auth. Claude only: CLAUDE_CODE_OAUTH_TOKEN is a claude.ai
+	// subscription credential that Codex and OpenCode neither read nor need.
+	//
+	// An unresolvable account (removed from the store while sessions still
+	// reference it) yields no var at all, so the session falls back to the
+	// ambient /login rather than failing to launch.
+	//
+	// Every branch logs: "which account did this session actually launch as"
+	// is the question every multi-account bug report starts with, and the
+	// answer is invisible once tmux has the env. Never the token itself.
+	ag := agent.Parse(string(s.Agent))
+	switch {
+	case ag != agent.Claude:
+		if s.Account != "" {
+			debuglog.Logger.Info("session env: account ignored for non-claude agent",
+				"id", s.ID, "agent", ag, "account", s.Account)
+		}
+	case s.Account == "":
+		debuglog.Logger.Info("session env: no account, using ambient claude login", "id", s.ID)
+	default:
+		tok := accountToken(s.Account)
+		if tok == "" {
+			// The store no longer knows this account: removed, or the resolver
+			// was never installed. Falls back rather than failing to launch.
+			debuglog.Logger.Warn("session env: account has no token, falling back to ambient login",
+				"id", s.ID, "account", s.Account)
+			break
+		}
+		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+tok)
+		debuglog.Logger.Info("session env: launching as claude account",
+			"id", s.ID, "account", s.Account, "token_len", len(tok))
+	}
+	return env
 }
 
 // Start launches the Claude Code session in tmux.
@@ -1559,6 +1628,7 @@ func (s *Session) ToRow() *SessionRow {
 		Title:           s.Title,
 		ProjectPath:     s.ProjectPath,
 		Agent:           string(s.Agent),
+		Account:         s.Account,
 		Status:          string(s.Status),
 		TmuxSession:     s.TmuxSessionName,
 		CreatedAt:       s.CreatedAt,
@@ -1645,6 +1715,7 @@ func FromRow(row *SessionRow) *Session {
 		Title:           row.Title,
 		ProjectPath:     row.ProjectPath,
 		Agent:           agent.Parse(row.Agent),
+		Account:         row.Account,
 		Status:          status,
 		TmuxSessionName: row.TmuxSession,
 		CreatedAt:       row.CreatedAt,

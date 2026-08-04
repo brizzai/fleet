@@ -40,6 +40,7 @@ type SessionRow struct {
 	Title           string
 	ProjectPath     string
 	Agent           string
+	Account         string
 	Status          string
 	TmuxSession     string
 	CreatedAt       time.Time
@@ -203,6 +204,16 @@ func (s *StateDB) migrate() error {
 			return err
 		}
 	}
+	// Claude account (email) the session authenticates as. Defaults to empty,
+	// which means the ambient /login account — so every pre-existing row keeps
+	// behaving exactly as it did before multi-account support.
+	if !s.hasColumn("sessions", "account") {
+		_, err = s.db.Exec(`ALTER TABLE sessions ADD COLUMN account TEXT NOT NULL DEFAULT ''`)
+		if err != nil {
+			debuglog.Logger.Error("migration failed: add account column", "error", err)
+			return err
+		}
+	}
 
 	_, err = s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS slot_bindings (
@@ -315,10 +326,10 @@ func (s *StateDB) hasColumn(table, column string) bool {
 // SaveSession inserts or replaces a session row.
 func (s *StateDB) SaveSession(row *SessionRow) error {
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		row.ID, row.Title, row.ProjectPath, string(agent.Parse(row.Agent)), row.Status, row.TmuxSession,
+		row.ID, row.Title, row.ProjectPath, string(agent.Parse(row.Agent)), row.Account, row.Status, row.TmuxSession,
 		row.CreatedAt.Unix(), row.LastAccessed.Unix(), boolToInt(row.Acknowledged),
 		row.ClaudeSessionID, row.WorkspaceName,
 		boolToInt(row.ManuallyRenamed), row.FirstPrompt, boolToInt(row.TitleGenerated),
@@ -333,7 +344,7 @@ func (s *StateDB) SaveSession(row *SessionRow) error {
 // LoadSessions returns all sessions ordered by creation time.
 func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, project_path, agent, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until
+		SELECT id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until
 		FROM sessions ORDER BY created_at
 	`)
 	if err != nil {
@@ -347,7 +358,7 @@ func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 		var r SessionRow
 		var createdAt, lastAccessed, snoozedUntil int64
 		var ack, manuallyRenamed, titleGenerated int
-		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount, &snoozedUntil); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Account, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount, &snoozedUntil); err != nil {
 			debuglog.Logger.Error("failed to scan session row", "error", err)
 			return nil, err
 		}
@@ -481,6 +492,18 @@ func (s *StateDB) UpdateClaudeSessionID(id, claudeSessionID string) error {
 	_, err := s.db.Exec("UPDATE sessions SET claude_session_id = ? WHERE id = ?", claudeSessionID, id)
 	if err != nil {
 		debuglog.Logger.Error("failed to update claude session ID", "id", id, "claude_session_id", claudeSessionID, "error", err)
+	}
+	return err
+}
+
+// UpdateAccount changes which Claude account a session authenticates as.
+//
+// Unlike agent, which is fixed at creation, account is mutable: a session whose
+// account runs out of quota can be moved to another one and resumed.
+func (s *StateDB) UpdateAccount(id, account string) error {
+	_, err := s.db.Exec("UPDATE sessions SET account = ? WHERE id = ?", account, id)
+	if err != nil {
+		debuglog.Logger.Error("failed to update session account", "id", id, "error", err)
 	}
 	return err
 }

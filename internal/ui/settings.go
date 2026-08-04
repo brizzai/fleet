@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/analytics"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/editor"
 )
@@ -30,6 +31,7 @@ var (
 	densitySet          = []string{"normal", "compact"}
 	enterModeSet        = []string{"attach", "split"}
 	defaultAgentSet     = []string{"claude", "codex", "opencode"}
+	accountStrategySet  = []string{claudeaccount.StrategyLeastUsed, claudeaccount.StrategyWaterfall, claudeaccount.StrategyManual}
 	telemetryModeSet    = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
 	suspendModeSet      = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
 )
@@ -553,6 +555,11 @@ func buildSettingsCategories() []settingsCategory {
 			withLabel("Slot badges", toggle(
 				(*config.Config).IsShowSlotBadges,
 				func(c *config.Config, v bool) { c.ShowSlotBadges = &v }, true)),
+			// Self-hides below two accounts, so this only matters once a second
+			// subscription is added.
+			withLabel("Account usage", toggle(
+				(*config.Config).IsShowAccountUsage,
+				func(c *config.Config, v bool) { c.ShowAccountUsage = &v }, true)),
 			{label: "GIT", subheader: true},
 			withLabel("PR badges", toggle(
 				(*config.Config).IsShowPRBadges,
@@ -692,6 +699,26 @@ func buildSettingsCategories() []settingsCategory {
 				valueW: func() int { return maxStrW([]string{"Claude", "Codex", "OpenCode"}) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.DefaultAgent = cycleString(d.cfg.GetDefaultAgent(), defaultAgentSet, dir)
+				},
+			},
+			{
+				// Which Claude subscription a new session runs under. Only
+				// meaningful once a second account is added (Ctrl+K → Manage
+				// Claude Accounts); with one account every mode picks it.
+				label: "Claude account",
+				value: func(c *config.Config) string {
+					switch c.GetAccountStrategy() {
+					case claudeaccount.StrategyWaterfall:
+						return "Waterfall"
+					case claudeaccount.StrategyManual:
+						return "Manual"
+					default:
+						return "Least used"
+					}
+				},
+				valueW: func() int { return maxStrW([]string{"Least used", "Waterfall", "Manual"}) },
+				cycle: func(d *SettingsDialog, dir int) {
+					d.cfg.AccountStrategy = cycleString(d.cfg.GetAccountStrategy(), accountStrategySet, dir)
 				},
 			},
 			{

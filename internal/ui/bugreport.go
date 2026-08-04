@@ -299,7 +299,7 @@ func (d *BugReportDialog) trackMisdetection(expected session.Status) tea.Cmd {
 func (d *BugReportDialog) submitStatusReport(desc string, expected session.Status) tea.Cmd {
 	body := buildStatusReportBody(desc, expected, &d.status, d.report)
 	title := fmt.Sprintf("Wrong status: showed %s, expected %s — %s",
-		d.status.shownStatus, expected, ansi.Truncate(sanitizeHome(desc), 60, "…"))
+		d.status.shownStatus, expected, ansi.Truncate(sanitizeForIssue(desc), 60, "…"))
 	return d.createGitHubIssue(title, body, "bug")
 }
 
@@ -307,7 +307,7 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 	// Build title from description, truncated. Sanitized like the body: the
 	// title is what GitHub shows in search results and notification mail, so a
 	// home path leaking here survives even when the body below it is clean.
-	title := ansi.Truncate(sanitizeHome(description), 60, "…")
+	title := ansi.Truncate(sanitizeForIssue(description), 60, "…")
 
 	var body string
 	label := "bug"
@@ -316,7 +316,7 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 		// action log, and debug log are reproduction context for a defect; on an
 		// idea they are noise the maintainer has to scroll past.
 		label = "enhancement"
-		body = "## Feature Request\n\n### Problem\n" + sanitizeHome(description) + "\n\n" +
+		body = "## Feature Request\n\n### Problem\n" + sanitizeForIssue(description) + "\n\n" +
 			fmt.Sprintf("### Environment\n- **Version**: %s\n- **OS**: %s (%s)\n",
 				d.report.Version, d.report.OSSummary(), d.report.Arch)
 	} else {
@@ -535,7 +535,7 @@ func (d *BugReportDialog) formatErrors() []string {
 	var result []string
 	for _, e := range d.errorEntries {
 		ago := formatTimeAgo(e.Timestamp)
-		result = append(result, fmt.Sprintf("%s | %s", ago, sanitizeHome(e.Message)))
+		result = append(result, fmt.Sprintf("%s | %s", ago, sanitizeForIssue(e.Message)))
 	}
 	return result
 }
@@ -549,7 +549,7 @@ func (d *BugReportDialog) formatActions() []string {
 	for i := 0; i < count; i++ {
 		a := d.actionEntries[i]
 		ts := a.Timestamp.Format("15:04:05")
-		detail := sanitizeHome(a.Detail)
+		detail := sanitizeForIssue(a.Detail)
 		result_ := "ok"
 		if !a.Success {
 			result_ = "ERROR"

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
@@ -37,6 +38,7 @@ type worktreeOpts struct {
 	base      string
 	repoPath  string
 	agentName string
+	account   string
 	noSession bool
 }
 
@@ -54,6 +56,7 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.StringVar(&o.base, "base", "", "base branch to branch from (default: the repo's default branch)")
 	fs.StringVar(&o.repoPath, "path", "", "repo to create the worktree in (default: current directory)")
 	fs.StringVar(&o.agentName, "agent", "", "agent to run: claude, codex, or opencode (default: default_agent config)")
+	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config)")
 	fs.BoolVar(&o.noSession, "no-session", false, "create the worktree only, print its path, and start no session")
 	return fs
 }
@@ -109,6 +112,16 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 		}
 		if o.noSession {
 			return o, fmt.Errorf("--agent has no effect with --no-session (no session is started)")
+		}
+	}
+	if o.account != "" {
+		if o.noSession {
+			return o, fmt.Errorf("--account has no effect with --no-session (no session is started)")
+		}
+		// CLAUDE_CODE_OAUTH_TOKEN is a claude.ai credential; the other agents
+		// never read it, so accepting the flag here would silently do nothing.
+		if o.agentName != "" && agent.Type(o.agentName) != agent.Claude {
+			return o, fmt.Errorf("--account only applies to claude sessions (got --agent %s)", o.agentName)
 		}
 	}
 	return o, nil
@@ -170,6 +183,34 @@ func runWorktree(args []string) {
 		if _, err := exec.LookPath(ag.Binary()); err != nil {
 			fmt.Fprintf(os.Stderr, "%s CLI not found — install %s to create sessions\n", ag.Binary(), ag.DisplayName())
 			os.Exit(1)
+		}
+	}
+
+	// Resolve the Claude account before doing any work. A typo here bills the
+	// wrong subscription, so an unknown name is an error rather than a silent
+	// fallback — the same rule --agent follows, and for a costlier reason.
+	accounts := claudeaccount.Load()
+	session.SetAccountTokenFunc(accounts.TokenFor)
+	account := ""
+	if !opts.noSession && ag == agent.Claude {
+		if opts.account != "" {
+			if _, ok := accounts.Get(opts.account); !ok {
+				fmt.Fprintf(os.Stderr, "unknown account %q — configure it in fleet first\n", opts.account)
+				os.Exit(1)
+			}
+			account = opts.account
+		} else if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
+			Accounts: accounts.List(),
+			Strategy: cfg.GetAccountStrategy(),
+			Manual:   cfg.DefaultAccount,
+		}); ok {
+			account = acct.Email
+		}
+		if account != "" {
+			if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
+				fmt.Fprintf(os.Stderr, "%s is set and overrides fleet's account selection — unset it to use %s\n", conflict, account)
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -236,6 +277,7 @@ func runWorktree(args []string) {
 
 	s := session.NewSession(name, info.Path)
 	s.Agent = ag
+	s.Account = account
 	s.WorkspaceName = name
 	if err := s.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Created worktree %s, but failed to start session: %v\n", info.Path, err)

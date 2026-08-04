@@ -21,6 +21,7 @@ import (
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/chrome"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/discovery"
@@ -429,6 +430,14 @@ type Home struct {
 	cfg     *config.Config
 	version string
 
+	// Claude accounts. accounts is the on-disk set of subscriptions; usage is
+	// their quota state, written by the background worker and read while
+	// assigning a session, so it follows gitInfoCache's immutable-snapshot
+	// pattern rather than a lock.
+	accounts       *claudeaccount.Store
+	accountUsage   atomic.Pointer[map[string]claudeaccount.Usage]
+	accountsDialog *AccountsDialog
+
 	// Pre-resolved per-install identity (device hash + git name/email +
 	// OS version). Discovered in main.go before the TUI starts so Init
 	// doesn't shell out on the Bubble Tea Update() thread.
@@ -564,7 +573,49 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	}
 	emptyCache := make(map[string]*git.RepoInfo)
 	h.gitInfoCache.Store(&emptyCache)
+
+	h.accounts = claudeaccount.Load()
+	h.accountsDialog = NewAccountsDialog()
+	// One startup line carrying the whole multi-account picture, so a bug
+	// report shows the configuration without needing the user to describe it.
+	debuglog.Logger.Info("claude accounts ready",
+		"count", h.accounts.Len(), "strategy", cfg.GetAccountStrategy(),
+		"manual_default", cfg.DefaultAccount, "origins_restricted", len(cfg.AllowedAccounts),
+		"conflicting_auth", claudeaccount.GuardConflictingAuth())
+	emptyUsage := make(map[string]claudeaccount.Usage)
+	h.accountUsage.Store(&emptyUsage)
+	// Sessions resolve their token at launch through this, so re-adding an
+	// account with a fresh token takes effect on the next relaunch without
+	// touching any live Session.
+	session.SetAccountTokenFunc(h.accounts.TokenFor)
 	return h
+}
+
+// accountUsageSnapshot returns the current immutable quota snapshot. The
+// returned map MUST NOT be mutated.
+func (h *Home) accountUsageSnapshot() map[string]claudeaccount.Usage {
+	if p := h.accountUsage.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// allowedAccountsFor returns the accounts permitted for sessions at repoPath,
+// or nil for unrestricted.
+//
+// Resolved from the cached git info rather than shelling out, since this runs
+// on the Update goroutine. An origin the cache hasn't reached yet reads as
+// unrestricted — which is also the default, so the fallback can only ever be
+// permissive in the same way an unconfigured origin already is.
+func (h *Home) allowedAccountsFor(repoPath string) []string {
+	if len(h.cfg.AllowedAccounts) == 0 {
+		return nil
+	}
+	info, ok := h.gitInfo()[repoPath]
+	if !ok || info == nil || info.OriginKey == "" {
+		return nil
+	}
+	return h.cfg.GetAllowedAccounts(OriginExpandKey(info.OriginKey))
 }
 
 // Init implements tea.Model.
@@ -685,6 +736,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.contextMenu.SetSize(msg.Width, msg.Height)
 		h.snoozeDialog.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
+		h.accountsDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
@@ -813,6 +865,50 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionCreateMsg:
 		return h.handleSessionCreate(msg)
 
+	case accountSetupTokenMsg:
+		return h, h.runSetupToken()
+
+	case accountValidateMsg:
+		h.accountsDialog.SetBusy("Checking the token…")
+		return h, h.validateAccount(msg.token, false)
+
+	case accountValidatedMsg:
+		return h.handleAccountValidated(msg)
+
+	case accountRemoveMsg:
+		if !h.accounts.Remove(msg.email) {
+			return h, nil
+		}
+		// Sessions still naming this account fall back to the ambient login
+		// rather than failing to launch — see Store.TokenFor.
+		if h.cfg.DefaultAccount == msg.email {
+			h.cfg.DefaultAccount = ""
+			if err := h.cfg.Save(); err != nil {
+				debuglog.Logger.Error("failed to save config after clearing default account", "err", err)
+			}
+		}
+		return h, h.persistAccounts("Removed " + msg.email)
+
+	case accountReorderMsg:
+		if !h.accounts.Reorder(msg.email, msg.delta) {
+			return h, nil
+		}
+		return h, h.persistAccounts("")
+
+	case accountSetDefaultMsg:
+		// Only the manual strategy consults this, so setting it under an
+		// automatic strategy would be a control that visibly does nothing.
+		if h.cfg.GetAccountStrategy() != claudeaccount.StrategyManual {
+			h.setInfo("Set the account strategy to Manual in Settings to pin an account")
+			return h, nil
+		}
+		h.cfg.DefaultAccount = msg.email
+		if err := h.cfg.Save(); err != nil {
+			h.setError(fmt.Errorf("could not save default account: %w", err))
+			return h, nil
+		}
+		return h, h.persistAccounts("Default account: " + msg.email)
+
 	case forkSessionMsg:
 		ag := msg.agent
 		if ag == "" {
@@ -828,6 +924,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
 		s.Agent = ag
+		// Inherit rather than re-pick: the fork resumes the parent's
+		// conversation, so it has to authenticate as the account that
+		// conversation belongs to. A fork whose account was chosen afresh would
+		// resume against a different subscription and lose the prompt cache.
+		// (msg.account is empty only on paths that predate this field, where
+		// falling back to the strategy is still better than nothing.)
+		s.Account = msg.account
+		if s.Account == "" {
+			s.Account = h.resolveAccount(ag, msg.path)
+		}
 		// Record which conversation we're forking from. The fork resumes the
 		// source session's ClaudeSessionID; if that id is stale (a missed
 		// rotation), the fork opens the wrong conversation (issue #142). Logging
@@ -1730,9 +1836,22 @@ func (h *Home) View() tea.View {
 	// Animated "What's New" badge, top-right of the header row. Only when there
 	// are unseen highlights and no modal owns the screen (a modal makes
 	// renderBody return its own full-screen view).
+	// Both live on the header's top-right, so they share it: the badge keeps the
+	// corner (it is transient and demands attention) and the quota readout is
+	// laid out to its left. Tracking the badge's occupied width here is what
+	// keeps them from overprinting each other.
+	rightEdge := h.width - 1
 	if h.hasUnseenWhatsNew && !h.modalOpen() {
 		badge := renderWhatsNewBadge(h.whatsNewFrame)
-		base = overlayAt(badge, base, h.width-lipgloss.Width(badge)-1, 0)
+		badgeW := lipgloss.Width(badge)
+		base = overlayAt(badge, base, rightEdge-badgeW, 0)
+		rightEdge -= badgeW + 2
+	}
+	if ShowAccountUsage && !h.modalOpen() {
+		readout := renderAccountUsageHeader(h.accounts.List(), h.accountUsageSnapshot(), rightEdge, time.Now())
+		if readout != "" {
+			base = overlayAt(readout, base, rightEdge-lipgloss.Width(readout), 0)
+		}
 	}
 	// Command palette is a true overlay: render it on top of the main UI so
 	// the sidebar/preview stay visible behind the dialog box. The base is
@@ -1822,6 +1941,7 @@ func (h *Home) modalOpen() bool {
 		h.worktreeDialog.IsVisible() ||
 		h.branchDialog.IsVisible() ||
 		h.sessionCreateDialog.IsVisible() ||
+		h.accountsDialog.IsVisible() ||
 		h.newDialog.IsVisible() ||
 		h.confirmDialog.IsVisible() ||
 		h.renameDialog.IsVisible() ||
@@ -1863,6 +1983,9 @@ func (h *Home) renderBody() string {
 	}
 	if h.sessionCreateDialog.IsVisible() {
 		return h.sessionCreateDialog.View()
+	}
+	if h.accountsDialog.IsVisible() {
+		return h.accountsDialog.View()
 	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
@@ -2166,6 +2289,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.sessionCreateDialog.IsVisible():
 		dialog, cmd := h.sessionCreateDialog.Update(msg)
 		h.sessionCreateDialog = dialog
+		return cmd, true
+	case h.accountsDialog.IsVisible():
+		dialog, cmd := h.accountsDialog.Update(msg)
+		h.accountsDialog = dialog
 		return cmd, true
 	case h.newDialog.IsVisible():
 		dialog, cmd := h.newDialog.Update(msg)
@@ -2849,7 +2976,60 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	msg.agent = ag
+	if msg.account == "" {
+		msg.account = h.resolveAccount(ag, msg.path)
+	}
+	// A conflicting ambient credential outranks the per-session token, so the
+	// session would run on that credential while every fleet surface claimed it
+	// was on the chosen account. Refuse rather than misbill silently — the fix
+	// is one `unset` away, and a wrong-subscription charge is not recoverable.
+	if msg.account != "" {
+		if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
+			h.setError(fmt.Errorf("%s is set and overrides fleet's account selection — unset it to use %s", conflict, msg.account))
+			return h, nil
+		}
+	}
 	return h, h.startSessionCmd(msg)
+}
+
+// resolveAccount picks the Claude account a new session at path should run as,
+// per the configured strategy. Returns "" for the ambient /login account, which
+// is both the no-accounts-configured case and the fallback when an origin's
+// allowlist leaves nothing to choose from.
+//
+// Claude-only: CLAUDE_CODE_OAUTH_TOKEN is a claude.ai subscription credential
+// that the other agents neither read nor need.
+func (h *Home) resolveAccount(ag agent.Type, path string) string {
+	if ag != agent.Claude {
+		return ""
+	}
+	if h.accounts == nil || h.accounts.Len() == 0 {
+		debuglog.Logger.Info("account select: none configured, using ambient login", "path", path)
+		return ""
+	}
+	strategy := h.cfg.GetAccountStrategy()
+	allowed := h.allowedAccountsFor(path)
+	usage := h.accountUsageSnapshot()
+
+	acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
+		Accounts: h.accounts.List(),
+		Usage:    usage,
+		Strategy: strategy,
+		Manual:   h.cfg.DefaultAccount,
+		Allowed:  allowed,
+	})
+	if !ok {
+		debuglog.Logger.Warn("account select: no candidate, falling back to ambient login",
+			"path", path, "strategy", strategy, "allowed", allowed, "configured", h.accounts.Len())
+		return ""
+	}
+	// The inputs as well as the verdict: "why this account" is unanswerable
+	// from the choice alone, and the usual answer is a stale or missing poll.
+	debuglog.Logger.Info("account select",
+		"chosen", acct.Email, "strategy", strategy, "path", path,
+		"allowed", allowed, "candidates", h.accounts.Len(),
+		"usage_known", len(usage), "chosen_five_hour_pct", usage[acct.Email].FiveHourPct)
+	return acct.Email
 }
 
 // tccProbeResultMsg carries the outcome of a lazy macOS-TCC access probe.
@@ -2959,6 +3139,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	s := session.NewSession(msg.title, msg.path)
 	s.WorkspaceName = msg.workspaceName
 	s.Agent = msg.agent
+	s.Account = msg.account
 	if msg.resumeClaudeID != "" {
 		s.ClaudeSessionID = msg.resumeClaudeID
 	}
@@ -4056,6 +4237,7 @@ func (h *Home) forkSelected() tea.Cmd {
 	path := s.ProjectPath
 	workspaceName := s.WorkspaceName
 	parentAgent := s.Agent
+	parentAccount := s.Account
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		claudeSessionID, stale := s.ResolveLaunchID()
@@ -4069,6 +4251,7 @@ func (h *Home) forkSelected() tea.Cmd {
 			title:                 title,
 			workspaceName:         workspaceName,
 			agent:                 parentAgent,
+			account:               parentAccount,
 		}
 	}
 }
@@ -4107,6 +4290,12 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 	sourceID := ctx.parentSessionID
 	sourceTitle := ctx.parentTitle
 	sourcePath := ctx.parentProjectPath
+	// Both inherited from the parent, captured on the Update goroutine. The
+	// fork resumes the parent's conversation, so it must run the same agent and
+	// authenticate as the same account — re-picking either would resume against
+	// something that doesn't hold that conversation.
+	parentAgent := parent.Agent
+	parentAccount := parent.Account
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		parentClaudeSessionID, stale := parent.ResolveLaunchID()
@@ -4119,6 +4308,8 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 			path:                  destPath,
 			title:                 title,
 			workspaceName:         destWorkspaceName,
+			agent:                 parentAgent,
+			account:               parentAccount,
 		}
 	}
 }
@@ -5647,6 +5838,11 @@ drainPriority:
 	// empty-fleet early-return path above — the throttle makes that safe.
 	h.maybeAdoptExternalSessions(sessions)
 
+	// 5d. Refresh Claude account quota. Network I/O, and the endpoint rate-limits
+	// hard, so it is self-throttled well below the tick and lives here rather
+	// than on the Update loop.
+	h.maybePollAccountUsage()
+
 	// 5. Git+PR refresh used to run here, inline. It now lives on its own
 	// goroutine (gitWorker) — see the comment there for why sharing this
 	// one was a bug.
@@ -7167,6 +7363,22 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		forkWorktree.Enabled = true
 	}
 
+	// Each clause names the reason it actually failed — a constant note here
+	// would contradict the account the readout shows on the same screen.
+	moveAccount := ContextMenuItem{ID: "move_account", Label: "Move to Next Account"}
+	switch {
+	case agentOf(s) != agent.Claude:
+		moveAccount.Note = "Claude only"
+	case h.accounts.Len() < 2:
+		moveAccount.Note = "needs a second account"
+	case !resumable:
+		// Without a conversation id the restart starts a fresh chat on the new
+		// account, silently discarding the work — worse than refusing.
+		moveAccount.Note = "no session id yet"
+	default:
+		moveAccount.Enabled = true
+	}
+
 	suspend := ContextMenuItem{ID: "suspend_session", Label: "Suspend Session"}
 	switch {
 	case status == session.StatusSuspended:
@@ -7198,6 +7410,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 			Note:    "no session id yet",
 		},
 		forkWorktree,
+		moveAccount,
 		suspend,
 		h.snoozeMenuItem(),
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
@@ -7269,6 +7482,8 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "jump_next", Name: "Jump to Next Waiting", Shortcut: "Space"},
 		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
+		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
+		{Kind: PaletteKindCommand, ID: "move_account", Name: "Move Session to Next Account"},
 		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -7468,6 +7683,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		}
 		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
 		return h, nil
+	case "manage_accounts":
+		return h, h.openAccountsDialog()
+	case "move_account":
+		return h, h.moveSelectedAccount()
 	case "new_repo":
 		h.newDialog.Show()
 		return h, nil

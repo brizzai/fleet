@@ -65,11 +65,26 @@ type Config struct {
 	// GetSessionSuspendMode. See internal/ui suspend sweep.
 	SessionSuspendMode string `json:"session_suspend_mode,omitempty"`
 
+	// AccountStrategy picks which Claude account a new session runs under:
+	// "least_used" (default), "waterfall", or "manual". Read via
+	// GetAccountStrategy. Accounts themselves live in accounts.json, not here —
+	// their tokens are year-long credentials and this file is published in bug
+	// reports.
+	AccountStrategy string `json:"account_strategy,omitempty"`
+	// DefaultAccount is the account email used under the "manual" strategy.
+	DefaultAccount string `json:"default_account,omitempty"`
+	// AllowedAccounts restricts which accounts may be used under a given origin,
+	// keyed the same way as collapsed_groups / snoozed_groups ("origin:<key>").
+	// An absent or empty entry means every account is allowed, so the common
+	// case configures nothing.
+	AllowedAccounts map[string][]string `json:"allowed_accounts,omitempty"`
+
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
 	// surfaced in the Appearance category of the Settings dialog and drives a
 	// package-level render flag in the ui package (see ApplyDisplayConfig).
 	ShowAgentGlyphs    *bool  `json:"show_agent_glyphs,omitempty"`    // per-session ✻/◇ agent sigil
+	ShowAccountUsage   *bool  `json:"show_account_usage,omitempty"`   // top-right per-account weekly quota readout
 	ShowStatusPills    *bool  `json:"show_status_pills,omitempty"`    // header "2● 1◐" status summary
 	ShowPRBadges       *bool  `json:"show_pr_badges,omitempty"`       // "#123 ✓" PR badge on checkout headers
 	ShowDirtyIndicator *bool  `json:"show_dirty_indicator,omitempty"` // "*" dirty-worktree marker
@@ -139,6 +154,29 @@ func (c *Config) GetDefaultAgent() string {
 	default:
 		return "claude"
 	}
+}
+
+// GetAccountStrategy returns the normalized Claude-account assignment strategy
+// ("least_used", "waterfall", or "manual"), defaulting to least_used. Normalized
+// like GetDefaultAgent so a hand-edited " Waterfall " still resolves.
+func (c *Config) GetAccountStrategy() string {
+	switch strings.TrimSpace(strings.ToLower(c.AccountStrategy)) {
+	case "waterfall":
+		return "waterfall"
+	case "manual":
+		return "manual"
+	default:
+		return "least_used"
+	}
+}
+
+// GetAllowedAccounts returns the account emails permitted under the given
+// origin key. An empty result means unrestricted — the default for every origin.
+func (c *Config) GetAllowedAccounts(originKey string) []string {
+	if len(c.AllowedAccounts) == 0 {
+		return nil
+	}
+	return c.AllowedAccounts[originKey]
 }
 
 // GetReleaseNotesSeenVersion returns the newest release version the user has
@@ -465,6 +503,11 @@ func boolDefaultTrue(p *bool) bool {
 
 // IsShowAgentGlyphs reports whether the per-session ✻/◇ agent sigil is shown (default: true).
 func (c *Config) IsShowAgentGlyphs() bool { return boolDefaultTrue(c.ShowAgentGlyphs) }
+
+// IsShowAccountUsage reports whether the top-right per-account weekly quota
+// readout is shown (default: true). It self-hides with fewer than two accounts,
+// so the default costs nothing for a single-subscription user.
+func (c *Config) IsShowAccountUsage() bool { return boolDefaultTrue(c.ShowAccountUsage) }
 
 // IsShowStatusPills reports whether header status-summary pills are shown (default: true).
 func (c *Config) IsShowStatusPills() bool { return boolDefaultTrue(c.ShowStatusPills) }
