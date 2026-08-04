@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 )
 
@@ -56,7 +59,7 @@ func TestAddedPromptsForANameWhenUnidentified(t *testing.T) {
 		t.Errorf("cursor landed on %q, want the account just added", got)
 	}
 	// The box must explain itself, or it reads as a pointless chore.
-	if !strings.Contains(d.View(), "doesn't reveal") {
+	if !strings.Contains(d.View(), "won't say which account") {
 		t.Errorf("rename prompt does not explain why a name is needed:\n%s", d.View())
 	}
 }
@@ -74,6 +77,134 @@ func TestAddedDoesNotPromptWhenNamed(t *testing.T) {
 
 	if d.mode != accountsList {
 		t.Fatalf("mode = %v, want the list — an already-named account needs nothing", d.mode)
+	}
+}
+
+// The box is a fixed width and nothing inside it may wrap. Getting the content
+// width wrong by two columns split the separator, the rows and the footer all
+// at once — visible as a stray "—" and a "close" on its own line.
+func TestDialogNeverWraps(t *testing.T) {
+	long := claudeaccount.Account{
+		Email: "a-really-quite-long-account-address@some-long-domain.example.com",
+		Plan:  "max",
+		Order: 0,
+	}
+	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8", Order: 1}
+
+	// Every mode, at terminal widths from cramped to roomy.
+	modes := []struct {
+		name  string
+		setup func(d *AccountsDialog)
+	}{
+		{"empty", func(d *AccountsDialog) { d.Refresh(nil, nil, "") }},
+		{"list", func(d *AccountsDialog) {
+			d.Refresh([]claudeaccount.Account{long, fp}, nil, "")
+		}},
+		{"list with quota", func(d *AccountsDialog) {
+			d.Refresh([]claudeaccount.Account{long, fp}, map[string]claudeaccount.Usage{
+				long.Email: {FiveHourPct: 42, FiveHourReset: hdrNow.Add(time.Hour), FetchedAt: hdrNow},
+				fp.Email:   {Err: claudeaccount.ErrQuotaScope, FetchedAt: hdrNow},
+			}, "")
+		}},
+		{"manual default", func(d *AccountsDialog) {
+			d.Show([]claudeaccount.Account{long, fp}, nil, long.Email, true)
+		}},
+		{"paste", func(d *AccountsDialog) {
+			d.Refresh([]claudeaccount.Account{long}, nil, "")
+			d.mode = accountsPaste
+		}},
+		{"rename unnamed", func(d *AccountsDialog) {
+			d.Refresh([]claudeaccount.Account{fp}, nil, "")
+			d.Added(fp.Email, true)
+		}},
+		{"confirm remove", func(d *AccountsDialog) {
+			d.Refresh([]claudeaccount.Account{long}, nil, "")
+			d.mode = accountsConfirmRm
+		}},
+		{"error", func(d *AccountsDialog) {
+			d.Refresh(nil, nil, "")
+			d.SetError(errors.New("token was rejected — generate a fresh one with `claude setup-token`"), false)
+		}},
+	}
+
+	for _, m := range modes {
+		for _, termW := range []int{50, 80, 140} {
+			d := NewAccountsDialog()
+			d.SetSize(termW, 40)
+			d.Show(nil, nil, "", false)
+			m.setup(d)
+
+			boxW := min(accountsDialogWidth, max(40, termW-4))
+			for _, line := range strings.Split(d.View(), "\n") {
+				if w := lipgloss.Width(line); w > termW {
+					t.Errorf("%s @ term %d: line is %d cols, wider than the terminal:\n%s",
+						m.name, termW, w, line)
+					break
+				}
+			}
+			// Every box line is exactly boxW: a wrapped interior would produce
+			// a short line where the right border should be.
+			var boxLines int
+			for _, line := range strings.Split(d.View(), "\n") {
+				if strings.ContainsAny(line, "╭│╰") {
+					boxLines++
+					if w := lipgloss.Width(strings.TrimRight(line, " ")); w != (termW-boxW)/2+boxW {
+						t.Errorf("%s @ term %d: ragged box line (%d cols):\n%q", m.name, termW, w, line)
+						break
+					}
+				}
+			}
+			if boxLines == 0 {
+				t.Errorf("%s @ term %d: no box rendered", m.name, termW)
+			}
+		}
+	}
+}
+
+// "unreadable" read as a fault. Nothing is broken — a setup-token credential
+// simply isn't entitled to the usage endpoint, so the cell stays empty.
+func TestScopeLimitedAccountShowsNoQuotaNoise(t *testing.T) {
+	d := NewAccountsDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, "", false)
+	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8"}
+	d.Refresh([]claudeaccount.Account{fp},
+		map[string]claudeaccount.Usage{fp.Email: {Err: claudeaccount.ErrQuotaScope, FetchedAt: hdrNow}}, "")
+
+	view := d.View()
+	for _, bad := range []string{"unreadable", "not checked yet", "quota unavailable"} {
+		if strings.Contains(view, bad) {
+			t.Errorf("scope-limited account shows %q, which reads as a fault:\n%s", bad, view)
+		}
+	}
+	// But it should still point at the fix for its unreadable name.
+	if !strings.Contains(view, "r to name") {
+		t.Errorf("unnamed account gives no hint that it can be named:\n%s", view)
+	}
+}
+
+// One text box serves both modes, so its placeholder has to be set on entry —
+// otherwise the rename prompt asks for a name while offering a token as the
+// example of what to type.
+func TestInputPlaceholderMatchesTheMode(t *testing.T) {
+	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8"}
+
+	d := NewAccountsDialog()
+	d.SetSize(120, 40)
+	d.Show([]claudeaccount.Account{fp}, nil, "", false)
+
+	d.Added(fp.Email, true)
+	if got := d.input.Placeholder; got != namePlaceholder {
+		t.Errorf("rename placeholder = %q, want the name example", got)
+	}
+	if strings.Contains(d.View(), "sk-ant") {
+		t.Errorf("rename prompt offers a token as the example:\n%s", d.View())
+	}
+
+	// And back the other way.
+	d.SetError(errors.New("capture missed"), true)
+	if got := d.input.Placeholder; got != tokenPlaceholder {
+		t.Errorf("paste placeholder = %q, want the token example", got)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // accountsMode is which pane of the dialog owns the keyboard.
@@ -31,9 +32,11 @@ const (
 
 // AccountsDialog manages the set of Claude subscriptions fleet can launch under.
 //
-// Accounts are self-naming: the email and plan come from `claude auth status`
-// with the token applied, never from the user, so a label can't be wrong and
-// nothing has to be typed but the token itself.
+// Accounts would name themselves if Anthropic let them, but a `claude
+// setup-token` credential is not entitled to the profile endpoint (403), so in
+// practice a token arrives anonymous and is keyed by a fingerprint. The dialog
+// therefore asks for a name at the one moment the user certainly knows the
+// answer: immediately after the browser login that produced the token.
 type AccountsDialog struct {
 	visible bool
 	width   int
@@ -57,10 +60,27 @@ type AccountsDialog struct {
 // NewAccountsDialog creates the dialog.
 func NewAccountsDialog() *AccountsDialog {
 	ti := textinput.New()
-	ti.Placeholder = "sk-ant-oat01-…"
 	ti.CharLimit = 200
 	ti.SetWidth(46)
 	return &AccountsDialog{input: ti}
+}
+
+// Placeholders for the shared text input. One box serves both the paste and
+// rename modes, so the placeholder has to be set on entry — otherwise the
+// rename prompt asks for a name while showing a token as the example.
+const (
+	tokenPlaceholder = "sk-ant-oat01-…"
+	namePlaceholder  = "personal, work, you@example.com"
+)
+
+// beginInput focuses the shared text box for a mode, seeding its value and
+// placeholder together so the two can't disagree.
+func (d *AccountsDialog) beginInput(mode accountsMode, value, placeholder string) {
+	d.mode = mode
+	d.input.SetValue(value)
+	d.input.Placeholder = placeholder
+	d.input.CursorEnd()
+	d.input.Focus()
 }
 
 // Show opens the dialog over the current account set.
@@ -113,9 +133,7 @@ func (d *AccountsDialog) Added(email string, needsLabel bool) {
 		}
 	}
 	if needsLabel {
-		d.mode = accountsRename
-		d.input.SetValue("")
-		d.input.Focus()
+		d.beginInput(accountsRename, "", namePlaceholder)
 	}
 }
 
@@ -127,7 +145,7 @@ func (d *AccountsDialog) SetSize(w, h int) {
 }
 
 // SetBusy puts the dialog into its validating state while a captured token is
-// checked against `claude auth status`.
+// checked with Anthropic.
 func (d *AccountsDialog) SetBusy(notice string) {
 	d.mode = accountsWaitingToken
 	d.notice = notice
@@ -140,9 +158,7 @@ func (d *AccountsDialog) SetError(err error, offerPaste bool) {
 	d.err = claudeaccount.Redact(err.Error())
 	d.notice = ""
 	if offerPaste {
-		d.mode = accountsPaste
-		d.input.SetValue("")
-		d.input.Focus()
+		d.beginInput(accountsPaste, "", tokenPlaceholder)
 		return
 	}
 	d.mode = accountsList
@@ -243,17 +259,12 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 	case "p":
 		// The explicit paste path, for anyone who already has a token.
 		d.err = ""
-		d.mode = accountsPaste
-		d.input.SetValue("")
-		d.input.Focus()
+		d.beginInput(accountsPaste, "", tokenPlaceholder)
 	case "r":
 		// An account the API declined to identify gets a fingerprint name, so
 		// renaming has to be reachable or those rows stay unreadable forever.
 		if a, ok := d.selected(); ok {
-			d.mode = accountsRename
-			d.input.SetValue(a.Label)
-			d.input.CursorEnd()
-			d.input.Focus()
+			d.beginInput(accountsRename, a.Label, namePlaceholder)
 		}
 	case "d":
 		if len(d.accounts) > 0 {
@@ -292,9 +303,16 @@ func (d *AccountsDialog) selected() (claudeaccount.Account, bool) {
 	return d.accounts[d.cursor], true
 }
 
-// accountsDialogWidth is fixed so the box doesn't resize as usage percentages
-// arrive or a longer email is added mid-session.
-const accountsDialogWidth = 66
+const (
+	// accountsDialogWidth is fixed so the box doesn't resize as usage
+	// percentages arrive or a longer name is added mid-session.
+	accountsDialogWidth = 72
+	// boxChrome is what the border and padding take out of the declared width.
+	// Measured, not assumed: lipgloss v2's Width is border-inclusive, so the
+	// usable content is Width - 2 border - 4 padding. Getting this wrong by two
+	// wrapped the separator, the rows and the footer all at once.
+	boxChrome = 6
+)
 
 // View renders the dialog.
 func (d *AccountsDialog) View() string {
@@ -302,7 +320,8 @@ func (d *AccountsDialog) View() string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
 	errStyle := lipgloss.NewStyle().Foreground(ColorRed)
 
-	inner := accountsDialogWidth - 4
+	boxW := min(accountsDialogWidth, max(40, d.width-4))
+	inner := boxW - boxChrome
 
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Claude Accounts"))
@@ -310,21 +329,23 @@ func (d *AccountsDialog) View() string {
 
 	switch d.mode {
 	case accountsPaste:
-		b.WriteString(dimStyle.Render("Run `claude setup-token` in a terminal, then paste it here.") + "\n")
-		b.WriteString(dimStyle.Render("The token lasts a year and is stored outside config.json.") + "\n\n")
-		b.WriteString(d.input.View() + "\n")
+		for _, l := range wrapTo(inner, "Run `claude setup-token` in a terminal, then paste the token here. It lasts a year and is stored outside config.json.") {
+			b.WriteString(dimStyle.Render(l) + "\n")
+		}
+		b.WriteString("\n" + d.input.View() + "\n")
 
 	case accountsRename:
 		if a, ok := d.selected(); ok && a.NeedsLabel() {
 			// Anthropic won't identify a setup-token credential, so the row is
 			// keyed by a hash. Say so, or the box reads as a pointless chore.
-			b.WriteString(dimStyle.Render("Added. Anthropic doesn't reveal which account a") + "\n")
-			b.WriteString(dimStyle.Render("token belongs to, so give it a name you'll recognise:") + "\n\n")
+			for _, l := range wrapTo(inner, "Added. Anthropic won't say which account a token belongs to, so give it a name you'll recognise:") {
+				b.WriteString(dimStyle.Render(l) + "\n")
+			}
 		} else {
-			b.WriteString(dimStyle.Render("Name for "+d.selectedEmail()) + "\n\n")
+			b.WriteString(dimStyle.Render(ansi.Truncate("Name for "+d.selectedName(), inner, "…")) + "\n")
 		}
-		b.WriteString(d.input.View() + "\n")
-		b.WriteString(dimStyle.Render("e.g. personal, work — leave empty to skip.") + "\n")
+		b.WriteString("\n" + d.input.View() + "\n")
+		b.WriteString(dimStyle.Render("Your email, or anything — empty to skip.") + "\n")
 
 	case accountsWaitingToken:
 		b.WriteString(d.notice + "\n")
@@ -332,87 +353,183 @@ func (d *AccountsDialog) View() string {
 
 	default:
 		if len(d.accounts) == 0 {
-			b.WriteString(dimStyle.Render("No accounts yet — fleet uses whichever account you're") + "\n")
-			b.WriteString(dimStyle.Render("logged into. Add a second to spread work across both.") + "\n")
+			for _, l := range wrapTo(inner, "No accounts yet — fleet uses whichever account you're logged into. Add a second to spread work across both.") {
+				b.WriteString(dimStyle.Render(l) + "\n")
+			}
 		}
 		for i, a := range d.accounts {
 			b.WriteString(d.renderRow(i, a, inner) + "\n")
 		}
 		if d.mode == accountsConfirmRm {
-			b.WriteString("\n" + errStyle.Render(fmt.Sprintf("Remove %s?  y / n", d.selectedEmail())) + "\n")
+			b.WriteString("\n" + errStyle.Render(ansi.Truncate("Remove "+d.selectedName()+"?  y / n", inner, "…")) + "\n")
 		}
 	}
 
 	if d.err != "" {
-		b.WriteString("\n" + errStyle.Render("✕ "+d.err) + "\n")
+		b.WriteString("\n")
+		for _, l := range wrapTo(inner, "✕ "+d.err) {
+			b.WriteString(errStyle.Render(l) + "\n")
+		}
 	}
 
 	b.WriteString("\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", inner)))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render(d.footer()))
+	// The key hints are one idea per line rather than one long wrapped run:
+	// a footer that wraps mid-chord reads as a rendering fault.
+	for i, l := range d.footer(inner) {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(dimStyle.Render(l))
+	}
 
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorAccent).
 		Padding(1, 2).
-		Width(min(accountsDialogWidth, max(34, d.width-4)))
+		Width(boxW)
 
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(b.String()))
 }
 
-func (d *AccountsDialog) footer() string {
-	switch d.mode {
-	case accountsPaste:
-		return "⏎ add   esc back"
-	case accountsRename:
-		return "⏎ rename   esc back"
-	case accountsWaitingToken:
-		return "esc cancel"
-	case accountsConfirmRm:
-		return "y remove   n cancel"
+// selectedName is the human-facing name of the highlighted row.
+func (d *AccountsDialog) selectedName() string {
+	a, ok := d.selected()
+	if !ok {
+		return ""
 	}
-	if d.manualStrategy {
-		return "a add   p paste   r rename   d remove   J/K order   ⏎ default   esc close"
-	}
-	// Enter only means something under the manual strategy, so it is not
-	// advertised when the strategy would ignore it.
-	return "a add   p paste   r rename   d remove   J/K order   esc close"
+	return a.Name()
 }
 
-// renderRow draws one account: order marker, name, plan, and quota when known.
+// footer returns the key hints, packed into lines that fit width.
+func (d *AccountsDialog) footer(width int) []string {
+	var hints []string
+	switch d.mode {
+	case accountsPaste:
+		hints = []string{"⏎ add", "esc back"}
+	case accountsRename:
+		hints = []string{"⏎ save", "esc skip"}
+	case accountsWaitingToken:
+		hints = []string{"esc cancel"}
+	case accountsConfirmRm:
+		hints = []string{"y remove", "n cancel"}
+	default:
+		hints = []string{"a add", "p paste", "r rename", "d remove", "J/K order"}
+		// Enter only means something under the manual strategy, so it is not
+		// advertised when the strategy would ignore it.
+		if d.manualStrategy {
+			hints = append(hints, "⏎ default")
+		}
+		hints = append(hints, "esc close")
+	}
+	return packHints(hints, width)
+}
+
+// packHints lays hints out across as few lines as fit, never splitting one.
+func packHints(hints []string, width int) []string {
+	const sep = "   "
+	var lines []string
+	cur := ""
+	for _, h := range hints {
+		next := h
+		if cur != "" {
+			next = cur + sep + h
+		}
+		if cur != "" && lipgloss.Width(next) > width {
+			lines = append(lines, cur)
+			cur = h
+			continue
+		}
+		cur = next
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
+// wrapTo breaks text on word boundaries to fit width, so prose in the dialog
+// never relies on the box to wrap it (the box wraps mid-word).
+func wrapTo(width int, text string) []string {
+	if width < 8 {
+		return []string{text}
+	}
+	var lines []string
+	cur := ""
+	for _, w := range strings.Fields(text) {
+		next := w
+		if cur != "" {
+			next = cur + " " + w
+		}
+		if cur != "" && lipgloss.Width(next) > width {
+			lines = append(lines, cur)
+			cur = w
+			continue
+		}
+		cur = next
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
+// renderRow draws one account: selection marker, name, plan, and quota.
+//
+// width is the content width the row must not exceed; the name is truncated to
+// protect the right-hand cell, since a wrapped row reads as a broken dialog.
 func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) string {
 	selected := i == d.cursor && d.mode != accountsPaste
 	dimStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
 
-	marker := "  "
-	if d.manualStrategy && a.Email == d.defaultAccount {
-		marker = "★ "
+	// Three lead cells, kept as separate columns rather than one string: the
+	// cursor and the default-account star are independent, and a row can carry
+	// both. (Slicing them back apart would also cut the multi-byte ★ in half.)
+	cursorCol := " "
+	if selected {
+		cursorCol = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("▸")
 	}
+	starCol := "  "
+	if d.manualStrategy && a.Email == d.defaultAccount {
+		starCol = lipgloss.NewStyle().Foreground(ColorAccent).Render("★") + " "
+	}
+	const leadCells = 3
 
-	right := dimStyle.Render("not checked yet")
-	if u, ok := d.usage[a.Email]; ok && u.Known() {
-		right = renderQuotaCell(u)
-	} else if ok && u.Err != nil {
-		right = dimStyle.Render("unreadable")
+	// The right-hand cell is for numbers you can act on. An account whose token
+	// may never read quota gets nothing rather than a word: "unreadable" reads
+	// as a fault, when in fact nothing is wrong — a `claude setup-token`
+	// credential simply isn't entitled to the usage endpoint.
+	right := ""
+	if u, ok := d.usage[a.Email]; ok {
+		switch {
+		case u.Known():
+			right = renderQuotaCell(u)
+		case errors.Is(u.Err, claudeaccount.ErrQuotaScope):
+			right = ""
+		case u.Err != nil:
+			right = dimStyle.Render("quota unavailable")
+		}
 	}
 
 	name := a.Name()
-	if a.Plan != "" {
+	if a.NeedsLabel() {
+		// Nudge toward the rename rather than leaving a hash looking deliberate.
+		name += dimStyle.Render("  (r to name)")
+	} else if a.Plan != "" {
 		name += dimStyle.Render(" · " + a.Plan)
 	}
 
-	left := marker + name
-	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
+	avail := width - leadCells - lipgloss.Width(right)
+	if avail > 1 && lipgloss.Width(name) > avail {
+		name = ansi.Truncate(name, avail, "…")
+	}
+
+	pad := width - leadCells - lipgloss.Width(name) - lipgloss.Width(right)
 	if pad < 1 {
 		pad = 1
 	}
-	row := left + strings.Repeat(" ", pad) + right
-
-	if selected {
-		return lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("▸") + row
-	}
-	return " " + row
+	return cursorCol + starCol + name + strings.Repeat(" ", pad) + right
 }
 
 // renderQuotaCell renders the 5-hour window as "42% · resets 15:04", or the
