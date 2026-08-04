@@ -2,6 +2,8 @@ package claudeaccount
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,41 +43,23 @@ const (
 // ErrNoToken is returned when an operation needs a token and none was given.
 var ErrNoToken = errors.New("no token")
 
-// authStatus is the subset of `claude auth status --json` fleet reads.
-type authStatus struct {
-	LoggedIn         bool   `json:"loggedIn"`
-	Email            string `json:"email"`
-	OrgName          string `json:"orgName"`
-	SubscriptionType string `json:"subscriptionType"`
-}
-
-// tokenEnv builds a child environment where the given token is the credential
-// that wins.
+// profileEndpoint identifies the account behind a token.
 //
-// The higher-precedence variables are stripped rather than merely overridden:
-// CLAUDE_CODE_OAUTH_TOKEN sits at priority 5, below ANTHROPIC_AUTH_TOKEN (2)
-// and ANTHROPIC_API_KEY (3). Leaving either in place would validate the wrong
-// credential and cheerfully report success for a token that will never be used.
-// (apiKeyHelper, priority 4, is a settings.json key rather than an env var and
-// cannot be stripped here — GuardConflictingAuth covers it.)
-func tokenEnv(token string) []string {
-	src := os.Environ()
-	out := make([]string, 0, len(src)+1)
-	for _, e := range src {
-		if strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") ||
-			strings.HasPrefix(e, "ANTHROPIC_API_KEY=") ||
-			strings.HasPrefix(e, "ANTHROPIC_AUTH_TOKEN=") {
-			continue
-		}
-		out = append(out, e)
-	}
-	return append(out, "CLAUDE_CODE_OAUTH_TOKEN="+token)
-}
+// `claude auth status --json` cannot do this job, which is worth recording
+// because it is the obvious thing to reach for. With CLAUDE_CODE_OAUTH_TOKEN
+// set it answers only {"loggedIn":true,"authMethod":"oauth_token"} — no email,
+// no plan, and `loggedIn:true` even for a string of A's. It verifies nothing
+// and identifies nothing, so it is useless both as a liveness check and as a
+// source of names.
+const profileEndpoint = "https://api.anthropic.com/api/oauth/profile"
 
-// Validate asks Claude who a token belongs to, returning a ready-to-store
-// Account. This is what makes accounts self-naming: the email and plan come
-// from Claude, never from the user, so a label can't be wrong. It doubles as
-// the liveness check for an expired token.
+// Validate checks a token is live and identifies the account behind it.
+//
+// Liveness is the HTTP status: the endpoints reject a bad bearer with 401/403,
+// which is the only real verification available (see profileEndpoint for why
+// the CLI cannot do it). Identity is best-effort on top — a valid token whose
+// owner we cannot name is still a usable account, so it gets a stable
+// fingerprint name rather than being refused.
 func Validate(ctx context.Context, token string) (Account, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -89,46 +73,114 @@ func Validate(ctx context.Context, token string) (Account, error) {
 	// paste from a whole one, which is the common failure.
 	debuglog.Logger.Info("validating claude account token", "token_len", len(token), "timeout", execTimeout)
 
-	cmd := exec.CommandContext(ctx, "claude", "auth", "status", "--json")
-	cmd.Env = tokenEnv(token)
-	out, err := cmd.Output()
+	body, status, err := getWithToken(ctx, profileEndpoint, token)
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			// Redact defensively: the token can appear in an error echo.
-			stderr := Redact(strings.TrimSpace(string(ee.Stderr)))
-			debuglog.Logger.Error("claude auth status failed", "stderr", stderr, "exit_code", ee.ExitCode())
-			return Account{}, fmt.Errorf("claude auth status: %s", stderr)
+		return Account{}, fmt.Errorf("could not reach Anthropic to check the token: %w", err)
+	}
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		debuglog.Logger.Error("token rejected by anthropic", "status", status)
+		return Account{}, errors.New("token was rejected — generate a fresh one with `claude setup-token`")
+	case status != http.StatusOK:
+		// Some other failure (rate limit, outage). Fall back to the usage
+		// endpoint purely as a liveness probe before giving up: refusing a
+		// working token because one endpoint hiccuped is the worse error.
+		debuglog.Logger.Warn("profile endpoint unavailable, falling back to usage probe", "status", status)
+		if _, err := FetchUsage(ctx, token); err != nil {
+			return Account{}, fmt.Errorf("could not verify the token: %w", err)
 		}
-		debuglog.Logger.Error("claude auth status could not run", "error", err)
-		return Account{}, fmt.Errorf("claude auth status: %w", err)
+		body = nil
 	}
 
-	var st authStatus
-	if err := json.Unmarshal(out, &st); err != nil {
-		// The output can't hold a token (it echoes identity, not credentials),
-		// but redact anyway — this line is bound for debug.log.
-		debuglog.Logger.Error("could not parse claude auth status output",
-			"error", err, "output", Redact(strings.TrimSpace(string(out))))
-		return Account{}, fmt.Errorf("could not parse claude auth status output: %w", err)
-	}
-	// The email test is the load-bearing one, not LoggedIn. Verified against a
-	// deliberately invalid token: `claude auth status` still answers
-	// loggedIn=true and simply omits the email. Checking LoggedIn alone would
-	// accept any garbage string and store it as a working account.
-	if !st.LoggedIn || st.Email == "" {
-		debuglog.Logger.Error("token rejected by claude",
-			"logged_in", st.LoggedIn, "email_present", st.Email != "")
-		return Account{}, errors.New("token is not valid — claude did not return an account for it")
+	// The response shape is undocumented, so log it (redacted) — this is how we
+	// learn what identity fields exist without guessing at a struct.
+	if len(body) > 0 {
+		debuglog.Logger.Info("account profile response", "body", Redact(strings.TrimSpace(string(body))))
 	}
 
-	debuglog.Logger.Info("claude account validated",
-		"email", st.Email, "plan", st.SubscriptionType, "org", st.OrgName)
-	return Account{
-		Email: st.Email,
-		Plan:  st.SubscriptionType,
-		Token: token,
-	}, nil
+	email, plan := identityFrom(body)
+	if email == "" {
+		// Valid but unnamed. Fingerprint the token so the name is stable across
+		// re-adds of the same token and distinct between accounts, without the
+		// credential being recoverable from it.
+		email = "account-" + fingerprint(token)
+		debuglog.Logger.Warn("token is valid but carries no identity; using a fingerprint name",
+			"name", email)
+	}
+
+	debuglog.Logger.Info("claude account validated", "email", email, "plan", plan)
+	return Account{Email: email, Plan: plan, Token: token}, nil
+}
+
+// getWithToken performs an authenticated GET, returning the body and status.
+func getWithToken(ctx context.Context, url, token string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("User-Agent", "claude-code/"+claudeVersion())
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
+}
+
+// identityFrom digs an email and plan out of an undocumented JSON response.
+//
+// Deliberately a walk rather than a struct: the shape isn't published, and a
+// struct that guesses one nesting wrong silently yields an unnamed account. A
+// walk finds the field wherever it sits and keeps working if it moves.
+func identityFrom(body []byte) (email, plan string) {
+	if len(body) == 0 {
+		return "", ""
+	}
+	var v any
+	if err := json.Unmarshal(body, &v); err != nil {
+		return "", ""
+	}
+	var walk func(any)
+	walk = func(n any) {
+		switch t := n.(type) {
+		case map[string]any:
+			for k, val := range t {
+				s, _ := val.(string)
+				lk := strings.ToLower(k)
+				// An "@" is what makes it an address rather than a flag like
+				// "email_verified".
+				if email == "" && strings.Contains(lk, "email") && strings.Contains(s, "@") {
+					email = s
+				}
+				if plan == "" && s != "" &&
+					(lk == "subscriptiontype" || lk == "subscription_type" || lk == "plan" || lk == "tier") {
+					plan = s
+				}
+				walk(val)
+			}
+		case []any:
+			for _, val := range t {
+				walk(val)
+			}
+		}
+	}
+	walk(v)
+	return email, plan
+}
+
+// fingerprint is a short, stable, non-reversible id for a token, used to name
+// an account whose owner the API would not tell us.
+func fingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 // Usage is one account's quota state as reported by the usage endpoint.

@@ -889,6 +889,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, h.persistAccounts("Removed " + msg.email)
 
+	case accountRenameMsg:
+		if !h.accounts.SetLabel(msg.email, msg.label) {
+			return h, nil
+		}
+		return h, h.persistAccounts("")
+
 	case accountReorderMsg:
 		if !h.accounts.Reorder(msg.email, msg.delta) {
 			return h, nil

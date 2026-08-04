@@ -68,7 +68,13 @@ type (
 		capture bool
 		err     error
 	}
-	accountRemoveMsg  struct{ email string }
+	accountRemoveMsg struct{ email string }
+	// accountRenameMsg sets a display label. Needed because a token the API
+	// declines to identify is stored under a fingerprint name.
+	accountRenameMsg struct {
+		email string
+		label string
+	}
 	accountReorderMsg struct {
 		email string
 		delta int

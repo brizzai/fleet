@@ -25,6 +25,7 @@ const (
 	accountsPaste                            // manual token entry (the fallback path)
 	accountsConfirmRm                        // "really remove?" on the highlighted row
 	accountsWaitingToken                     // validating a token we just captured
+	accountsRename                           // typing a display label for the highlighted row
 )
 
 // AccountsDialog manages the set of Claude subscriptions fleet can launch under.
@@ -158,6 +159,25 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 		d.input, cmd = d.input.Update(msg)
 		return d, cmd
 
+	case accountsRename:
+		switch keyMsg.String() {
+		case "esc":
+			d.mode = accountsList
+			d.input.Blur()
+			return d, nil
+		case "enter":
+			email, label := d.selectedEmail(), strings.TrimSpace(d.input.Value())
+			d.mode = accountsList
+			d.input.Blur()
+			if email == "" {
+				return d, nil
+			}
+			return d, func() tea.Msg { return accountRenameMsg{email: email, label: label} }
+		}
+		var cmd tea.Cmd
+		d.input, cmd = d.input.Update(msg)
+		return d, cmd
+
 	case accountsConfirmRm:
 		switch keyMsg.String() {
 		case "y":
@@ -194,6 +214,15 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 		d.mode = accountsPaste
 		d.input.SetValue("")
 		d.input.Focus()
+	case "r":
+		// An account the API declined to identify gets a fingerprint name, so
+		// renaming has to be reachable or those rows stay unreadable forever.
+		if a, ok := d.selected(); ok {
+			d.mode = accountsRename
+			d.input.SetValue(a.Label)
+			d.input.CursorEnd()
+			d.input.Focus()
+		}
 	case "d":
 		if len(d.accounts) > 0 {
 			d.mode = accountsConfirmRm
@@ -217,10 +246,18 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 }
 
 func (d *AccountsDialog) selectedEmail() string {
-	if d.cursor < 0 || d.cursor >= len(d.accounts) {
+	a, ok := d.selected()
+	if !ok {
 		return ""
 	}
-	return d.accounts[d.cursor].Email
+	return a.Email
+}
+
+func (d *AccountsDialog) selected() (claudeaccount.Account, bool) {
+	if d.cursor < 0 || d.cursor >= len(d.accounts) {
+		return claudeaccount.Account{}, false
+	}
+	return d.accounts[d.cursor], true
 }
 
 // accountsDialogWidth is fixed so the box doesn't resize as usage percentages
@@ -245,9 +282,14 @@ func (d *AccountsDialog) View() string {
 		b.WriteString(dimStyle.Render("The token lasts a year and is stored outside config.json.") + "\n\n")
 		b.WriteString(d.input.View() + "\n")
 
+	case accountsRename:
+		b.WriteString(dimStyle.Render("Name for "+d.selectedEmail()) + "\n\n")
+		b.WriteString(d.input.View() + "\n")
+		b.WriteString(dimStyle.Render("Leave empty to clear the label.") + "\n")
+
 	case accountsWaitingToken:
 		b.WriteString(d.notice + "\n")
-		b.WriteString(dimStyle.Render("Asking Claude which account this token belongs to…") + "\n")
+		b.WriteString(dimStyle.Render("Checking the token with Anthropic…") + "\n")
 
 	default:
 		if len(d.accounts) == 0 {
@@ -284,17 +326,19 @@ func (d *AccountsDialog) footer() string {
 	switch d.mode {
 	case accountsPaste:
 		return "⏎ add   esc back"
+	case accountsRename:
+		return "⏎ rename   esc back"
 	case accountsWaitingToken:
 		return "esc cancel"
 	case accountsConfirmRm:
 		return "y remove   n cancel"
 	}
 	if d.manualStrategy {
-		return "a add   p paste   d remove   J/K order   ⏎ set default   esc close"
+		return "a add   p paste   r rename   d remove   J/K order   ⏎ default   esc close"
 	}
 	// Enter only means something under the manual strategy, so it is not
 	// advertised when the strategy would ignore it.
-	return "a add   p paste   d remove   J/K order   esc close"
+	return "a add   p paste   r rename   d remove   J/K order   esc close"
 }
 
 // renderRow draws one account: order marker, name, plan, and quota when known.

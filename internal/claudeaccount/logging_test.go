@@ -51,6 +51,66 @@ func TestValidateNeverLogsTheToken(t *testing.T) {
 	}
 }
 
+func TestIdentityFrom(t *testing.T) {
+	// The response shape is undocumented, so identity is dug out by walking
+	// rather than by a struct that guesses one nesting and silently yields an
+	// unnamed account when it guesses wrong. These are plausible shapes.
+	cases := []struct {
+		name      string
+		body      string
+		wantEmail string
+		wantPlan  string
+	}{
+		{"flat", `{"email":"a@x.com","subscriptionType":"max"}`, "a@x.com", "max"},
+		{"nested under account", `{"account":{"email_address":"b@x.com"},"plan":"pro"}`, "b@x.com", "pro"},
+		{"deeply nested", `{"data":{"user":{"primary_email":"c@x.com"}},"tier":"team"}`, "c@x.com", "team"},
+		{"inside an array", `{"accounts":[{"email":"d@x.com"}]}`, "d@x.com", ""},
+		{"snake case plan", `{"email":"e@x.com","subscription_type":"max"}`, "e@x.com", "max"},
+		{"no identity at all", `{"ok":true}`, "", ""},
+		{"empty body", ``, "", ""},
+		{"not json", `<html>nope</html>`, "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			email, plan := identityFrom([]byte(c.body))
+			if email != c.wantEmail {
+				t.Errorf("email = %q, want %q", email, c.wantEmail)
+			}
+			if plan != c.wantPlan {
+				t.Errorf("plan = %q, want %q", plan, c.wantPlan)
+			}
+		})
+	}
+}
+
+func TestIdentityIgnoresNonAddressEmailFields(t *testing.T) {
+	// "email_verified":true must not be mistaken for an address — the "@" test
+	// is what separates the address from the flags that sit beside it.
+	email, _ := identityFrom([]byte(`{"email_verified":"true","email_status":"ok"}`))
+	if email != "" {
+		t.Fatalf("email = %q, want empty", email)
+	}
+}
+
+func TestFingerprintIsStableAndDistinct(t *testing.T) {
+	// A token the API declines to identify is stored under this name, so it has
+	// to be stable across re-adds (or re-adding duplicates the account) and
+	// distinct between tokens (or two accounts collide into one).
+	a := fingerprint(fakeToken)
+	if a != fingerprint(fakeToken) {
+		t.Error("fingerprint is not stable for the same token")
+	}
+	if a == fingerprint(fakeToken+"x") {
+		t.Error("fingerprint collides across different tokens")
+	}
+	if strings.Contains(fakeToken, a) {
+		t.Error("fingerprint is a substring of the token — it must not be reversible")
+	}
+	if len(a) != 8 {
+		t.Errorf("fingerprint length = %d, want 8", len(a))
+	}
+}
+
 func TestFetchUsageNeverLogsTheToken(t *testing.T) {
 	buf := captureLog(t)
 
