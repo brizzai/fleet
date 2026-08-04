@@ -825,9 +825,10 @@ func (h *Home) maybePollAccountUsage() {
 		if had {
 			next[a.Email] = prev
 		}
-		// FetchedAt advances on failure too, so a broken endpoint is retried at
-		// the same slow cadence instead of on every cycle.
-		if had && now.Sub(prev.FetchedAt) < claudeaccount.MinPollInterval {
+		// Paced on AttemptedAt, not FetchedAt: a failing account must back off
+		// at the same slow cadence as a healthy one rather than retrying every
+		// cycle, and FetchedAt no longer advances on failure.
+		if had && now.Sub(prev.AttemptedAt) < claudeaccount.MinPollInterval {
 			continue
 		}
 
@@ -849,12 +850,17 @@ func (h *Home) maybePollAccountUsage() {
 				debuglog.Logger.Warn("account usage poll failed",
 					"account", a.Email, "err", claudeaccount.Redact(err.Error()))
 			}
+			// Keep whatever numbers we already had — a reading from three
+			// minutes ago beats none, and dropping it would pull the account
+			// out of the readout and rank it at the neutral midpoint for
+			// selection. Only the attempt clock moves.
 			prev.Err = err
-			prev.FetchedAt = now
+			prev.AttemptedAt = now
 			next[a.Email] = prev
 			changed = true
 			continue
 		}
+		u.AttemptedAt = now
 		debuglog.Logger.Info("account usage polled",
 			"account", a.Email,
 			"five_hour_pct", u.FiveHourPct, "five_hour_reset", u.FiveHourReset.Format(time.RFC3339),

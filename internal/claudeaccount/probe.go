@@ -104,6 +104,7 @@ func usageFromHeaders(h http.Header) (Usage, string, bool) {
 		FiveHourReset: headerTime(h, "anthropic-ratelimit-unified-5h-reset"),
 		SevenDayReset: headerTime(h, "anthropic-ratelimit-unified-7d-reset"),
 		FetchedAt:     time.Now(),
+		AttemptedAt:   time.Now(),
 	}
 
 	// The status field is authoritative where the percentage is a guess: a

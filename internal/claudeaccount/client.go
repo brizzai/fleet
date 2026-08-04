@@ -195,15 +195,24 @@ func fingerprint(token string) string {
 	return hex.EncodeToString(sum[:])[:8]
 }
 
-// Usage is one account's quota state as reported by the usage endpoint.
+// Usage is one account's quota state as last read.
+//
+// FetchedAt and AttemptedAt are deliberately separate. A network blip must not
+// erase a reading taken three minutes ago — a stale measurement is much closer
+// to the truth than "unknown", which would drop the account out of the readout
+// and make Select rank it at the neutral midpoint. So a failure advances only
+// AttemptedAt (which paces the retry) and leaves the numbers alone.
 type Usage struct {
 	FiveHourPct   int
 	FiveHourReset time.Time
 	SevenDayPct   int
 	SevenDayReset time.Time
 
+	// FetchedAt is when the percentages above were last successfully read.
 	FetchedAt time.Time
-	Err       error // last poll error; nil once a poll succeeds
+	// AttemptedAt is when a read was last tried, successfully or not.
+	AttemptedAt time.Time
+	Err         error // last poll error; nil once a poll succeeds
 }
 
 // Exhausted reports whether this account should be skipped for new work.
@@ -221,10 +230,13 @@ func (u Usage) Exhausted(now time.Time) bool {
 }
 
 // Known reports whether this usage carries a real reading, as opposed to the
-// zero value that a never-polled or failing account has. Selection needs the
-// distinction: an unknown account is a candidate, a spent one is not.
+// zero value a never-polled account has. Selection needs the distinction: an
+// unknown account is a candidate ranked at the midpoint, a spent one is not.
+//
+// Deliberately independent of Err: a reading that succeeded once stays usable
+// through a later failure. Err describes the last *attempt*, not the data.
 func (u Usage) Known() bool {
-	return !u.FetchedAt.IsZero() && u.Err == nil
+	return !u.FetchedAt.IsZero()
 }
 
 var httpClient = &http.Client{Timeout: httpTimeout}

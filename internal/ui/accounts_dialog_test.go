@@ -103,7 +103,7 @@ func TestDialogNeverWraps(t *testing.T) {
 		{"list with quota", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{long, fp}, map[string]claudeaccount.Usage{
 				long.Email: {FiveHourPct: 42, FiveHourReset: hdrNow.Add(time.Hour), FetchedAt: hdrNow},
-				fp.Email:   {Err: claudeaccount.ErrNoQuotaHeaders, FetchedAt: hdrNow},
+				fp.Email:   {Err: claudeaccount.ErrNoQuotaHeaders, AttemptedAt: hdrNow},
 			}, "")
 		}},
 		{"manual default", func(d *AccountsDialog) {
@@ -173,7 +173,7 @@ func TestQuotaRowShowsTheNumberAndNamesTheGap(t *testing.T) {
 	ok := claudeaccount.Account{Email: "real@x.com", Order: 1}
 	d.Refresh([]claudeaccount.Account{fp, ok}, map[string]claudeaccount.Usage{
 		// Unnamed, and its poll failed.
-		fp.Email: {Err: claudeaccount.ErrNoQuotaHeaders, FetchedAt: hdrNow},
+		fp.Email: {Err: claudeaccount.ErrNoQuotaHeaders, AttemptedAt: hdrNow},
 		// Named, with a live reading.
 		ok.Email: {FiveHourPct: 42, FiveHourReset: hdrNow.Add(time.Hour), FetchedAt: hdrNow},
 	}, "")

@@ -1,6 +1,7 @@
 package claudeaccount
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -111,6 +112,32 @@ func TestOrgIDExtracted(t *testing.T) {
 	}))
 	if org != "3675552f-509d-4c55-b960-c0710c979d25" {
 		t.Errorf("org = %q, want the header value", org)
+	}
+}
+
+// A network blip must not erase a reading taken minutes ago: unknown is worse
+// than stale, because it drops the account out of the readout and ranks it at
+// the neutral midpoint for selection.
+func TestAFailedAttemptDoesNotDiscardTheReading(t *testing.T) {
+	good := Usage{FiveHourPct: 42, FetchedAt: testNow, AttemptedAt: testNow}
+	if !good.Known() {
+		t.Fatal("a fresh successful reading should be known")
+	}
+
+	// What the poll does on failure: record the error and the attempt, keep
+	// the numbers.
+	afterFailure := good
+	afterFailure.Err = errors.New("context deadline exceeded")
+	afterFailure.AttemptedAt = testNow.Add(MinPollInterval)
+
+	if !afterFailure.Known() {
+		t.Error("a failed attempt discarded a previously good reading")
+	}
+	if afterFailure.FiveHourPct != 42 {
+		t.Errorf("percentages changed on failure: %d", afterFailure.FiveHourPct)
+	}
+	if !afterFailure.FetchedAt.Equal(testNow) {
+		t.Error("FetchedAt moved on a failed attempt; it must mark the last success")
 	}
 }
 
