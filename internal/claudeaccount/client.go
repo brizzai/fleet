@@ -43,6 +43,14 @@ const (
 // ErrNoToken is returned when an operation needs a token and none was given.
 var ErrNoToken = errors.New("no token")
 
+// ErrQuotaScope means this token may never read quota, however long we wait.
+//
+// The usage endpoint requires the `user:profile` scope, and `claude
+// setup-token` mints tokens without it — the ambient /login credential has it,
+// a setup-token credential does not. Callers must stop polling an account that
+// returns this rather than retrying on a timer forever.
+var ErrQuotaScope = errors.New("token lacks the user:profile scope needed to read quota")
+
 // profileEndpoint identifies the account behind a token.
 //
 // `claude auth status --json` cannot do this job, which is worth recording
@@ -73,29 +81,33 @@ func Validate(ctx context.Context, token string) (Account, error) {
 	// paste from a whole one, which is the common failure.
 	debuglog.Logger.Info("validating claude account token", "token_len", len(token), "timeout", execTimeout)
 
-	// Liveness is the usage endpoint, because that is the one fleet actually
-	// depends on: a token that can read quota can run sessions. Deliberately
-	// not the profile endpoint — a setup-token token is scope-limited (the
-	// docs say it "can only make model requests") and answers 403 there even
-	// when perfectly valid. Measured: a bogus token gets 401 from profile, a
-	// real one gets 403. Treating 403 as rejection refused every good token.
-	if _, err := FetchUsage(ctx, token); err != nil {
-		debuglog.Logger.Error("token failed the usage probe", "err", Redact(err.Error()))
-		return Account{}, fmt.Errorf("token was rejected — generate a fresh one with `claude setup-token` (%w)", err)
-	}
-
-	// Identity is best-effort on top, and often unavailable for exactly the
-	// scope reason above. A valid token we cannot name is still a usable
-	// account, so nothing here can fail the validation.
+	// One call does both jobs: the status code discriminates, the body names.
+	//
+	//   401 → genuinely bad token. (Measured against a string of A's.)
+	//   403 → real token, scope-limited. `claude setup-token` mints one without
+	//         `user:profile`, and the API says so in as many words: "OAuth
+	//         token does not meet scope requirement user:profile". Valid, just
+	//         not entitled to this endpoint — accept it.
+	//   200 → valid and entitled; the body carries the identity.
+	//
+	// Anything else (network, rate limit, outage) is not evidence against the
+	// token, so it is accepted rather than refused for an unrelated failure.
 	body, status, err := getWithToken(ctx, profileEndpoint, token)
-	if err != nil || status != http.StatusOK {
-		debuglog.Logger.Info("no identity available for this token; naming it by fingerprint",
-			"profile_status", status, "err", err)
+	switch {
+	case err != nil:
+		debuglog.Logger.Warn("could not reach Anthropic to check the token; accepting it unverified", "err", err)
 		body = nil
-	} else {
+	case status == http.StatusUnauthorized:
+		debuglog.Logger.Error("token rejected by anthropic", "status", status)
+		return Account{}, errors.New("token was rejected — generate a fresh one with `claude setup-token`")
+	case status == http.StatusOK:
 		// The response shape is undocumented, so log it (redacted) — this is how
 		// we learn what identity fields exist without guessing at a struct.
 		debuglog.Logger.Info("account profile response", "body", Redact(strings.TrimSpace(string(body))))
+	default:
+		debuglog.Logger.Info("token is valid but not entitled to identify itself; naming it by fingerprint",
+			"profile_status", status)
+		body = nil
 	}
 
 	email, plan := identityFrom(body)
@@ -318,6 +330,12 @@ func FetchUsage(ctx context.Context, token string) (Usage, error) {
 		debuglog.Logger.Warn("usage endpoint returned non-200",
 			"status", resp.StatusCode, "user_agent", "claude-code/"+claudeVersion(),
 			"body", Redact(strings.TrimSpace(string(body))))
+		// A scope refusal is permanent for this token, so say so distinctly:
+		// retrying it every few minutes for the life of the process would be
+		// pure noise against an answer that will never change.
+		if resp.StatusCode == http.StatusForbidden && strings.Contains(string(body), "scope") {
+			return Usage{}, ErrQuotaScope
+		}
 		return Usage{}, fmt.Errorf("usage endpoint returned %d", resp.StatusCode)
 	}
 

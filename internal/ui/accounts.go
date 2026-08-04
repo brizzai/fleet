@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -593,6 +594,12 @@ func (h *Home) maybePollAccountUsage() {
 		if had {
 			next[a.Email] = prev
 		}
+		// A scope refusal is permanent for this token — a `claude setup-token`
+		// credential will never be allowed to read quota. Retrying it on a
+		// timer would fill the log with an answer that cannot change.
+		if had && errors.Is(prev.Err, claudeaccount.ErrQuotaScope) {
+			continue
+		}
 		// FetchedAt advances on failure too, so a broken endpoint is retried at
 		// the same slow cadence instead of on every cycle.
 		if had && now.Sub(prev.FetchedAt) < claudeaccount.MinPollInterval {
@@ -601,11 +608,17 @@ func (h *Home) maybePollAccountUsage() {
 
 		u, err := claudeaccount.FetchUsage(context.Background(), a.Token)
 		if err != nil {
-			// Warn, not Error: quota is an optimization and a dead endpoint is
-			// survivable — but it silently changes which account gets picked,
-			// so it must be visible in the log.
-			debuglog.Logger.Warn("account usage poll failed",
-				"account", a.Email, "err", claudeaccount.Redact(err.Error()))
+			if errors.Is(err, claudeaccount.ErrQuotaScope) {
+				// Said once, then never again for this account.
+				debuglog.Logger.Info("quota unavailable for this account; assignment falls back to configured order",
+					"account", a.Email)
+			} else {
+				// Warn, not Error: quota is an optimization and a dead endpoint
+				// is survivable — but it silently changes which account gets
+				// picked, so it must be visible in the log.
+				debuglog.Logger.Warn("account usage poll failed",
+					"account", a.Email, "err", claudeaccount.Redact(err.Error()))
+			}
 			prev.Err = err
 			prev.FetchedAt = now
 			next[a.Email] = prev
