@@ -887,8 +887,16 @@ func (h *Home) persistAccounts(notice string) tea.Cmd {
 }
 
 // accountLabel is the human name for an account key, for use in UI text.
-// An empty key is the ambient /login account; a key the store no longer knows
-// is shown as-is rather than blanked, since "gone" is itself worth seeing.
+//
+// A key the store no longer knows must not be shown as if the session were
+// running on it. TokenFor returns nothing for an unknown account and
+// sessionEnv then sets no variable at all, so such a session is really on the
+// ambient login — the label says what is true now, and notes the removal as
+// the reason rather than the state.
+//
+// This happens legitimately: an account re-added after fleet learns its email
+// is keyed by that email, not the fingerprint it had before, so sessions
+// created under the old key are orphaned by the rename.
 func (h *Home) accountLabel(email string) string {
 	if email == "" {
 		return "your logged-in account"
@@ -896,7 +904,7 @@ func (h *Home) accountLabel(email string) string {
 	if a, ok := h.accounts.Get(email); ok {
 		return a.Name()
 	}
-	return email + " (removed)"
+	return "your logged-in account (its account was removed)"
 }
 
 // agentOf resolves a session's agent, treating the legacy empty value as Claude

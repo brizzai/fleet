@@ -216,6 +216,27 @@ func TestInputPlaceholderMatchesTheMode(t *testing.T) {
 	}
 }
 
+// A session whose account was removed is not running on that account — fleet
+// sets no token for an unknown key, so it falls back to the ambient login. The
+// label has to say what is true now, or it reads as "running on a dead
+// account", which is both alarming and wrong.
+func TestRemovedAccountLabelNamesTheFallback(t *testing.T) {
+	h := &Home{accounts: &claudeaccount.Store{}}
+
+	got := h.accountLabel(claudeaccount.FingerprintPrefix + "4666551e")
+	if !strings.Contains(got, "logged-in account") {
+		t.Errorf("label = %q, want it to name the ambient login it actually uses", got)
+	}
+	if !strings.Contains(got, "removed") {
+		t.Errorf("label = %q, want it to explain why", got)
+	}
+
+	// An empty key is the same destination, reached without a removal.
+	if got := h.accountLabel(""); got != "your logged-in account" {
+		t.Errorf("unset account label = %q", got)
+	}
+}
+
 func TestNeedsLabel(t *testing.T) {
 	fp := claudeaccount.FingerprintPrefix + "abc12345"
 	if !(claudeaccount.Account{Email: fp}).NeedsLabel() {
