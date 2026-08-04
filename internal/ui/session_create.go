@@ -65,7 +65,7 @@ func (d *SessionCreateDialog) Update(msg tea.Msg) (*SessionCreateDialog, tea.Cmd
 
 // agentCycle is the order the picker steps through (left/right). New agents are
 // appended; the create path validates the binary is installed and errors if not.
-var agentCycle = []agent.Type{agent.Claude, agent.Codex, agent.OpenCode}
+var agentCycle = []agent.Type{agent.Claude, agent.Codex, agent.OpenCode, agent.Cursor}
 
 // cycleAgent advances the selected agent by delta (+1 next, -1 prev), wrapping.
 func (d *SessionCreateDialog) cycleAgent(delta int) {

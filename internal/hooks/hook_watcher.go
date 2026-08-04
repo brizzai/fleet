@@ -259,13 +259,18 @@ func emitHookMetrics(prev, curr *HookStatus) {
 	if curr == nil {
 		return
 	}
+	// Each agent names these two moments differently — Claude/Codex PascalCase,
+	// OpenCode dotted, Cursor lowerCamelCase. Matching only Claude's spelling
+	// would silently drop prompt/response volume and the first-response
+	// onboarding milestone for every non-Claude user, so they register as having
+	// installed fleet and never gotten a single agent response.
 	switch curr.Event {
-	case "UserPromptSubmit":
+	case "UserPromptSubmit", "beforeSubmitPrompt":
 		if prev == nil || curr.PromptCount > prev.PromptCount {
 			analytics.Track(analytics.EventClaudePromptSubmitted, nil)
 		}
-	case "Stop":
-		if prev == nil || prev.Event != "Stop" || !prev.UpdatedAt.Equal(curr.UpdatedAt) {
+	case "Stop", "stop", "session.idle":
+		if prev == nil || !isResponseEnd(prev.Event) || !prev.UpdatedAt.Equal(curr.UpdatedAt) {
 			analytics.Track(analytics.EventClaudeResponseReceived, nil)
 			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstClaudeResponse) {
 				analytics.Track(analytics.EventOnboardingFirstClaudeResponse, map[string]interface{}{
@@ -274,4 +279,10 @@ func emitHookMetrics(prev, curr *HookStatus) {
 			}
 		}
 	}
+}
+
+// isResponseEnd reports whether event is any agent's end-of-response hook, used
+// to dedupe repeat writes of the same event in emitHookMetrics.
+func isResponseEnd(event string) bool {
+	return event == "Stop" || event == "stop" || event == "session.idle"
 }

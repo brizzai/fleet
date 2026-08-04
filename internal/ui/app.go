@@ -4045,6 +4045,10 @@ func (h *Home) forkSelected() tea.Cmd {
 		h.setError(fmt.Errorf("cannot fork: no session selected"))
 		return nil
 	}
+	if !s.Agent.SupportsFork() {
+		h.setError(fmt.Errorf("cannot fork: %s has no fork command", s.Agent.DisplayName()))
+		return nil
+	}
 	if s.GetClaudeSessionID() == "" {
 		h.setError(fmt.Errorf("cannot fork: session has no Claude conversation ID yet"))
 		return nil
@@ -6912,6 +6916,15 @@ func (h *Home) loadSessions() tea.Msg {
 			debuglog.Logger.Error("opencode plugin inject failed", "err", err)
 		}
 	}
+	// Install Cursor CLI hooks too, but only if cursor-agent is present — never
+	// create ~/.cursor for users who don't have it.
+	var cursorHookErr error
+	if _, err := exec.LookPath("cursor-agent"); err == nil {
+		if _, err := hooks.InjectCursorHooks(hooks.GetCursorConfigDir()); err != nil {
+			debuglog.Logger.Error("cursor hooks inject failed", "err", err)
+			cursorHookErr = err
+		}
+	}
 	// Route tmux copy-mode selections to the system clipboard (pbcopy on
 	// macOS; wl-copy/xclip/xsel on Linux), so drag/click-to-copy works on
 	// terminals that block OSC 52 (iTerm2 default) or don't support it (Apple
@@ -6925,6 +6938,13 @@ func (h *Home) loadSessions() tea.Msg {
 	var warning string
 	if _, err := exec.LookPath("claude"); err != nil {
 		warning = "claude CLI not found — install Claude Code to create sessions"
+	}
+	// A failed Cursor hook install is otherwise invisible: Cursor rides the
+	// pure-hook status path, so with no hooks.json every one of its sessions
+	// resets to idle on each tick — never running, never waiting — with nothing
+	// on screen explaining why. Surface it like the missing-claude warning.
+	if cursorHookErr != nil && warning == "" {
+		warning = "cursor hooks install failed — Cursor sessions will show as idle"
 	}
 
 	// Load persisted PR cache. A failure here is non-fatal — the bootstrap
@@ -7157,6 +7177,16 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		unread.Enabled = true
 	}
 
+	forkSession := ContextMenuItem{ID: "fork", Label: "Fork Session", Shortcut: "f", Key: "f"}
+	switch {
+	case !s.Agent.SupportsFork():
+		forkSession.Note = s.Agent.DisplayName() + " has no fork"
+	case !resumable:
+		forkSession.Note = "no session id yet"
+	default:
+		forkSession.Enabled = true
+	}
+
 	forkWorktree := ContextMenuItem{ID: "fork_worktree", Label: "Fork to Worktree", Shortcut: "F", Key: "F"}
 	switch {
 	case s.Agent != agent.Claude:
@@ -7192,11 +7222,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 			Enabled: h.hasPRForCursor(),
 			Note:    "no PR",
 		},
-		{
-			ID: "fork", Label: "Fork Session", Shortcut: "f", Key: "f",
-			Enabled: resumable,
-			Note:    "no session id yet",
-		},
+		forkSession,
 		forkWorktree,
 		suspend,
 		h.snoozeMenuItem(),

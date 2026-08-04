@@ -29,7 +29,7 @@ var (
 	chevronStyleSet     = []string{"triangle", "plusminus"}
 	densitySet          = []string{"normal", "compact"}
 	enterModeSet        = []string{"attach", "split"}
-	defaultAgentSet     = []string{"claude", "codex", "opencode"}
+	defaultAgentSet     = []string{"claude", "codex", "opencode", "cursor"}
 	telemetryModeSet    = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
 	suspendModeSet      = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
 )
@@ -685,11 +685,13 @@ func buildSettingsCategories() []settingsCategory {
 						return "Codex"
 					case "opencode":
 						return "OpenCode"
+					case "cursor":
+						return "Cursor"
 					default:
 						return "Claude"
 					}
 				},
-				valueW: func() int { return maxStrW([]string{"Claude", "Codex", "OpenCode"}) },
+				valueW: func() int { return maxStrW([]string{"Claude", "Codex", "OpenCode", "Cursor"}) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.DefaultAgent = cycleString(d.cfg.GetDefaultAgent(), defaultAgentSet, dir)
 				},

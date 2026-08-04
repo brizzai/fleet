@@ -21,13 +21,16 @@ type hookPayload struct {
 	Prompt        string          `json:"prompt,omitempty"`
 	// Reason is set on SessionEnd: "clear", "logout", "prompt_input_exit", "other".
 	Reason string `json:"reason,omitempty"`
+	// Status is set on Cursor's stop hook: "completed", "aborted", or "error".
+	Status string `json:"status,omitempty"`
 }
 
 // mapEventToStatus maps a hook event to a fleet status string. Claude and Codex
 // send Claude-style event names; the OpenCode status plugin sends OpenCode-native
-// names (session.busy/session.idle/permission.asked) — these are additive, the
-// other agents never emit them, so the handler stays agent-neutral.
-func mapEventToStatus(event string) string {
+// names (session.busy/session.idle/permission.asked); Cursor CLI's hooks.json
+// sends its own lowerCamelCase event names — these are all additive, no agent
+// emits another's names, so the handler stays agent-neutral.
+func mapEventToStatus(event, status string) string {
 	switch event {
 	case "UserPromptSubmit":
 		return "running"
@@ -62,9 +65,56 @@ func mapEventToStatus(event string) string {
 		// the next session.idle. Without this, waiting can stick if OpenCode
 		// doesn't re-emit session.status{busy} after an in-flight approval.
 		return "running"
+	// Cursor CLI events (from hooks.json, see internal/hooks/cursor_hooks.go).
+	// Both shell hooks map to running, never waiting: afterShellExecution's
+	// payload carries `output` and `duration`, so it fires when the command
+	// *completes*, not when an approval clears. Mapping beforeShellExecution to
+	// waiting would therefore hold the row at ◐ for the entire runtime of every
+	// command the agent runs — and Cursor is on the pure-hook path with no pane
+	// fallback to correct it, so `Space` would rotate to a busy session and `Y`
+	// would inject a stray "y"+Enter into a pane showing no prompt. Cursor has
+	// no dedicated approval hook, so fleet simply has no waiting signal for it.
+	//
+	// No sessionStart case: unlike Claude, Cursor's initial status (see
+	// initialRunStatus in session.go) starts idle, not running — so there's
+	// nothing for sessionStart to correct, and mapping it to "finished" (as
+	// Claude's SessionStart does) would immediately flip a freshly launched,
+	// untouched session to finished before any turn ran. It falls through to
+	// the default unmapped case below; fleet subscribes to no such hook (see
+	// cursorHookEvents in internal/hooks/cursor_hooks.go).
+	case "beforeSubmitPrompt":
+		return "running"
+	case "beforeShellExecution", "afterShellExecution":
+		return "running"
+	case "stop":
+		// Cursor's stop payload reports how the turn ended. Only "completed" is
+		// finished work; "error" surfaces as an error so a failed turn doesn't
+		// render with the same "done, come look" dot as a successful one.
+		// "aborted" is a user-initiated cancel — the turn is over, not broken.
+		if status == "error" {
+			return "error"
+		}
+		return "finished"
+	case "sessionEnd":
+		// Not "dead". Observed payload (cursor-agent 2026.07.23-e383d2b):
+		// {reason: "completed", final_status, duration_ms, ...} — this fires when
+		// a *conversation* ends, with the process alive and back at its prompt.
+		// Routing it to "dead" sets StatusError and writes a crash dump for a
+		// healthy session, then Reload All Sessions restarts a live agent.
+		// Cursor's real process death comes from tmux pane-death, same as Codex
+		// and OpenCode, neither of which maps an end-of-session hook to dead.
+		return "finished"
 	default:
 		return ""
 	}
+}
+
+// isPromptSubmit reports whether event is a user-prompt-submission hook —
+// Claude/Codex's UserPromptSubmit, or Cursor's beforeSubmitPrompt equivalent
+// (see internal/hooks/cursor_hooks.go) — used to gate prompt-text capture and
+// prompt-count increments in handleHookHandler.
+func isPromptSubmit(event string) bool {
+	return event == "UserPromptSubmit" || event == "beforeSubmitPrompt"
 }
 
 // isCompactSessionStart reports the SessionStart that Claude Code fires when a
@@ -104,7 +154,14 @@ func handleHookHandler() {
 
 	instanceID := os.Getenv("FLEET_INSTANCE_ID")
 	if instanceID == "" {
-		log.Warn("hook-handler: no FLEET_INSTANCE_ID env var",
+		// Debug, not Warn: fleet installs Cursor's hooks into the user-global
+		// ~/.cursor/hooks.json, which the Cursor IDE reads too — so this fires
+		// for every prompt and shell command in the editor, none of which is
+		// fleet's business. At Warn it always writes, and since debug.log is
+		// size-truncated and the `!` bug-report flow pastes its last 100 lines
+		// into a public issue, an editing session would evict the diagnostics
+		// the report exists to carry.
+		log.Debug("hook-handler: no FLEET_INSTANCE_ID env var (not a fleet session)",
 			"event", payload.HookEventName,
 			"claudeSession", payload.SessionID,
 			"source", payload.Source,
@@ -120,7 +177,7 @@ func handleHookHandler() {
 		return
 	}
 
-	status := mapEventToStatus(payload.HookEventName)
+	status := mapEventToStatus(payload.HookEventName, payload.Status)
 
 	// Special handling for Notification events.
 	if payload.HookEventName == "Notification" && payload.Matcher != nil {
@@ -148,9 +205,10 @@ func handleHookHandler() {
 	)
 
 	// Extract user prompt and prompt count.
+	promptSubmit := isPromptSubmit(payload.HookEventName)
 	var userPrompt string
 	var promptCount int
-	if payload.HookEventName == "UserPromptSubmit" && payload.Prompt != "" {
+	if promptSubmit && payload.Prompt != "" {
 		userPrompt = payload.Prompt
 	}
 
@@ -165,7 +223,7 @@ func handleHookHandler() {
 	}
 
 	// Increment prompt count on new user prompt submissions.
-	if payload.HookEventName == "UserPromptSubmit" {
+	if promptSubmit {
 		promptCount++
 	}
 

@@ -13,6 +13,10 @@ func ReadAgentSessionName(a agent.Type, sessionID, projectPath string) string {
 	case agent.OpenCode:
 		// OpenCode titles its sessions too, but fleet doesn't read them yet.
 		return ""
+	case agent.Cursor:
+		// Cursor CLI's local chat storage has no documented title/session-id
+		// mapping fleet can read; falls back to the prompt heuristic like OpenCode.
+		return ""
 	default:
 		// Claude, and legacy rows with no agent recorded.
 		return ReadClaudeSessionName(sessionID, projectPath)
