@@ -118,6 +118,53 @@ func TestStoreReorderRejectsOutOfRange(t *testing.T) {
 	}
 }
 
+// The verdict is permanent and the question isn't free, so it has to survive a
+// restart — otherwise every launch re-asks, and a transient 429 in place of the
+// 403 leaves fleet retrying on a timer against an answer that cannot change.
+func TestQuotaUnavailableIsRememberedAndIdempotent(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: "a@x.com", Token: "t"})
+
+	if !s.MarkQuotaUnavailable("a@x.com") {
+		t.Fatal("first mark should report new information")
+	}
+	if s.MarkQuotaUnavailable("a@x.com") {
+		t.Error("second mark should report nothing new, so it triggers no save")
+	}
+	if a, _ := s.Get("a@x.com"); !a.QuotaUnavailable {
+		t.Error("flag not set on the account")
+	}
+	if s.MarkQuotaUnavailable("ghost@x.com") {
+		t.Error("marking an unknown account should report false")
+	}
+}
+
+func TestReAddGivesAFreshTokenAFreshVerdict(t *testing.T) {
+	// A new token deserves to be re-checked, unlike Order and Label which are
+	// the user's own choices and are preserved.
+	//
+	// The asymmetry is deliberate: carrying the flag onto a replacement token
+	// would silently disable quota forever if a future token did carry the
+	// scope, whereas clearing it costs exactly one HTTP call that re-marks it
+	// immediately. A wasted call beats a feature that quietly stops working.
+	s := &Store{}
+	s.Upsert(Account{Email: "a@x.com", Token: "old", Label: "work"})
+	s.MarkQuotaUnavailable("a@x.com")
+
+	s.Upsert(Account{Email: "a@x.com", Token: "new"})
+
+	a, _ := s.Get("a@x.com")
+	if a.QuotaUnavailable {
+		t.Error("a replacement token inherited the old token's verdict")
+	}
+	if a.Token != "new" {
+		t.Errorf("token = %q, want the refreshed one", a.Token)
+	}
+	if a.Label != "work" {
+		t.Errorf("label = %q, want it preserved — it is the user's choice, not a verdict", a.Label)
+	}
+}
+
 func TestStoreRemove(t *testing.T) {
 	s := &Store{}
 	s.Upsert(Account{Email: "a@x.com", Token: "t"})

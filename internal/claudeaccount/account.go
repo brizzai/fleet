@@ -33,6 +33,16 @@ type Account struct {
 	Label string `json:"label,omitempty"`
 	Token string `json:"token"`
 	Order int    `json:"order"` // waterfall order; also the tie-break for least-used
+
+	// QuotaUnavailable records that this token may never read quota — the usage
+	// endpoint needs the `user:profile` scope and a `claude setup-token`
+	// credential does not carry it.
+	//
+	// Persisted rather than kept in memory because the answer is permanent and
+	// the question is not free: without this, every restart re-asks, and a
+	// transient 429 in place of the 403 leaves fleet retrying on a timer
+	// forever against a verdict that cannot change.
+	QuotaUnavailable bool `json:"quota_unavailable,omitempty"`
 }
 
 // FingerprintPrefix marks an account the API declined to identify, whose key is
@@ -186,6 +196,11 @@ func (s *Store) TokenFor(email string) string {
 // Upsert adds an account or replaces the existing one with the same email,
 // preserving that account's Order and Label so re-adding an expired token
 // doesn't silently reorder the rotation or discard a rename.
+//
+// QuotaUnavailable is deliberately NOT carried over: it is a verdict about a
+// specific token, and a replacement deserves its own. Inheriting it would
+// silently disable quota forever if a future token did carry the scope, where
+// clearing it costs one HTTP call that re-marks it immediately.
 func (s *Store) Upsert(a Account) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -210,6 +225,23 @@ func (s *Store) Remove(email string) bool {
 	for i := range s.accounts {
 		if s.accounts[i].Email == email {
 			s.accounts = append(s.accounts[:i], s.accounts[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// MarkQuotaUnavailable records that an account's token can never read quota,
+// so nothing asks again. Reports whether this was new information.
+func (s *Store) MarkQuotaUnavailable(email string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.accounts {
+		if s.accounts[i].Email == email {
+			if s.accounts[i].QuotaUnavailable {
+				return false
+			}
+			s.accounts[i].QuotaUnavailable = true
 			return true
 		}
 	}

@@ -753,8 +753,15 @@ func (h *Home) maybePollAccountUsage() {
 			next[a.Email] = prev
 		}
 		// A scope refusal is permanent for this token — a `claude setup-token`
-		// credential will never be allowed to read quota. Retrying it on a
-		// timer would fill the log with an answer that cannot change.
+		// credential will never be allowed to read quota. The flag is persisted,
+		// so this also skips the pointless first poll after every restart.
+		if a.QuotaUnavailable {
+			if !had {
+				next[a.Email] = claudeaccount.Usage{Err: claudeaccount.ErrQuotaScope, FetchedAt: now}
+				changed = true
+			}
+			continue
+		}
 		if had && errors.Is(prev.Err, claudeaccount.ErrQuotaScope) {
 			continue
 		}
@@ -767,9 +774,16 @@ func (h *Home) maybePollAccountUsage() {
 		u, err := claudeaccount.FetchUsage(context.Background(), a.Token)
 		if err != nil {
 			if errors.Is(err, claudeaccount.ErrQuotaScope) {
-				// Said once, then never again for this account.
+				// Said once, then never again for this account — and remembered
+				// on disk, so a later transient 429 can't mask the permanent
+				// answer and restart the retry loop.
 				debuglog.Logger.Info("quota unavailable for this account; assignment falls back to configured order",
 					"account", a.Email)
+				if h.accounts.MarkQuotaUnavailable(a.Email) {
+					if saveErr := h.accounts.Save(); saveErr != nil {
+						debuglog.Logger.Error("could not persist quota-unavailable flag", "err", saveErr)
+					}
+				}
 			} else {
 				// Warn, not Error: quota is an optimization and a dead endpoint
 				// is survivable — but it silently changes which account gets
