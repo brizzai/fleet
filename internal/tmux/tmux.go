@@ -708,6 +708,14 @@ func (s *Session) Kill() error {
 }
 
 // CapturePane reads the terminal output with caching and singleflight dedup.
+// DetachClient detaches every client attached to this session, returning the
+// user to whatever they were in before. The session itself keeps running.
+func (s *Session) DetachClient() error {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "tmux", "detach-client", "-s", s.Name).Run()
+}
+
 // CapturePaneJoined captures the pane with wrapped lines rejoined and the full
 // scrollback included, returning plain text.
 //

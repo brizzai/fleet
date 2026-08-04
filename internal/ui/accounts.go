@@ -412,6 +412,17 @@ func quotaStyle(pct int) lipgloss.Style {
 // Same reasoning as the drawer's `fleetsh_`.
 const accountSetupPrefix = "fleetauth_"
 
+const (
+	// setupTokenPollInterval is how often the watcher checks the pane for the
+	// token. Fast enough to feel immediate, slow enough that capture-pane on an
+	// attached session costs nothing.
+	setupTokenPollInterval = 750 * time.Millisecond
+	// setupTokenWatchWindow bounds the watcher so an abandoned login can't
+	// leave a goroutine polling for the life of the process. Generous: the
+	// browser flow can involve signing in and pasting a code back.
+	setupTokenWatchWindow = 10 * time.Minute
+)
+
 // openAccountsDialog shows the account manager.
 func (h *Home) openAccountsDialog() tea.Cmd {
 	h.accountsDialog.Show(
@@ -437,14 +448,13 @@ func (h *Home) runSetupToken() tea.Cmd {
 	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "setup-token", home)
 	debuglog.Logger.Info("starting claude setup-token", "tmux", ts.Name, "cwd", home)
 
-	// The trailing echo is the whole exit affordance. `claude setup-token`
-	// prints the token and returns to the shell, leaving the user parked in a
-	// pane with no indication that fleet is waiting or how to get back —
-	// which reads as a hang. Ctrl+Q is fleet's detach key everywhere else.
+	// Ctrl+Q is the fallback, not the plan — the watcher below returns the user
+	// automatically once the token lands. The hint stays because the watcher
+	// can miss (an aborted flow prints no token at all).
 	//
 	// Strip any inherited token so setup-token authenticates the browser
 	// session rather than the account fleet happens to be holding.
-	const cmd = `claude setup-token; printf '\n\033[1;35m  ✻ Done? Press Ctrl+Q to return to fleet.\033[0m\n'`
+	const cmd = `claude setup-token; printf '\n\033[1;35m  ✻ Waiting for the token… (Ctrl+Q returns to fleet)\033[0m\n'`
 	if err := ts.Start(cmd, "CLAUDE_CODE_OAUTH_TOKEN="); err != nil {
 		debuglog.Logger.Error("could not start setup-token session", "tmux", ts.Name, "err", err)
 		return func() tea.Msg {
@@ -456,9 +466,52 @@ func (h *Home) runSetupToken() tea.Cmd {
 	h.attachStartedAt.Store(time.Now().UnixNano())
 	h.actionLog.Add("add claude account", "", true)
 
+	// Watch the pane and pull the user back the moment the token appears, so
+	// finishing the browser flow is the last thing they have to do. The token
+	// is the final thing setup-token prints, so seeing it means the flow is
+	// complete — there is no earlier state this could cut short.
+	//
+	// Runs alongside tea.Exec, which blocks until the attached client goes
+	// away; detaching from here is what makes it return.
+	captured := make(chan string, 1)
+	go func() {
+		deadline := time.Now().Add(setupTokenWatchWindow)
+		for time.Now().Before(deadline) {
+			time.Sleep(setupTokenPollInterval)
+			pane, err := ts.CapturePaneJoined()
+			if err != nil {
+				return // session gone: the user quit the shell themselves
+			}
+			tok, ok := claudeaccount.ExtractToken(pane)
+			if !ok {
+				continue
+			}
+			captured <- tok
+			debuglog.Logger.Info("token appeared; returning from the setup pane", "tmux", ts.Name)
+			if err := ts.DetachClient(); err != nil {
+				debuglog.Logger.Error("could not auto-detach setup pane", "tmux", ts.Name, "err", err)
+			}
+			return
+		}
+		debuglog.Logger.Warn("setup-token watch window expired", "tmux", ts.Name, "window", setupTokenWatchWindow)
+	}()
+
 	return tea.Exec(attachCmd{session: ts}, func(execErr error) tea.Msg {
 		h.isAttaching.Store(false)
 		h.attachStartedAt.Store(0)
+
+		// Prefer what the watcher saw. On a manual Ctrl+Q it has usually not
+		// fired yet, so fall through to reading the pane directly.
+		select {
+		case tok := <-captured:
+			if killErr := ts.Kill(); killErr != nil {
+				debuglog.Logger.Error("failed to kill setup-token session", "err", killErr)
+			}
+			debuglog.Logger.Info("captured token from setup-token pane",
+				"tmux", ts.Name, "token_len", len(tok), "via", "watcher")
+			return accountValidateMsg{token: tok}
+		default:
+		}
 
 		// Joined, not CapturePaneFresh: the token is ~108 characters and the
 		// shell prompt eats columns before it, so on any realistic pane width

@@ -73,28 +73,28 @@ func Validate(ctx context.Context, token string) (Account, error) {
 	// paste from a whole one, which is the common failure.
 	debuglog.Logger.Info("validating claude account token", "token_len", len(token), "timeout", execTimeout)
 
-	body, status, err := getWithToken(ctx, profileEndpoint, token)
-	if err != nil {
-		return Account{}, fmt.Errorf("could not reach Anthropic to check the token: %w", err)
-	}
-	switch {
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		debuglog.Logger.Error("token rejected by anthropic", "status", status)
-		return Account{}, errors.New("token was rejected — generate a fresh one with `claude setup-token`")
-	case status != http.StatusOK:
-		// Some other failure (rate limit, outage). Fall back to the usage
-		// endpoint purely as a liveness probe before giving up: refusing a
-		// working token because one endpoint hiccuped is the worse error.
-		debuglog.Logger.Warn("profile endpoint unavailable, falling back to usage probe", "status", status)
-		if _, err := FetchUsage(ctx, token); err != nil {
-			return Account{}, fmt.Errorf("could not verify the token: %w", err)
-		}
-		body = nil
+	// Liveness is the usage endpoint, because that is the one fleet actually
+	// depends on: a token that can read quota can run sessions. Deliberately
+	// not the profile endpoint — a setup-token token is scope-limited (the
+	// docs say it "can only make model requests") and answers 403 there even
+	// when perfectly valid. Measured: a bogus token gets 401 from profile, a
+	// real one gets 403. Treating 403 as rejection refused every good token.
+	if _, err := FetchUsage(ctx, token); err != nil {
+		debuglog.Logger.Error("token failed the usage probe", "err", Redact(err.Error()))
+		return Account{}, fmt.Errorf("token was rejected — generate a fresh one with `claude setup-token` (%w)", err)
 	}
 
-	// The response shape is undocumented, so log it (redacted) — this is how we
-	// learn what identity fields exist without guessing at a struct.
-	if len(body) > 0 {
+	// Identity is best-effort on top, and often unavailable for exactly the
+	// scope reason above. A valid token we cannot name is still a usable
+	// account, so nothing here can fail the validation.
+	body, status, err := getWithToken(ctx, profileEndpoint, token)
+	if err != nil || status != http.StatusOK {
+		debuglog.Logger.Info("no identity available for this token; naming it by fingerprint",
+			"profile_status", status, "err", err)
+		body = nil
+	} else {
+		// The response shape is undocumented, so log it (redacted) — this is how
+		// we learn what identity fields exist without guessing at a struct.
 		debuglog.Logger.Info("account profile response", "body", Redact(strings.TrimSpace(string(body))))
 	}
 
