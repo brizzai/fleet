@@ -19,6 +19,17 @@ import (
 	"github.com/brizzai/fleet/internal/session"
 )
 
+// divergenceLagGrace is how far the hook file may sit ahead of the applied hook
+// before the gap stops being explainable as ordinary lag.
+//
+// Two sources feed it. The pipeline itself costs ~600ms (a 100ms fsnotify
+// debounce plus up to a 500ms fast worker cycle). The larger term is precision:
+// the applied timestamp comes from the status file's `ts`, which is Unix
+// SECONDS, while ModTime is sub-second — so re-reading the very same file yields
+// a skew anywhere in [0, 1s) with nothing wrong at all. 3s clears both with room
+// to spare, and the case this exists to catch is off by hours, not seconds.
+const divergenceLagGrace = 3 * time.Second
+
 type statusSnapshotMsg struct {
 	path string
 	err  error
@@ -218,20 +229,56 @@ func buildSnapshotJSON(snap session.StatusSnapshot, hookFileRaw []byte, hookFile
 	}
 	m["worker"] = worker
 
+	// `status` is what fleet APPLIED (in memory); `file_contents` is what the agent
+	// last WROTE. They are separate sources read at the same instant, and they can
+	// disagree: the ownership gate drops a hook whose session_id is not the owner,
+	// so memory stays frozen while the file moves on. owner_session_id/owner_pid are
+	// the gate's own state — without them that divergence can only be guessed at.
 	hookMap := map[string]any{
-		"status":        snap.HookStatus,
-		"updated_at":    snap.HookUpdatedAt.Format(time.RFC3339),
-		"age":           fmtSnapshotAge(snap.HookUpdatedAt, now),
-		"overridden_at": fmtSnapshotAge(snap.HookOverriddenAt, now),
+		"status":           snap.HookStatus,
+		"updated_at":       snap.HookUpdatedAt.Format(time.RFC3339),
+		"age":              fmtSnapshotAge(snap.HookUpdatedAt, now),
+		"overridden_at":    fmtSnapshotAge(snap.HookOverriddenAt, now),
+		"owner_session_id": snap.OwnerSessionID,
+		"owner_pid":        snap.OwnerPID,
 	}
 	if len(hookFileRaw) > 0 {
 		var parsed any
 		if json.Unmarshal(hookFileRaw, &parsed) == nil {
 			hookMap["file_contents"] = parsed
+			// Lift the two fields the divergence turns on out of file_contents, and
+			// state the comparison outright. file_contents is never published (it
+			// carries the reporter's verbatim prompt), so a report that only showed
+			// the applied status left "is fleet even reading this file?" to be
+			// re-derived by hand from the fact that the handler maps event→status.
+			if fc, ok := parsed.(map[string]any); ok {
+				fileStatus, _ := fc["status"].(string)
+				fileSession, _ := fc["session_id"].(string)
+				hookMap["file_status"] = fileStatus
+				hookMap["file_session_id"] = fileSession
+				if fileStatus != "" {
+					hookMap["applied_matches_file"] = fileStatus == snap.HookStatus
+				}
+			}
 		}
 	}
 	if hookFileInfo != nil {
 		hookMap["file_mod_time"] = hookFileInfo.ModTime().Format(time.RFC3339)
+		hookMap["file_age"] = fmtSnapshotAge(hookFileInfo.ModTime(), now)
+
+		// A false applied_matches_file has two very different causes, and they carry
+		// the same value. The applied side lags the file by design — fsnotify debounce
+		// plus a worker cycle — so a capture landing mid-write reads false benignly,
+		// identically to a hook fleet dropped and never applied. The skew separates
+		// them: benign lag is sub-cycle, a dropped hook leaves the applied side
+		// arbitrarily far behind (18h27m in #220). Report it rather than asking the
+		// reader to infer it from two age rows.
+		if !snap.HookUpdatedAt.IsZero() {
+			if skew := hookFileInfo.ModTime().Sub(snap.HookUpdatedAt); skew > 0 {
+				hookMap["file_newer_by"] = skew.Round(time.Millisecond).String()
+				hookMap["divergence_significant"] = skew > divergenceLagGrace
+			}
+		}
 	}
 	m["hook"] = hookMap
 

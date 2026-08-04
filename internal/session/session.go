@@ -1594,6 +1594,14 @@ type StatusSnapshot struct {
 	HookUpdatedAt    time.Time
 	HookOverriddenAt time.Time
 
+	// OwnerSessionID/OwnerPID are the conversation the ownership gate has latched
+	// onto. A hook whose session_id differs from OwnerSessionID is dropped, and
+	// the in-memory hook then sits frozen while the status file on disk moves on —
+	// a divergence that reads, from the outside, as a status stuck forever. These
+	// are captured so a report can show it instead of leaving it to be inferred.
+	OwnerSessionID string
+	OwnerPID       int
+
 	LastContentHash     string
 	LastContentChangeAt time.Time
 
@@ -1616,6 +1624,8 @@ func (s *Session) SnapshotData(rawPane string) StatusSnapshot {
 		HookStatus:          s.hookStatus,
 		HookUpdatedAt:       s.hookUpdatedAt,
 		HookOverriddenAt:    s.hookOverriddenAt,
+		OwnerSessionID:      s.ownerSessionID,
+		OwnerPID:            s.ownerPID,
 		LastContentHash:     s.lastContentHash,
 		LastContentChangeAt: s.lastContentChangeAt,
 	}
