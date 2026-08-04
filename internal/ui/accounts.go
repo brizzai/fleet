@@ -393,9 +393,15 @@ func (h *Home) runSetupToken() tea.Cmd {
 	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "setup-token", home)
 	debuglog.Logger.Info("starting claude setup-token", "tmux", ts.Name, "cwd", home)
 
+	// The trailing echo is the whole exit affordance. `claude setup-token`
+	// prints the token and returns to the shell, leaving the user parked in a
+	// pane with no indication that fleet is waiting or how to get back —
+	// which reads as a hang. Ctrl+Q is fleet's detach key everywhere else.
+	//
 	// Strip any inherited token so setup-token authenticates the browser
 	// session rather than the account fleet happens to be holding.
-	if err := ts.Start("claude setup-token", "CLAUDE_CODE_OAUTH_TOKEN="); err != nil {
+	const cmd = `claude setup-token; printf '\n\033[1;35m  ✻ Done? Press Ctrl+Q to return to fleet.\033[0m\n'`
+	if err := ts.Start(cmd, "CLAUDE_CODE_OAUTH_TOKEN="); err != nil {
 		debuglog.Logger.Error("could not start setup-token session", "tmux", ts.Name, "err", err)
 		return func() tea.Msg {
 			return accountValidatedMsg{capture: true, err: fmt.Errorf("could not start `claude setup-token`: %w", err)}
@@ -410,7 +416,12 @@ func (h *Home) runSetupToken() tea.Cmd {
 		h.isAttaching.Store(false)
 		h.attachStartedAt.Store(0)
 
-		pane, capErr := ts.CapturePaneFresh()
+		// Joined, not CapturePaneFresh: the token is ~108 characters and the
+		// shell prompt eats columns before it, so on any realistic pane width
+		// the unjoined capture returns it split across physical lines and the
+		// match stops at the wrap. That truncated string then validates as a
+		// bogus token, which is exactly what it is.
+		pane, capErr := ts.CapturePaneJoined()
 		if killErr := ts.Kill(); killErr != nil {
 			debuglog.Logger.Error("failed to kill setup-token session", "err", killErr)
 		}

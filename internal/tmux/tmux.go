@@ -708,6 +708,31 @@ func (s *Session) Kill() error {
 }
 
 // CapturePane reads the terminal output with caching and singleflight dedup.
+// CapturePaneJoined captures the pane with wrapped lines rejoined and the full
+// scrollback included, returning plain text.
+//
+// Separate from CapturePane because the two want opposite things. Status
+// detection needs `-e` (ANSI preserved) and only the visible screen. Reading a
+// *value* off a pane needs the opposite: `-J` so a string longer than the pane
+// is one line instead of several, `-S -` so it still resolves after scrolling,
+// and no `-e` so escape bytes can't land mid-value.
+//
+// Without -J this silently truncates at every pane width — the prompt consumes
+// columns before the value even starts, so even a pane wider than the value
+// cuts it. Uncached and unsingleflighted: callers read a pane once, deliberately.
+func (s *Session) CapturePaneJoined() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", s.Name, "-p", "-J", "-S", "-")
+	output, err := cmd.Output()
+	if err != nil {
+		debuglog.Logger.Error("tmux capture-pane -J failed", "session", s.Name, "err", err)
+		return "", fmt.Errorf("capture-pane failed: %w", err)
+	}
+	return string(output), nil
+}
+
 func (s *Session) CapturePane() (string, error) {
 	// Check cache.
 	s.cacheMu.RLock()
