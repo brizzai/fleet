@@ -32,11 +32,12 @@ const (
 
 // AccountsDialog manages the set of Claude subscriptions fleet can launch under.
 //
-// Accounts would name themselves if Anthropic let them, but a `claude
-// setup-token` credential is not entitled to the profile endpoint (403), so in
-// practice a token arrives anonymous and is keyed by a fingerprint. The dialog
-// therefore asks for a name at the one moment the user certainly knows the
-// answer: immediately after the browser login that produced the token.
+// A `claude setup-token` credential is inference-only by design and will not
+// identify its owner, so most accounts arrive anonymous. Fleet names the one
+// exception automatically — a token whose organization matches the login
+// cached on this machine — and asks for the rest at the one moment the user
+// certainly knows the answer: immediately after the browser login that
+// produced the token.
 type AccountsDialog struct {
 	visible bool
 	width   int
@@ -222,6 +223,16 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 			}
 			return d, func() tea.Msg { return accountRenameMsg{email: email, label: label} }
 		}
+		// Number keys pick a suggestion. Almost every account is "work" or
+		// "personal", so the common case should be one keystroke rather than
+		// eight — but the box stays focused, so anything else is just typed.
+		if n := keyMsg.String(); len(n) == 1 && n[0] >= '1' && n[0] <= '9' {
+			if picks := d.nameSuggestions(); int(n[0]-'1') < len(picks) {
+				d.input.SetValue(picks[n[0]-'1'])
+				d.input.CursorEnd()
+				return d, nil
+			}
+		}
 		var cmd tea.Cmd
 		d.input, cmd = d.input.Update(msg)
 		return d, cmd
@@ -296,6 +307,37 @@ func (d *AccountsDialog) selectedEmail() string {
 	return a.Email
 }
 
+// nameSuggestions are the one-key picks offered in the rename box.
+//
+// Leads with the local login's email when it is not already taken: adding a
+// second subscription usually means the *other* one is your main account, and
+// having it offered beats typing it. Then the two labels that cover almost
+// every remaining case.
+func (d *AccountsDialog) nameSuggestions() []string {
+	var out []string
+	if p, ok := claudeaccount.LocalIdentity(); ok && !d.labelTaken(p.Email) {
+		out = append(out, p.Email)
+	}
+	for _, s := range []string{"work", "personal"} {
+		if !d.labelTaken(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// labelTaken reports whether another account already uses this name, so the
+// picks never offer a duplicate.
+func (d *AccountsDialog) labelTaken(name string) bool {
+	sel := d.selectedEmail()
+	for _, a := range d.accounts {
+		if a.Email != sel && (a.Label == name || a.Email == name) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *AccountsDialog) selected() (claudeaccount.Account, bool) {
 	if d.cursor < 0 || d.cursor >= len(d.accounts) {
 		return claudeaccount.Account{}, false
@@ -345,7 +387,13 @@ func (d *AccountsDialog) View() string {
 			b.WriteString(dimStyle.Render(ansi.Truncate("Name for "+d.selectedName(), inner, "…")) + "\n")
 		}
 		b.WriteString("\n" + d.input.View() + "\n")
-		b.WriteString(dimStyle.Render("Your email, or anything — empty to skip.") + "\n")
+		if picks := d.nameSuggestions(); len(picks) > 0 {
+			var row []string
+			for i, p := range picks {
+				row = append(row, fmt.Sprintf("%d %s", i+1, p))
+			}
+			b.WriteString(dimStyle.Render(ansi.Truncate(strings.Join(row, "   "), inner, "…")) + "\n")
+		}
 
 	case accountsWaitingToken:
 		b.WriteString(d.notice + "\n")
@@ -409,7 +457,7 @@ func (d *AccountsDialog) footer(width int) []string {
 	case accountsPaste:
 		hints = []string{"⏎ add", "esc back"}
 	case accountsRename:
-		hints = []string{"⏎ save", "esc skip"}
+		hints = []string{"1-9 pick", "⏎ save", "esc skip"}
 	case accountsWaitingToken:
 		hints = []string{"esc cancel"}
 	case accountsConfirmRm:
@@ -736,6 +784,17 @@ func (h *Home) handleAccountValidated(msg accountValidatedMsg) (tea.Model, tea.C
 		return h, nil
 	}
 	h.accounts.Upsert(msg.account)
+	// Validation already read this account's quota; keep it rather than paying
+	// for a second probe seconds later.
+	if u := msg.account.InitialUsage(); u.Known() {
+		current := h.accountUsageSnapshot()
+		next := make(map[string]claudeaccount.Usage, len(current)+1)
+		for k, v := range current {
+			next[k] = v
+		}
+		next[msg.account.Email] = u
+		h.accountUsage.Store(&next)
+	}
 	cmd := h.persistAccounts("Added " + msg.account.Name())
 	// After persistAccounts, so the dialog is looking at the refreshed list.
 	h.accountsDialog.Added(msg.account.Email, msg.account.NeedsLabel())
@@ -769,39 +828,36 @@ func (h *Home) maybePollAccountUsage() {
 		if had {
 			next[a.Email] = prev
 		}
-		// A scope refusal is permanent for this token — a `claude setup-token`
-		// credential will never be allowed to read quota. The flag is persisted,
-		// so this also skips the pointless first poll after every restart.
-		if a.QuotaUnavailable {
-			if !had {
-				next[a.Email] = claudeaccount.Usage{Err: claudeaccount.ErrQuotaScope, FetchedAt: now}
-				changed = true
-			}
-			continue
-		}
-		if had && errors.Is(prev.Err, claudeaccount.ErrQuotaScope) {
-			continue
-		}
 		// FetchedAt advances on failure too, so a broken endpoint is retried at
 		// the same slow cadence instead of on every cycle.
 		if had && now.Sub(prev.FetchedAt) < claudeaccount.MinPollInterval {
 			continue
 		}
 
-		u, err := claudeaccount.FetchUsage(context.Background(), a.Token)
-		if err != nil {
-			if errors.Is(err, claudeaccount.ErrQuotaScope) {
-				// Said once, then never again for this account — and remembered
-				// on disk, so a later transient 429 can't mask the permanent
-				// answer and restart the retry loop.
-				debuglog.Logger.Info("quota unavailable for this account; assignment falls back to configured order",
-					"account", a.Email)
-				if h.accounts.MarkQuotaUnavailable(a.Email) {
-					if saveErr := h.accounts.Save(); saveErr != nil {
-						debuglog.Logger.Error("could not persist quota-unavailable flag", "err", saveErr)
-					}
+		// Two routes to the same numbers. The usage endpoint is free but needs
+		// the `user:profile` scope; the probe costs about nine tokens but works
+		// with the inference-only credential `claude setup-token` mints. Once
+		// an account is known to be refused, go straight to the probe — the
+		// refusal is a property of the token and will not change.
+		var (
+			u   claudeaccount.Usage
+			err error
+		)
+		if a.UsageEndpointForbidden {
+			u, _, err = claudeaccount.ProbeUsage(context.Background(), a.Token)
+		} else if u, err = claudeaccount.FetchUsage(context.Background(), a.Token); errors.Is(err, claudeaccount.ErrQuotaScope) {
+			debuglog.Logger.Info("usage endpoint refuses this token on scope; reading quota from response headers instead",
+				"account", a.Email)
+			if h.accounts.MarkUsageEndpointForbidden(a.Email) {
+				if saveErr := h.accounts.Save(); saveErr != nil {
+					debuglog.Logger.Error("could not persist usage-endpoint verdict", "err", saveErr)
 				}
-			} else {
+			}
+			u, _, err = claudeaccount.ProbeUsage(context.Background(), a.Token)
+		}
+
+		if err != nil {
+			{
 				// Warn, not Error: quota is an optimization and a dead endpoint
 				// is survivable — but it silently changes which account gets
 				// picked, so it must be visible in the log.
@@ -897,6 +953,19 @@ func (h *Home) moveSelectedAccount() tea.Cmd {
 	}
 }
 
+// accountLabel is the human name for an account key, for use in UI text.
+// An empty key is the ambient /login account; a key the store no longer knows
+// is shown as-is rather than blanked, since "gone" is itself worth seeing.
+func (h *Home) accountLabel(email string) string {
+	if email == "" {
+		return "your logged-in account"
+	}
+	if a, ok := h.accounts.Get(email); ok {
+		return a.Name()
+	}
+	return email + " (removed)"
+}
+
 // agentOf resolves a session's agent, treating the legacy empty value as Claude
 // the same way the launch path does.
 func agentOf(s *session.Session) agent.Type { return agent.Parse(string(s.Agent)) }
@@ -915,4 +984,17 @@ func (h *Home) persistAccounts(notice string) tea.Cmd {
 		h.setInfo(notice)
 	}
 	return nil
+}
+
+// previewAccountLabel names the account for the preview footer, or "" when
+// there is nothing worth saying.
+//
+// Silent until a second account exists: with one (or none) every session runs
+// on the same credential, so the label would be a constant — noise on the one
+// line the user reads for path and recency.
+func (h *Home) previewAccountLabel(s *session.Session) string {
+	if s == nil || h.accounts.Len() < 2 || agentOf(s) != agent.Claude {
+		return ""
+	}
+	return h.accountLabel(s.Account)
 }

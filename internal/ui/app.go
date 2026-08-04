@@ -576,6 +576,10 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 
 	h.accounts = claudeaccount.Load()
 	h.accountsDialog = NewAccountsDialog()
+	// Fleet identifies as itself to Anthropic, not as claude-code. Measured
+	// 2026-08-04: the messages endpoint serves fleet/<version> identically, so
+	// there is nothing to gain by impersonating the CLI.
+	claudeaccount.SetUserAgent(version)
 	// One startup line carrying the whole multi-account picture, so a bug
 	// report shows the configuration without needing the user to describe it.
 	debuglog.Logger.Info("claude accounts ready",
@@ -2086,7 +2090,7 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
-		previewFooter := BuildPreviewFooter(s, h.width-6)
+		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
 		b.WriteString(RenderBorderedPanelInsets(previewInner, previewTitle, "", shellChips, previewFooter, h.width, previewHeight, h.focusMode))
 	default: // dual
@@ -2145,7 +2149,7 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
-		previewFooter := BuildPreviewFooter(s, previewWidth-6)
+		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
 		// collapsed chips ride the preview's bottom-left border (shellChips is
 		// "" while the drawer is open, since the drawer then shows the shells).
@@ -7371,7 +7375,14 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 
 	// Each clause names the reason it actually failed — a constant note here
 	// would contradict the account the readout shows on the same screen.
+	// The label names both ends of the move. Nothing else in the UI says which
+	// account a session is on — the header readout is quota-driven and stays
+	// hidden when quota is unreadable, which is every setup-token account — so
+	// a bare "Move to Next Account" asks the user to act blind.
 	moveAccount := ContextMenuItem{ID: "move_account", Label: "Move to Next Account"}
+	if next, ok := nextAccountAfter(h.accounts.List(), s.Account); ok {
+		moveAccount.Label = "Move to " + next.Name()
+	}
 	switch {
 	case agentOf(s) != agent.Claude:
 		moveAccount.Note = "Claude only"
@@ -7383,6 +7394,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		moveAccount.Note = "no session id yet"
 	default:
 		moveAccount.Enabled = true
+		moveAccount.Note = "on " + h.accountLabel(s.Account)
 	}
 
 	suspend := ContextMenuItem{ID: "suspend_session", Label: "Suspend Session"}

@@ -23,10 +23,15 @@ import (
 
 // Account is one Claude subscription fleet can launch sessions under.
 //
-// Email is the identity: it comes from `claude auth status --json` rather than
-// the user, so it is never typed and never wrong, and re-adding an account
-// after a token expires keeps existing sessions pointed at it. Label is the
-// separate, renameable display name.
+// Email is the key, and it is only sometimes an actual email. A `claude
+// setup-token` credential is inference-only by design and will not say who it
+// belongs to, so most accounts are keyed by a fingerprint of the token and
+// carry a user-supplied Label. The exception is an account whose organization
+// matches the login cached on this machine — that one names itself. See
+// identity.go.
+//
+// Whatever the key is, it is stable across re-adds of the same token, which is
+// what keeps existing sessions pointed at the right account.
 type Account struct {
 	Email string `json:"email"`
 	Plan  string `json:"plan,omitempty"` // "max", "pro", … — display only
@@ -34,16 +39,27 @@ type Account struct {
 	Token string `json:"token"`
 	Order int    `json:"order"` // waterfall order; also the tie-break for least-used
 
-	// QuotaUnavailable records that this token may never read quota — the usage
-	// endpoint needs the `user:profile` scope and a `claude setup-token`
-	// credential does not carry it.
-	//
-	// Persisted rather than kept in memory because the answer is permanent and
-	// the question is not free: without this, every restart re-asks, and a
-	// transient 429 in place of the 403 leaves fleet retrying on a timer
-	// forever against a verdict that cannot change.
-	QuotaUnavailable bool `json:"quota_unavailable,omitempty"`
+	// OrgUUID is the organization the token belongs to, from the
+	// anthropic-organization-id response header. Not an email, but a stable
+	// identity — and the thing that lets fleet recognise a token as the
+	// account already logged in on this machine.
+	OrgUUID string `json:"org_uuid,omitempty"`
+
+	// UsageEndpointForbidden records that /api/oauth/usage refuses this token
+	// on scope, so quota must come from the probe instead. Permanent for a
+	// given token; persisted so every restart doesn't re-ask, and so a
+	// transient 429 can't be mistaken for the scope answer and restart the
+	// retry loop.
+	UsageEndpointForbidden bool `json:"usage_endpoint_forbidden,omitempty"`
+
+	// initialUsage carries the reading taken while validating, so adding an
+	// account doesn't spend a second probe seconds later. Not persisted —
+	// quota is live state, not configuration.
+	initialUsage Usage
 }
+
+// InitialUsage returns the quota reading taken during validation, if any.
+func (a Account) InitialUsage() Usage { return a.initialUsage }
 
 // FingerprintPrefix marks an account the API declined to identify, whose key is
 // a hash of its token rather than an email.
@@ -231,17 +247,17 @@ func (s *Store) Remove(email string) bool {
 	return false
 }
 
-// MarkQuotaUnavailable records that an account's token can never read quota,
+// MarkUsageEndpointForbidden records that an account's token can never read quota,
 // so nothing asks again. Reports whether this was new information.
-func (s *Store) MarkQuotaUnavailable(email string) bool {
+func (s *Store) MarkUsageEndpointForbidden(email string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.accounts {
 		if s.accounts[i].Email == email {
-			if s.accounts[i].QuotaUnavailable {
+			if s.accounts[i].UsageEndpointForbidden {
 				return false
 			}
-			s.accounts[i].QuotaUnavailable = true
+			s.accounts[i].UsageEndpointForbidden = true
 			return true
 		}
 	}

@@ -145,16 +145,16 @@ func TestQuotaUnavailableIsRememberedAndIdempotent(t *testing.T) {
 	s := &Store{}
 	s.Upsert(Account{Email: "a@x.com", Token: "t"})
 
-	if !s.MarkQuotaUnavailable("a@x.com") {
+	if !s.MarkUsageEndpointForbidden("a@x.com") {
 		t.Fatal("first mark should report new information")
 	}
-	if s.MarkQuotaUnavailable("a@x.com") {
+	if s.MarkUsageEndpointForbidden("a@x.com") {
 		t.Error("second mark should report nothing new, so it triggers no save")
 	}
-	if a, _ := s.Get("a@x.com"); !a.QuotaUnavailable {
+	if a, _ := s.Get("a@x.com"); !a.UsageEndpointForbidden {
 		t.Error("flag not set on the account")
 	}
-	if s.MarkQuotaUnavailable("ghost@x.com") {
+	if s.MarkUsageEndpointForbidden("ghost@x.com") {
 		t.Error("marking an unknown account should report false")
 	}
 }
@@ -169,12 +169,12 @@ func TestReAddGivesAFreshTokenAFreshVerdict(t *testing.T) {
 	// immediately. A wasted call beats a feature that quietly stops working.
 	s := &Store{}
 	s.Upsert(Account{Email: "a@x.com", Token: "old", Label: "work"})
-	s.MarkQuotaUnavailable("a@x.com")
+	s.MarkUsageEndpointForbidden("a@x.com")
 
 	s.Upsert(Account{Email: "a@x.com", Token: "new"})
 
 	a, _ := s.Get("a@x.com")
-	if a.QuotaUnavailable {
+	if a.UsageEndpointForbidden {
 		t.Error("a replacement token inherited the old token's verdict")
 	}
 	if a.Token != "new" {

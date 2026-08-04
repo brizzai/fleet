@@ -105,23 +105,40 @@ func Validate(ctx context.Context, token string) (Account, error) {
 		// we learn what identity fields exist without guessing at a struct.
 		debuglog.Logger.Info("account profile response", "body", Redact(strings.TrimSpace(string(body))))
 	default:
-		debuglog.Logger.Info("token is valid but not entitled to identify itself; naming it by fingerprint",
+		debuglog.Logger.Info("token is not entitled to identify itself; trying the local profile",
 			"profile_status", status)
 		body = nil
 	}
 
 	email, plan := identityFrom(body)
+
+	// Second chance, entirely local: if this token's organization is the one
+	// logged in on this machine, ~/.claude.json already holds the email. See
+	// identity.go for why this is a fair thing to do and where the line is.
+	usage, org, probeErr := ProbeUsage(ctx, token)
+	if probeErr != nil {
+		debuglog.Logger.Info("quota probe unavailable at add time", "err", Redact(probeErr.Error()))
+	}
+	if email == "" && org != "" {
+		if name := NameForOrg(org); name != "" {
+			email = name
+			debuglog.Logger.Info("named the account from the local profile", "email", email, "org", org)
+		}
+	}
+
 	if email == "" {
-		// Valid but unnamed. Fingerprint the token so the name is stable across
-		// re-adds of the same token and distinct between accounts, without the
-		// credential being recoverable from it.
+		// Still anonymous, which is the expected outcome for any account other
+		// than the one logged in here. Fingerprint the token so the key is
+		// stable across re-adds and distinct between accounts, without the
+		// credential being recoverable from it. The user supplies a label.
 		email = FingerprintPrefix + fingerprint(token)
-		debuglog.Logger.Warn("token is valid but carries no identity; using a fingerprint name",
+		debuglog.Logger.Info("token carries no identity fleet can resolve; using a fingerprint name",
 			"name", email)
 	}
 
-	debuglog.Logger.Info("claude account validated", "email", email, "plan", plan)
-	return Account{Email: email, Plan: plan, Token: token}, nil
+	debuglog.Logger.Info("claude account validated",
+		"email", email, "plan", plan, "org", org, "quota_readable", probeErr == nil)
+	return Account{Email: email, Plan: plan, Token: token, OrgUUID: org, initialUsage: usage}, nil
 }
 
 // getWithToken performs an authenticated GET, returning the body and status.
@@ -279,6 +296,33 @@ type usageResponse struct {
 // claudeVersion reads the installed Claude Code version once per process, for
 // the User-Agent below. Falls back to a plausible version rather than failing:
 // a missing binary must not make quota unreadable for the accounts fleet knows.
+// userAgent identifies fleet to Anthropic. Fleet sends its own name rather
+// than impersonating claude-code: measured 2026-08-04, the messages endpoint
+// serves `fleet/<version>` exactly as it serves `claude-code/<version>`, so
+// there is nothing to buy by misrepresenting the client.
+//
+// (The usage endpoint is different — community reports say it rate-limits
+// unknown agents hard. That endpoint refuses fleet's tokens on scope anyway,
+// so the question is moot there.)
+var (
+	uaMu      sync.RWMutex
+	userAgent = "fleet/dev"
+)
+
+// SetUserAgent records fleet's version for outbound requests. Called once at
+// startup; safe to leave unset in tests.
+func SetUserAgent(version string) {
+	uaMu.Lock()
+	defer uaMu.Unlock()
+	userAgent = "fleet/" + strings.TrimPrefix(version, "v")
+}
+
+func fleetUserAgent() string {
+	uaMu.RLock()
+	defer uaMu.RUnlock()
+	return userAgent
+}
+
 var claudeVersion = sync.OnceValue(func() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
