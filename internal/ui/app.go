@@ -2104,21 +2104,30 @@ func (h *Home) renderBody() string {
 // dialogs receive both key presses and bracketed paste (tea.PasteMsg, which is
 // not a KeyMsg in Bubble Tea v2 and so never flows through handleKey).
 func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
+	// Dialogs that hold no text field get the keypress remapped from a non-Latin
+	// layout, so a delete confirm still answers to Hebrew 'ט' as "y". The ones
+	// that do hold a field keep the original — a Hebrew rename must stay Hebrew.
+	// TestNormalizedDialogsHoldNoTextInput guards which side each lands on.
+	cmdMsg := msg
+	if km, ok := msg.(tea.KeyPressMsg); ok {
+		cmdMsg = normalizeKey(km)
+	}
+
 	switch {
 	case h.helpOverlay.IsVisible():
-		overlay, cmd := h.helpOverlay.Update(msg)
+		overlay, cmd := h.helpOverlay.Update(cmdMsg)
 		h.helpOverlay = overlay
 		return cmd, true
 	case h.releaseNotes.IsVisible():
-		dialog, cmd := h.releaseNotes.Update(msg)
+		dialog, cmd := h.releaseNotes.Update(cmdMsg)
 		h.releaseNotes = dialog
 		return cmd, true
 	case h.consentDialog.IsVisible():
-		dialog, cmd := h.consentDialog.Update(msg)
+		dialog, cmd := h.consentDialog.Update(cmdMsg)
 		h.consentDialog = dialog
 		return cmd, true
 	case h.onboardingDialog.IsVisible():
-		dialog, cmd := h.onboardingDialog.Update(msg)
+		dialog, cmd := h.onboardingDialog.Update(cmdMsg)
 		h.onboardingDialog = dialog
 		return cmd, true
 	case h.bugReport.IsVisible():
@@ -2126,7 +2135,7 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		h.bugReport = dialog
 		return cmd, true
 	case h.settingsDialog.IsVisible():
-		dialog, cmd := h.settingsDialog.Update(msg)
+		dialog, cmd := h.settingsDialog.Update(cmdMsg)
 		h.settingsDialog = dialog
 		return cmd, true
 	case h.createWorkspaceDialog.IsVisible():
@@ -2160,11 +2169,11 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		h.snoozeDialog = dialog
 		return cmd, true
 	case h.contextMenu.IsVisible():
-		dialog, cmd := h.contextMenu.Update(msg)
+		dialog, cmd := h.contextMenu.Update(cmdMsg)
 		h.contextMenu = dialog
 		return cmd, true
 	case h.sessionCreateDialog.IsVisible():
-		dialog, cmd := h.sessionCreateDialog.Update(msg)
+		dialog, cmd := h.sessionCreateDialog.Update(cmdMsg)
 		h.sessionCreateDialog = dialog
 		return cmd, true
 	case h.newDialog.IsVisible():
@@ -2172,7 +2181,7 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		h.newDialog = dialog
 		return cmd, true
 	case h.confirmDialog.IsVisible():
-		dialog, cmd := h.confirmDialog.Update(msg)
+		dialog, cmd := h.confirmDialog.Update(cmdMsg)
 		h.confirmDialog = dialog
 		return cmd, true
 	case h.renameDialog.IsVisible():
@@ -2320,6 +2329,13 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	prevSlotTapSlot := h.lastSlotTapSlot
 	prevSlotTapAt := h.lastSlotTapAt
 	h.lastSlotTapSlot = -1
+
+	// A non-Latin layout delivers the character it produced, not the key that was
+	// pressed, so every case below would miss (Hebrew's `j` key arrives as 'ח').
+	// Safe to do unconditionally here: every branch that owns text — modals, the
+	// launchpad, focus mode, the filter, the drawer — has already returned above,
+	// so nothing downstream of this line can be typing.
+	msg = normalizeKey(msg)
 
 	switch msg.String() {
 	case "`": // open the terminal drawer + move focus into it
