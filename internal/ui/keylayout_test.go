@@ -5,10 +5,12 @@ import (
 	"go/parser"
 	"go/token"
 	"reflect"
-	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/brizzai/fleet/internal/discovery"
 )
 
 // TestNormalizeKeyLeavesLatinAlone: the remap must be invisible to everyone on a
@@ -107,6 +109,36 @@ func TestNonLatinKeyClosesDrawer(t *testing.T) {
 	}
 }
 
+// TestNonLatinKeyDrivesLaunchpad covers the other branch that matches above the
+// remap. The launchpad is the only one that does not return on a miss, so a key
+// it failed to match went on to drive the main switch: Hebrew 'ח' moved the
+// sidebar cursor hidden behind the launchpad, and Russian 'Ф' opened the
+// session-create dialog on top of it instead of checking every row.
+func TestNonLatinKeyDrivesLaunchpad(t *testing.T) {
+	h := newPersistTestHome(t)
+	h.booted = true
+	h.launchpad.SetItems([]discovery.Recent{
+		{Path: "/tmp/one", OriginKey: "one"},
+		{Path: "/tmp/two", OriginKey: "two"},
+	})
+	if !h.launchpadActive() {
+		t.Fatal("precondition failed: the launchpad is not showing, so this proves nothing")
+	}
+
+	h.handleKey(tea.KeyPressMsg{Code: 'ח', Text: "ח"}) //nolint:errcheck // the cursor is the assertion
+	if h.launchpad.cursor != 1 {
+		t.Errorf("Hebrew 'ח' left the launchpad cursor at %d, want 1 (same as `j`)", h.launchpad.cursor)
+	}
+
+	h.handleKey(tea.KeyPressMsg{Code: 'Ф', Text: "Ф"}) //nolint:errcheck // toggle-all is the assertion
+	if h.launchpad.SelectedCount() != 0 {
+		t.Errorf("Russian 'Ф' left %d rows checked — it means toggle-all, and SetItems pre-checks every row", h.launchpad.SelectedCount())
+	}
+	if h.newDialog.IsVisible() {
+		t.Error("Russian 'Ф' fell through and opened the new-session dialog on top of the launchpad")
+	}
+}
+
 // TestNonLatinKeyReachesTextFreeDialog covers the routeToModal half: a delete
 // confirm has to answer to the Hebrew key in the `y` position, since the dialog
 // offers no other single-key yes.
@@ -170,6 +202,14 @@ func TestFindTextInputDetects(t *testing.T) {
 	if got := findTextInput(withoutInput, map[reflect.Type]bool{}); got != "" {
 		t.Errorf("findTextInput reports ConfirmDialog owning %q — false positives make the guard unusable", got)
 	}
+
+	// A dialog with several inputs is the likely way this guard goes blind: it
+	// would hold them in a slice, and a search that only followed pointers would
+	// call it clean.
+	type multiInput struct{ Inputs []textinput.Model }
+	if got := findTextInput(reflect.TypeFor[multiInput](), map[reflect.Type]bool{}); got == "" {
+		t.Error("findTextInput missed a []textinput.Model — a multi-input dialog would pass the guard")
+	}
 }
 
 // dialogsReceivingNormalizedKeys returns the Home field names whose Update is
@@ -219,16 +259,14 @@ func dialogsReceivingNormalizedKeys(t *testing.T) []string {
 // findTextInput reports the field path at which t holds a bubbles textinput, or
 // "" if it holds none. Recursive: a dialog could nest one inside a sub-struct.
 func findTextInput(t reflect.Type, seen map[reflect.Type]bool) string {
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
+	t = unwrapContainers(t)
 	if t.Kind() != reflect.Struct || seen[t] {
 		return ""
 	}
 	seen[t] = true
 
 	for _, f := range reflect.VisibleFields(t) {
-		if strings.TrimPrefix(f.Type.String(), "*") == "textinput.Model" {
+		if unwrapContainers(f.Type).String() == "textinput.Model" {
 			return f.Name
 		}
 		if nested := findTextInput(f.Type, seen); nested != "" {
@@ -236,4 +274,20 @@ func findTextInput(t reflect.Type, seen map[reflect.Type]bool) string {
 		}
 	}
 	return ""
+}
+
+// unwrapContainers strips pointer, slice, array and map layers. A dialog with
+// several inputs is likely to hold them as a []textinput.Model, and a guard that
+// only followed pointers would report such a dialog clean — passing
+// TestNormalizedDialogsHoldNoTextInput while eating the user's non-Latin typing.
+// Interface-typed fields stay invisible: their dynamic type is not knowable here.
+func unwrapContainers(t reflect.Type) reflect.Type {
+	for {
+		switch t.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+			t = t.Elem()
+		default:
+			return t
+		}
+	}
 }

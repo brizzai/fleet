@@ -2244,8 +2244,16 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// First-run launchpad: drive the recent-repos picker. Space multi-selects,
 	// Enter launches the checked set (or the cursor row). Unhandled keys
 	// (n to type a path, ?, S, q, …) fall through to the main switch below.
+	//
+	// Matched on the US position for the same reason the drawer's chrome is: this
+	// branch sits above the remap, and unlike every other branch here it does not
+	// return on a miss. A Hebrew 'ח' would fall through, normalize to "j" below,
+	// and move the hidden sidebar cursor instead of the launchpad's — worse than
+	// the dead press it used to be, and on the first screen a user ever sees. Safe
+	// because the launchpad owns no text input (its `n` opens newDialog, a modal),
+	// and the fall-through still carries the raw key down to the remap.
 	if h.launchpadActive() {
-		switch msg.String() {
+		switch normalizeKey(msg).String() {
 		case "j", "down":
 			h.launchpad.Move(1)
 			return h, nil
@@ -2332,9 +2340,11 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// A non-Latin layout delivers the character it produced, not the key that was
 	// pressed, so every case below would miss (Hebrew's `j` key arrives as 'ח').
-	// Safe to do unconditionally here: every branch that owns text — modals, the
-	// launchpad, focus mode, the filter, the drawer — has already returned above,
-	// so nothing downstream of this line can be typing.
+	// Safe to do unconditionally here: every branch that owns text — modals, focus
+	// mode, the filter, the drawer — has already returned above, so nothing
+	// downstream of this line can be typing. (The launchpad is the one branch that
+	// falls through rather than returning; it owns no text and matches on the US
+	// position itself, above.)
 	msg = normalizeKey(msg)
 
 	switch msg.String() {

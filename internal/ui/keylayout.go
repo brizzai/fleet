@@ -16,10 +16,12 @@ import (
 //
 // Call it only where a key means a command. It must never reach a text input or
 // the tmux forwarders — a Hebrew user renaming a session, filtering, or typing
-// into the drawer's shell has to get Hebrew back. The two call sites are chosen
-// so that is structurally true rather than merely intended: handleKey applies it
+// into the drawer's shell has to get Hebrew back. The call sites are chosen so
+// that is structurally true rather than merely intended: handleKey applies it
 // below every text-owning branch, and routeToModal applies it only to dialogs
-// that hold no textinput at all (TestNormalizedDialogsHoldNoTextInput).
+// that hold no textinput at all (TestNormalizedDialogsHoldNoTextInput). The two
+// branches that match above the remap — the drawer's chrome and the launchpad —
+// own no text of their own and forward nothing they matched.
 //
 // Both Code and Text are rewritten because upstream Key.String() returns Text
 // verbatim whenever it is non-empty, and String() is what every switch here
