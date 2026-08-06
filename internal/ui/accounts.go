@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -547,9 +548,15 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 	// may never read quota gets nothing rather than a word: "unreadable" reads
 	// as a fault, when in fact nothing is wrong — a `claude setup-token`
 	// credential simply isn't entitled to the usage endpoint.
+	//
+	// A rejection is the exception, and it outranks the numbers: the account is
+	// out of the rotation entirely, so showing its last-known percentage would
+	// present a dead credential as a healthy one with headroom to spare.
 	right := ""
 	if u, ok := d.usage[a.Email]; ok {
 		switch {
+		case u.Rejected:
+			right = lipgloss.NewStyle().Foreground(ColorRed).Render("✕ token rejected")
 		case u.Known():
 			right = renderQuotaCell(u)
 		case u.Err != nil:
@@ -780,21 +787,38 @@ func (h *Home) handleAccountValidated(msg accountValidatedMsg) (tea.Model, tea.C
 		h.accountsDialog.SetError(msg.err, msg.capture)
 		return h, nil
 	}
-	h.accounts.Upsert(msg.account)
+	// Upsert may have matched on organization, so the account can be stored under
+	// a key that is not msg.account.Email — a rotated token arrives with a fresh
+	// fingerprint name and lands on the existing account. Everything below indexes
+	// by account, so it has to use the key Upsert actually wrote.
+	key := h.accounts.Upsert(msg.account)
+
+	// Replace this account's reading outright, even when validation couldn't get
+	// one. The numbers and any rejection belong to the *old* token, and adding a
+	// replacement is precisely how a user heals a dead account — inheriting the
+	// verdict would keep the fresh credential excluded from selection until the
+	// next poll, making the fix look like it didn't work. Same asymmetry as
+	// UsageEndpointForbidden: a new token gets a new verdict.
+	current := h.accountUsageSnapshot()
+	next := make(map[string]claudeaccount.Usage, len(current)+1)
+	for k, v := range current {
+		next[k] = v
+	}
 	// Validation already read this account's quota; keep it rather than paying
 	// for a second probe seconds later.
-	if u := msg.account.InitialUsage(); u.Known() {
-		current := h.accountUsageSnapshot()
-		next := make(map[string]claudeaccount.Usage, len(current)+1)
-		for k, v := range current {
-			next[k] = v
-		}
-		next[msg.account.Email] = u
-		h.accountUsage.Store(&next)
+	next[key] = msg.account.InitialUsage()
+	h.accountUsage.Store(&next)
+
+	// Report the account as stored, not as validated: an org match keeps the
+	// existing key and label, so announcing msg.account would name a key that
+	// isn't in the store and re-prompt for a label the account already has.
+	stored, ok := h.accounts.Get(key)
+	if !ok {
+		stored = msg.account
 	}
-	cmd := h.persistAccounts("Added " + msg.account.Name())
+	cmd := h.persistAccounts("Added " + stored.Name())
 	// After persistAccounts, so the dialog is looking at the refreshed list.
-	h.accountsDialog.Added(msg.account.Email, msg.account.NeedsLabel())
+	h.accountsDialog.Added(key, stored.NeedsLabel())
 	return h, cmd
 }
 
@@ -843,7 +867,18 @@ func (h *Home) maybePollAccountUsage() {
 		// fleet's own name, is worth roughly nine tokens a poll.
 		u, org, err := claudeaccount.ProbeUsage(context.Background(), a.Token)
 		if err != nil {
-			{
+			// A refusal is the one failure that carries information. Everything
+			// else here is "fleet couldn't ask", which says nothing about the
+			// credential; a 401/403 says the credential is dead, and selection
+			// must act on that rather than scoring it as unknown.
+			rejected := errors.Is(err, claudeaccount.ErrTokenRejected)
+			if rejected {
+				// Error, not Warn: every session assigned this account is billing
+				// somewhere else or failing to run, and the account keeps looking
+				// healthy in the readout until someone reads this line.
+				debuglog.Logger.Error("account credential rejected; excluding it from new sessions",
+					"account", a.Email, "err", claudeaccount.Redact(err.Error()))
+			} else {
 				// Warn, not Error: quota is an optimization and a dead endpoint
 				// is survivable — but it silently changes which account gets
 				// picked, so it must be visible in the log.
@@ -856,6 +891,7 @@ func (h *Home) maybePollAccountUsage() {
 			// selection. Only the attempt clock moves.
 			prev.Err = err
 			prev.AttemptedAt = now
+			prev.Rejected = rejected
 			next[a.Email] = prev
 			changed = true
 			continue

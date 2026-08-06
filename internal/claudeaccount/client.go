@@ -236,7 +236,23 @@ type Usage struct {
 	// AttemptedAt is when a read was last tried, successfully or not.
 	AttemptedAt time.Time
 	Err         error // last poll error; nil once a poll succeeds
+
+	// Rejected records that the API refused this credential outright (see
+	// ErrTokenRejected), which is the one failure that is real information.
+	//
+	// Live state, never persisted on the Account: an account heals when a fresh
+	// token is added or when a later poll succeeds, and a verdict written to disk
+	// would outlive both. Polling continues on the normal cadence while it is
+	// set, which is what lets the account come back on its own.
+	Rejected bool
 }
+
+// Usable reports whether a session launched on this account could actually run.
+//
+// Only a rejection makes it false. Spent is not unusable — it is a wait, and it
+// clears at the reset — and an unpollable account is not unusable either, since
+// fleet not reaching the endpoint says nothing about the credential.
+func (u Usage) Usable() bool { return !u.Rejected }
 
 // Exhausted reports whether this account should be skipped for new work.
 //

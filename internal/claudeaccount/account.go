@@ -238,7 +238,12 @@ func (s *Store) TokenFor(email string) string {
 // specific token, and a replacement deserves its own. Inheriting it would
 // silently disable quota forever if a future token did carry the scope, where
 // clearing it costs one HTTP call that re-marks it immediately.
-func (s *Store) Upsert(a Account) {
+//
+// Returns the key the account is stored under, which is NOT always a.Email — an
+// org match keeps the existing key. Callers that index anything by account (the
+// usage map, config) must use the returned key or they will write under a name
+// nothing else reads.
+func (s *Store) Upsert(a Account) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if i := s.indexOfLocked(a); i >= 0 {
@@ -256,10 +261,11 @@ func (s *Store) Upsert(a Account) {
 		// them — which is exactly what re-adding a rotated token used to do.
 		a.Email, a.Order = old.Email, old.Order
 		s.accounts[i] = a
-		return
+		return a.Email
 	}
 	a.Order = len(s.accounts)
 	s.accounts = append(s.accounts, a)
+	return a.Email
 }
 
 // indexOfLocked finds the account a refers to, organization first.
