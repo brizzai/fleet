@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -178,6 +180,17 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 		if err := storage.UpdateStatus(row.ID, string(s.GetStatus())); err != nil {
 			debuglog.Logger.Error("failed to persist status after wake", "id", row.ID, "err", err)
 		}
+		// Restart may have *healed* the conversation id on the way in
+		// (adoptResolvedLaunchID promotes a resolved id over a stale one — the
+		// issue #226 path). The TUI gets away with not persisting that here
+		// because its hook worker re-persists moments later; this process exits
+		// as soon as deliver returns, so an unsaved heal is recomputed and thrown
+		// away on every wake and the session stays pinned to a dead conversation.
+		if id := s.ClaudeSessionID; id != "" && id != row.ClaudeSessionID {
+			if err := storage.UpdateClaudeSessionID(row.ID, id); err != nil {
+				debuglog.Logger.Error("failed to persist healed conversation id after wake", "id", row.ID, "err", err)
+			}
+		}
 		fmt.Printf("Woke suspended session '%s' (%s) with your message\n", row.Title, ag.DisplayName())
 		fmt.Printf("Sent: %s\n", summarizeText(message, 60))
 		// The TUI reads sessions from SQLite once, at startup, and only ever
@@ -205,8 +218,7 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 	// command line and the Enter runs it — "delete the old build dir and rerun
 	// make" would be executed by the shell. Deliberately not bypassable with
 	// -force: there is no version of this the user wanted.
-	tmux.RefreshSessionCache() // cache is populated by the TUI's tick, which isn't running here
-	if paneCmd := tmux.PaneCurrentCommand(row.TmuxSession); shell.IsShellCommand(paneCmd) {
+	if paneCmd, atShell := waitForAgentInPane(row.TmuxSession); atShell {
 		return fmt.Errorf("the %s process in session %q has exited — its pane is back at a %s prompt, "+
 			"where the message would run as a shell command.\nRestart it with r in the TUI",
 			ag.DisplayName(), row.Title, paneCmd)
@@ -218,15 +230,154 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 				"discarded and its Enter confirms the highlighted option.\nAnswer it first (attach, "+
 				"or Y to approve), or pass -force to send anyway", row.Title)
 		}
+		// The check above can't see an OpenCode prompt (no structural detector for
+		// its UI), so for that agent the guard silently withdraws at the moment it
+		// matters most: a paste into a permission menu is discarded and the Enter
+		// confirms whatever was highlighted. Refusing outright would be worse —
+		// OpenCode defaults to allow-all, so every send would need -force and the
+		// flag would become reflex — but proceeding without saying so leaves the
+		// user with a guarantee they don't have.
+		if ag == agent.OpenCode {
+			fmt.Fprintf(os.Stderr, "Note: fleet can't tell whether an OpenCode session is waiting on a "+
+				"prompt.\nIf it is, this message is discarded and its Enter confirms the highlighted option.\n")
+		}
 	}
 
 	if err := ts.PasteAndSubmit(message); err != nil {
 		return fmt.Errorf("failed to send to session %q: %w", row.Title, err)
 	}
+	// A pane whose agent is *running* is not necessarily an agent that is
+	// *listening*: for a couple of seconds after the process appears, the TUI is
+	// still painting and anything written to the pty is discarded. Measured at
+	// ~2.4s for Claude, and no signal available here distinguishes it — the
+	// process name has already flipped, and the pane content sits static
+	// mid-startup, so waiting for it to settle fires ~2s too early.
+	//
+	// So don't predict readiness, check the outcome: the message either shows up
+	// in the pane or it didn't arrive. Reporting "Sent" for a message that
+	// vanished is the worst thing this command could do, and it is exactly what
+	// happens without this. Deliberately no auto-retry — a re-paste on a false
+	// negative would submit the message twice.
+	if !confirmDelivered(ts, message) {
+		return fmt.Errorf("the message was not delivered — %q was still starting and its input "+
+			"wasn't ready yet.\nNothing reached the agent; try again in a moment", row.Title)
+	}
 
 	fmt.Printf("Sent to '%s' (%s)\n", row.Title, ag.DisplayName())
 	fmt.Printf("Message: %s\n", summarizeText(message, 60))
 	return nil
+}
+
+// agentStartupGrace bounds how long waitForAgentInPane waits for a pane to stop
+// looking like a bare shell. Generous because the cost is paid only on the
+// genuinely-exited path, which is already an error, while under-waiting
+// produces a *wrong* error on a healthy session: measured start times ranged
+// from 0.6s to 7.4s, dominated by shell rc and the agent's own boot.
+const agentStartupGrace = 10 * time.Second
+
+// agentStartupPoll is the gap between pane reads during that grace period.
+const agentStartupPoll = 150 * time.Millisecond
+
+// deliveryGrace bounds how long confirmDelivered waits for the message to show
+// up in the pane, and deliveryPoll is the gap between those reads.
+const (
+	deliveryGrace = 2 * time.Second
+	deliveryPoll  = 250 * time.Millisecond
+)
+
+// waitForAgentInPane reports whether the pane is sitting at a shell prompt with
+// no agent in the foreground, returning the command it settled on.
+//
+// It polls rather than reading once, because a single read cannot tell "the
+// agent exited" from "the agent hasn't started yet" — and both are common. A
+// session is launched by *typing* the agent's command into a fresh pane, so for
+// as long as the shell takes to source its rc, pane_current_command is `zsh`.
+// That is precisely the window the advertised script runs in:
+//
+//	gh issue view 242 | fleet wt fix-242 -p -
+//	fleet send fix-242 "also update the tests"     # ← lands mid-startup
+//
+// Reading once made that fail with "the Claude process has exited", which was
+// both false and — since this guard is deliberately not -force-able — a dead
+// end. Waiting costs nothing on a healthy session (the first read after startup
+// wins) and delays only the genuinely-exited case, which is already an error.
+func waitForAgentInPane(tmuxSession string) (paneCmd string, atShell bool) {
+	deadline := time.Now().Add(agentStartupGrace)
+	for {
+		// Re-refresh every pass: the cache is a snapshot, and the TUI's tick that
+		// normally repopulates it isn't running in a one-shot CLI process.
+		tmux.RefreshSessionCache()
+		paneCmd = tmux.PaneCurrentCommand(tmuxSession)
+		if !shell.IsShellCommand(paneCmd) {
+			return paneCmd, false
+		}
+		if time.Now().After(deadline) {
+			return paneCmd, true
+		}
+		time.Sleep(agentStartupPoll)
+	}
+}
+
+// confirmDelivered reports whether message visibly reached the pane.
+//
+// "Visibly reached" is the right bar rather than "was submitted": a message
+// sitting in the input box is in front of the user and recoverable, whereas one
+// swallowed during startup is gone with nothing on screen to show for it.
+func confirmDelivered(ts *tmux.Session, message string) bool {
+	needle := deliveryNeedle(message)
+	if needle == "" {
+		return true // nothing distinctive to look for; don't invent a failure
+	}
+	deadline := time.Now().Add(deliveryGrace)
+	for {
+		if pane, err := ts.CapturePaneFresh(); err == nil {
+			hay := squashSpace(session.StripANSI(pane))
+			// Claude collapses a multi-line paste to a "[Pasted text #1 +N lines]"
+			// placeholder, so the text itself is never on screen to match.
+			if strings.Contains(hay, needle) || strings.Contains(hay, "[Pastedtext") {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(deliveryPoll)
+	}
+}
+
+// deliveryNeedle builds what to look for in the pane: the head of the message's
+// first line, with whitespace squashed out.
+//
+// Squashing is what makes the match survive rendering — the pane wraps long
+// lines and indents continuations, so the message's own spacing is not what
+// ends up on screen. Returns "" for a message too short to identify, where a
+// match would be indistinguishable from coincidence; the caller then skips the
+// check rather than guessing.
+func deliveryNeedle(message string) string {
+	line := message
+	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+		line = line[:i]
+	}
+	squashed := squashSpace(line)
+	r := []rune(squashed)
+	if len(r) < 6 {
+		return ""
+	}
+	if len(r) > 24 {
+		r = r[:24]
+	}
+	return string(r)
+}
+
+// squashSpace removes all whitespace, so wrapped and re-indented pane text
+// still matches the message it came from.
+func squashSpace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // resolveSession finds the one session named by selector.

@@ -39,15 +39,16 @@ func TestBuildLaunchCmd(t *testing.T) {
 		{"opencode resume", OpenCode, LaunchOpts{ResumeID: "abc"}, "opencode --session abc"},
 		{"opencode fork", OpenCode, LaunchOpts{ForkID: "abc"}, "opencode --session abc --fork"},
 		{"opencode fork wins over resume", OpenCode, LaunchOpts{ResumeID: "r", ForkID: "f"}, "opencode --session f --fork"},
-		// A prompt is the agent's own argument — positional for Claude/Codex,
-		// --prompt for OpenCode, whose positional is a project path instead.
-		{"claude prompt", Claude, LaunchOpts{Prompt: "fix it"}, `claude "$FLEET_INITIAL_PROMPT"`},
-		{"codex prompt", Codex, LaunchOpts{Prompt: "fix it"}, `codex "$FLEET_INITIAL_PROMPT"`},
-		{"opencode prompt", OpenCode, LaunchOpts{Prompt: "fix it"}, `opencode --prompt "$FLEET_INITIAL_PROMPT"`},
-		{"claude resume with prompt", Claude, LaunchOpts{ResumeID: "abc", Prompt: "go on"}, `claude --resume abc "$FLEET_INITIAL_PROMPT"`},
-		{"codex resume with prompt", Codex, LaunchOpts{ResumeID: "abc", Prompt: "go on"}, `codex resume abc "$FLEET_INITIAL_PROMPT"`},
-		{"opencode resume with prompt", OpenCode, LaunchOpts{ResumeID: "abc", Prompt: "go on"}, `opencode --session abc --prompt "$FLEET_INITIAL_PROMPT"`},
-		{"claude fork with prompt", Claude, LaunchOpts{ForkID: "abc", Prompt: "go on"}, `claude --resume abc --fork-session "$FLEET_INITIAL_PROMPT"`},
+		// A prompt is the agent's own argument, behind a separator that ends
+		// option parsing — `--` for Claude/Codex, `--prompt=` for OpenCode,
+		// whose positional is a project path instead.
+		{"claude prompt", Claude, LaunchOpts{Prompt: "fix it"}, `claude -- "$FLEET_INITIAL_PROMPT"`},
+		{"codex prompt", Codex, LaunchOpts{Prompt: "fix it"}, `codex -- "$FLEET_INITIAL_PROMPT"`},
+		{"opencode prompt", OpenCode, LaunchOpts{Prompt: "fix it"}, `opencode --prompt="$FLEET_INITIAL_PROMPT"`},
+		{"claude resume with prompt", Claude, LaunchOpts{ResumeID: "abc", Prompt: "go on"}, `claude --resume abc -- "$FLEET_INITIAL_PROMPT"`},
+		{"codex resume with prompt", Codex, LaunchOpts{ResumeID: "abc", Prompt: "go on"}, `codex resume abc -- "$FLEET_INITIAL_PROMPT"`},
+		{"opencode resume with prompt", OpenCode, LaunchOpts{ResumeID: "abc", Prompt: "go on"}, `opencode --session abc --prompt="$FLEET_INITIAL_PROMPT"`},
+		{"claude fork with prompt", Claude, LaunchOpts{ForkID: "abc", Prompt: "go on"}, `claude --resume abc --fork-session -- "$FLEET_INITIAL_PROMPT"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -73,6 +74,25 @@ func TestBuildLaunchCmdNeverEmbedsPromptText(t *testing.T) {
 		}
 		if !strings.Contains(cmd, `"$`+PromptEnvVar+`"`) {
 			t.Errorf("%s: launch command should reference the prompt env var, got %q", typ, cmd)
+		}
+	}
+}
+
+// Quoting the expansion satisfies the *shell*; the agent's argv parser is a
+// second parser that reads a leading dash as an option and exits, stranding a
+// live session at a shell prompt with the message gone. `fleet send` promises a
+// message may start with a dash, so the separator has to hold that promise all
+// the way to argv.
+func TestBuildLaunchCmdSeparatesPromptFromOptions(t *testing.T) {
+	cases := map[Type]string{
+		Claude:   `-- "$FLEET_INITIAL_PROMPT"`,
+		Codex:    `-- "$FLEET_INITIAL_PROMPT"`,
+		OpenCode: `--prompt="$FLEET_INITIAL_PROMPT"`, // `--prompt <val>` makes yargs read the value as an option
+	}
+	for typ, want := range cases {
+		cmd := typ.BuildLaunchCmd(LaunchOpts{Prompt: "--force is not a flag here"})
+		if !strings.HasSuffix(cmd, want) {
+			t.Errorf("%s: launch command = %q, want it to end with %q", typ, cmd, want)
 		}
 	}
 }

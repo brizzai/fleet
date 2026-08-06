@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -679,6 +680,10 @@ func (s *Session) SendLiteralKeys(text string) error {
 	return nil
 }
 
+// sendBufferSeq distinguishes concurrent PasteAndSubmit calls within one
+// process; the pid in the name separates them across processes.
+var sendBufferSeq atomic.Uint64
+
 // PasteAndSubmit types text into the pane as a paste and then presses Enter.
 //
 // Deliberately not SendLiteralKeys: that types the text a byte at a time, so
@@ -693,9 +698,13 @@ func (s *Session) SendLiteralKeys(text string) error {
 // Enter is a separate call on purpose — it must land after the paste's closing
 // marker for the agent to read it as "submit" rather than as pasted content.
 func (s *Session) PasteAndSubmit(text string) error {
-	// Buffer name is per-session so two concurrent sends can't overwrite each
-	// other's text between load and paste.
-	buf := "fleet-send-" + s.Name
+	// The buffer name must be unique per *call*, not per target session: two
+	// concurrent sends to one session are exactly the case that shares a name,
+	// and they interleave as load(A) → load(B) → paste -d(A pastes B's text and
+	// drops the buffer) → paste(B) fails. A's message is silently replaced by
+	// B's while A reports success and B — whose text actually landed — reports
+	// an error. pid + counter makes each call's buffer its own.
+	buf := fmt.Sprintf("fleet-send-%d-%d", os.Getpid(), sendBufferSeq.Add(1))
 
 	load := exec.Command("tmux", "load-buffer", "-b", buf, "-")
 	load.Stdin = strings.NewReader(text)

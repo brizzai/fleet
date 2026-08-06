@@ -69,11 +69,12 @@ type Session struct {
 
 	// InitialPrompt is the first message to hand the agent, sent as the agent's
 	// own prompt argument so it opens already working on it. Transient and
-	// one-shot: cleared by a successful Start so a later Restart (or the idle-
-	// suspend wake) can't re-submit a prompt the user asked for once, and never
-	// persisted — a prompt that outlived its launch would replay on every app
-	// restart. The text reaches the pane through agent.PromptEnvVar, never the
-	// command string; see sessionEnv.
+	// one-shot: every launch path clears it on success via
+	// consumeInitialPromptLocked, so a later restart, respawn or idle-suspend
+	// wake can't re-submit a prompt the user asked for once. Never persisted — a
+	// prompt that outlived its launch would replay on every app restart. The
+	// text reaches the pane through agent.PromptEnvVar, never the command
+	// string; see sessionEnv.
 	InitialPrompt string
 
 	// snoozedUntil mutes this session from the attention surfaces (Space jump,
@@ -229,15 +230,24 @@ func (s *Session) Start() error {
 	// transcript heuristic (which can't see a fork). Cleared on divergence.
 	s.forkParentID = s.ForkFromID
 	s.ForkFromID = "" // Clear after first start so restarts use session's own ClaudeSessionID.
-	// Same one-shot rule as the fork id, and for a louder reason: a prompt left
-	// in place would be re-submitted by every Restart — pressing `r` on a
-	// finished session, or waking it from idle-suspend, would silently ask the
-	// agent to redo the original task. Cleared only on success, so a failed
-	// launch can be retried with the prompt intact.
-	s.InitialPrompt = ""
+	s.consumeInitialPromptLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
 	return nil
+}
+
+// consumeInitialPromptLocked clears the one-shot launch prompt. Caller holds mu.
+//
+// Every path that hands the agent a command line has to call this, because each
+// of them would otherwise re-submit the prompt: Start, Restart (the `r` key, and
+// the wake from idle-suspend) and RespawnClaude all build the command from
+// buildAgentCmd and the env from sessionEnv. Missing one means a user who
+// restarts a finished session silently gets the original task asked again.
+//
+// Called only after a launch has succeeded, so a failed one can be retried with
+// the prompt intact.
+func (s *Session) consumeInitialPromptLocked() {
+	s.InitialPrompt = ""
 }
 
 // Kill terminates the tmux session.
@@ -774,6 +784,7 @@ func (s *Session) Restart() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
+	s.consumeInitialPromptLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session restarted", "id", s.ID, "title", s.Title)
 	return nil
@@ -821,6 +832,7 @@ func (s *Session) RespawnClaude() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
+	s.consumeInitialPromptLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session respawned", "id", s.ID, "title", s.Title)
 	return nil

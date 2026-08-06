@@ -259,3 +259,30 @@ func TestNoInitialPromptLeavesLaunchUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// The one-shot rule has to hold on every path that hands the agent a command
+// line, not just Start: each of them builds the launch command and env from the
+// same two functions, so a path that forgets to consume the prompt silently
+// re-submits the original task. This asserts the clear itself, which is what
+// those paths call — the launches need real tmux and can't run here.
+func TestInitialPromptIsOneShot(t *testing.T) {
+	s := &Session{ID: "abc-123", Agent: agent.Claude, InitialPrompt: "do the thing"}
+
+	s.mu.Lock()
+	s.consumeInitialPromptLocked()
+	s.mu.Unlock()
+
+	if s.InitialPrompt != "" {
+		t.Fatalf("InitialPrompt = %q, want it consumed", s.InitialPrompt)
+	}
+	// A second launch must now look exactly like a promptless one, or `r` on a
+	// finished session would ask the agent to redo its first task.
+	if cmd := s.buildAgentCmd(); strings.Contains(cmd, "FLEET_INITIAL_PROMPT") {
+		t.Errorf("relaunch command still carries the prompt: %q", cmd)
+	}
+	for _, e := range s.sessionEnv() {
+		if strings.HasPrefix(e, "FLEET_INITIAL_PROMPT=") {
+			t.Errorf("relaunch env still carries the prompt: %q", e)
+		}
+	}
+}

@@ -265,3 +265,36 @@ func TestSummarizeText(t *testing.T) {
 		}
 	})
 }
+
+func TestDeliveryNeedle(t *testing.T) {
+	t.Run("uses the first line only", func(t *testing.T) {
+		if got := deliveryNeedle("run the tests\nthen push"); got != "runthetests" {
+			t.Errorf("got %q", got)
+		}
+	})
+
+	// The pane wraps long lines and indents continuations, so the message's own
+	// spacing is not what lands on screen.
+	t.Run("squashes whitespace so wrapping can't break the match", func(t *testing.T) {
+		if got := deliveryNeedle("run   the\ttests"); got != "runthetests" {
+			t.Errorf("got %q", got)
+		}
+	})
+
+	t.Run("caps the length", func(t *testing.T) {
+		got := deliveryNeedle(strings.Repeat("a", 100))
+		if len([]rune(got)) != 24 {
+			t.Errorf("got %d runes, want 24", len([]rune(got)))
+		}
+	})
+
+	// Too short to identify: "y" would match almost any pane, and a coincidental
+	// hit reported as delivery is worse than not checking.
+	t.Run("declines a message too short to identify", func(t *testing.T) {
+		for _, msg := range []string{"y", "ok", "", "   ", "yes!"} {
+			if got := deliveryNeedle(msg); got != "" {
+				t.Errorf("message %q: got needle %q, want none", msg, got)
+			}
+		}
+	})
+}

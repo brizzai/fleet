@@ -74,6 +74,30 @@ const PromptEnvVar = "FLEET_INITIAL_PROMPT"
 // multi-word or multi-line prompt stays a single argv element.
 const promptRef = `"$` + PromptEnvVar + `"`
 
+// promptArg is the prompt argument as each agent must receive it.
+//
+// Quoting the expansion protects the prompt from the *shell*; it does nothing
+// about the agent's own argv parser, which is a second parser with its own
+// opinion about a leading dash. A message may legitimately start with one —
+// `fleet send` guarantees exactly that by refusing to parse flags after the
+// selector — and every agent rejects it as an unknown option and *exits*,
+// leaving a live session parked at a shell prompt with the message gone:
+//
+//	claude "--fix this"            → error: unknown option '--fix this'
+//	codex "--fix this"             → error: unexpected argument … tip: use '-- …'
+//	opencode --prompt "--fix this" → prints usage and exits
+//
+// `--` ends option parsing for the two agents that take the prompt as a
+// positional (verified against Claude 2.1 / Codex 0.5x). OpenCode's positional
+// is a project path, so its prompt rides --prompt and needs the `=` form: with
+// a space, yargs reads the next word as a fresh option instead of the value.
+func (t Type) promptArg() string {
+	if t == OpenCode {
+		return "--prompt=" + promptRef
+	}
+	return "-- " + promptRef
+}
+
 // LaunchOpts carries the per-session details that shape the launch command.
 type LaunchOpts struct {
 	// ResumeID resumes an existing agent conversation when set (and ForkID is empty).
@@ -108,8 +132,9 @@ type LaunchOpts struct {
 //	opencode --session <id> --fork         (fork)
 //
 // An initial prompt appends the agent's own prompt argument to any of those —
-// a positional for Claude and Codex, --prompt for OpenCode. All three accept it
-// alongside resume/fork, so a resumed conversation can be handed a message too.
+// `-- <prompt>` for Claude and Codex, `--prompt=<prompt>` for OpenCode (see
+// promptArg for why the separator matters). All three accept it alongside
+// resume/fork, so a resumed conversation can be handed a message too.
 func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	var cmd string
 	switch t {
@@ -143,17 +168,7 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	}
 
 	if o.Prompt != "" {
-		cmd += " " + t.promptFlag() + promptRef
+		cmd += " " + t.promptArg()
 	}
 	return cmd
-}
-
-// promptFlag returns the prefix the agent needs before its prompt argument.
-// Claude and Codex take a bare positional; OpenCode's positional is a project
-// path, so its prompt goes behind --prompt.
-func (t Type) promptFlag() string {
-	if t == OpenCode {
-		return "--prompt "
-	}
-	return ""
 }
