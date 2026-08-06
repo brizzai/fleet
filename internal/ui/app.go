@@ -244,6 +244,7 @@ type Home struct {
 	commandPalette        *CommandPaletteDialog
 	contextMenu           *ContextMenuDialog
 	snoozeDialog          *SnoozeDialog
+	accountPicker         *AccountPickerDialog
 	// The row the open context menu was built for. Its entries resolve their
 	// subject from h.cursor, which an async rebuild can move — see contextMenuTarget.
 	contextMenuTarget   contextMenuTarget
@@ -539,6 +540,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		commandPalette:         NewCommandPaletteDialog(),
 		contextMenu:            NewContextMenuDialog(),
 		snoozeDialog:           NewSnoozeDialog(),
+		accountPicker:          NewAccountPickerDialog(),
 		sessionCreateDialog:    NewSessionCreateDialog(),
 		consentDialog:          NewConsentDialog(),
 		onboardingDialog:       NewOnboardingDialog(cfg),
@@ -739,6 +741,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.commandPalette.SetSize(msg.Width, msg.Height)
 		h.contextMenu.SetSize(msg.Width, msg.Height)
 		h.snoozeDialog.SetSize(msg.Width, msg.Height)
+		h.accountPicker.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.accountsDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
@@ -753,6 +756,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.snoozeDialog.IsVisible() {
 			h.snoozeDialog.SetAnchor(h.contextMenuAnchor())
+		}
+		if h.accountPicker.IsVisible() {
+			h.accountPicker.SetAnchor(h.contextMenuAnchor())
 		}
 		return h, nil
 
@@ -1113,6 +1119,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.applySnoozeUntil(sc, msg.until, msg.durationID)
 		return h, nil
+
+	case accountPickedMsg:
+		// Same discipline as snoozeSelectedMsg: the picker named one row, and an
+		// async rebuild may have moved the cursor while it was open. Getting this
+		// wrong here bills a different session's work to the chosen subscription.
+		if !h.focusContextMenuTarget() {
+			h.setInfo("That session is gone — nothing to move")
+			return h, nil
+		}
+		return h, h.moveSelectedToAccount(msg.email)
 
 	case contextMenuMsg:
 		// Put the cursor back on the row the menu was opened for before dispatching —
@@ -1880,6 +1896,11 @@ func (h *Home) View() tea.View {
 		x, y := h.contextMenu.Position(lipgloss.Width(mv), lipgloss.Height(mv))
 		base = overlayAt(mv, base, x, y)
 	}
+	// Account picker: same row-anchored dropdown treatment as the context menu.
+	if av := h.accountPicker.View(); av != "" {
+		x, y := h.accountPicker.Position(lipgloss.Width(av), lipgloss.Height(av))
+		base = overlayAt(av, base, x, y)
+	}
 	// Snooze picker: same row-anchored dropdown treatment as the context menu.
 	if sv := h.snoozeDialog.View(); sv != "" {
 		x, y := h.snoozeDialog.Position(lipgloss.Width(sv), lipgloss.Height(sv))
@@ -1958,6 +1979,7 @@ func (h *Home) modalOpen() bool {
 		h.commandPalette.IsVisible() ||
 		h.contextMenu.IsVisible() ||
 		h.snoozeDialog.IsVisible() ||
+		h.accountPicker.IsVisible() ||
 		h.launchpadActive()
 }
 
@@ -2287,6 +2309,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.commandPalette.IsVisible():
 		dialog, cmd := h.commandPalette.Update(msg)
 		h.commandPalette = dialog
+		return cmd, true
+	case h.accountPicker.IsVisible():
+		dialog, cmd := h.accountPicker.Update(msg)
+		h.accountPicker = dialog
 		return cmd, true
 	case h.snoozeDialog.IsVisible():
 		dialog, cmd := h.snoozeDialog.Update(msg)
@@ -3040,6 +3066,153 @@ func (h *Home) resolveAccount(ag agent.Type, path string) string {
 		"allowed", allowed, "candidates", h.accounts.Len(),
 		"usage_known", len(usage), "chosen_five_hour_pct", usage[acct.Email].FiveHourPct)
 	return acct.Email
+}
+
+// accountUnusableReason says why a session's pinned account cannot run it right
+// now, or "" when it can. The strings are user-facing — they go in the toast
+// that explains why the session moved.
+//
+// Deliberately three separate causes rather than one "broken": they call for
+// different responses. A spent window fixes itself at the reset, a rejected
+// token needs a new one, and a removed account was the user's own doing.
+func (h *Home) accountUnusableReason(email string) string {
+	if h.accounts.TokenFor(email) == "" {
+		return "its account was removed"
+	}
+	u := h.accountUsageSnapshot()[email]
+	switch {
+	case u.Rejected:
+		return "its token was rejected"
+	case u.Exhausted(time.Now()):
+		return "its 5-hour window is spent"
+	}
+	return ""
+}
+
+// healAccountBeforeRelaunch re-picks a session's account when the pinned one can
+// no longer run it, and reports whether it moved.
+//
+// Sessions are pinned at creation and deliberately never rotate: Claude's prompt
+// cache is per-account, so re-picking on every restart would throw away the very
+// thing a restart is trying to preserve. That reasoning holds only while the pin
+// is usable. A pin to a rejected token, a spent window or an account that has
+// been removed is not protecting a cache — it is a session that cannot run, and
+// "restart it and carry on" is precisely what the user wants from `r`.
+//
+// So the rule is: keep the pin whenever it could possibly work, heal it when it
+// can't. An unpollable account is left alone — fleet failing to reach Anthropic
+// is not evidence against the credential, and healing on it would rotate the
+// whole fleet during an outage.
+func (h *Home) healAccountBeforeRelaunch(s *session.Session) bool {
+	if s == nil || agentOf(s) != agent.Claude || s.Account == "" || h.accounts.Len() == 0 {
+		return false
+	}
+	reason := h.accountUnusableReason(s.Account)
+	if reason == "" {
+		return false
+	}
+
+	// Select already refuses to hand back a rejected account, but it will return
+	// a spent one when every candidate is spent — so this can land on the account
+	// it started from. Moving to itself would cost the cache for nothing.
+	next := h.resolveAccount(agent.Claude, s.ProjectPath)
+	if next == s.Account {
+		debuglog.Logger.Info("account heal: no better account available, keeping the pin",
+			"id", s.ID, "account", s.Account, "reason", reason)
+		return false
+	}
+
+	from := h.accountLabel(s.Account)
+	if err := h.storage.UpdateAccount(s.ID, next); err != nil {
+		// The in-memory move still stands: launching on a working account and
+		// forgetting by the next restart beats refusing to launch at all.
+		debuglog.Logger.Error("account heal: could not persist the move",
+			"id", s.ID, "from", s.Account, "to", next, "err", err)
+	}
+	debuglog.Logger.Info("account heal: moved session to a usable account",
+		"id", s.ID, "title", s.Title, "from", s.Account, "to", next, "reason", reason)
+	s.Account = next
+
+	// Said out loud, not just logged: the session is about to bill a different
+	// subscription than the one the user assigned it, which they must never
+	// discover from an invoice.
+	h.actionLog.Add("move account", fmt.Sprintf("%s → %s (%s)", from, h.accountLabel(next), reason), true)
+	h.setInfo(fmt.Sprintf("Moved to %s — %s %s", h.accountLabel(next), from, reason))
+	return true
+}
+
+// openAccountPicker offers the other subscriptions for the session under the
+// cursor. The automatic heal on restart covers an account that has plainly
+// stopped working; this covers everything it deliberately won't — moving off an
+// account that is merely busy, or onto a specific one, which is a judgement call
+// fleet has no business making on its own.
+func (h *Home) openAccountPicker() {
+	s := h.selectedSession()
+	if s == nil {
+		return
+	}
+	usage := h.accountUsageSnapshot()
+	rows := make([]accountPickerRow, 0, h.accounts.Len())
+	for _, a := range h.accounts.List() {
+		r := accountPickerRow{email: a.Email, label: a.Name(), usage: usage[a.Email], enabled: true}
+		switch {
+		case a.Email == s.Account:
+			// Shown, never pickable: the row explains where the session is now,
+			// and "moving" it to itself would restart for no reason.
+			r.enabled, r.note = false, "current"
+		case usage[a.Email].Rejected:
+			// Offering a credential the API refuses would trade a busy account for
+			// one that cannot run at all.
+			r.enabled, r.note = false, "token rejected"
+		}
+		rows = append(rows, r)
+	}
+
+	// Remember which row this picker speaks for and re-anchor from the cursor:
+	// reached from the context menu the target is already set, but the palette
+	// and any future key entry point set neither.
+	h.contextMenuTarget = h.targetForCursor()
+	h.accountPicker.SetAnchor(h.contextMenuAnchor())
+	h.accountPicker.Show("Move "+s.Title+" to", rows)
+}
+
+// moveSelectedToAccount pins the selected session to email and relaunches it.
+//
+// The relaunch is not optional. The token is baked into the tmux session's
+// environment at launch, so changing the record alone would leave the sidebar
+// naming one account while the live process billed another — the exact lie the
+// account labelling was fixed to stop telling. So the picker says "move +
+// restart" and this does both, or neither.
+func (h *Home) moveSelectedToAccount(email string) tea.Cmd {
+	s := h.selectedSession()
+	if s == nil || email == "" || email == s.Account {
+		return nil
+	}
+	from := h.accountLabel(s.Account)
+	if err := h.storage.UpdateAccount(s.ID, email); err != nil {
+		// Refuse rather than half-move: an in-memory move that isn't persisted
+		// would silently revert at the next fleet restart, and a session quietly
+		// returning to a spent account is worse than one that never left.
+		h.setError(fmt.Errorf("could not move account: %w", err))
+		return nil
+	}
+	s.Account = email
+	debuglog.Logger.Info("moved session account",
+		"id", s.ID, "title", s.Title, "from", from, "to", email)
+	h.actionLog.Add("move account", fmt.Sprintf("%s → %s", from, h.accountLabel(email)), true)
+	h.setInfo(fmt.Sprintf("Moved to %s — restarting", h.accountLabel(email)))
+
+	// Full restart, never a respawn: see the comment in restartSession for why a
+	// changed account can't ride respawn-pane's layered environment.
+	h.markSessionAccessed(s)
+	id := s.ID
+	return func() tea.Msg {
+		err := s.Restart()
+		if err != nil {
+			debuglog.Logger.Error("restart after account move failed", "id", id, "err", err)
+		}
+		return sessionRestartMsg{id: id, err: err}
+	}
 }
 
 // tccProbeResultMsg carries the outcome of a lazy macOS-TCC access probe.
@@ -3878,12 +4051,21 @@ func (h *Home) restartSession(s *session.Session) tea.Cmd {
 	h.actionLog.Add("restart session", s.Title, true)
 	analytics.Track(analytics.EventSessionRestarted, nil)
 	h.markSessionAccessed(s)
+	// A restart is the moment a stuck session gets unstuck, so it is also the
+	// moment to get it off an account that cannot run it.
+	healed := h.healAccountBeforeRelaunch(s)
 	id := s.ID
 	title := s.Title
 	debuglog.Logger.Info("restarting session", "id", id, "title", title)
 	return func() tea.Msg {
 		var err error
-		if s.IsAlive() && !s.GetTmuxSession().IsPaneDead() {
+		// A heal always takes the full-restart path. respawn-pane layers its -e
+		// over the environment tmux created the session with, so a move *to* the
+		// ambient login — which sets no variable at all — would silently inherit
+		// the old account's token and bill exactly the account we just left.
+		// Rebuilding the tmux session is the only way the env is precisely what
+		// sessionEnv says, and a heal is rare enough to pay for it.
+		if !healed && s.IsAlive() && !s.GetTmuxSession().IsPaneDead() {
 			// Tmux session alive, just respawn the pane.
 			err = s.RespawnClaude()
 			if err != nil {
@@ -3908,6 +4090,10 @@ func (h *Home) resumeSelected(s *session.Session) tea.Cmd {
 	h.actionLog.Add("resume session", s.Title, true)
 	analytics.Track(analytics.EventSessionRestarted, nil)
 	h.markSessionAccessed(s)
+	// Waking is a relaunch like any other, and a session suspended for hours is
+	// the likeliest of all to find its account spent or its token expired. No
+	// healed/respawn branch here: this path is always a full Restart.
+	h.healAccountBeforeRelaunch(s)
 	h.attachAfterResumeID = s.ID
 	s.SetStatus(session.StatusStarting)
 	h.rebuildFlatItems()
@@ -7387,11 +7573,25 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		suspend.Enabled = true
 	}
 
+	// Each clause names the reason it actually failed. "Claude only" on a Codex
+	// row is true; showing it on a Claude session with one subscription would
+	// contradict the account this very session is running on.
+	moveAccount := ContextMenuItem{ID: "move_account", Label: "Move to Account…"}
+	switch {
+	case s.Agent != agent.Claude:
+		moveAccount.Note = "Claude only"
+	case h.accounts.Len() < 2:
+		moveAccount.Note = "only one account"
+	default:
+		moveAccount.Enabled = true
+	}
+
 	items := []ContextMenuItem{
 		open,
 		{ID: "focus", Label: "Focus Preview", Shortcut: tabKey, Key: "tab", Enabled: true},
 		approve,
 		{ID: "restart", Label: "Restart", Shortcut: "r", Key: "r", Enabled: true},
+		moveAccount,
 		{ID: "rename", Label: "Rename", Shortcut: "R", Key: "R", Enabled: true},
 		unread,
 		{ID: "editor", Label: "Open in Editor", Shortcut: "e", Key: "e", Enabled: true},
@@ -7712,6 +7912,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.resumeSelected(s)
 	case "restart":
 		return h, h.confirmRestartSelected()
+	case "move_account":
+		h.openAccountPicker()
+		return h, nil
 	case "suspend_session":
 		return h, h.suspendSelected()
 	case "suspend_now":
