@@ -27,7 +27,6 @@ import (
 // the API volunteers on a request the token is entitled to make. Identity —
 // which that limit genuinely withholds — is not taken from here.
 const (
-	messagesEndpoint = "https://api.anthropic.com/v1/messages"
 	// probeModel is the cheapest model available. The request is one token in,
 	// one token out; the point is the headers, not the answer.
 	probeModel = "claude-haiku-4-5-20251001"
@@ -36,9 +35,25 @@ const (
 	orgIDHeader = "anthropic-organization-id"
 )
 
+// messagesEndpoint is a var only so tests can point it at a local server. How
+// this function classifies a response decides whether a dead credential keeps
+// winning new sessions, which is not a thing to leave untested.
+var messagesEndpoint = "https://api.anthropic.com/v1/messages"
+
 // ErrNoQuotaHeaders means the response carried no rate-limit headers, so the
 // probe told us nothing. Distinct from a failed request.
 var ErrNoQuotaHeaders = errors.New("response carried no rate-limit headers")
+
+// ErrTokenRejected means the API refused the credential itself. It is a verdict
+// about the token, not about the network, and it does not change on retry.
+//
+// The distinction is the whole point: everywhere else a failed poll is
+// deliberately treated as no information, because a stale reading beats none
+// and a blip must not evict a healthy account. A rejected token is the opposite
+// — it is the strongest possible information, and scoring it as "unknown" ranks
+// a dead credential at the midpoint, ahead of a healthy account with real usage.
+// That is how every new session ends up on the one account that cannot run.
+var ErrTokenRejected = errors.New("token rejected")
 
 // ProbeUsage reads quota (and the owning organization) by making the smallest
 // possible Messages request and parsing its response headers.
@@ -72,13 +87,19 @@ func ProbeUsage(ctx context.Context, token string) (Usage, string, error) {
 	// Drain so the connection can be reused; the payload is one token.
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 
-	// Headers arrive on a rejection too — a spent bucket answers 429 and still
+	// Checked before the headers, not after: a refusal is a verdict on the
+	// credential whatever else the response carries, and reading quota off a
+	// response that rejected the token would report numbers for work it cannot do.
+	// Deliberately not permanent — the caller re-probes on the usual cadence, so a
+	// re-issued token (or an org-side change) heals the account on its own.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return Usage{}, "", fmt.Errorf("%w (%d)", ErrTokenRejected, resp.StatusCode)
+	}
+
+	// Headers arrive on a rate-limit too — a spent bucket answers 429 and still
 	// reports its utilization and reset, which is exactly when we most want it.
 	u, org, ok := usageFromHeaders(resp.Header)
 	if !ok {
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return Usage{}, "", fmt.Errorf("token rejected (%d)", resp.StatusCode)
-		}
 		debuglog.Logger.Warn("quota probe returned no headers",
 			"status", resp.StatusCode, "body", Redact(strings.TrimSpace(string(respBody))))
 		return Usage{}, "", ErrNoQuotaHeaders

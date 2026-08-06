@@ -64,7 +64,7 @@ type SelectOpts struct {
 // worse than waiting, and the ambient login could be exactly such an account.
 // The session gets created and carries the spent marker.
 func Select(o SelectOpts) (Account, bool) {
-	candidates := filterAllowed(o.Accounts, o.Allowed)
+	candidates := dropRejected(filterAllowed(o.Accounts, o.Allowed), o.Usage)
 	if len(candidates) == 0 {
 		return Account{}, false
 	}
@@ -118,6 +118,31 @@ func pctOf(usage map[string]Usage, email string) int {
 		return unknownPct
 	}
 	return u.FiveHourPct
+}
+
+// dropRejected removes accounts whose credential the API refuses.
+//
+// Ahead of every strategy, including manual — a rejected token cannot run a
+// session at all, so there is no mode in which handing one out is the right
+// answer. That makes it categorically different from spent, which Select
+// deliberately still returns (soonest to reset) because a wait ends.
+//
+// When it empties the candidate list Select reports false and the caller falls
+// back to the ambient login. That is the better failure: a login that works
+// beats a token that 401s, even under an allowlist, because the allowlist is
+// there to route work between accounts that can do it.
+//
+// Nothing here is sticky. The verdict lives in Usage, the poll keeps running,
+// and a re-issued token clears it — so an account healed outside fleet becomes
+// a candidate again on its next successful poll.
+func dropRejected(accounts []Account, usage map[string]Usage) []Account {
+	out := make([]Account, 0, len(accounts))
+	for _, a := range accounts {
+		if usage[a.Email].Usable() {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // filterAllowed keeps only accounts named in allowed. An empty allowlist means

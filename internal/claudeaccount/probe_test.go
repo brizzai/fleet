@@ -1,8 +1,10 @@
 package claudeaccount
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -13,6 +15,68 @@ func hdr(kv map[string]string) http.Header {
 		h.Set(k, v)
 	}
 	return h
+}
+
+// probeAgainst points ProbeUsage at a stub for the duration of a test.
+func probeAgainst(t *testing.T, h http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	prev := messagesEndpoint
+	messagesEndpoint = srv.URL
+	t.Cleanup(func() { messagesEndpoint = prev; srv.Close() })
+}
+
+// A refused credential must be distinguishable from a poll that failed to land.
+// Everything downstream treats a plain failure as "no information" — which is
+// right for a blip and catastrophic for a dead token, because an account with no
+// reading scores at the midpoint and outranks every healthy account in use.
+func TestRejectedTokenIsReportedAsRejected(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		probeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		})
+		_, _, err := ProbeUsage(context.Background(), "sk-ant-oat01-whatever")
+		if !errors.Is(err, ErrTokenRejected) {
+			t.Errorf("status %d gave err %v, want ErrTokenRejected", status, err)
+		}
+	}
+}
+
+// The inverse, and the one that matters for stability: an outage, a timeout or a
+// malformed reply must never read as a rejection, or a bad afternoon at
+// Anthropic would empty fleet's candidate list and drop every session onto the
+// ambient login.
+func TestOrdinaryProbeFailureIsNotARejection(t *testing.T) {
+	probeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	_, _, err := ProbeUsage(context.Background(), "sk-ant-oat01-whatever")
+	if err == nil {
+		t.Fatal("a 500 should still be an error")
+	}
+	if errors.Is(err, ErrTokenRejected) {
+		t.Error("a 500 was classified as a rejected token")
+	}
+}
+
+// A 429 carries the real numbers and is exactly when they matter most, so it
+// must be read, not thrown away as a failure.
+func TestRateLimitedResponseStillYieldsItsHeaders(t *testing.T) {
+	probeAgainst(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "1.0")
+		w.Header().Set("anthropic-ratelimit-unified-5h-status", "rejected")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	u, _, err := ProbeUsage(context.Background(), "sk-ant-oat01-whatever")
+	if err != nil {
+		t.Fatalf("429 with headers returned %v, want the reading", err)
+	}
+	if !u.Exhausted(time.Now()) {
+		t.Errorf("five hour = %d%%, want it read as spent", u.FiveHourPct)
+	}
+	if u.Rejected {
+		t.Error("a spent account was marked as a rejected credential — it recovers at the reset")
+	}
 }
 
 // The unit trap: these headers are fractions in 0..1, while /api/oauth/usage

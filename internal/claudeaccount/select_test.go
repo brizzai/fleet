@@ -21,6 +21,97 @@ func used(pct int) Usage {
 	return Usage{FiveHourPct: pct, FetchedAt: testNow, FiveHourReset: testNow.Add(time.Hour)}
 }
 
+// rejected builds the reading for an account the API refuses. Note it carries no
+// successful fetch, which is exactly the shape that used to score as "unknown".
+func rejected() Usage {
+	return Usage{AttemptedAt: testNow, Err: ErrTokenRejected, Rejected: true}
+}
+
+// The bug this closes: a token the API answers 403 to never gets a reading, so
+// pctOf scored it at unknownPct (50) — which beats a healthy account at 59% and
+// handed every new session the one credential that cannot run.
+func TestSelectSkipsRejectedEvenWhenTheAliveAccountIsBusier(t *testing.T) {
+	got, ok := Select(SelectOpts{
+		Accounts: accts("dead", "alive"),
+		Usage:    map[string]Usage{"dead": rejected(), "alive": used(59)},
+		Strategy: StrategyLeastUsed,
+		Now:      testNow,
+	})
+	if !ok || got.Email != "alive" {
+		t.Fatalf("least_used = %q (ok=%v), want alive — a rejected token outranked a working account", got.Email, ok)
+	}
+}
+
+// Manual is strict about *spent* because a wait ends. A rejection never does, so
+// it is dropped ahead of every strategy rather than pinned to.
+func TestSelectManualDoesNotPinToARejectedAccount(t *testing.T) {
+	got, ok := Select(SelectOpts{
+		Accounts: accts("dead", "alive"),
+		Usage:    map[string]Usage{"dead": rejected(), "alive": used(90)},
+		Strategy: StrategyManual,
+		Manual:   "dead",
+		Now:      testNow,
+	})
+	if !ok || got.Email != "alive" {
+		t.Fatalf("manual = %q (ok=%v), want alive", got.Email, ok)
+	}
+}
+
+func TestSelectWaterfallSkipsRejected(t *testing.T) {
+	got, _ := Select(SelectOpts{
+		Accounts: accts("dead", "alive"),
+		Usage:    map[string]Usage{"dead": rejected()},
+		Strategy: StrategyWaterfall,
+		Now:      testNow,
+	})
+	if got.Email != "alive" {
+		t.Fatalf("waterfall = %q, want alive", got.Email)
+	}
+}
+
+// With every credential refused, the ambient login is the better answer: it may
+// well work, and a token the API rejects certainly won't. Unlike all-spent,
+// which still returns the soonest to reset because that account recovers.
+func TestSelectAllRejectedFallsBackToAmbient(t *testing.T) {
+	_, ok := Select(SelectOpts{
+		Accounts: accts("a", "b"),
+		Usage:    map[string]Usage{"a": rejected(), "b": rejected()},
+		Strategy: StrategyLeastUsed,
+		Now:      testNow,
+	})
+	if ok {
+		t.Fatal("Select handed out a rejected account instead of falling back to the ambient login")
+	}
+}
+
+// A rejection must not be inferred from an unreadable endpoint: fleet failing to
+// reach Anthropic says nothing about the credential, and excluding on that would
+// empty the candidate list during any outage.
+func TestSelectKeepsAnAccountWhoseProbeMerelyFailed(t *testing.T) {
+	got, ok := Select(SelectOpts{
+		Accounts: accts("blip"),
+		Usage:    map[string]Usage{"blip": {AttemptedAt: testNow, Err: ErrNoQuotaHeaders}},
+		Strategy: StrategyLeastUsed,
+		Now:      testNow,
+	})
+	if !ok || got.Email != "blip" {
+		t.Fatalf("Select = %q (ok=%v), want blip — a failed poll is not a rejection", got.Email, ok)
+	}
+}
+
+// The verdict rides on the live reading, so a later successful poll (or a fresh
+// token, which replaces the entry outright) brings the account straight back.
+func TestHealedAccountBecomesSelectableAgain(t *testing.T) {
+	usage := map[string]Usage{"a": rejected(), "b": used(70)}
+	if got, _ := Select(SelectOpts{Accounts: accts("a", "b"), Usage: usage, Now: testNow}); got.Email != "b" {
+		t.Fatalf("while rejected: %q, want b", got.Email)
+	}
+	usage["a"] = used(5) // a good poll overwrites the entry, Rejected included
+	if got, _ := Select(SelectOpts{Accounts: accts("a", "b"), Usage: usage, Now: testNow}); got.Email != "a" {
+		t.Fatalf("after healing: %q, want a — a recovered account never became a candidate again", got.Email)
+	}
+}
+
 func TestSelectLeastUsedPicksMostHeadroom(t *testing.T) {
 	got, ok := Select(SelectOpts{
 		Accounts: accts("a", "b", "c"),
