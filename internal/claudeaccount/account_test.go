@@ -106,6 +106,109 @@ func TestStoreUpsertPreservesOrderAndLabel(t *testing.T) {
 	}
 }
 
+// The orphaning bug this exists to prevent: an account the API declines to name
+// is keyed by a hash of its token, so running `claude setup-token` again used to
+// produce a second account for one subscription. Every session, plus
+// default_account and allowed_accounts, still named the old key — they fell back
+// to the ambient login and billed the wrong place, with only a parenthetical in
+// the sidebar to say so.
+func TestRotatedTokenLandsOnTheSameAccount(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: FingerprintPrefix + "aaaaaaaa", Token: "t1", OrgUUID: "org-1"})
+	s.SetLabel(FingerprintPrefix+"aaaaaaaa", "personal")
+	s.Upsert(Account{Email: "other@x.com", Token: "t2", OrgUUID: "org-2"})
+
+	// Same subscription, new token — so a different fingerprint key.
+	s.Upsert(Account{Email: FingerprintPrefix + "bbbbbbbb", Token: "t3", OrgUUID: "org-1"})
+
+	if n := s.Len(); n != 2 {
+		t.Fatalf("%d accounts after a token rotation, want 2 — a rotation minted a new identity", n)
+	}
+	got, ok := s.Get(FingerprintPrefix + "aaaaaaaa")
+	if !ok {
+		t.Fatal("the original key is gone — every session naming it is now orphaned")
+	}
+	if got.Token != "t3" {
+		t.Errorf("token = %q, want the rotated one", got.Token)
+	}
+	if got.Label != "personal" {
+		t.Errorf("label = %q, want personal", got.Label)
+	}
+	if got.Order != 0 {
+		t.Errorf("order = %d, want 0", got.Order)
+	}
+}
+
+// A different organization is a different subscription. Matching those together
+// would bill one account's work to the other — worse than the orphaning.
+func TestDifferentOrgIsADifferentAccount(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: "a@x.com", Token: "t1", OrgUUID: "org-1"})
+	s.Upsert(Account{Email: "b@x.com", Token: "t2", OrgUUID: "org-2"})
+
+	if n := s.Len(); n != 2 {
+		t.Fatalf("%d accounts, want 2 — two subscriptions collapsed into one", n)
+	}
+}
+
+// Accounts stored before fleet recorded orgs have none, and so does an account
+// whose add-time probe failed. Matching on a blank org would fold every one of
+// them onto the first.
+func TestBlankOrgNeverMatches(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: "a@x.com", Token: "t1"})
+	s.Upsert(Account{Email: "b@x.com", Token: "t2"})
+
+	if n := s.Len(); n != 2 {
+		t.Fatalf("%d accounts, want 2 — accounts with no org matched each other", n)
+	}
+}
+
+// The key must not move, but an email fleet has just managed to resolve is
+// still worth showing. Label is where display already looks first.
+func TestResolvedEmailBecomesTheLabelNotTheKey(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: FingerprintPrefix + "aaaaaaaa", Token: "t1", OrgUUID: "org-1"})
+
+	s.Upsert(Account{Email: "real@x.com", Token: "t2", OrgUUID: "org-1"})
+
+	a, ok := s.Get(FingerprintPrefix + "aaaaaaaa")
+	if !ok {
+		t.Fatal("the key moved to the newly resolved email, orphaning existing sessions")
+	}
+	if a.Label != "real@x.com" {
+		t.Errorf("label = %q, want the resolved email", a.Label)
+	}
+	if a.NeedsLabel() {
+		t.Error("account still asks for a label when fleet knows its email")
+	}
+}
+
+func TestSetOrgUUIDFillsOnlyABlank(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: "a@x.com", Token: "t"})
+
+	if !s.SetOrgUUID("a@x.com", "org-1") {
+		t.Fatal("first backfill should report new information")
+	}
+	if s.SetOrgUUID("a@x.com", "org-1") {
+		t.Error("repeat backfill should report nothing new, so it triggers no save")
+	}
+	// A changed org means a different subscription, not a correction.
+	if s.SetOrgUUID("a@x.com", "org-2") {
+		t.Error("backfill overwrote a known org")
+	}
+	if a, _ := s.Get("a@x.com"); a.OrgUUID != "org-1" {
+		t.Errorf("org = %q, want org-1", a.OrgUUID)
+	}
+	if s.SetOrgUUID("a@x.com", "") {
+		t.Error("an empty org is not information")
+	}
+	if s.SetOrgUUID("ghost@x.com", "org-3") {
+		t.Error("backfilling an unknown account should report false")
+	}
+}
+
 func TestStoreListIsOrdered(t *testing.T) {
 	s := &Store{}
 	s.Upsert(Account{Email: "a@x.com"})

@@ -1,8 +1,9 @@
 // Package claudeaccount manages multiple Claude subscriptions so sessions can
 // run under different accounts in parallel.
 //
-// The mechanism is one environment variable per tmux session:
-// CLAUDE_CODE_OAUTH_TOKEN, a year-long token minted by `claude setup-token`.
+// The mechanism is one environment variable per tmux session (AuthEnvVar,
+// see client.go for why it is not the obvious one), carrying a year-long token
+// minted by `claude setup-token`.
 // It overrides authentication ONLY — ~/.claude stays shared, so hooks,
 // projects/ (auto-naming and --resume), skills, plugins and local MCP servers
 // keep working untouched. CLAUDE_CONFIG_DIR was deliberately rejected: it forks
@@ -141,7 +142,26 @@ func (s *Store) Save() error {
 		debuglog.Logger.Error("failed to create config directory", "path", path, "error", err)
 		return err
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	// Temp-and-rename, not WriteFile: two goroutines reach here now — the Update
+	// loop when the user edits accounts, and the worker when a quota poll
+	// backfills an organization. A torn write costs every token in the file, and
+	// Load answers an unparseable file with an empty store, so every session
+	// would fall back to the ambient login with nothing on screen to say why.
+	// CreateTemp opens at 0600, same as the file it replaces.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".accounts-*.json")
+	if err != nil {
+		debuglog.Logger.Error("failed to stage accounts file", "path", path, "error", err)
+		return err
+	}
+	_, err = tmp.Write(data)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
 		debuglog.Logger.Error("failed to write accounts file", "path", path, "error", err)
 		return err
 	}
@@ -209,9 +229,10 @@ func (s *Store) TokenFor(email string) string {
 	return a.Token
 }
 
-// Upsert adds an account or replaces the existing one with the same email,
-// preserving that account's Order and Label so re-adding an expired token
-// doesn't silently reorder the rotation or discard a rename.
+// Upsert adds an account or updates the one it refers to, preserving that
+// account's key, Order and Label so re-adding a token doesn't silently reorder
+// the rotation, discard a rename, or mint a second identity for a subscription
+// fleet already knows.
 //
 // QuotaUnavailable is deliberately NOT carried over: it is a verdict about a
 // specific token, and a replacement deserves its own. Inheriting it would
@@ -220,18 +241,77 @@ func (s *Store) TokenFor(email string) string {
 func (s *Store) Upsert(a Account) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := range s.accounts {
-		if s.accounts[i].Email == a.Email {
-			a.Order = s.accounts[i].Order
-			if a.Label == "" {
-				a.Label = s.accounts[i].Label
-			}
-			s.accounts[i] = a
-			return
+	if i := s.indexOfLocked(a); i >= 0 {
+		old := s.accounts[i]
+		if a.Label == "" {
+			a.Label = old.Label
 		}
+		// An email fleet has only just managed to resolve is worth showing, but
+		// must not become the key. Label is where display already looks first.
+		if a.Label == "" && a.Email != old.Email && !strings.HasPrefix(a.Email, FingerprintPrefix) {
+			a.Label = a.Email
+		}
+		// The stored key wins. Sessions, default_account and allowed_accounts all
+		// reference an account by this string, so changing it orphans every one of
+		// them — which is exactly what re-adding a rotated token used to do.
+		a.Email, a.Order = old.Email, old.Order
+		s.accounts[i] = a
+		return
 	}
 	a.Order = len(s.accounts)
 	s.accounts = append(s.accounts, a)
+}
+
+// indexOfLocked finds the account a refers to, organization first.
+//
+// The org is the one identity that survives `claude setup-token` being run
+// again; the key may not. An account the API declined to name is keyed by a
+// hash of its token, so rotating that token used to mint a whole new account
+// and leave every session pointed at a name that no longer existed — which
+// reads in the UI as "your logged-in account (its account was removed)" and
+// silently bills the ambient login on the next restart.
+//
+// Callers must hold s.mu.
+func (s *Store) indexOfLocked(a Account) int {
+	if a.OrgUUID != "" {
+		for i := range s.accounts {
+			if s.accounts[i].OrgUUID == a.OrgUUID {
+				return i
+			}
+		}
+	}
+	for i := range s.accounts {
+		if s.accounts[i].Email == a.Email {
+			return i
+		}
+	}
+	return -1
+}
+
+// SetOrgUUID records the organization behind an account, so one added before
+// its org was readable still gains the identity that survives a token
+// rotation. Reports whether this was new information.
+//
+// Only ever fills a blank: an account whose org came back *different* is a
+// different subscription, and quietly re-pointing one at the other is the
+// mis-billing this whole mechanism exists to prevent.
+func (s *Store) SetOrgUUID(email, org string) bool {
+	if org == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.accounts {
+		if s.accounts[i].Email != email {
+			continue
+		}
+		if s.accounts[i].OrgUUID != "" {
+			return false
+		}
+		s.accounts[i].OrgUUID = org
+		return true
+	}
+	return false
 }
 
 // Remove drops the account with the given email, reporting whether it existed.

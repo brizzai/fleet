@@ -841,7 +841,7 @@ func (h *Home) maybePollAccountUsage() {
 		// quota at all. It also only tolerates callers claiming to be
 		// claude-code. One mechanism that works for every token type, under
 		// fleet's own name, is worth roughly nine tokens a poll.
-		u, _, err := claudeaccount.ProbeUsage(context.Background(), a.Token)
+		u, org, err := claudeaccount.ProbeUsage(context.Background(), a.Token)
 		if err != nil {
 			{
 				// Warn, not Error: quota is an optimization and a dead endpoint
@@ -860,6 +860,22 @@ func (h *Home) maybePollAccountUsage() {
 			changed = true
 			continue
 		}
+		// Backfill the organization for an account added before fleet recorded
+		// one, or whose add-time probe failed. That org is the identity a token
+		// rotation survives, so an account without one is a single `claude
+		// setup-token` away from being orphaned along with all its sessions.
+		//
+		// Saved directly rather than through persistAccounts: nothing user-visible
+		// changed and the token is untouched, while persistAccounts refreshes the
+		// dialog, which belongs to the Update goroutine and not this one.
+		if h.accounts.SetOrgUUID(a.Email, org) {
+			debuglog.Logger.Info("learned account organization", "account", a.Email)
+			if saveErr := h.accounts.Save(); saveErr != nil {
+				debuglog.Logger.Warn("could not persist account organization",
+					"account", a.Email, "err", saveErr)
+			}
+		}
+
 		u.AttemptedAt = now
 		debuglog.Logger.Info("account usage polled",
 			"account", a.Email,
