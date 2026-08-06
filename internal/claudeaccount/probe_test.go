@@ -150,6 +150,18 @@ func TestNoQuotaHeadersIsRecognised(t *testing.T) {
 	}
 }
 
+// A response carrying only the weekly bucket must not be read as "5h at 0%".
+// Zero is a claim: it makes the account look completely free, so least-used
+// would send every new session to it on the strength of a header that wasn't
+// there.
+func TestSevenDayAloneIsNotAReading(t *testing.T) {
+	if _, _, ok := usageFromHeaders(hdr(map[string]string{
+		"anthropic-ratelimit-unified-7d-utilization": "0.20",
+	})); ok {
+		t.Fatal("a 7d-only response was accepted, fabricating a 5h reading of 0%")
+	}
+}
+
 func TestGarbageHeaderIsNotAReading(t *testing.T) {
 	if _, _, ok := usageFromHeaders(hdr(map[string]string{
 		"anthropic-ratelimit-unified-5h-utilization": "not-a-number",

@@ -93,8 +93,15 @@ func ProbeUsage(ctx context.Context, token string) (Usage, string, error) {
 // same Usage struct, so exactly one of them has to be scaled — this one.
 func usageFromHeaders(h http.Header) (Usage, string, bool) {
 	five, fiveOK := headerPct(h, "anthropic-ratelimit-unified-5h-utilization")
-	seven, sevenOK := headerPct(h, "anthropic-ratelimit-unified-7d-utilization")
-	if !fiveOK && !sevenOK {
+	seven, _ := headerPct(h, "anthropic-ratelimit-unified-7d-utilization")
+
+	// The 5h bucket specifically, not "either bucket": a missing utilization
+	// header parses to zero, and zero is a claim, not an absence. Everything
+	// downstream keys off FiveHourPct — an account fabricated at 0% reads as
+	// completely free and wins every least-used comparison, so a 7d-only
+	// response would quietly stampede new sessions onto it. Discarding the
+	// reading costs a dim "quota unavailable"; trusting it misroutes work.
+	if !fiveOK {
 		return Usage{}, "", false
 	}
 
