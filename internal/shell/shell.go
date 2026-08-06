@@ -246,6 +246,16 @@ func (s *Shell) RefreshStatus() Status {
 	return st
 }
 
+// IsShellCommand reports whether paneCmd is an interactive shell sitting at its
+// prompt — i.e. nothing is running in the pane's foreground.
+//
+// Unlike the idleCommands lookup it wraps, "" (not in the cache yet) is NOT a
+// shell: callers use this to decide whether typing into a pane is safe, and
+// "unknown" must not read as "definitely a shell prompt".
+func IsShellCommand(paneCmd string) bool {
+	return paneCmd != "" && idleCommands[paneCmd]
+}
+
 // DeriveStatus computes a shell's status from its tmux pane state. Pure.
 func DeriveStatus(dead bool, paneCmd string) Status {
 	if dead {

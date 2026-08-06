@@ -67,6 +67,15 @@ type Session struct {
 	PromptCount          int
 	ForkFromID           string // Transient: if set, start with --resume <id> --fork-session (cleared after start)
 
+	// InitialPrompt is the first message to hand the agent, sent as the agent's
+	// own prompt argument so it opens already working on it. Transient and
+	// one-shot: cleared by a successful Start so a later Restart (or the idle-
+	// suspend wake) can't re-submit a prompt the user asked for once, and never
+	// persisted — a prompt that outlived its launch would replay on every app
+	// restart. The text reaches the pane through agent.PromptEnvVar, never the
+	// command string; see sessionEnv.
+	InitialPrompt string
+
 	// snoozedUntil mutes this session from the attention surfaces (Space jump,
 	// status pills) until the deadline passes. Deliberately NOT a Status: a
 	// snoozed session keeps running and keeps its real status — snooze is a
@@ -165,6 +174,7 @@ func (s *Session) buildAgentCmd() string {
 	return agent.Parse(string(s.Agent)).BuildLaunchCmd(agent.LaunchOpts{
 		ResumeID: s.ClaudeSessionID,
 		ForkID:   s.ForkFromID,
+		Prompt:   s.InitialPrompt,
 	})
 }
 
@@ -180,10 +190,18 @@ func (s *Session) initialRunStatus() Status {
 
 // sessionEnv returns the env vars to set on the tmux session for this fleet session.
 func (s *Session) sessionEnv() []string {
-	return []string{
+	env := []string{
 		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
 	}
+	// tmux passes -e values through as-is (no shell parses them), so this is the
+	// only place an arbitrary prompt can cross into the pane intact: the launch
+	// command expands "$FLEET_INITIAL_PROMPT" into one argv element regardless of
+	// the quotes, newlines or $(...) it contains.
+	if s.InitialPrompt != "" {
+		env = append(env, fmt.Sprintf("%s=%s", agent.PromptEnvVar, s.InitialPrompt))
+	}
+	return env
 }
 
 // Start launches the Claude Code session in tmux.
@@ -211,6 +229,12 @@ func (s *Session) Start() error {
 	// transcript heuristic (which can't see a fork). Cleared on divergence.
 	s.forkParentID = s.ForkFromID
 	s.ForkFromID = "" // Clear after first start so restarts use session's own ClaudeSessionID.
+	// Same one-shot rule as the fork id, and for a louder reason: a prompt left
+	// in place would be re-submitted by every Restart — pressing `r` on a
+	// finished session, or waking it from idle-suspend, would silently ask the
+	// agent to redo the original task. Cleared only on success, so a failed
+	// launch can be retried with the prompt intact.
+	s.InitialPrompt = ""
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
 	return nil
@@ -2269,6 +2293,33 @@ func stripRightMargin(line string) string {
 func hashContent(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h[:8])
+}
+
+// PaneIndicatesWaiting reports whether raw pane content shows the agent sitting
+// on a prompt that expects a keypress — a permission menu or an approval
+// request. It exists for callers outside the status worker that are about to
+// *type into* a pane (`fleet send`): text delivered into a numbered menu is
+// swallowed, and the trailing Enter then confirms whichever option is
+// highlighted. A caller needs to know that before it acts.
+//
+// Reads the pane rather than the stored hook, on purpose. Granting a permission
+// fires no hook, so the hook status stays "waiting" long after the user
+// answered — stale in exactly the direction that would block legitimate
+// messages. The pane shows what is on screen now.
+//
+// Returns false for OpenCode: its status is plugin-driven and fleet has no
+// structural detector for its UI, so there is nothing to read here. Better a
+// caller that knows the check is unavailable than one trusting a guess.
+func PaneIndicatesWaiting(a agent.Type, rawPane string) bool {
+	clean := StripANSI(rawPane)
+	switch a {
+	case agent.Codex:
+		return codexPaneWaiting(clean)
+	case agent.OpenCode:
+		return false
+	default:
+		return detectStatus(clean, debuglog.Logger) == StatusWaiting
+	}
 }
 
 // StripANSI removes ANSI escape sequences from content.
