@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -220,8 +221,8 @@ func (s *Session) sessionEnv() []string {
 		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
 	}
-	// Per-account auth. Claude only: CLAUDE_CODE_OAUTH_TOKEN is a claude.ai
-	// subscription credential that Codex and OpenCode neither read nor need.
+	// Per-account auth. Claude only: this is a claude.ai subscription
+	// credential that Codex and OpenCode neither read nor need.
 	//
 	// An unresolvable account (removed from the store while sessions still
 	// reference it) yields no var at all, so the session falls back to the
@@ -248,9 +249,9 @@ func (s *Session) sessionEnv() []string {
 				"id", s.ID, "account", s.Account)
 			break
 		}
-		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+tok)
+		env = append(env, claudeaccount.AuthEnvVar+"="+tok)
 		debuglog.Logger.Info("session env: launching as claude account",
-			"id", s.ID, "account", s.Account, "token_len", len(tok))
+			"id", s.ID, "account", s.Account, "var", claudeaccount.AuthEnvVar, "token_len", len(tok))
 	}
 	return env
 }

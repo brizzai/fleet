@@ -34,10 +34,33 @@ const (
 // ErrNoToken is returned when an operation needs a token and none was given.
 var ErrNoToken = errors.New("no token")
 
+// AuthEnvVar is the environment variable fleet sets per session to choose which
+// subscription a Claude session runs on.
+//
+// It is deliberately NOT CLAUDE_CODE_OAUTH_TOKEN, which is the obvious choice
+// and does not work. Measured against Claude Code 2.1.221: with a Keychain
+// login present, that variable is ignored outright — a deliberately invalid
+// token (one the API answers 401 to) still produced a normal reply, because the
+// CLI never consulted it. Sessions "assigned" an account all billed to the
+// ambient login, silently and with no error anywhere. The tell was a second
+// subscription pinned at exactly 0% for sixteen hours while sessions supposedly
+// ran on it.
+//
+// ANTHROPIC_AUTH_TOKEN sits at precedence 2, above ANTHROPIC_API_KEY (3) and
+// apiKeyHelper (4), and Claude Code says so in as many words when it is set:
+// "another auth source is set and takes precedence over your claude.ai login".
+// A setup-token credential passed here bills the subscription, not API credits
+// — verified by watching the unified 5h bucket move 0% → 1% across one turn.
+//
+// The visible cost is that banner: every session prints a line about claude.ai
+// connectors being disabled. The capability was already lost with this token
+// type; only the warning is new.
+const AuthEnvVar = "ANTHROPIC_AUTH_TOKEN"
+
 // profileEndpoint identifies the account behind a token.
 //
 // `claude auth status --json` cannot do this job, which is worth recording
-// because it is the obvious thing to reach for. With CLAUDE_CODE_OAUTH_TOKEN
+// because it is the obvious thing to reach for. With an auth token
 // set it answers only {"loggedIn":true,"authMethod":"oauth_token"} — no email,
 // no plan, and `loggedIn:true` even for a string of A's. It verifies nothing
 // and identifies nothing, so it is useless both as a liveness check and as a
@@ -244,10 +267,17 @@ var httpClient = &http.Client{Timeout: httpTimeout}
 // GuardConflictingAuth reports the name of an ambient credential that would
 // outrank a per-session token, or "" when the coast is clear.
 //
-// Without this the feature fails silently and expensively: fleet sets
-// CLAUDE_CODE_OAUTH_TOKEN, Claude ignores it in favour of the higher-priority
-// credential, and every session bills to the wrong account with no error
-// anywhere. A wrong-billing failure must be loud.
+// Without this the feature fails silently and expensively: fleet sets a token,
+// Claude ignores it in favour of a higher-priority credential, and every
+// session bills to the wrong account with no error anywhere. A wrong-billing
+// failure must be loud.
+//
+// NOTE: now that AuthEnvVar is ANTHROPIC_AUTH_TOKEN (precedence 2), neither
+// name below can actually outrank it, and fleet sets its own value per session
+// via tmux -e, which overrides anything inherited. So this refuses launches it
+// no longer needs to. It fails closed rather than misbilling, so it is left
+// alone deliberately pending a decision on what — if anything — still
+// outranks precedence 2.
 func GuardConflictingAuth() string {
 	for _, name := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
 		if os.Getenv(name) != "" {

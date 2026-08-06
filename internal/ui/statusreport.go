@@ -354,7 +354,7 @@ func (d *BugReportDialog) viewStatusForm() string {
 //
 //   - The user's home directory, rewritten to "~".
 //   - Anthropic credentials. The add-account flow puts a year-long
-//     CLAUDE_CODE_OAUTH_TOKEN on a real tmux pane, and pane excerpts are
+//     account token on a real tmux pane, and pane excerpts are
 //     published here — so the redaction lives at the chokepoint rather than at
 //     each call site, where a future caller could forget it.
 func sanitizeForIssue(s string) string {

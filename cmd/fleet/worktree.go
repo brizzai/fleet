@@ -118,7 +118,7 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 		if o.noSession {
 			return o, fmt.Errorf("--account has no effect with --no-session (no session is started)")
 		}
-		// CLAUDE_CODE_OAUTH_TOKEN is a claude.ai credential; the other agents
+		// The account token is a claude.ai credential; the other agents
 		// never read it, so accepting the flag here would silently do nothing.
 		if o.agentName != "" && agent.Type(o.agentName) != agent.Claude {
 			return o, fmt.Errorf("--account only applies to claude sessions (got --agent %s)", o.agentName)

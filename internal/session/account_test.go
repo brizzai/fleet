@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
@@ -22,7 +23,7 @@ func withTokens(t *testing.T, tokens map[string]string) {
 
 func tokenIn(env []string) (string, bool) {
 	for _, e := range env {
-		if v, ok := strings.CutPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN="); ok {
+		if v, ok := strings.CutPrefix(e, claudeaccount.AuthEnvVar+"="); ok {
 			return v, true
 		}
 	}
@@ -35,10 +36,32 @@ func TestSessionEnvSetsTokenForClaudeAccount(t *testing.T) {
 
 	got, ok := tokenIn(s.sessionEnv())
 	if !ok {
-		t.Fatal("no CLAUDE_CODE_OAUTH_TOKEN in env — the session would run on the ambient login")
+		t.Fatal("no auth token in env — the session would run on the ambient login")
 	}
 	if got != "sk-ant-oat01-work" {
 		t.Fatalf("token = %q, want the work account's", got)
+	}
+}
+
+// The whole feature rests on this one variable name, and picking the wrong one
+// fails silently: sessions launch, work correctly, and bill the ambient login.
+// CLAUDE_CODE_OAUTH_TOKEN is the obvious choice and Claude Code 2.1.221 ignores
+// it outright when a Keychain login exists — measured with a token the API
+// answers 401 to, which still produced a normal reply. Nothing in fleet could
+// detect that; the only symptom was a second subscription pinned at 0%.
+func TestSessionEnvUsesTheVariableClaudeActuallyReads(t *testing.T) {
+	withTokens(t, map[string]string{"work@x.com": "sk-ant-oat01-work"})
+	s := &Session{ID: "abc", Agent: agent.Claude, Account: "work@x.com"}
+
+	env := s.sessionEnv()
+	for _, e := range env {
+		if strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") {
+			t.Fatal("session sets CLAUDE_CODE_OAUTH_TOKEN, which Claude Code ignores " +
+				"when a Keychain login exists — the session would bill the ambient account")
+		}
+	}
+	if !slices.Contains(env, "ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-work") {
+		t.Fatalf("env = %v, want ANTHROPIC_AUTH_TOKEN set to the account's token", env)
 	}
 }
 
@@ -59,7 +82,7 @@ func TestSessionEnvOmitsTokenWithoutAccount(t *testing.T) {
 }
 
 func TestSessionEnvOmitsTokenForNonClaudeAgents(t *testing.T) {
-	// CLAUDE_CODE_OAUTH_TOKEN is a claude.ai subscription credential; Codex and
+	// The auth token is a claude.ai subscription credential; Codex and
 	// OpenCode neither read nor need it.
 	withTokens(t, map[string]string{"work@x.com": "sk-ant-oat01-work"})
 	for _, ag := range []agent.Type{agent.Codex, agent.OpenCode} {

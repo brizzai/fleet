@@ -3007,7 +3007,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 // is both the no-accounts-configured case and the fallback when an origin's
 // allowlist leaves nothing to choose from.
 //
-// Claude-only: CLAUDE_CODE_OAUTH_TOKEN is a claude.ai subscription credential
+// Claude-only: the account token is a claude.ai subscription credential
 // that the other agents neither read nor need.
 func (h *Home) resolveAccount(ag agent.Type, path string) string {
 	if ag != agent.Claude {

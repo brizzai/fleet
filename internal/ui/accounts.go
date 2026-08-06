@@ -656,7 +656,7 @@ func (h *Home) runSetupToken() tea.Cmd {
 	// Strip any inherited token so setup-token authenticates the browser
 	// session rather than the account fleet happens to be holding.
 	const cmd = `claude setup-token; printf '\n\033[1;35m  ✻ Waiting for the token… (Ctrl+Q returns to fleet)\033[0m\n'`
-	if err := ts.Start(cmd, "CLAUDE_CODE_OAUTH_TOKEN="); err != nil {
+	if err := ts.Start(cmd, claudeaccount.AuthEnvVar+"="); err != nil {
 		debuglog.Logger.Error("could not start setup-token session", "tmux", ts.Name, "err", err)
 		return func() tea.Msg {
 			return accountValidatedMsg{capture: true, err: fmt.Errorf("could not start `claude setup-token`: %w", err)}
