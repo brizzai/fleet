@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
@@ -21,6 +22,12 @@ type ShellConfig struct {
 	List    string `json:"list,omitempty"`
 	Create  string `json:"create,omitempty"`
 	Destroy string `json:"destroy,omitempty"`
+	// Dir is a path template controlling where the built-in git-worktree
+	// provider places new worktrees for this repo. It overrides the global
+	// config worktree_dir. Empty means "no per-repo override" (fall back to
+	// global, then the classic sibling layout). See resolveWorktreePath for
+	// placeholder semantics. Ignored when a shell provider is configured.
+	Dir string `json:"dir,omitempty"`
 }
 
 // PRChecksConfig holds repo-level controls over how PR check rollup is computed.
@@ -56,6 +63,9 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 	}
 	if local.Workspace.Destroy != "" {
 		merged.Workspace.Destroy = local.Workspace.Destroy
+	}
+	if local.Workspace.Dir != "" {
+		merged.Workspace.Dir = local.Workspace.Dir
 	}
 
 	merged.PRChecks.Ignore = dedupeStrings(append(base.PRChecks.Ignore, local.PRChecks.Ignore...))
@@ -93,13 +103,31 @@ func CopyFilesPatterns(repoPath string) []string {
 	return loadMergedRepoConfig(repoPath).CopyFiles.Paths
 }
 
+// WorktreeDirTemplate returns the effective worktree-location path template for
+// repoPath: the per-repo .fleet.json workspace.dir wins, else globalDefault
+// (the caller's already-loaded config worktree_dir), else "" (the classic
+// sibling layout). ResolveProvider uses it to stamp GitWorktreeProvider.WorktreeDir,
+// which Create/Destroy and the UI preview (via GitWorktreeDirTemplate) then read —
+// so precedence lives in one place. The global default is passed in rather than
+// reloaded from disk here, avoiding per-call config I/O and debug-log noise on
+// the ResolveProvider path (which runs on the Update loop, e.g. the d-key delete).
+func WorktreeDirTemplate(repoPath, globalDefault string) string {
+	// Trim before the emptiness check so a whitespace-only per-repo dir behaves
+	// as "no override" (defer to globalDefault) rather than silently shadowing
+	// it — matching the field doc and GetWorktreeDir, which also trims.
+	if d := strings.TrimSpace(loadMergedRepoConfig(repoPath).Workspace.Dir); d != "" {
+		return d
+	}
+	return globalDefault
+}
+
 // ResolveProvider loads workspace config from repoPath. Preference is by file
 // presence, not contents: if .fleet.json exists it wins (even when empty —
 // that's how a user disables a stale legacy .bc.json without deleting it);
 // otherwise .bc.json is used. Same rule for .fleet.local.json over
 // .bc.local.json. Local overrides base field-by-field. Returns ShellProvider
 // if any command ends up set, otherwise GitWorktreeProvider.
-func ResolveProvider(repoPath string) Provider {
+func ResolveProvider(repoPath, worktreeDir string) Provider {
 	merged := loadMergedRepoConfig(repoPath).Workspace
 
 	// If any shell command is set, use ShellProvider.
@@ -111,8 +139,9 @@ func ResolveProvider(repoPath string) Provider {
 		}
 	}
 
-	// Default: built-in git worktree provider.
-	return &GitWorktreeProvider{}
+	// Default: built-in git worktree provider, honoring the configured
+	// worktree-location template (per-repo dir override, else global config).
+	return &GitWorktreeProvider{WorktreeDir: WorktreeDirTemplate(repoPath, worktreeDir)}
 }
 
 // preferredConfig returns the config from preferredName if that file exists at

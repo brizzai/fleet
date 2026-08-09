@@ -35,7 +35,12 @@ type Provider interface {
 // --- GitWorktreeProvider (built-in default) ---
 
 // GitWorktreeProvider uses git worktree commands for workspace management.
-type GitWorktreeProvider struct{}
+// WorktreeDir is the path template controlling where new worktrees are placed
+// (empty = classic sibling layout); it is set by ResolveProvider from the
+// per-repo .fleet.json workspace.dir or the global config worktree_dir.
+type GitWorktreeProvider struct {
+	WorktreeDir string
+}
 
 // worktreeRemoveMu serializes the remove/RemoveAll/prune region across Destroy
 // calls. Providers are created per-invocation (ResolveProvider doesn't cache),
@@ -74,9 +79,19 @@ func (g *GitWorktreeProvider) List(repoPath string) ([]WorkspaceInfo, error) {
 }
 
 func (g *GitWorktreeProvider) Create(repoPath, name, branch, baseBranch string) (*WorkspaceInfo, error) {
-	path := deriveWorktreePath(repoPath, name)
+	path := resolveWorktreePath(repoPath, name, g.WorktreeDir)
 
 	debuglog.Logger.Info("git worktree create", "repo", repoPath, "name", name, "branch", branch, "baseBranch", baseBranch, "path", path)
+
+	// A non-sibling template (e.g. "<repo>.worktrees/<name>") may need an
+	// intermediate directory that git worktree add won't create. The sibling
+	// default's parent (the repo's parent) always exists, so this is a no-op there.
+	if parent := filepath.Dir(path); parent != "" {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			debuglog.Logger.Error("git worktree create: mkdir parent failed", "name", name, "parent", parent, "err", err)
+			return nil, fmt.Errorf("create worktree parent dir %q: %w", parent, err)
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -232,7 +247,7 @@ func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {
 	// and as the -C target for git worktree remove.
 	mainPath, _ := filepath.Abs(all[0].Path)
 	absRepo, _ := filepath.Abs(repoPath)
-	derivedPath, _ := filepath.Abs(deriveWorktreePath(mainPath, name))
+	derivedPath, _ := filepath.Abs(resolveWorktreePath(mainPath, name, g.WorktreeDir))
 
 	// Find the worktree to remove. Try multiple matching strategies:
 	// 1. Exact name match (ws.Name == name)
@@ -544,18 +559,32 @@ func ValidateBranchName(branch string) string {
 	return ""
 }
 
-// deriveWorktreePath computes the sibling worktree path.
-// e.g. repoPath="/code/myrepo", name="feature-login" -> "/code/myrepo-feature-login"
-func deriveWorktreePath(repoPath, name string) string {
-	absRepo, _ := filepath.Abs(repoPath)
-	parent := filepath.Dir(absRepo)
-	base := filepath.Base(absRepo)
-	return filepath.Join(parent, base+"-"+name)
+// GitWorktreeDirTemplate returns the worktree-dir path template a provider will
+// use, or "" for shell/other providers (and the git provider's sibling
+// default). It lets the UI preview the target path from the already-resolved
+// provider without re-reading config on every render.
+func GitWorktreeDirTemplate(p Provider) string {
+	if g, ok := p.(*GitWorktreeProvider); ok {
+		return g.WorktreeDir
+	}
+	return ""
 }
 
-// DeriveWorktreePathPreview returns a display-friendly relative path preview.
-func DeriveWorktreePathPreview(repoPath, name string) string {
-	absRepo, _ := filepath.Abs(repoPath)
-	base := filepath.Base(absRepo)
-	return "../" + base + "-" + name
+// DeriveWorktreePathPreview returns a display-friendly path preview for the
+// worktree that would be created for `name` under `repoPath`, applying
+// `template` (the effective worktree-dir template, e.g. from
+// GitWorktreeDirTemplate; empty = classic sibling layout). The home dir is
+// shortened to ~ for readability. Pure — no disk I/O — so it's safe to call
+// from a render path.
+func DeriveWorktreePathPreview(repoPath, name, template string) string {
+	p := resolveWorktreePath(repoPath, name, template)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if p == home {
+			return "~"
+		}
+		if strings.HasPrefix(p, home+string(os.PathSeparator)) {
+			return "~" + strings.TrimPrefix(p, home)
+		}
+	}
+	return p
 }

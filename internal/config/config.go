@@ -65,6 +65,14 @@ type Config struct {
 	// GetSessionSuspendMode. See internal/ui suspend sweep.
 	SessionSuspendMode string `json:"session_suspend_mode,omitempty"`
 
+	// WorktreeDir is a path template controlling where the built-in git-worktree
+	// provider places new worktrees. Empty (default) means the classic sibling
+	// layout (<repo>-<branch>). Placeholders: {{parent}} (main repo's parent
+	// dir), {{repo}} (main repo basename), {{name}} (sanitized branch name), and
+	// a leading ~ / ~/ for the home dir. Read via GetWorktreeDir. A per-repo
+	// .fleet.json workspace.dir overrides this. See internal/workspace.
+	WorktreeDir string `json:"worktree_dir,omitempty"`
+
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
 	// surfaced in the Appearance category of the Settings dialog and drives a
@@ -561,6 +569,13 @@ func (c *Config) GetSessionSuspendMode() string {
 // value does not count as configured, so consent still applies.
 func (c *Config) TelemetryConfigured() bool {
 	return isValidTelemetryMode(c.TelemetryMode) || c.Telemetry != nil
+}
+
+// GetWorktreeDir returns the worktree-location path template (trimmed). Empty
+// means the built-in git provider uses the classic sibling layout. See the
+// WorktreeDir field for placeholder semantics.
+func (c *Config) GetWorktreeDir() string {
+	return strings.TrimSpace(c.WorktreeDir)
 }
 
 // GetEditor returns the configured editor, falling back to $EDITOR then "code".
