@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -195,11 +196,11 @@ func WaitForLogin(ctx context.Context, dir string, every time.Duration) (Identit
 // highest-precedence variable itself, so almost nothing could outrank it. A
 // config dir's login sits at the *bottom* of the precedence order — below
 // ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY and apiKeyHelper — so any of those
-// inherited from the user's shell silently overrides every account at once, and
-// the whole fleet quietly bills one credential.
+// silently overrides every account at once, and the whole fleet quietly bills
+// one credential.
 //
 // tmux -e can add variables but not remove them, so a session cannot scrub what
-// it inherits. Refusing loudly is the only honest answer.
+// it inherits. Saying so is the only honest answer.
 func GuardConflictingAuth() string {
 	for _, name := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
 		if os.Getenv(name) != "" {
@@ -208,5 +209,39 @@ func GuardConflictingAuth() string {
 			return name
 		}
 	}
+	// apiKeyHelper is not an environment variable, so it survives every scrub and
+	// every fresh shell — and it outranks a config dir's login just the same. A
+	// user who configured one once, months ago, gets a clean pass from the env
+	// checks above while Claude authenticates through the helper.
+	if helperConfigured() {
+		debuglog.Logger.Warn("apiKeyHelper is configured and outranks every account login",
+			"file", "~/.claude/settings.json",
+			"effect", "sessions would authenticate through the helper, not the chosen account")
+		return "apiKeyHelper (in ~/.claude/settings.json)"
+	}
 	return ""
+}
+
+// helperConfigured reports whether ~/.claude/settings.json sets apiKeyHelper.
+//
+// Read rather than cached: it is one small file, consulted at session launch
+// and at CLI startup, and a stale "no" here is exactly the silent misbilling
+// this function exists to prevent. An unreadable or unparseable file answers
+// false — a guard that cannot read the file must not invent a conflict.
+func helperConfigured() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		APIKeyHelper string `json:"apiKeyHelper"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false
+	}
+	return strings.TrimSpace(cfg.APIKeyHelper) != ""
 }

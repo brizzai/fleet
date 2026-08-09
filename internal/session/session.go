@@ -274,6 +274,18 @@ func (s *Session) sessionEnv() []string {
 			debuglog.Logger.Error("session env: could not provision account config dir",
 				"id", s.ID, "account", s.Account, "dir", dir, "err", err)
 		}
+		// Warned here rather than only at the creation sites, because every
+		// launch path funnels through sessionEnv — create, restart, respawn and
+		// the idle-suspend wake. A conflicting credential can appear in the
+		// shell long after a session was created cleanly, and a config dir's
+		// login sits at the *bottom* of the precedence order, so one ambient key
+		// silently redirects the entire fleet. TmuxEnv blanks the two env vars;
+		// apiKeyHelper it cannot touch, which is exactly why this must be said.
+		if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
+			debuglog.Logger.Warn("session env: an ambient credential outranks this account's login",
+				"id", s.ID, "account", s.Account, "conflict", conflict,
+				"effect", "the session will authenticate as that credential, not the chosen account")
+		}
 		// TmuxEnv, not a bare CLAUDE_CONFIG_DIR: it also blanks any credential
 		// the tmux server inherited, which would otherwise outrank this dir's
 		// login and quietly run the session on someone else's billing.
