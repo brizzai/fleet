@@ -1,4 +1,4 @@
 ---
 type: fixed
 ---
-**Shift+Enter inserts a newline.** Fleet now turns on tmux `extended-keys`, so `Shift+Enter` reaches Claude Code as a newline instead of submitting — once your terminal emits a distinct `Shift+Enter` (run Claude's `/terminal-setup`, or bind it in Ghostty/kitty). Set `FLEET_NO_EXTENDED_KEYS` to opt out.
+**Shift+Enter inserts a newline.** In a fleet session `Shift+Enter` now breaks the line instead of submitting your message, on terminals that report modified keys the xterm way — iTerm2 works as-is, kitty needs `map shift+enter send_text all \x1b[13;2u` in `kitty.conf`. Skipped on tmux 3.5 and 3.6.x, where turning the feature on trips an upstream key-parsing bug; `FLEET_NO_EXTENDED_KEYS` opts out everywhere else.

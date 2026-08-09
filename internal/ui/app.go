@@ -7785,9 +7785,11 @@ func (h *Home) loadSessions() tea.Msg {
 	// Terminal). Runs here for users with existing sessions; Start covers
 	// fresh installs once a server exists.
 	tmux.EnsureCopyCommand()
-	// Forward extended keys (Shift+Enter et al.) into panes so the agent gets a
-	// real newline instead of a submit. Runs here for users with existing
-	// sessions; Start covers fresh installs once a server exists.
+	// Let extended keys (Shift+Enter et al.) through to panes, so an agent that
+	// asks for them can tell Shift+Enter from Enter — the outer terminal still
+	// has to honor them. Runs here for users with existing sessions; Start
+	// covers fresh installs once a server exists. Sessions already running when
+	// this flips may need a restart before it takes.
 	tmux.EnsureExtendedKeys()
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()
