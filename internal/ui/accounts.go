@@ -555,9 +555,25 @@ func quotaStyle(pct int) lipgloss.Style {
 // Same reasoning as the drawer's `fleetsh_`.
 const accountSetupPrefix = "fleetauth_"
 
-// claudeBinaryName is what the login pane runs. Bare, with no wrapper: anything
-// printed before it is erased when Claude Code paints its own screen.
-const claudeBinaryName = "claude"
+// accountLoginCmd is what the login pane runs.
+//
+// `claude auth login` rather than a full interactive session: it does exactly
+// the browser flow and nothing else, and it exits when the login lands. Opening
+// a whole Claude Code session and asking the user to type /login was the wrong
+// shape — the pane looked like an ordinary working session with nothing to do,
+// and Claude Code wipes any instruction printed before it starts.
+//
+// --claudeai is the current default and is stated anyway, because the
+// alternative is --console: that signs in to Anthropic Console for API usage
+// billing, which is precisely the wrong thing for a feature whose whole purpose
+// is choosing between subscriptions. A future change of default must not
+// silently switch how a user's work is billed.
+//
+// The hold on failure is what makes the error readable: on success the command
+// exits and fleet takes the user straight back, so an unheld pane would flash
+// its reason and vanish.
+const accountLoginCmd = `claude auth login --claudeai || ` +
+	`{ printf '\n\033[1;31m  Login failed. Ctrl+Q returns to fleet.\033[0m\n'; sleep 600; }`
 
 const (
 	// accountLoginPollInterval is how often the watcher asks whether the config
@@ -613,11 +629,7 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "login", dir)
 	debuglog.Logger.Info("starting account login", "tmux", ts.Name, "dir", dir)
 
-	// The instruction lives on the pane border, not in the scrollback. A printf
-	// before `claude` is wiped the moment Claude Code paints its own UI, so the
-	// one thing the user has to do — type /login — was invisible, and a pane
-	// that opens on a normal-looking prompt reads as "it logged me in already".
-	cmd := claudeBinaryName
+	cmd := accountLoginCmd
 	// TmuxEnv blanks any inherited credential: fleet is often launched from a
 	// fleet session, and an ambient token outranks this dir's login — the pane
 	// would open already authenticated as somebody else, which reads as "it
@@ -630,8 +642,9 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	}
 
 	// Stays on screen for the whole flow, unlike anything printed into the pane.
+	// On the pane border, where it survives whatever the login flow paints.
 	ts.ApplyStatusBar(tmux.StatusBarOpts{
-		DisplayName: "Type  /login  to add this account · Ctrl+Q returns to fleet",
+		DisplayName: "Signing in to another Claude account · Ctrl+Q returns to fleet",
 	})
 
 	h.isAttaching.Store(true)
