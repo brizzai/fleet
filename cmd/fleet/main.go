@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -65,6 +66,8 @@ func main() {
 		runRemove(args[1])
 	case "worktree", "wt":
 		runWorktree(args[1:])
+	case "send":
+		runSend(args[1:])
 	case "hook-handler":
 		handleHookHandler()
 	case "chrome-host":
@@ -351,11 +354,57 @@ Usage:
   fleet list         List all sessions
   fleet remove <id>  Remove a session
   fleet worktree <branch>  Create a git worktree and start a session in it
-                           (--base, --path, --agent, --no-session)
+                           (--base, --path, --agent, --no-session, --prompt)
+  fleet send <session> <message>  Send a message to a running session
   fleet hooks <install|uninstall|status>  Manage Claude Code hooks
   fleet update       Update to latest version
   fleet version      Show version
   fleet help         Show this help`)
+}
+
+// readStdinArg resolves a text argument that may be "-", meaning "read it from
+// stdin". That's what lets a prompt come from a pipe or a heredoc rather than a
+// shell-quoted one-liner: `gh issue view 242 | fleet wt fix-242 -p -`.
+//
+// Whitespace is trimmed because the common producers add a trailing newline,
+// and an all-whitespace result is an error rather than an empty prompt: the
+// pipeline that produced nothing is the thing worth reporting.
+func readStdinArg(raw string, stdin io.Reader, label string) (string, error) {
+	if raw != "-" {
+		return raw, nil
+	}
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s from stdin: %w", label, err)
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return "", fmt.Errorf("no %s on stdin", label)
+	}
+	return text, nil
+}
+
+// summarizeText renders a prompt or message as one short line for a
+// confirmation. Counts runes, not bytes: prompts routinely carry box-drawing
+// output pasted from a terminal, and a byte cut both truncates early and can
+// split a rune.
+func summarizeText(text string, maxRunes int) string {
+	line := text
+	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimSpace(line)
+	r := []rune(line)
+	truncated := len(r) > maxRunes
+	if truncated {
+		line = strings.TrimRight(string(r[:maxRunes]), " ")
+	}
+	// The ellipsis has to mean "there is more", whether more means later lines
+	// or a longer first line.
+	if truncated || len(line) < len(strings.TrimSpace(text)) {
+		line += "…"
+	}
+	return line
 }
 
 func expandPath(path string) string {

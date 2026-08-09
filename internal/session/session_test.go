@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/brizzai/fleet/internal/agent"
 )
 
 func TestStripANSI(t *testing.T) {
@@ -206,5 +208,81 @@ func TestNormalizeForHash(t *testing.T) {
 	result = normalizeForHash(normalLine)
 	if result != normalLine {
 		t.Errorf("normalizeForHash should not strip short space runs, got: %q", result)
+	}
+}
+
+// The prompt must reach the pane through the environment, never through the
+// launch command: tmux sets env values with no shell involved, while the
+// command string is typed into one. These two halves are what make an
+// arbitrary prompt safe, so they are asserted together.
+func TestInitialPromptTravelsInEnvNotCommand(t *testing.T) {
+	nasty := "fix $(touch /tmp/pwned) `id`\nsecond line"
+	s := &Session{ID: "abc-123", Agent: "claude", InitialPrompt: nasty}
+
+	cmd := s.buildAgentCmd()
+	if strings.Contains(cmd, "touch") || strings.Contains(cmd, "\n") {
+		t.Errorf("launch command leaked prompt text: %q", cmd)
+	}
+	if !strings.Contains(cmd, "$FLEET_INITIAL_PROMPT") {
+		t.Errorf("launch command should expand the prompt env var, got %q", cmd)
+	}
+
+	var got string
+	found := false
+	for _, e := range s.sessionEnv() {
+		if v, ok := strings.CutPrefix(e, "FLEET_INITIAL_PROMPT="); ok {
+			got, found = v, true
+		}
+	}
+	if !found {
+		t.Fatalf("sessionEnv() carried no prompt: %q", s.sessionEnv())
+	}
+	// Verbatim: any escaping here would reach the agent as literal backslashes.
+	if got != nasty {
+		t.Errorf("prompt env = %q, want %q", got, nasty)
+	}
+}
+
+// A session with no prompt must launch exactly as it did before the feature
+// existed — no stray argument, no empty env var that would make the agent open
+// on a blank message.
+func TestNoInitialPromptLeavesLaunchUnchanged(t *testing.T) {
+	for _, ag := range []agent.Type{agent.Claude, agent.Codex, agent.OpenCode} {
+		s := &Session{ID: "abc-123", Agent: ag}
+		if cmd := s.buildAgentCmd(); strings.Contains(cmd, "FLEET_INITIAL_PROMPT") {
+			t.Errorf("%s: promptless launch command mentions the prompt var: %q", ag, cmd)
+		}
+		for _, e := range s.sessionEnv() {
+			if strings.HasPrefix(e, "FLEET_INITIAL_PROMPT=") {
+				t.Errorf("%s: promptless session set %q", ag, e)
+			}
+		}
+	}
+}
+
+// The one-shot rule has to hold on every path that hands the agent a command
+// line, not just Start: each of them builds the launch command and env from the
+// same two functions, so a path that forgets to consume the prompt silently
+// re-submits the original task. This asserts the clear itself, which is what
+// those paths call — the launches need real tmux and can't run here.
+func TestInitialPromptIsOneShot(t *testing.T) {
+	s := &Session{ID: "abc-123", Agent: agent.Claude, InitialPrompt: "do the thing"}
+
+	s.mu.Lock()
+	s.consumeInitialPromptLocked()
+	s.mu.Unlock()
+
+	if s.InitialPrompt != "" {
+		t.Fatalf("InitialPrompt = %q, want it consumed", s.InitialPrompt)
+	}
+	// A second launch must now look exactly like a promptless one, or `r` on a
+	// finished session would ask the agent to redo its first task.
+	if cmd := s.buildAgentCmd(); strings.Contains(cmd, "FLEET_INITIAL_PROMPT") {
+		t.Errorf("relaunch command still carries the prompt: %q", cmd)
+	}
+	for _, e := range s.sessionEnv() {
+		if strings.HasPrefix(e, "FLEET_INITIAL_PROMPT=") {
+			t.Errorf("relaunch env still carries the prompt: %q", e)
+		}
 	}
 }

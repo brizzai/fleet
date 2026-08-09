@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -677,6 +678,52 @@ func (s *Session) SendLiteralKeys(text string) error {
 		return err
 	}
 	return nil
+}
+
+// sendBufferSeq distinguishes concurrent PasteAndSubmit calls within one
+// process; the pid in the name separates them across processes.
+var sendBufferSeq atomic.Uint64
+
+// PasteAndSubmit types text into the pane as a paste and then presses Enter.
+//
+// Deliberately not SendLiteralKeys: that types the text a byte at a time, so
+// every newline in a multi-line message reaches the agent as its own Enter and
+// submits a partial message (and, in a pane sitting at a shell, would run each
+// line). load-buffer + `paste-buffer -p` hands the whole message over inside
+// bracketed-paste markers, which every agent TUI treats as one block. The -p
+// markers are only emitted when the pane's application asked for bracketed
+// paste, so a pane that didn't is left with plain text rather than escape
+// sequences on screen.
+//
+// Enter is a separate call on purpose — it must land after the paste's closing
+// marker for the agent to read it as "submit" rather than as pasted content.
+func (s *Session) PasteAndSubmit(text string) error {
+	// The buffer name must be unique per *call*, not per target session: two
+	// concurrent sends to one session are exactly the case that shares a name,
+	// and they interleave as load(A) → load(B) → paste -d(A pastes B's text and
+	// drops the buffer) → paste(B) fails. A's message is silently replaced by
+	// B's while A reports success and B — whose text actually landed — reports
+	// an error. pid + counter makes each call's buffer its own.
+	buf := fmt.Sprintf("fleet-send-%d-%d", os.Getpid(), sendBufferSeq.Add(1))
+
+	load := exec.Command("tmux", "load-buffer", "-b", buf, "-")
+	load.Stdin = strings.NewReader(text)
+	if out, err := load.CombinedOutput(); err != nil {
+		debuglog.Logger.Error("tmux load-buffer failed", "session", s.Name, "err", err)
+		return fmt.Errorf("tmux load-buffer failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	// -d drops the buffer once pasted, so a message never lingers in the shared
+	// tmux server's buffer stack where a later paste could resurrect it.
+	paste := exec.Command("tmux", "paste-buffer", "-d", "-p", "-b", buf, "-t", s.Name)
+	if out, err := paste.CombinedOutput(); err != nil {
+		// -d never ran, so delete the buffer here instead of leaving the text behind.
+		_ = exec.Command("tmux", "delete-buffer", "-b", buf).Run()
+		debuglog.Logger.Error("tmux paste-buffer failed", "session", s.Name, "err", err)
+		return fmt.Errorf("tmux paste-buffer failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	return s.SendKeys("Enter")
 }
 
 // CapturePaneFresh invalidates the cache before capturing, ensuring fresh output.
