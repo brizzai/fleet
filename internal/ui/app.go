@@ -2104,21 +2104,30 @@ func (h *Home) renderBody() string {
 // dialogs receive both key presses and bracketed paste (tea.PasteMsg, which is
 // not a KeyMsg in Bubble Tea v2 and so never flows through handleKey).
 func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
+	// Dialogs that hold no text field get the keypress remapped from a non-Latin
+	// layout, so a delete confirm still answers to Hebrew 'ט' as "y". The ones
+	// that do hold a field keep the original — a Hebrew rename must stay Hebrew.
+	// TestNormalizedDialogsHoldNoTextInput guards which side each lands on.
+	cmdMsg := msg
+	if km, ok := msg.(tea.KeyPressMsg); ok {
+		cmdMsg = normalizeKey(km)
+	}
+
 	switch {
 	case h.helpOverlay.IsVisible():
-		overlay, cmd := h.helpOverlay.Update(msg)
+		overlay, cmd := h.helpOverlay.Update(cmdMsg)
 		h.helpOverlay = overlay
 		return cmd, true
 	case h.releaseNotes.IsVisible():
-		dialog, cmd := h.releaseNotes.Update(msg)
+		dialog, cmd := h.releaseNotes.Update(cmdMsg)
 		h.releaseNotes = dialog
 		return cmd, true
 	case h.consentDialog.IsVisible():
-		dialog, cmd := h.consentDialog.Update(msg)
+		dialog, cmd := h.consentDialog.Update(cmdMsg)
 		h.consentDialog = dialog
 		return cmd, true
 	case h.onboardingDialog.IsVisible():
-		dialog, cmd := h.onboardingDialog.Update(msg)
+		dialog, cmd := h.onboardingDialog.Update(cmdMsg)
 		h.onboardingDialog = dialog
 		return cmd, true
 	case h.bugReport.IsVisible():
@@ -2126,7 +2135,7 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		h.bugReport = dialog
 		return cmd, true
 	case h.settingsDialog.IsVisible():
-		dialog, cmd := h.settingsDialog.Update(msg)
+		dialog, cmd := h.settingsDialog.Update(cmdMsg)
 		h.settingsDialog = dialog
 		return cmd, true
 	case h.createWorkspaceDialog.IsVisible():
@@ -2160,11 +2169,11 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		h.snoozeDialog = dialog
 		return cmd, true
 	case h.contextMenu.IsVisible():
-		dialog, cmd := h.contextMenu.Update(msg)
+		dialog, cmd := h.contextMenu.Update(cmdMsg)
 		h.contextMenu = dialog
 		return cmd, true
 	case h.sessionCreateDialog.IsVisible():
-		dialog, cmd := h.sessionCreateDialog.Update(msg)
+		dialog, cmd := h.sessionCreateDialog.Update(cmdMsg)
 		h.sessionCreateDialog = dialog
 		return cmd, true
 	case h.newDialog.IsVisible():
@@ -2172,7 +2181,7 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		h.newDialog = dialog
 		return cmd, true
 	case h.confirmDialog.IsVisible():
-		dialog, cmd := h.confirmDialog.Update(msg)
+		dialog, cmd := h.confirmDialog.Update(cmdMsg)
 		h.confirmDialog = dialog
 		return cmd, true
 	case h.renameDialog.IsVisible():
@@ -2235,8 +2244,16 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// First-run launchpad: drive the recent-repos picker. Space multi-selects,
 	// Enter launches the checked set (or the cursor row). Unhandled keys
 	// (n to type a path, ?, S, q, …) fall through to the main switch below.
+	//
+	// Matched on the US position for the same reason the drawer's chrome is: this
+	// branch sits above the remap, and unlike every other branch here it does not
+	// return on a miss. A Hebrew 'ח' would fall through, normalize to "j" below,
+	// and move the hidden sidebar cursor instead of the launchpad's — worse than
+	// the dead press it used to be, and on the first screen a user ever sees. Safe
+	// because the launchpad owns no text input (its `n` opens newDialog, a modal),
+	// and the fall-through still carries the raw key down to the remap.
 	if h.launchpadActive() {
-		switch msg.String() {
+		switch normalizeKey(msg).String() {
 		case "j", "down":
 			h.launchpad.Move(1)
 			return h, nil
@@ -2320,6 +2337,15 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	prevSlotTapSlot := h.lastSlotTapSlot
 	prevSlotTapAt := h.lastSlotTapAt
 	h.lastSlotTapSlot = -1
+
+	// A non-Latin layout delivers the character it produced, not the key that was
+	// pressed, so every case below would miss (Hebrew's `j` key arrives as 'ח').
+	// Safe to do unconditionally here: every branch that owns text — modals, focus
+	// mode, the filter, the drawer — has already returned above, so nothing
+	// downstream of this line can be typing. (The launchpad is the one branch that
+	// falls through rather than returning; it owns no text and matches on the US
+	// position itself, above.)
+	msg = normalizeKey(msg)
 
 	switch msg.String() {
 	case "`": // open the terminal drawer + move focus into it
