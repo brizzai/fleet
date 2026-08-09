@@ -263,7 +263,10 @@ func (s *Session) sessionEnv() []string {
 			debuglog.Logger.Error("session env: could not provision account config dir",
 				"id", s.ID, "account", s.Account, "dir", dir, "err", err)
 		}
-		env = append(env, claudeaccount.ConfigDirEnvVar+"="+dir)
+		// TmuxEnv, not a bare CLAUDE_CONFIG_DIR: it also blanks any credential
+		// the tmux server inherited, which would otherwise outrank this dir's
+		// login and quietly run the session on someone else's billing.
+		env = append(env, claudeaccount.TmuxEnv(dir)...)
 		debuglog.Logger.Info("session env: launching as claude account",
 			"id", s.ID, "account", s.Account, "var", claudeaccount.ConfigDirEnvVar, "dir", dir)
 	}

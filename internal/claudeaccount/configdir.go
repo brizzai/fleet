@@ -242,6 +242,21 @@ func mirrorClaudeJSON(home, dir string) error {
 		acct["projects"] = out
 	}
 
+	// Pre-trust the account dir itself. The login pane runs there, and Claude
+	// Code asks about its working directory before it will do anything — so
+	// without this the pane opens on a security question instead of a prompt.
+	// Safe to assert: fleet created this directory moments ago and it holds
+	// nothing but symlinks fleet made.
+	out, _ := acct["projects"].(map[string]any)
+	if out == nil {
+		out = map[string]any{}
+	}
+	out[dir] = map[string]any{
+		"hasTrustDialogAccepted":        true,
+		"hasCompletedProjectOnboarding": true,
+	}
+	acct["projects"] = out
+
 	data, err := json.MarshalIndent(acct, "", "  ")
 	if err != nil {
 		return err

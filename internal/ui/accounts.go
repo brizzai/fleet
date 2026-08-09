@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"strings"
 	"time"
 
@@ -603,22 +602,22 @@ func (h *Home) runAccountLogin() tea.Cmd {
 		}
 	}
 
-	home, herr := os.UserHomeDir()
-	if herr != nil {
-		home = os.TempDir()
-	}
-	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "login", home)
+	// Started in the account dir, not the user's home: Claude Code asks whether
+	// you trust the working directory, and home is both the widest possible
+	// answer and one Provision has pre-trusted for this dir. A pane whose only
+	// job is a login should not open on a security question about ~.
+	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "login", dir)
 	debuglog.Logger.Info("starting account login", "tmux", ts.Name, "dir", dir)
 
 	// Ctrl+Q is the fallback, not the plan — the watcher below returns the user
 	// automatically once the login lands. The hint stays because an abandoned
 	// flow never completes and the user needs a way out.
 	cmd := `printf '\033[1;35m  ✻ Run /login to add this account, then wait (Ctrl+Q returns to fleet)\033[0m\n\n'; claude`
-	// configDirEnv scrubs any inherited credential: fleet is often launched from
-	// a fleet session, and an ambient token would outrank this dir's login and
-	// log the wrong account in.
-	_, env := claudeaccount.LoginCommand(dir)
-	if err := ts.Start(cmd, env...); err != nil {
+	// TmuxEnv blanks any inherited credential: fleet is often launched from a
+	// fleet session, and an ambient token outranks this dir's login — the pane
+	// would open already authenticated as somebody else, which reads as "it
+	// won't let me log in".
+	if err := ts.Start(cmd, claudeaccount.TmuxEnv(dir)...); err != nil {
 		debuglog.Logger.Error("could not start login session", "tmux", ts.Name, "err", err)
 		return func() tea.Msg {
 			return accountLoggedInMsg{err: fmt.Errorf("could not start `claude`: %w", err)}

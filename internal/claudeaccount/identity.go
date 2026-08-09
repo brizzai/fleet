@@ -128,14 +128,26 @@ func configDirEnv(dir string) []string {
 // account of why it was replaced.
 const ConfigDirEnvVar = "CLAUDE_CONFIG_DIR"
 
-// Login runs an interactive `claude` in the given config dir so the user can
-// complete /login in a real terminal. Returns the command fleet should run on
-// an attached pane.
+// TmuxEnv returns the environment overrides a tmux session must carry to run as
+// this account, in the `KEY=VALUE` form tmux -e takes.
 //
-// Interactive by necessity: the flow opens a browser and can ask for a code to
-// be pasted back, so there is no headless form of it.
-func LoginCommand(dir string) (string, []string) {
-	return claudeBinary, configDirEnv(dir)
+// The empty values are the important part, and getting this wrong is how a
+// session silently bills the wrong thing. tmux -e can only *add* variables; it
+// cannot remove one the server already inherited. So the credentials that
+// outrank a config dir's login are set to empty rather than omitted — Claude
+// Code tests them for truthiness, so an empty value reads as unset.
+//
+// Passing a full process environment here instead would be both enormous and
+// useless: hundreds of -e flags, and the inherited credential still in place.
+// That bug shipped for exactly one commit, and the tell was a fresh login pane
+// announcing "API Usage Billing".
+func TmuxEnv(dir string) []string {
+	return []string{
+		ConfigDirEnvVar + "=" + dir,
+		"ANTHROPIC_AUTH_TOKEN=",
+		"ANTHROPIC_API_KEY=",
+		"CLAUDE_CODE_OAUTH_TOKEN=",
+	}
 }
 
 // WaitForLogin polls until the config dir has a live login, the context ends,

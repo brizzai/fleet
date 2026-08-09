@@ -66,15 +66,33 @@ func TestSessionEnvUsesAConfigDirNotACredential(t *testing.T) {
 
 	env := s.sessionEnv()
 	for _, e := range env {
-		for _, bad := range []string{"CLAUDE_CODE_OAUTH_TOKEN=", "ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_API_KEY="} {
-			if strings.HasPrefix(e, bad) {
-				t.Fatalf("session sets %s — that is either ignored outright or displaces "+
-					"the claude.ai login and loses connectors", strings.TrimSuffix(bad, "="))
+		for _, name := range []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+			if v, ok := strings.CutPrefix(e, name+"="); ok && v != "" {
+				t.Fatalf("session sets %s to a value — that is either ignored outright "+
+					"or displaces the claude.ai login and loses connectors", name)
 			}
 		}
 	}
 	if !slices.Contains(env, claudeaccount.ConfigDirEnvVar+"="+dirs["work@x.com"]) {
 		t.Fatalf("env = %v, want CLAUDE_CONFIG_DIR set to the account's config dir", env)
+	}
+}
+
+// tmux -e can only add variables, never remove one the server already inherited.
+// So the credentials that outrank a config dir's login must be set to empty
+// rather than left alone — Claude Code tests them for truthiness, and an empty
+// value reads as unset. Without this a session inherits whatever credential
+// fleet itself was launched with and bills that instead, which showed up as a
+// brand-new login pane announcing "API Usage Billing".
+func TestSessionEnvBlanksInheritedCredentials(t *testing.T) {
+	withDirs(t, "work@x.com")
+	s := &Session{ID: "abc", Agent: agent.Claude, Account: "work@x.com"}
+
+	env := s.sessionEnv()
+	for _, name := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} {
+		if !slices.Contains(env, name+"=") {
+			t.Errorf("env does not blank %s: %v", name, env)
+		}
 	}
 }
 
