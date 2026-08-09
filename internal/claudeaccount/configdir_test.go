@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -90,6 +91,54 @@ func TestProvisionIsIdempotent(t *testing.T) {
 	}
 	if target != filepath.Join(home, ".claude", "projects") {
 		t.Errorf("projects -> %q, want the shared dir", target)
+	}
+}
+
+// Concurrent provisions of the same dir must not leave a window where a shared
+// link is missing.
+//
+// reloadAll fans out per session, so two sessions on one account provision at the
+// same time. The links are replaced, not written in place, so without
+// serialization one provision removes projects/ and recreates it while the other,
+// having already Lstat'd, removes the fresh link and symlinks over it: one gets
+// EEXIST, and worse, a `claude --resume` starting inside the gap finds no
+// transcript and opens an empty conversation.
+//
+// Also pins that a failure no longer costs the mirrors: settings.json is what
+// carries fleet's hooks, and it used to be skipped whenever any one link failed.
+func TestProvisionSurvivesConcurrentCallers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "projects"), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"hooks":{}}`), 0600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	dir := filepath.Join(home, "acct")
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = Provision(dir)
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Provision %d: %v", i, err)
+		}
+	}
+	if _, err := os.Readlink(filepath.Join(dir, "projects")); err != nil {
+		t.Errorf("projects is not a symlink after concurrent provisions: %v", err)
+	}
+	// The mirror ran, so the account dir carries fleet's hooks.
+	if _, err := os.Stat(filepath.Join(dir, "settings.json")); err != nil {
+		t.Errorf("settings.json was not mirrored: %v", err)
 	}
 }
 

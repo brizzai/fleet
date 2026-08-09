@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
@@ -66,6 +67,11 @@ func NewConfigDirPath() (string, error) {
 // many sessions against this one directory.
 var sharedDirs = []string{"projects", "skills", "plugins", "agents", "commands", "ide"}
 
+// provisionMu serializes Provision. Package-level rather than per-dir: it is
+// held for a handful of syscalls on every session launch, and a map of mutexes
+// would be more machinery than the contention justifies.
+var provisionMu sync.Mutex
+
 // Provision makes dir usable as a Claude Code home for a fleet session.
 //
 // Idempotent, and called on every launch rather than only at add time: the
@@ -76,6 +82,18 @@ var sharedDirs = []string{"projects", "skills", "plugins", "agents", "commands",
 // Deliberately NOT shared: .credentials / the Keychain item (the entire point),
 // and history.jsonl (per-account by nature).
 func Provision(dir string) error {
+	// Serialized because the shared links are replaced, not written in place, so
+	// two provisions of the same dir have a window where the link is gone.
+	// reloadAll fans out per session, and two sessions on one account provision
+	// concurrently: one removes projects/ and recreates it while the other, having
+	// already Lstat'd, removes the fresh link and symlinks over it. Whoever loses
+	// gets EEXIST — but the worse outcome is the gap itself, since a
+	// `claude --resume` starting inside it finds no transcript and opens an empty
+	// conversation. Same reasoning (and same remedy) as GitWorktreeProvider's
+	// mutex around concurrent removes.
+	provisionMu.Lock()
+	defer provisionMu.Unlock()
+
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -85,6 +103,7 @@ func Provision(dir string) error {
 	}
 	realClaude := filepath.Join(home, ".claude")
 
+	var firstErr error
 	for _, name := range sharedDirs {
 		src := filepath.Join(realClaude, name)
 		if _, err := os.Stat(src); err != nil {
@@ -102,15 +121,24 @@ func Provision(dir string) error {
 			}
 			_ = os.Remove(dst)
 		}
-		if err := os.Symlink(src, dst); err != nil {
-			return err
+		// Recorded and carried on, not returned. A failure on one link used to
+		// skip both mirrors below — so a single bad symlink cost the account dir
+		// its copy of settings.json, which is what carries fleet's hooks, and
+		// sessionEnv launches anyway. A partial provision that still refreshes
+		// hooks is strictly better than one that doesn't; the error still comes
+		// back at the end.
+		if err := os.Symlink(src, dst); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 
-	if err := mirrorSettings(realClaude, dir); err != nil {
-		return err
+	if err := mirrorSettings(realClaude, dir); err != nil && firstErr == nil {
+		firstErr = err
 	}
-	return mirrorClaudeJSON(home, dir)
+	if err := mirrorClaudeJSON(home, dir); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 // mirrorSettings copies ~/.claude/settings.json into the account dir.
