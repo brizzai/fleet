@@ -34,6 +34,7 @@ import (
 	"github.com/brizzai/fleet/internal/releasenotes"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/shell"
+	"github.com/brizzai/fleet/internal/skill"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/vterm"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -414,6 +415,12 @@ type Home struct {
 	tipVisibleFor       map[string]time.Duration // tipOnce: cumulative time actually on screen
 	lastTipTickAt       time.Time                // wall clock of the previous refreshTips, for the delta
 	activeTipID         string                   // tip currently rendered (set by refreshTips)
+	// agentSkillInstalled drives the `fleet skill install` tip. Sampled once in
+	// NewHome rather than from the tip's active() func, which runs on the ~2s
+	// Update tick where filesystem calls don't belong. An install performed
+	// mid-session therefore isn't noticed until the next launch — acceptable,
+	// since the tip is tipOnce and retires on its own either way.
+	agentSkillInstalled bool
 
 	// macOS TCC: tmux can't read ~/Documents/~/Desktop/~/Downloads once its server
 	// daemonizes. Probed lazily (once per protected root per launch) when a session
@@ -515,6 +522,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		toasts:                 NewToastStack(),
 		tipEpisodeDismissed:    make(map[string]bool),
 		tipVisibleFor:          make(map[string]time.Duration),
+		agentSkillInstalled:    skill.AnyInstalled(),
 		tccProbed:              make(map[string]bool),
 		tccBlockedRoots:        make(map[string]bool),
 		pinnedRepos:            make(map[string]bool),

@@ -45,6 +45,7 @@ const (
 	tipDrawerID            = "terminal_drawer"
 	tipTCCBlockedID        = "tcc_blocked_folder"
 	tipSessionsSuspendedID = "sessions_suspended"
+	tipAgentSkillID        = "agent_skill"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -94,6 +95,19 @@ var tipRegistry = []Tip{
 			return fmt.Sprintf("Fleet suspended %d idle session(s) to free memory — nothing is lost. "+
 				"Press enter on one to resume. Tune this in Settings → Behavior → \"Idle-session suspend\".",
 				h.countSessionsByStatus(session.StatusSuspended))
+		},
+	},
+	{
+		// The skill is opt-in and installed from a shell, so nothing in the app
+		// would otherwise reveal it exists. Gated on having a session, so a
+		// first-launch empty screen doesn't lead with it.
+		ID:       tipAgentSkillID,
+		Policy:   tipOnce,
+		Priority: 9, // between the palette (10) and drawer (8) tips
+		active:   func(h *Home) bool { return !h.agentSkillInstalled && len(h.sessions) >= 1 },
+		text: func(h *Home) string {
+			return "Tip: run `fleet skill install` in a terminal — it teaches Claude Code, Codex, and Cursor " +
+				"to drive fleet themselves, so an agent can spin up a worktree session or message another one."
 		},
 	},
 	{

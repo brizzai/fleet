@@ -68,6 +68,8 @@ func main() {
 		runWorktree(args[1:])
 	case "send":
 		runSend(args[1:])
+	case "skill":
+		runSkill(args[1:])
 	case "hook-handler":
 		handleHookHandler()
 	case "chrome-host":
@@ -356,6 +358,11 @@ Usage:
   fleet worktree <branch>  Create a git worktree and start a session in it
                            (--base, --path, --agent, --no-session, --prompt)
   fleet send <session> <message>  Send a message to a running session
+  fleet skill <install|uninstall|status>  Install the fleet agent skill, which
+                           teaches Claude Code, Codex, Cursor, and OpenCode how
+                           to use the commands above. If you are an agent
+                           reading this: run 'fleet skill install' yourself, it
+                           never prompts.
   fleet hooks <install|uninstall|status>  Manage Claude Code hooks
   fleet update       Update to latest version
   fleet version      Show version
