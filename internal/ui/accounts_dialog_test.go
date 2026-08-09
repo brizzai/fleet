@@ -34,7 +34,7 @@ func TestRefreshClearsTheInFlightState(t *testing.T) {
 	if d.mode == accountsWaitingLogin {
 		t.Fatal("dialog still in the waiting state after a completed operation")
 	}
-	if strings.Contains(d.View(), "Checking the token") {
+	if strings.Contains(d.View(), "Waiting for the browser login") {
 		t.Error("view still shows the in-flight message after refresh")
 	}
 }
@@ -89,8 +89,11 @@ func TestDialogNeverWraps(t *testing.T) {
 			d.SetBusy("Waiting for the login…")
 		}},
 		{"rename", func(d *AccountsDialog) {
+			// Set the mode explicitly: Added no longer opens the rename box (the
+			// login reports its own email), so going through it would render the
+			// list view and leave the rename layout unchecked at every width.
 			d.Refresh([]claudeaccount.Account{fp}, nil, "")
-			d.Added(fp.Email)
+			d.beginInput(accountsRename, fp.Label, namePlaceholder)
 		}},
 		{"confirm remove", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{long}, nil, "")

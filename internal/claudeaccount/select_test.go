@@ -318,3 +318,59 @@ func TestParseStrategyNormalizes(t *testing.T) {
 		}
 	}
 }
+
+// A spent weekly bucket rejects work exactly as hard as a spent 5-hour one. An
+// account whose week is gone but whose 5-hour window just reset used to report
+// itself available, win selection, and fail on the first real call.
+func TestSevenDayExhaustionCountsAsSpent(t *testing.T) {
+	weekGone := Usage{
+		FiveHourPct: 5, FiveHourReset: testNow.Add(time.Hour),
+		SevenDayPct: 100, SevenDayReset: testNow.Add(72 * time.Hour),
+		FetchedAt: testNow,
+	}
+	if !weekGone.Exhausted(testNow) {
+		t.Fatal("a spent weekly window did not count as exhausted")
+	}
+	got, ok := Select(SelectOpts{
+		Accounts: accts("weekgone", "fine"),
+		Usage:    map[string]Usage{"weekgone": weekGone, "fine": used(80)},
+		Strategy: StrategyLeastUsed,
+		Now:      testNow,
+	})
+	if !ok || got.Email != "fine" {
+		t.Fatalf("selected %q, want fine — the weekly-spent account was still a candidate", got.Email)
+	}
+}
+
+// A passed reset means refilled, per window independently.
+func TestSevenDayResetClearsExhaustion(t *testing.T) {
+	u := Usage{SevenDayPct: 100, SevenDayReset: testNow.Add(-time.Minute), FetchedAt: testNow}
+	if u.Exhausted(testNow) {
+		t.Error("a weekly window whose reset has passed still read as spent")
+	}
+}
+
+// With everything spent Select still returns the one that comes back first —
+// and "comes back" has to mean the window actually blocking it. A 5-hour reset
+// an hour away does not fix a weekly bucket with three days left on it.
+func TestAllSpentPicksTheAccountWhoseBlockingWindowClearsFirst(t *testing.T) {
+	weekly := Usage{ // 5h clear soon, but the week blocks for 3 days
+		FiveHourPct: 100, FiveHourReset: testNow.Add(time.Hour),
+		SevenDayPct: 100, SevenDayReset: testNow.Add(72 * time.Hour),
+		FetchedAt: testNow,
+	}
+	hourly := Usage{ // only the 5h window is spent, back in two hours
+		FiveHourPct: 100, FiveHourReset: testNow.Add(2 * time.Hour),
+		SevenDayPct: 10, SevenDayReset: testNow.Add(96 * time.Hour),
+		FetchedAt: testNow,
+	}
+	got, ok := Select(SelectOpts{
+		Accounts: accts("weekly", "hourly"),
+		Usage:    map[string]Usage{"weekly": weekly, "hourly": hourly},
+		Strategy: StrategyLeastUsed,
+		Now:      testNow,
+	})
+	if !ok || got.Email != "hourly" {
+		t.Fatalf("selected %q, want hourly — it is the one that actually returns first", got.Email)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -597,6 +598,24 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	return h
 }
 
+// writeAccountUsage swaps one account's reading into the snapshot.
+//
+// CompareAndSwap, not Load-copy-Store: the quota poll runs on the worker and an
+// account add runs on the Update goroutine, so a plain store can land on top of
+// a concurrent one and silently drop the newer reading until the next poll
+// cycle. Same shape and same fix as writeGitInfo.
+func (h *Home) writeAccountUsage(mutate func(map[string]claudeaccount.Usage)) {
+	for {
+		cur := h.accountUsage.Load()
+		next := make(map[string]claudeaccount.Usage, len(*cur)+1)
+		maps.Copy(next, *cur)
+		mutate(next)
+		if h.accountUsage.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
+}
+
 // accountUsageSnapshot returns the current immutable quota snapshot. The
 // returned map MUST NOT be mutated.
 func (h *Home) accountUsageSnapshot() map[string]claudeaccount.Usage {
@@ -617,11 +636,22 @@ func (h *Home) allowedAccountsFor(repoPath string) []string {
 	if len(h.cfg.AllowedAccounts) == 0 {
 		return nil
 	}
-	info, ok := h.gitInfo()[repoPath]
-	if !ok || info == nil || info.OriginKey == "" {
-		return nil
+	// The cache is populated asynchronously, so for the first seconds after
+	// launch it has no OriginKey for a repo. Returning nil there would read as
+	// "no restriction" — Select treats an empty allowlist as unrestricted — and
+	// a session created in that window could land on a disallowed account. With
+	// an allowlist configured, resolve it directly rather than guess.
+	origin := ""
+	if info, ok := h.gitInfo()[repoPath]; ok && info != nil {
+		origin = info.OriginKey
 	}
-	return h.cfg.GetAllowedAccounts(OriginExpandKey(info.OriginKey))
+	if origin == "" {
+		origin = git.GetOriginKey(repoPath)
+	}
+	if origin == "" {
+		return nil // genuinely no remote; nothing an allowlist could key on
+	}
+	return h.cfg.GetAllowedAccounts(OriginExpandKey(origin))
 }
 
 // Init implements tea.Model.
@@ -940,10 +970,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// conversation, so it has to authenticate as the account that
 		// conversation belongs to. A fork whose account was chosen afresh would
 		// resume against a different subscription and lose the prompt cache.
-		// (msg.account is empty only on paths that predate this field, where
-		// falling back to the strategy is still better than nothing.)
+		// An empty account is only re-picked when the parent never carried one.
+		// "" is a live identity — it means the ambient login — so using it as
+		// the "unset" sentinel would reassign a fork whose conversation belongs
+		// to the ambient account, and the fork would resume it as someone else.
 		s.Account = msg.account
-		if s.Account == "" {
+		if !msg.accountSet && s.Account == "" {
 			s.Account = h.resolveAccount(ag, msg.path)
 		}
 		// Record which conversation we're forking from. The fork resumes the
@@ -1644,6 +1676,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// branch/dirty/PR would stay blank for the whole process lifetime.
 			// No bootstrap probe runs here, so the repoLastHotAt reasoning holds.
 			go h.gitWorker()
+			// Its own goroutine for the same reason gitWorker has one: the poll
+			// shells out to `security` and then makes an HTTP call, per account,
+			// sequentially. On the status worker several accounts falling due in
+			// one cycle could stall status detection for the whole fleet.
+			go h.accountWorker()
 		}
 		if len(msg.items) > 0 {
 			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
@@ -3371,12 +3408,18 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 	}
 	analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{"count": len(items)})
 	cmds := make([]tea.Cmd, 0, len(items))
+	// startSessionCmd is called directly here rather than through
+	// handleSessionCreate, so the account has to be resolved per item — without
+	// this every session the launchpad creates lands on the ambient login
+	// regardless of account_strategy, on the one path that makes several at once.
+	ag := agent.Parse(h.cfg.GetDefaultAgent())
 	for _, it := range items {
 		h.actionLog.Add("launchpad add", it.Path, true)
 		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
 			path:           it.Path,
 			title:          it.Title,
 			resumeClaudeID: it.ClaudeSessionID,
+			account:        h.resolveAccount(ag, it.Path),
 		}))
 	}
 	return tea.Batch(cmds...)
@@ -4470,6 +4513,7 @@ func (h *Home) forkSelected() tea.Cmd {
 			workspaceName:         workspaceName,
 			agent:                 parentAgent,
 			account:               parentAccount,
+			accountSet:            true,
 		}
 	}
 }
@@ -4528,6 +4572,7 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 			workspaceName:         destWorkspaceName,
 			agent:                 parentAgent,
 			account:               parentAccount,
+			accountSet:            true,
 		}
 	}
 }
@@ -6056,11 +6101,6 @@ drainPriority:
 	// empty-fleet early-return path above — the throttle makes that safe.
 	h.maybeAdoptExternalSessions(sessions)
 
-	// 5d. Refresh Claude account quota. Network I/O, and the endpoint rate-limits
-	// hard, so it is self-throttled well below the tick and lives here rather
-	// than on the Update loop.
-	h.maybePollAccountUsage()
-
 	// 5. Git+PR refresh used to run here, inline. It now lives on its own
 	// goroutine (gitWorker) — see the comment there for why sharing this
 	// one was a bug.
@@ -6081,6 +6121,38 @@ drainPriority:
 // pane re-checks — and a permission grant fires no hook, so waiting→running is
 // pane-only. A 16-minute cycle once froze every session's status for its whole
 // duration.
+// accountWorker refreshes Claude account quota on its own cadence.
+//
+// Deliberately not on the status worker. maybePollAccountUsage reads a Keychain
+// item via `security` and then calls the usage endpoint, once per account, in
+// sequence — so a slow endpoint with several accounts due could hold up session
+// status detection, hook processing and pane refresh for the entire fleet. That
+// is the exact failure the gitWorker split was created to avoid for git and gh.
+//
+// The poll is self-throttled to MinPollInterval per account, so this ticking at
+// the normal cadence costs nothing on the cycles where nothing is due.
+func (h *Home) accountWorker() {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					debuglog.Logger.Error("accountWorker panic recovered", "panic", r)
+				}
+			}()
+			h.maybePollAccountUsage()
+		}()
+	}
+}
+
 func (h *Home) gitWorker() {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()

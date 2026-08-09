@@ -64,13 +64,39 @@ type Usage struct {
 func (u Usage) Usable() bool { return !u.LoggedOut }
 
 // Exhausted reports whether this account should be skipped for new work.
+//
+// Either window counts. The 5-hour bucket is the one that usually bites, but a
+// spent weekly bucket rejects work just as hard — and an account whose week is
+// gone while its 5-hour window has just reset would otherwise report itself
+// available, win selection, and fail on the first real call.
 func (u Usage) Exhausted(now time.Time) bool {
-	// A stale reading is not evidence of exhaustion: an account whose reset has
-	// passed is available again whether or not we have managed to re-poll it.
-	if !u.FiveHourReset.IsZero() && !u.FiveHourReset.After(now) {
+	return u.windowSpent(u.FiveHourPct, u.FiveHourReset, now) ||
+		u.windowSpent(u.SevenDayPct, u.SevenDayReset, now)
+}
+
+// windowSpent reports whether one bucket is used up and has not yet refilled.
+//
+// A stale reading is not evidence of exhaustion: a window whose reset has passed
+// is available again whether or not we have managed to re-poll it.
+func (u Usage) windowSpent(pct int, reset time.Time, now time.Time) bool {
+	if !reset.IsZero() && !reset.After(now) {
 		return false
 	}
-	return u.FiveHourPct >= ExhaustedPct
+	return pct >= ExhaustedPct
+}
+
+// SpentWindowReset is when the exhausted bucket refills — the later of the two
+// when both are spent, since the account is unusable until the slower one
+// returns. Zero when nothing is spent or no reset time is known.
+func (u Usage) SpentWindowReset(now time.Time) time.Time {
+	var at time.Time
+	if u.windowSpent(u.FiveHourPct, u.FiveHourReset, now) {
+		at = u.FiveHourReset
+	}
+	if u.windowSpent(u.SevenDayPct, u.SevenDayReset, now) && u.SevenDayReset.After(at) {
+		at = u.SevenDayReset
+	}
+	return at
 }
 
 // Known reports whether this usage carries a real reading, as opposed to the

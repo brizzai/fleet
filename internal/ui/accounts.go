@@ -337,7 +337,7 @@ func (d *AccountsDialog) View() string {
 
 	case accountsWaitingLogin:
 		b.WriteString(d.notice + "\n")
-		b.WriteString(dimStyle.Render("Checking the token with Anthropic…") + "\n")
+		b.WriteString(dimStyle.Render("Waiting for the browser login to finish…") + "\n")
 
 	default:
 		if len(d.accounts) == 0 {
@@ -724,15 +724,13 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 	// Everything below indexes by account, so it uses the key Upsert wrote.
 	key := h.accounts.Upsert(msg.account)
 
-	current := h.accountUsageSnapshot()
-	next := make(map[string]claudeaccount.Usage, len(current)+1)
-	maps.Copy(next, current)
 	// Replace this account's reading outright rather than merging: a fresh login
 	// is exactly how a logged-out account is fixed, and inheriting the old
 	// verdict would keep it excluded from selection until the next poll, making
 	// the fix look like it didn't work.
-	next[key] = msg.account.InitialUsage()
-	h.accountUsage.Store(&next)
+	h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
+		m[key] = msg.account.InitialUsage()
+	})
 
 	stored, ok := h.accounts.Get(key)
 	if !ok {
@@ -746,10 +744,12 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 
 // maybePollAccountUsage refreshes each account's quota, throttled per account.
 //
-// Runs on the worker goroutine: it makes a network call per account, and the
-// endpoint 429s persistently if polled faster than MinPollInterval — once
-// tripped, backing off does not clear it quickly, so the throttle is a floor
-// and not a target.
+// Runs on accountWorker, its own goroutine: it reads a Keychain item and then
+// makes a network call, per account, in sequence, and the endpoint 429s
+// persistently if polled faster than MinPollInterval — once tripped, backing
+// off does not clear it quickly, so the throttle is a floor and not a target.
+// On the shared status worker a slow endpoint would stall status detection for
+// the whole fleet.
 //
 // Failures are recorded rather than raised. Quota is an optimization: with none
 // of it readable, least-used degrades to waterfall order and everything still
@@ -763,14 +763,13 @@ func (h *Home) maybePollAccountUsage() {
 
 	now := time.Now()
 	current := h.accountUsageSnapshot()
-	next := make(map[string]claudeaccount.Usage, len(accounts))
-	changed := false
+	// Collected as a delta and merged under CompareAndSwap at the end: a whole
+	// replacement map would clobber an account added on the Update goroutine
+	// while this cycle was in flight.
+	updates := make(map[string]claudeaccount.Usage, len(accounts))
 
 	for _, a := range accounts {
 		prev, had := current[a.Email]
-		if had {
-			next[a.Email] = prev
-		}
 		// Paced on AttemptedAt, not FetchedAt: a failing account must back off
 		// at the same slow cadence as a healthy one rather than retrying every
 		// cycle, and FetchedAt no longer advances on failure.
@@ -814,8 +813,7 @@ func (h *Home) maybePollAccountUsage() {
 			prev.Err = err
 			prev.AttemptedAt = now
 			prev.LoggedOut = loggedOut
-			next[a.Email] = prev
-			changed = true
+			updates[a.Email] = prev
 			continue
 		}
 
@@ -825,14 +823,15 @@ func (h *Home) maybePollAccountUsage() {
 			"five_hour_pct", u.FiveHourPct, "five_hour_reset", u.FiveHourReset.Format(time.RFC3339),
 			"seven_day_pct", u.SevenDayPct,
 			"exhausted", u.Exhausted(now))
-		next[a.Email] = u
-		changed = true
+		updates[a.Email] = u
 	}
 
-	if !changed {
+	if len(updates) == 0 {
 		return
 	}
-	h.accountUsage.Store(&next)
+	h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
+		maps.Copy(m, updates)
+	})
 }
 
 // persistAccounts saves the store, re-points the token resolver and refreshes

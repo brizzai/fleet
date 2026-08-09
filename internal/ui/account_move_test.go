@@ -222,9 +222,11 @@ func TestPickedAccountFollowsTheTargetNotTheCursor(t *testing.T) {
 	h.openAccountPicker() // opened on alpha
 	h.cursor = 1          // an async rebuild lands the cursor on beta
 
-	if _, cmd := h.Update(accountPickedMsg{email: "second@x.com"}); cmd != nil {
-		cmd()
-	}
+	// The command is deliberately not run: it calls Restart(), which shells out
+	// to tmux and would leave a real session behind. The move and its
+	// persistence both happen synchronously inside moveSelectedToAccount, before
+	// the command is returned, so the assertions below cover what matters.
+	h.Update(accountPickedMsg{email: "second@x.com"})
 	if alpha.Account != "second@x.com" {
 		t.Errorf("alpha account = %q, want second@x.com — the picker acted on the wrong row", alpha.Account)
 	}

@@ -93,7 +93,7 @@ func Select(o SelectOpts) (Account, bool) {
 		}
 	}
 	if len(live) == 0 {
-		return soonestReset(candidates, o.Usage), true
+		return soonestReset(candidates, o.Usage, now), true
 	}
 
 	if ParseStrategy(o.Strategy) == StrategyWaterfall {
@@ -167,11 +167,14 @@ func filterAllowed(accounts []Account, allowed []string) []Account {
 // soonestReset picks the account that will come back first. An account with no
 // known reset time sorts last: we cannot promise it recovers sooner than one
 // that has actually told us when it will.
-func soonestReset(accounts []Account, usage map[string]Usage) Account {
+//
+// "Comes back" means whichever window is actually blocking it — a weekly bucket
+// spent for five more days is not fixed by a 5-hour reset an hour from now.
+func soonestReset(accounts []Account, usage map[string]Usage, now time.Time) Account {
 	best := accounts[0]
-	bestAt, bestKnown := resetOf(usage, best.Email)
+	bestAt, bestKnown := resetOf(usage, best.Email, now)
 	for _, a := range accounts[1:] {
-		at, known := resetOf(usage, a.Email)
+		at, known := resetOf(usage, a.Email, now)
 		switch {
 		case known && !bestKnown:
 			best, bestAt, bestKnown = a, at, true
@@ -182,11 +185,16 @@ func soonestReset(accounts []Account, usage map[string]Usage) Account {
 	return best
 }
 
-func resetOf(usage map[string]Usage, email string) (time.Time, bool) {
+func resetOf(usage map[string]Usage, email string, now time.Time) (time.Time, bool) {
 	u, ok := usage[email]
 	if !ok {
 		return time.Time{}, false
 	}
+	if at := u.SpentWindowReset(now); !at.IsZero() {
+		return at, true
+	}
+	// Not spent by our reading (or no reset known): fall back to the 5-hour
+	// clock, which is the sooner of the two whenever both are present.
 	if !u.FiveHourReset.IsZero() {
 		return u.FiveHourReset, true
 	}

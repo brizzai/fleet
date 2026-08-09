@@ -45,9 +45,15 @@ type forkSessionMsg struct {
 	title                 string
 	workspaceName         string
 	agent                 agent.Type // inherited from the parent session
+	accountSet            bool       // true when account was carried from the parent, even if empty
 	// account is inherited from the parent session and must not be re-picked:
 	// the fork resumes the parent's conversation, and that conversation's
 	// prompt cache lives on the parent's account.
+	//
+	// accountSet distinguishes "the parent runs on the ambient login" from "no
+	// account was carried". Both are the empty string, and treating the first as
+	// the second re-picks an account for a fork whose conversation belongs to
+	// the ambient login — it would then authenticate as someone else.
 	account string
 }
 

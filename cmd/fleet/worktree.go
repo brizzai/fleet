@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -225,10 +226,28 @@ func runWorktree(args []string) {
 	accounts := claudeaccount.Load()
 	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
 	account := ""
+	// Re-checked here, not only at parse time: the parse-time guard can compare
+	// --account against --agent only when --agent was given. With default_agent
+	// set to codex or opencode, an explicit --account would otherwise be dropped
+	// on the floor and the session created as the wrong agent — the silent typo
+	// the explicit validation exists to prevent.
+	if opts.account != "" && ag != agent.Claude {
+		fmt.Fprintf(os.Stderr, "--account only applies to claude sessions (default_agent is %s)\n", ag)
+		os.Exit(1)
+	}
 	if !opts.noSession && ag == agent.Claude {
+		// The same per-origin allowlist the TUI enforces. Without it the policy
+		// held in one surface and not the other, which is worse than not having
+		// one — including for an explicit --account, which could name an account
+		// the origin disallows.
+		allowed := cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(repoPath)))
 		if opts.account != "" {
 			if _, ok := accounts.Get(opts.account); !ok {
 				fmt.Fprintf(os.Stderr, "unknown account %q — configure it in fleet first\n", opts.account)
+				os.Exit(1)
+			}
+			if !accountAllowed(opts.account, allowed) {
+				fmt.Fprintf(os.Stderr, "account %q is not in allowed_accounts for this origin\n", opts.account)
 				os.Exit(1)
 			}
 			account = opts.account
@@ -236,8 +255,17 @@ func runWorktree(args []string) {
 			Accounts: accounts.List(),
 			Strategy: cfg.GetAccountStrategy(),
 			Manual:   cfg.DefaultAccount,
+			Allowed:  allowed,
 		}); ok {
 			account = acct.Email
+			// Quota lives only in a running TUI's memory, so SelectOpts.Usage is
+			// empty here and least_used degrades to configured order. Said out
+			// loud: a scripted `fleet worktree` can otherwise land on a nearly
+			// spent account with nothing to indicate the strategy didn't apply.
+			if cfg.GetAccountStrategy() == claudeaccount.StrategyLeastUsed && accounts.Len() > 1 {
+				debuglog.Logger.Info("account select: no quota available from the CLI, configured order decided",
+					"chosen", account, "strategy", cfg.GetAccountStrategy())
+			}
 		}
 		if account != "" {
 			if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
@@ -443,4 +471,22 @@ func copyClaudeSettings(srcRepo, dstRepo string) {
 	if err := os.WriteFile(filepath.Join(dstDir, "settings.local.json"), data, 0600); err != nil {
 		debuglog.Logger.Error("copyClaudeSettings: failed to write settings file", "dst", dstRepo, "err", err)
 	}
+}
+
+// originExpandKey mirrors the TUI's key space for per-origin config
+// (`origin:<key>`), so allowed_accounts means the same thing from the CLI.
+func originExpandKey(originKey string) string {
+	if originKey == "" {
+		return ""
+	}
+	return "origin:" + originKey
+}
+
+// accountAllowed reports whether email passes the origin's allowlist. An empty
+// allowlist means unrestricted, matching claudeaccount.Select.
+func accountAllowed(email string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	return slices.Contains(allowed, email)
 }
