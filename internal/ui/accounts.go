@@ -555,6 +555,10 @@ func quotaStyle(pct int) lipgloss.Style {
 // Same reasoning as the drawer's `fleetsh_`.
 const accountSetupPrefix = "fleetauth_"
 
+// claudeBinaryName is what the login pane runs. Bare, with no wrapper: anything
+// printed before it is erased when Claude Code paints its own screen.
+const claudeBinaryName = "claude"
+
 const (
 	// accountLoginPollInterval is how often the watcher asks whether the config
 	// dir has a login yet. Each check shells out to `claude auth status`, so
@@ -609,10 +613,11 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "login", dir)
 	debuglog.Logger.Info("starting account login", "tmux", ts.Name, "dir", dir)
 
-	// Ctrl+Q is the fallback, not the plan — the watcher below returns the user
-	// automatically once the login lands. The hint stays because an abandoned
-	// flow never completes and the user needs a way out.
-	cmd := `printf '\033[1;35m  ✻ Run /login to add this account, then wait (Ctrl+Q returns to fleet)\033[0m\n\n'; claude`
+	// The instruction lives on the pane border, not in the scrollback. A printf
+	// before `claude` is wiped the moment Claude Code paints its own UI, so the
+	// one thing the user has to do — type /login — was invisible, and a pane
+	// that opens on a normal-looking prompt reads as "it logged me in already".
+	cmd := claudeBinaryName
 	// TmuxEnv blanks any inherited credential: fleet is often launched from a
 	// fleet session, and an ambient token outranks this dir's login — the pane
 	// would open already authenticated as somebody else, which reads as "it
@@ -623,6 +628,11 @@ func (h *Home) runAccountLogin() tea.Cmd {
 			return accountLoggedInMsg{err: fmt.Errorf("could not start `claude`: %w", err)}
 		}
 	}
+
+	// Stays on screen for the whole flow, unlike anything printed into the pane.
+	ts.ApplyStatusBar(tmux.StatusBarOpts{
+		DisplayName: "Type  /login  to add this account · Ctrl+Q returns to fleet",
+	})
 
 	h.isAttaching.Store(true)
 	h.attachStartedAt.Store(time.Now().UnixNano())

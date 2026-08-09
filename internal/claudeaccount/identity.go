@@ -54,14 +54,18 @@ func Identify(ctx context.Context, dir string) (Identity, error) {
 	cmd := exec.CommandContext(ctx, claudeBinary, "auth", "status")
 	cmd.Env = configDirEnv(dir)
 
-	out, err := cmd.Output()
-	if err != nil {
-		// Distinguished from ErrNotLoggedIn on purpose. "fleet could not run
-		// claude" is fleet's problem and must not be reported to the user as
-		// their account being logged out, nor cost them an account in Select.
-		return Identity{}, err
-	}
+	// Output, then parse regardless of the exit code. `claude auth status` exits
+	// 1 when logged out while still printing perfectly good JSON, so treating a
+	// non-zero exit as a failure would throw away the one answer this function
+	// exists to get — and report "fleet could not run claude" for the ordinary
+	// case of an account that simply needs logging in.
+	out, runErr := cmd.Output()
+	return parseAuthStatus(out, runErr)
+}
 
+// parseAuthStatus reads `claude auth status` output, tolerating the non-zero
+// exit it pairs with a perfectly good logged-out answer.
+func parseAuthStatus(out []byte, runErr error) (Identity, error) {
 	var raw struct {
 		LoggedIn         bool   `json:"loggedIn"`
 		AuthMethod       string `json:"authMethod"`
@@ -71,6 +75,12 @@ func Identify(ctx context.Context, dir string) (Identity, error) {
 		SubscriptionType string `json:"subscriptionType"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
+		// No usable answer. Now the exit error is the real story: fleet could not
+		// run claude at all, which is fleet's problem and must not cost the user
+		// an account in Select.
+		if runErr != nil {
+			return Identity{}, runErr
+		}
 		return Identity{}, err
 	}
 	id := Identity{
