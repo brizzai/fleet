@@ -65,3 +65,62 @@ func TestAllowPassthroughVersionGate(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTmuxVersionParts(t *testing.T) {
+	tests := []struct {
+		in         string
+		wantSuffix string
+	}{
+		{"tmux 3.5", ""},
+		{"tmux 3.5a", "a"},
+		{"3.5a\n", "a"},
+		{"tmux 3.4-rc2", "-rc2"},
+		{"tmux 3.6b", "b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			_, _, suffix, ok := parseTmuxVersionParts(tt.in)
+			if !ok {
+				t.Fatalf("parseTmuxVersionParts(%q) failed to parse", tt.in)
+			}
+			if suffix != tt.wantSuffix {
+				t.Errorf("parseTmuxVersionParts(%q) suffix = %q, want %q", tt.in, suffix, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestExtendedKeysSafe(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     string // as reported by tmux
+		unpars bool   // expect the version to be unparseable
+		want   bool
+	}{
+		{name: "3.2a predates both bugs", in: "tmux 3.2a", want: true},
+		{name: "3.4 predates both bugs", in: "tmux 3.4", want: true},
+		{name: "3.5 mis-encodes shift keys (tmux#4156)", in: "tmux 3.5", want: false},
+		{name: "3.5 rc is not the 3.5a fix", in: "tmux 3.5-rc1", want: false},
+		{name: "3.5a carries the fix", in: "tmux 3.5a", want: true},
+		{name: "3.6 leaks raw bytes (tmux#5031)", in: "tmux 3.6", want: false},
+		{name: "3.6a still leaks", in: "tmux 3.6a", want: false},
+		{name: "3.6b still leaks", in: "tmux 3.6b", want: false},
+		{name: "3.7 carries the fix", in: "tmux 3.7", want: true},
+		{name: "3.7b carries the fix", in: "tmux 3.7b", want: true},
+		{name: "a future major is assumed fixed", in: "tmux 4.0", want: true},
+		{name: "dev build is assumed modern", in: "tmux next-3.8", unpars: true, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			major, minor, suffix, ok := parseTmuxVersionParts(tt.in)
+			if ok == tt.unpars {
+				t.Fatalf("parseTmuxVersionParts(%q) ok = %v, want %v", tt.in, ok, !tt.unpars)
+			}
+			if got := extendedKeysSafe(major, minor, suffix, ok); got != tt.want {
+				t.Errorf("extendedKeysSafe(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
