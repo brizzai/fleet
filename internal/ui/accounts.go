@@ -536,9 +536,18 @@ func renderQuotaCell(u claudeaccount.Usage) string {
 }
 
 // quotaStyle colours a utilization figure by how much headroom is left.
+//
+// Red is reserved for an account that has actually run out, not for a high
+// number. Everywhere else in fleet red means a state you cannot work around —
+// an error dot, a spent window, a logged-out account — so spending it on "85%
+// used" cried wolf on an account that still had a fifth of its window left, and
+// left nothing louder to say when it genuinely went.
+//
+// So the gradient runs green → amber and stops there; red begins exactly where
+// Select stops handing the account out.
 func quotaStyle(pct int) lipgloss.Style {
 	switch {
-	case pct >= 85:
+	case pct >= claudeaccount.ExhaustedPct:
 		return lipgloss.NewStyle().Foreground(ColorRed)
 	case pct >= 60:
 		return lipgloss.NewStyle().Foreground(ColorYellow)

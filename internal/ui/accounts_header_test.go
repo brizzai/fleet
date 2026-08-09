@@ -261,3 +261,25 @@ func TestTruncateLabelSurvivesWideCharacters(t *testing.T) {
 		}
 	}
 }
+
+// Red means "you cannot use this now", not "this number is high" — the same
+// thing it means for an error dot, a spent window and a logged-out account.
+// It used to start at 85%, which cried wolf on an account with a fifth of its
+// window still to go and left nothing louder for when it actually ran out.
+func TestRedIsReservedForActuallySpent(t *testing.T) {
+	// Compared through the rendered output: lipgloss styles hold a color slice
+	// and are not comparable.
+	isRed := func(pct int) bool {
+		return quotaStyle(pct).Render("x") == lipgloss.NewStyle().Foreground(ColorRed).Render("x")
+	}
+	for _, pct := range []int{0, 42, 60, 84, 85, 90, 97} {
+		if isRed(pct) {
+			t.Errorf("%d%% renders red, but the account is still usable", pct)
+		}
+	}
+	for _, pct := range []int{claudeaccount.ExhaustedPct, 99, 100} {
+		if !isRed(pct) {
+			t.Errorf("%d%% does not render red, but Select will not hand this account out", pct)
+		}
+	}
+}
