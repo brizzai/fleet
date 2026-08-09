@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
+	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -125,6 +127,40 @@ func TestRestartStaysPutWhenEveryAccountIsSpent(t *testing.T) {
 	}
 }
 
+// The same rule when the other spent account resets sooner, which is the case
+// that actually broke.
+//
+// When every candidate is spent Select returns soonestReset — routinely a
+// *different* spent account. The old guard only asked "did it pick me again", so
+// this moved: the pin was rewritten, the session took the full Restart path with
+// its prompt cache discarded, and a toast announced a move onto an account that
+// also could not run it.
+//
+// The reset times are explicit here on purpose. The sibling test above passes
+// against either guard, because knownUsage stamps time.Now().Add(time.Hour)
+// twice and "second" lands later by the nanoseconds between the two calls — so
+// soonestReset happened to return the already-pinned account. Ordering by luck
+// of evaluation is not a test of anything.
+func TestRestartStaysPutWhenTheSoonerAccountIsAlsoSpent(t *testing.T) {
+	spentUntil := func(d time.Duration) claudeaccount.Usage {
+		return claudeaccount.Usage{
+			FiveHourPct:   100,
+			FiveHourReset: time.Now().Add(d),
+			FetchedAt:     time.Now(),
+		}
+	}
+	h, s := moveHome(t, map[string]claudeaccount.Usage{
+		"first@x.com":  spentUntil(3 * time.Hour),
+		"second@x.com": spentUntil(30 * time.Minute),
+	})
+	if h.healAccountBeforeRelaunch(s) {
+		t.Errorf("session moved onto a spent account that resets sooner; account = %q", s.Account)
+	}
+	if s.Account != "first@x.com" {
+		t.Errorf("pin was rewritten to %q", s.Account)
+	}
+}
+
 // A session on the ambient login was never assigned an account, so there is no
 // pin to heal — and rotating it onto a subscription would start billing one
 // without being asked.
@@ -175,6 +211,84 @@ func TestManualMoveToTheCurrentAccountIsANoOp(t *testing.T) {
 	h, _ := moveHome(t, map[string]claudeaccount.Usage{"first@x.com": knownUsage(10)})
 	if cmd := h.moveSelectedToAccount("first@x.com"); cmd != nil {
 		t.Error("moving to the account already in use produced a restart")
+	}
+}
+
+// Removing an account cleans up after itself.
+//
+// The handler used to call Store.Remove and stop, so a deliberate remove leaked
+// what an abandoned add cleans up: the dir stayed on disk holding the mirrored
+// .claude.json, Provision kept refreshing it on every launch, and re-adding the
+// same subscription minted a fresh random dir and orphaned another one — with no
+// way to clear any of it from fleet.
+//
+// The Keychain login is deliberately not touched: deleting it would log that
+// subscription out of Claude Code entirely, which is more than "remove from
+// fleet" means. The confirm dialog says so.
+func TestRemovingAnAccountDeletesItsConfigDir(t *testing.T) {
+	h, _ := moveHome(t, map[string]claudeaccount.Usage{})
+
+	dir := filepath.Join(claudeaccount.AccountsRoot(), "deadbeef")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("seed dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h.accounts.Upsert(claudeaccount.Account{Email: "third@x.com", ConfigDir: dir})
+
+	h.Update(accountRemoveMsg{email: "third@x.com"})
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("config dir survived the remove: %v", err)
+	}
+	if h.accounts.ConfigDirFor("third@x.com") != "" {
+		t.Error("account still in the store after removal")
+	}
+}
+
+// The picker is an assignment path like any other, so the per-origin allowlist
+// has to hold here too.
+//
+// It was the one surface that built its rows straight off Store.List, disabling
+// only `current` and `logged out`. A user who restricted an origin to their work
+// subscription could open "Move to Account…" on one of its sessions, pick their
+// personal account, and fleet would pin and relaunch — billing client work to the
+// wrong subscription, with no warning anywhere. A policy that holds on one
+// surface and not another is worse than not having one.
+func TestPickerRefusesAnAccountTheOriginDisallows(t *testing.T) {
+	h, s := moveHome(t, map[string]claudeaccount.Usage{
+		"first@x.com":  knownUsage(90),
+		"second@x.com": knownUsage(5),
+	})
+	// Keyed the way allowedAccountsFor resolves it, via the git cache so the
+	// lookup never shells out.
+	h.writeGitInfo(func(m map[string]*git.RepoInfo) bool {
+		m[s.ProjectPath] = &git.RepoInfo{OriginKey: "github.com/acme/api"}
+		return true
+	})
+	h.cfg.AllowedAccounts = map[string][]string{
+		OriginExpandKey("github.com/acme/api"): {"first@x.com"},
+	}
+
+	h.openAccountPicker()
+	for _, r := range h.accountPicker.rows {
+		if r.email == "second@x.com" && r.enabled {
+			t.Error("the picker offered an account this origin's allowlist excludes")
+		}
+	}
+
+	// Dimmed rather than dropped: a row that vanishes reads as a missing account,
+	// where a disabled one carrying its reason teaches the policy.
+	var found bool
+	for _, r := range h.accountPicker.rows {
+		if r.email == "second@x.com" {
+			found = true
+			if r.note == "" {
+				t.Error("the disallowed row gives no reason")
+			}
+		}
+	}
+	if !found {
+		t.Error("the disallowed account was hidden instead of dimmed")
 	}
 }
 

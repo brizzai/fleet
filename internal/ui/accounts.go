@@ -350,6 +350,14 @@ func (d *AccountsDialog) View() string {
 		}
 		if d.mode == accountsConfirmRm {
 			b.WriteString("\n" + errStyle.Render(ansi.Truncate("Remove "+d.selectedName()+"?  y / n", inner, "…")) + "\n")
+			// Named because it survives: fleet deletes the account's config
+			// directory, but the claude.ai login stays in your Keychain — logging
+			// a subscription out entirely is more than "remove from fleet" means,
+			// and a credential nobody mentioned is exactly the kind of leftover
+			// this line exists to prevent.
+			for _, l := range wrapTo(inner, "Its Claude login stays in your Keychain; only fleet's copy of the settings is deleted.") {
+				b.WriteString(dimStyle.Render(l) + "\n")
+			}
 		}
 	}
 
@@ -482,14 +490,14 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 	}
 	const leadCells = 3
 
-	// The right-hand cell is for numbers you can act on. An account whose token
-	// may never read quota gets nothing rather than a word: "unreadable" reads
-	// as a fault, when in fact nothing is wrong — a `claude setup-token`
-	// credential simply isn't entitled to the usage endpoint.
+	// The right-hand cell is for numbers you can act on. An account fleet has not
+	// managed to poll gets a quiet "quota unavailable" rather than a number it
+	// cannot stand behind — the endpoint may be down, the Keychain locked, or the
+	// account simply new.
 	//
-	// A rejection is the exception, and it outranks the numbers: the account is
-	// out of the rotation entirely, so showing its last-known percentage would
-	// present a dead credential as a healthy one with headroom to spare.
+	// A missing login is the exception, and it outranks the numbers: the account
+	// is out of the rotation entirely, so showing its last-known percentage would
+	// present a dead login as a healthy one with headroom to spare.
 	right := ""
 	if u, ok := d.usage[a.Email]; ok {
 		switch {
@@ -519,15 +527,23 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 	return cursorCol + starCol + name + strings.Repeat(" ", pad) + right
 }
 
-// renderQuotaCell renders the 5-hour window as "42% · resets 15:04", or the
-// reset time alone once the window is spent — at that point the percentage
+// renderQuotaCell renders the 5-hour window as "42% used", or — once a window is
+// spent — that window and when it comes back, since at that point the percentage
 // tells you nothing you can act on and the clock is the whole answer.
+//
+// The spent line names its window because the two differ by days. This cell is
+// reused by the account picker, where a spent row is still selectable (choosing
+// one is a legitimate call — it may be the right account to queue work on), so
+// "spent · weekly back Tue 09:00" and "spent · 5-hour back 16:20" have to be
+// distinguishable. Printing the 5-hour clock for a spent *weekly* window offered
+// a twenty-minute wait for an account blocked for five days, and picking it is a
+// real relaunch with the prompt cache discarded.
 func renderQuotaCell(u claudeaccount.Usage) string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
-	if u.Exhausted(time.Now()) {
-		s := "spent"
-		if !u.FiveHourReset.IsZero() {
-			s += " · back " + u.FiveHourReset.Local().Format("15:04")
+	if win, reset, spent := u.SpentWindow(time.Now()); spent {
+		s := "spent · " + win.Name()
+		if !reset.IsZero() {
+			s += " back " + reset.Local().Format("Mon 15:04")
 		}
 		return lipgloss.NewStyle().Foreground(ColorRed).Render(s)
 	}
@@ -556,8 +572,8 @@ func quotaStyle(pct int) lipgloss.Style {
 	}
 }
 
-// accountSetupPrefix names the throwaway tmux session that runs
-// `claude setup-token`.
+// accountSetupPrefix names the throwaway tmux session that runs the login (see
+// accountLoginCmd, just below).
 //
 // Deliberately not a `fleet_` prefix: tmux.ListSessions enumerates agent
 // sessions by that prefix, and a login pane must never be mistaken for one.
@@ -664,10 +680,21 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	// so finishing the browser flow is the last thing they have to do. Runs
 	// alongside tea.Exec, which blocks until the attached client goes away;
 	// detaching from here is what makes it return.
+	//
+	// The cancel escapes to Home because the watcher has to be stoppable from
+	// outside. It used to live and die inside this closure, so on Ctrl+Q the
+	// completion callback would delete the abandoned dir while the watcher kept
+	// polling `claude auth status` against that exact path every 1.5s for the rest
+	// of the ten-minute window — ~400 process spawns, and Claude Code recreates
+	// its config dir when missing, so the directory the cleanup had just removed
+	// came back: precisely the orphaned, login-less dir Provision then refreshes
+	// on every launch forever. Pressing `a` again stacked a second watcher on the
+	// first, which is why a new attempt cancels the old one here.
 	identified := make(chan claudeaccount.Identity, 1)
+	ctx, cancelWatch := context.WithTimeout(context.Background(), accountLoginWindow)
+	h.setAccountLoginCancel(cancelWatch)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), accountLoginWindow)
-		defer cancel()
+		defer cancelWatch()
 		id, err := claudeaccount.WaitForLogin(ctx, dir, accountLoginPollInterval)
 		if err != nil {
 			debuglog.Logger.Warn("account login watch ended without a login",
@@ -683,6 +710,10 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	return tea.Exec(attachCmd{session: ts}, func(execErr error) tea.Msg {
 		h.isAttaching.Store(false)
 		h.attachStartedAt.Store(0)
+		// Before anything else, and before the cleanup below in particular: the
+		// watcher must not still be polling a directory this callback is about to
+		// delete, or Claude Code recreates it behind us.
+		h.stopAccountLoginWatch()
 		if killErr := ts.Kill(); killErr != nil {
 			debuglog.Logger.Error("failed to kill login session", "err", killErr)
 		}
@@ -786,15 +817,12 @@ func (h *Home) maybePollAccountUsage() {
 			continue
 		}
 
-		// The probe is the only route, deliberately.
+		// /api/oauth/usage is the whole mechanism, and it costs nothing.
 		//
-		// /api/oauth/usage is free but needs the `user:profile` scope that
-		// `claude setup-token` withholds, so for fleet's accounts it answers
-		// 403 — and when rate-limited it answers 429 instead, which is
-		// indistinguishable from a transient failure and left accounts with no
-		// quota at all. It also only tolerates callers claiming to be
-		// claude-code. One mechanism that works for every token type, under
-		// fleet's own name, is worth roughly nine tokens a poll.
+		// Available because each account is a real claude.ai login: the credential
+		// carries `user:profile`, which is what the endpoint requires. Reading it
+		// consumes no message quota, so the poll can run on a timer without eating
+		// the thing it measures.
 		u, err := claudeaccount.FetchUsage(context.Background(), a.ConfigDir)
 		if err != nil {
 			// A missing login is the one failure that carries information.
@@ -859,17 +887,40 @@ func (h *Home) persistAccounts(notice string) tea.Cmd {
 	return nil
 }
 
+// setAccountLoginCancel installs the watcher's cancel, stopping any previous
+// one first so retrying with `a` cannot stack watchers.
+func (h *Home) setAccountLoginCancel(cancel context.CancelFunc) {
+	h.accountLoginMu.Lock()
+	prev := h.accountLoginCancel
+	h.accountLoginCancel = cancel
+	h.accountLoginMu.Unlock()
+	if prev != nil {
+		prev()
+	}
+}
+
+// stopAccountLoginWatch ends the in-flight login watch, if any. Safe to call
+// when none is running.
+func (h *Home) stopAccountLoginWatch() {
+	h.accountLoginMu.Lock()
+	cancel := h.accountLoginCancel
+	h.accountLoginCancel = nil
+	h.accountLoginMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // accountLabel is the human name for an account key, for use in UI text.
 //
 // A key the store no longer knows must not be shown as if the session were
-// running on it. TokenFor returns nothing for an unknown account and
+// running on it. ConfigDirFor returns nothing for an unknown account and
 // sessionEnv then sets no variable at all, so such a session is really on the
 // ambient login — the label says what is true now, and notes the removal as
 // the reason rather than the state.
 //
-// This happens legitimately: an account re-added after fleet learns its email
-// is keyed by that email, not the fingerprint it had before, so sessions
-// created under the old key are orphaned by the rename.
+// This happens whenever an account is removed while sessions are still pinned to
+// it: the key survives on the session row, the subscription behind it does not.
 func (h *Home) accountLabel(email string) string {
 	if email == "" {
 		return "your logged-in account"

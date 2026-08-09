@@ -268,9 +268,12 @@ func runWorktree(args []string) {
 			}
 		}
 		if account != "" {
-			if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
-				fmt.Fprintf(os.Stderr, "%s is set and overrides fleet's account selection — unset it to use %s\n", conflict, account)
-				os.Exit(1)
+			if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
+				fmt.Fprintln(os.Stderr, conflict.Message(account))
+				// Only an env var is fatal — see AuthConflict.
+				if conflict.Fatal {
+					os.Exit(1)
+				}
 			}
 		}
 	}

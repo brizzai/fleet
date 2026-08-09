@@ -89,14 +89,78 @@ func (u Usage) windowSpent(pct int, reset time.Time, now time.Time) bool {
 // when both are spent, since the account is unusable until the slower one
 // returns. Zero when nothing is spent or no reset time is known.
 func (u Usage) SpentWindowReset(now time.Time) time.Time {
-	var at time.Time
-	if u.windowSpent(u.FiveHourPct, u.FiveHourReset, now) {
-		at = u.FiveHourReset
-	}
-	if u.windowSpent(u.SevenDayPct, u.SevenDayReset, now) && u.SevenDayReset.After(at) {
-		at = u.SevenDayReset
-	}
+	_, at, _ := u.SpentWindow(now)
 	return at
+}
+
+// SpentWindow names the bucket that is actually blocking the account, and when
+// it refills.
+//
+// The companion Exhausted needed once it stopped meaning "the 5-hour window":
+// every surface that reports a spent account has to name the right one, because
+// the two differ by days. An account at 99% weekly whose 5-hour bucket just
+// reset is blocked for five days, and telling the user it comes back in twenty
+// minutes invites them to move a session onto it — a real relaunch, prompt cache
+// discarded, onto an account that still cannot answer.
+//
+// When both are spent it reports the later one, matching SpentWindowReset: the
+// account is unusable until the slower bucket returns, so that is the honest
+// horizon.
+func (u Usage) SpentWindow(now time.Time) (Window, time.Time, bool) {
+	five := u.windowSpent(u.FiveHourPct, u.FiveHourReset, now)
+	seven := u.windowSpent(u.SevenDayPct, u.SevenDayReset, now)
+	switch {
+	case five && seven:
+		if u.SevenDayReset.After(u.FiveHourReset) {
+			return WindowSevenDay, u.SevenDayReset, true
+		}
+		return WindowFiveHour, u.FiveHourReset, true
+	case seven:
+		return WindowSevenDay, u.SevenDayReset, true
+	case five:
+		return WindowFiveHour, u.FiveHourReset, true
+	}
+	return WindowFiveHour, time.Time{}, false
+}
+
+// Window is one of the two quota buckets Anthropic reports.
+type Window int
+
+const (
+	WindowFiveHour Window = iota
+	WindowSevenDay
+)
+
+// Name is the window as a word, for anywhere it is shown to a user.
+//
+// Deliberately not "5h"/"7d": those are bare durations, and they sit beside
+// countdowns that are also bare durations meaning something entirely different
+// ("resets in 5 days" next to "these are the 7-day figures"). A word cannot be
+// misread as a countdown.
+//
+// It lives here rather than in the UI because three surfaces name a window and
+// they must agree; two copies of these strings is how they stop agreeing.
+func (w Window) Name() string {
+	if w == WindowFiveHour {
+		return "5-hour"
+	}
+	return "weekly"
+}
+
+// Pct is this usage's utilization in the given window.
+func (u Usage) Pct(w Window) int {
+	if w == WindowFiveHour {
+		return u.FiveHourPct
+	}
+	return u.SevenDayPct
+}
+
+// Reset is when the given window refills, zero if unknown.
+func (u Usage) Reset(w Window) time.Time {
+	if w == WindowFiveHour {
+		return u.FiveHourReset
+	}
+	return u.SevenDayReset
 }
 
 // Known reports whether this usage carries a real reading, as opposed to the

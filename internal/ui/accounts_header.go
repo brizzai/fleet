@@ -26,36 +26,23 @@ const (
 	// accountWindowRotateSecs is how long each window holds the corner: long
 	// enough to read, short enough that you don't wait for the other one.
 	accountWindowRotateSecs = 6
+	// accountReadoutGap is the clear space kept between the header's breadcrumb
+	// and the readout, so the two never read as one run of text.
+	accountReadoutGap = 2
 )
 
-// quotaWindow is which bucket the readout is currently showing.
-type quotaWindow int
-
+// The window type, its word, and its percentage live in claudeaccount rather
+// than here: three surfaces name a window (this strip, the accounts dialog, the
+// heal toast) and they have to agree. Two copies of "5-hour"/"weekly" is how
+// they stop agreeing.
 const (
-	windowSevenDay quotaWindow = iota
-	windowFiveHour
+	windowSevenDay = claudeaccount.WindowSevenDay
+	windowFiveHour = claudeaccount.WindowFiveHour
 )
-
-// name is the window as a word. Deliberately not "5h"/"7d": those are bare
-// durations, and they sat beside the per-account countdowns meaning something
-// entirely different.
-func (w quotaWindow) name() string {
-	if w == windowFiveHour {
-		return "5-hour"
-	}
-	return "weekly"
-}
-
-func (w quotaWindow) pct(u claudeaccount.Usage) int {
-	if w == windowFiveHour {
-		return u.FiveHourPct
-	}
-	return u.SevenDayPct
-}
 
 // windowAt derives the displayed window from the clock, so every surface that
 // renders in the same frame agrees without sharing state.
-func windowAt(now time.Time) quotaWindow {
+func windowAt(now time.Time) claudeaccount.Window {
 	if (now.Unix()/accountWindowRotateSecs)%2 == 1 {
 		return windowFiveHour
 	}
@@ -134,7 +121,7 @@ func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string
 }
 
 // renderReadout lays the whole strip out at one density.
-func renderReadout(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, win quotaWindow, d density, now time.Time) string {
+func renderReadout(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, win claudeaccount.Window, d density, now time.Time) string {
 	dim := lipgloss.NewStyle().Foreground(ColorTextDim)
 	sep := lipgloss.NewStyle().Foreground(ColorBorder).Render(" │ ")
 
@@ -150,11 +137,11 @@ func renderReadout(accounts []claudeaccount.Account, usage map[string]claudeacco
 	// days" beside "these are the 7-day figures"). A word cannot be read as a
 	// countdown, and leading it makes it a heading over both accounts rather
 	// than something dangling off the last one.
-	return dim.Render(win.name()) + sep + strings.Join(chips, sep)
+	return dim.Render(win.Name()) + sep + strings.Join(chips, sep)
 }
 
 // accountChip renders one account at the given density.
-func accountChip(a claudeaccount.Account, u claudeaccount.Usage, win quotaWindow, d density, now time.Time) string {
+func accountChip(a claudeaccount.Account, u claudeaccount.Usage, win claudeaccount.Window, d density, now time.Time) string {
 	dim := lipgloss.NewStyle().Foreground(ColorTextDim)
 	red := lipgloss.NewStyle().Foreground(ColorRed)
 
@@ -171,13 +158,16 @@ func accountChip(a claudeaccount.Account, u claudeaccount.Usage, win quotaWindow
 	if u.LoggedOut {
 		return label + red.Render("✕ logged out")
 	}
-	if u.Exhausted(now) {
+	// Timed from the window that is actually spent, not assumed to be the 5-hour
+	// one: an account at 99% weekly whose 5-hour bucket just reset is blocked for
+	// five days, and showing "back in 20 minutes" invites exactly the wrong move.
+	if spentWin, _, spent := u.SpentWindow(now); spent {
 		// Plain space, not the fused separator: there is no percentage here for
 		// the countdown to be joined to, so a dot would just be noise.
-		return label + red.Render("spent ") + resetIn(u, windowFiveHour, now)
+		return label + red.Render("spent ") + resetIn(u, spentWin, now)
 	}
 
-	pct := win.pct(u)
+	pct := u.Pct(win)
 	out := label
 	if d.bar > 0 {
 		out += renderQuotaBar(pct, d.bar) + " "
@@ -234,11 +224,8 @@ func renderQuotaBar(pct, cells int) string {
 // Per window, because they differ — and because a weekly figure without its
 // horizon is the thing that prompted all of this. 54% of a week means nothing
 // until you know whether it resets tomorrow or in six days.
-func resetIn(u claudeaccount.Usage, win quotaWindow, now time.Time) string {
-	at := u.FiveHourReset
-	if win == windowSevenDay {
-		at = u.SevenDayReset
-	}
+func resetIn(u claudeaccount.Usage, win claudeaccount.Window, now time.Time) string {
+	at := u.Reset(win)
 	if at.IsZero() {
 		return ""
 	}

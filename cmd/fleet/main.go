@@ -16,6 +16,7 @@ import (
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/session"
@@ -251,10 +252,18 @@ func runAdd(path string) {
 		Accounts: accounts.List(),
 		Strategy: cfg.GetAccountStrategy(),
 		Manual:   cfg.DefaultAccount,
+		// The same per-origin allowlist the TUI and `fleet worktree` enforce.
+		// Shelling out to git is fine here where it is not in the TUI: this is a
+		// one-shot CLI, not the Update goroutine.
+		Allowed: cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(path))),
 	}); ok {
-		if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
-			fmt.Fprintf(os.Stderr, "%s is set and overrides fleet's account selection — unset it to use %s\n", conflict, acct.Email)
-			os.Exit(1)
+		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
+			fmt.Fprintln(os.Stderr, conflict.Message(acct.Email))
+			// A helper is not fatal: there is no command that clears it for one
+			// launch, so refusing would leave no way to run the session at all.
+			if conflict.Fatal {
+				os.Exit(1)
+			}
 		}
 		s.Account = acct.Email
 	}

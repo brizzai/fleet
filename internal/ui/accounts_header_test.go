@@ -7,13 +7,14 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/claudeaccount"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var hdrNow = time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 
 // The readout alternates windows on a wall-clock phase, so tests pick the
 // phase they mean rather than depending on where hdrNow happens to land.
-func atWindow(w quotaWindow) time.Time {
+func atWindow(w claudeaccount.Window) time.Time {
 	t := hdrNow
 	for i := 0; i < 2*accountWindowRotateSecs; i++ {
 		if windowAt(t) == w {
@@ -143,6 +144,41 @@ func TestAccountHeaderSpentAccountShowsCountdownNotPercent(t *testing.T) {
 	}
 }
 
+// A spent *weekly* bucket must be timed by the weekly clock.
+//
+// Exhausted covers both windows but this branch always printed FiveHourReset, so
+// an account at 99% weekly whose 5-hour bucket had just reset rendered a
+// twenty-minute countdown for an account blocked for five days. The same string
+// drives the account picker, where acting on it costs a real relaunch.
+func TestSpentWeeklyWindowIsTimedByTheWeeklyClock(t *testing.T) {
+	got := renderAccountUsageHeader(
+		hdrAccounts("a@x.com", "b@x.com"),
+		map[string]claudeaccount.Usage{
+			"a@x.com": {
+				FiveHourPct: 4, FiveHourReset: hdrNow.Add(20 * time.Minute),
+				SevenDayPct: 99, SevenDayReset: hdrNow.Add(5 * 24 * time.Hour),
+				FetchedAt: hdrNow,
+			},
+			"b@x.com": hdrUsage(5, 12),
+		},
+		140, hdrNow)
+
+	// Stripped before matching: the countdown is styled, and an SGR escape is a
+	// run of digits ending in "m" — so a bare "20m" needle matches ";120m" inside
+	// a colour code, and whether it does depends on the palette another test
+	// happened to leave installed.
+	plain := ansi.Strip(got)
+	if !strings.Contains(plain, "spent") {
+		t.Fatalf("a 99%% weekly bucket did not read as spent: %q", plain)
+	}
+	if !strings.Contains(plain, "5d") {
+		t.Errorf("want the weekly horizon (5d), got: %q", plain)
+	}
+	if strings.Contains(plain, "20m") {
+		t.Errorf("timed the spent weekly window by the 5-hour clock: %q", plain)
+	}
+}
+
 // The strip gives things up in order as the budget shrinks, rather than
 // switching between two fixed layouts. Each step must actually be narrower than
 // the one before, or a density is dead weight.
@@ -224,6 +260,61 @@ func TestAccountHeaderFitsItsWidth(t *testing.T) {
 		if lipgloss.Width(got) > w {
 			t.Errorf("width %d: readout is %d cells wide: %q", w, lipgloss.Width(got), got)
 		}
+	}
+}
+
+// The readout is fitted against the space left of the badge, not against the
+// whole screen.
+//
+// View() passed rightEdge — an x-coordinate — straight in as the width budget, so
+// on a 100-column terminal the strip was allowed ~99 columns, picked its widest
+// density (~74 for two labelled chips with gauges and countdowns), and was then
+// overlaid at x=25 straight over the breadcrumb, cutting it mid-word. The What's
+// New badge shares the pattern and gets away with it only because it is ~14
+// columns wide.
+func TestReadoutBudgetLeavesRoomForTheHeader(t *testing.T) {
+	const width = 100
+	// The widest thing the strip could render, and the one that used to fit.
+	widest := renderReadout(
+		hdrAccounts("yuval@x.com", "work@x.com"),
+		map[string]claudeaccount.Usage{
+			"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
+		},
+		windowFiveHour, densities[0], hdrNow)
+
+	// A breadcrumb of realistic length: origin, checkout and a session title.
+	headerW := lipgloss.Width("❯_ fleet  ›  brizzai/fleet  ›  feat-multi-account  ›  close the gaps review found")
+	budget := width - 1 - headerW - accountReadoutGap
+
+	if budget >= lipgloss.Width(widest) {
+		t.Fatalf("test is not exercising the squeeze: budget %d already fits the widest form (%d)",
+			budget, lipgloss.Width(widest))
+	}
+
+	got := renderAccountUsageHeader(
+		hdrAccounts("yuval@x.com", "work@x.com"),
+		map[string]claudeaccount.Usage{
+			"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
+		},
+		budget, hdrNow)
+
+	if lipgloss.Width(got) > budget {
+		t.Errorf("readout is %d cells for a %d-cell budget — it would overprint the breadcrumb: %q",
+			lipgloss.Width(got), budget, got)
+	}
+}
+
+// A budget that has gone negative — a breadcrumb wide enough to leave nothing —
+// must yield no strip rather than a clipped one.
+func TestReadoutYieldsNothingWhenThereIsNoRoom(t *testing.T) {
+	got := renderAccountUsageHeader(
+		hdrAccounts("yuval@x.com", "work@x.com"),
+		map[string]claudeaccount.Usage{
+			"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
+		},
+		-6, hdrNow)
+	if got != "" {
+		t.Errorf("rendered %q with no room to render into", got)
 	}
 }
 

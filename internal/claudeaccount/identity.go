@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,8 +189,43 @@ func WaitForLogin(ctx context.Context, dir string, every time.Duration) (Identit
 	}
 }
 
-// GuardConflictingAuth reports the name of an ambient credential that would
-// outrank an account's login, or "" when the coast is clear.
+// AuthConflict describes an ambient credential that outranks an account's login.
+//
+// Fatal is the whole reason this is a struct rather than a string. The two env
+// vars and apiKeyHelper have the same *effect* — they silently redirect every
+// session — but not the same remedy, and a guard that cannot tell them apart has
+// to pick one behaviour for both. Refusing on all three locked a user with a
+// months-old apiKeyHelper out of creating any Claude session at all, and told
+// them to "unset" a JSON key, which is not something a shell can do.
+//
+// So: an env var is fatal (one `unset` fixes it, and refusing costs nothing),
+// a helper is not (it is a deliberate, durable setup, and a fleet that refuses
+// to launch is worse for its owner than one that launches and says why).
+type AuthConflict struct {
+	// Name is the credential as the user would recognize it.
+	Name string
+	// Fatal is whether callers should refuse to launch rather than warn.
+	Fatal bool
+	// remedy is what the user must actually do about it.
+	remedy string
+}
+
+// Empty reports that no conflicting credential was found.
+func (c AuthConflict) Empty() bool { return c.Name == "" }
+
+// Message is the whole user-facing sentence, remedy included.
+//
+// Built here rather than at each call site because the remedy varies with the
+// conflict and the call sites do not know which one they have — the TUI, `fleet
+// add` and `fleet worktree` all used to hardcode "unset it", which was wrong for
+// one of the three cases.
+func (c AuthConflict) Message(account string) string {
+	return fmt.Sprintf("%s overrides fleet's account selection — %s to use %s",
+		c.Name, c.remedy, account)
+}
+
+// GuardConflictingAuth reports an ambient credential that would outrank an
+// account's login, or the zero AuthConflict when the coast is clear.
 //
 // This guard was nearly deleted and turns out to matter more here than it did
 // before. Under the previous ANTHROPIC_AUTH_TOKEN mechanism fleet set the
@@ -201,25 +237,32 @@ func WaitForLogin(ctx context.Context, dir string, every time.Duration) (Identit
 //
 // tmux -e can add variables but not remove them, so a session cannot scrub what
 // it inherits. Saying so is the only honest answer.
-func GuardConflictingAuth() string {
+func GuardConflictingAuth() AuthConflict {
 	for _, name := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
 		if os.Getenv(name) != "" {
 			debuglog.Logger.Warn("ambient credential outranks every account login",
 				"var", name, "effect", "sessions would use that credential, not the chosen account")
-			return name
+			return AuthConflict{Name: name + " is set", Fatal: true, remedy: "unset it"}
 		}
 	}
 	// apiKeyHelper is not an environment variable, so it survives every scrub and
 	// every fresh shell — and it outranks a config dir's login just the same. A
 	// user who configured one once, months ago, gets a clean pass from the env
 	// checks above while Claude authenticates through the helper.
+	//
+	// Not fatal, precisely because it is durable: there is no command that clears
+	// it for one launch, so refusing would leave the user with no way to run
+	// fleet's Claude sessions until they edited a file fleet never mentioned.
 	if helperConfigured() {
 		debuglog.Logger.Warn("apiKeyHelper is configured and outranks every account login",
 			"file", "~/.claude/settings.json",
-			"effect", "sessions would authenticate through the helper, not the chosen account")
-		return "apiKeyHelper (in ~/.claude/settings.json)"
+			"effect", "sessions authenticate through the helper, not the chosen account")
+		return AuthConflict{
+			Name:   "apiKeyHelper in ~/.claude/settings.json",
+			remedy: "remove it from that file",
+		}
 	}
-	return ""
+	return AuthConflict{}
 }
 
 // helperConfigured reports whether ~/.claude/settings.json sets apiKeyHelper.

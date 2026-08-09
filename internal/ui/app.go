@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -439,6 +441,16 @@ type Home struct {
 	accounts       *claudeaccount.Store
 	accountUsage   atomic.Pointer[map[string]claudeaccount.Usage]
 	accountsDialog *AccountsDialog
+	// accountWorkerOnce guards the quota poller — see startAccountWorker.
+	accountWorkerOnce sync.Once
+	// accountLoginCancel stops the in-flight login watcher, if any. Written from
+	// Update and from the tea.Exec completion callback, hence the mutex.
+	accountLoginMu     sync.Mutex
+	accountLoginCancel context.CancelFunc
+	// originKeyCache memoizes git.GetOriginKey per repo path — see
+	// allowedAccountsFor, which needs the answer on the Update goroutine.
+	originKeyMu    sync.Mutex
+	originKeyCache map[string]string
 
 	// Pre-resolved per-install identity (device hash + git name/email +
 	// OS version). Discovered in main.go before the TUI starts so Init
@@ -588,7 +600,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	debuglog.Logger.Info("claude accounts ready",
 		"count", h.accounts.Len(), "strategy", cfg.GetAccountStrategy(),
 		"manual_default", cfg.DefaultAccount, "origins_restricted", len(cfg.AllowedAccounts),
-		"conflicting_auth", claudeaccount.GuardConflictingAuth())
+		"conflicting_auth", claudeaccount.GuardConflictingAuth().Name)
 	emptyUsage := make(map[string]claudeaccount.Usage)
 	h.accountUsage.Store(&emptyUsage)
 	// Sessions resolve their token at launch through this, so re-adding an
@@ -646,12 +658,45 @@ func (h *Home) allowedAccountsFor(repoPath string) []string {
 		origin = info.OriginKey
 	}
 	if origin == "" {
-		origin = git.GetOriginKey(repoPath)
+		origin = h.originKeyFor(repoPath)
 	}
-	if origin == "" {
-		return nil // genuinely no remote; nothing an allowlist could key on
-	}
+	// GetOriginKey always answers — a repo with no remote keys as
+	// "local:<dir>", which is exactly how the sidebar groups it, so an origin
+	// allowlist can be written against a local-only checkout too.
 	return h.cfg.GetAllowedAccounts(OriginExpandKey(origin))
+}
+
+// accountAllowedFor reports whether email passes an origin's allowlist. An empty
+// allowlist means unrestricted, matching claudeaccount.Select.
+func accountAllowedFor(email string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	return slices.Contains(allowed, email)
+}
+
+// originKeyFor resolves a repo's origin key, memoized for the process.
+//
+// git.GetOriginKey shells out, and this runs on the Update goroutine — pressing
+// `a` on a repo on a slow or networked filesystem would block the whole TUI, and
+// launchLaunchpadSet multiplies it by one call per selected repo. A repo's
+// origin does not meaningfully change while fleet is open, so one exec per repo
+// per process buys the correctness without the recurring stall.
+//
+// Only reached when an allowlist is configured and the git cache has not yet
+// warmed, which is a few seconds after launch at most.
+func (h *Home) originKeyFor(repoPath string) string {
+	h.originKeyMu.Lock()
+	defer h.originKeyMu.Unlock()
+	if origin, ok := h.originKeyCache[repoPath]; ok {
+		return origin
+	}
+	origin := git.GetOriginKey(repoPath)
+	if h.originKeyCache == nil {
+		h.originKeyCache = make(map[string]string)
+	}
+	h.originKeyCache[repoPath] = origin
+	return origin
 }
 
 // Init implements tea.Model.
@@ -912,8 +957,29 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h.handleAccountLoggedIn(msg)
 
 	case accountRemoveMsg:
+		// Read before Remove drops the record — it is the only thing that knows
+		// where this account's directory lives.
+		dir := h.accounts.ConfigDirFor(msg.email)
 		if !h.accounts.Remove(msg.email) {
 			return h, nil
+		}
+		// A deliberate remove used to leak what an abandoned add cleans up: the
+		// dir stayed on disk holding the mirrored .claude.json, Provision kept
+		// refreshing it on every launch, and re-adding the same subscription minted
+		// a fresh random dir and orphaned another one.
+		//
+		// The Keychain login is deliberately left alone. Deleting it would log that
+		// subscription out of Claude Code entirely — a far larger action than
+		// "remove from fleet", and not fleet's credential to revoke. The confirm
+		// dialog says so, because a survivor nobody names is a surprise.
+		if dir != "" {
+			if err := claudeaccount.RemoveConfigDir(dir); err != nil {
+				// Logged, not raised: the account is already gone from fleet's
+				// model, and refusing the remove over an undeletable directory
+				// would be the wrong trade.
+				debuglog.Logger.Error("could not remove account config dir",
+					"account", msg.email, "dir", dir, "err", err)
+			}
 		}
 		// Sessions still naming this account fall back to the ambient login
 		// rather than failing to launch — see Store.ConfigDirFor.
@@ -1655,6 +1721,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Started here, not earlier: gitWorker and the bootstrap probe both
 		// touch repoLastHotAt unlocked, and bootstrap is done by now.
 		go h.gitWorker()
+		h.startAccountWorker()
 		return h, nil
 
 	case splashFrameMsg:
@@ -1676,11 +1743,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// branch/dirty/PR would stay blank for the whole process lifetime.
 			// No bootstrap probe runs here, so the repoLastHotAt reasoning holds.
 			go h.gitWorker()
-			// Its own goroutine for the same reason gitWorker has one: the poll
-			// shells out to `security` and then makes an HTTP call, per account,
-			// sequentially. On the status worker several accounts falling due in
-			// one cycle could stall status detection for the whole fleet.
-			go h.accountWorker()
+			h.startAccountWorker()
 		}
 		if len(msg.items) > 0 {
 			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
@@ -1907,7 +1970,19 @@ func (h *Home) View() tea.View {
 		rightEdge -= badgeW + 2
 	}
 	if ShowAccountUsage && !h.modalOpen() {
-		readout := renderAccountUsageHeader(h.accounts.List(), h.accountUsageSnapshot(), rightEdge, time.Now())
+		// The budget is the space left of rightEdge, not rightEdge itself.
+		// rightEdge is an x-coordinate: passing it as a width let the strip pick
+		// the widest density that fits the *whole screen* (~74 columns for two
+		// labelled chips) and then overlay it on top of the breadcrumb, cutting
+		// it mid-word. The badge gets away with the same pattern only because it
+		// is ~14 columns wide.
+		//
+		// Measured from what was actually drawn, so a long session title shrinks
+		// the strip rather than colliding with it. A budget that goes non-positive
+		// yields "" from the density loop, which is the right answer — no strip is
+		// better than a broken header.
+		budget := rightEdge - lipgloss.Width(h.renderHeader()) - accountReadoutGap
+		readout := renderAccountUsageHeader(h.accounts.List(), h.accountUsageSnapshot(), budget, time.Now())
 		if readout != "" {
 			base = overlayAt(readout, base, rightEdge-lipgloss.Width(readout), 0)
 		}
@@ -3074,14 +3149,23 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 	if msg.account == "" {
 		msg.account = h.resolveAccount(ag, msg.path)
 	}
-	// A conflicting ambient credential outranks the per-session token, so the
+	// A conflicting ambient credential outranks the per-session login, so the
 	// session would run on that credential while every fleet surface claimed it
-	// was on the chosen account. Refuse rather than misbill silently — the fix
-	// is one `unset` away, and a wrong-subscription charge is not recoverable.
+	// was on the chosen account.
+	//
+	// Refusing is right when one `unset` fixes it — a wrong-subscription charge
+	// is not recoverable and the cost of stopping is a single command. It is
+	// wrong for apiKeyHelper, which no shell command clears: refusing there meant
+	// a user who configured a helper months ago could not create *any* Claude
+	// session, by any route, and the error told them to unset a JSON key. So the
+	// helper says its piece and the session launches.
 	if msg.account != "" {
-		if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
-			h.setError(fmt.Errorf("%s is set and overrides fleet's account selection — unset it to use %s", conflict, msg.account))
-			return h, nil
+		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
+			if conflict.Fatal {
+				h.setError(errors.New(conflict.Message(msg.account)))
+				return h, nil
+			}
+			h.setInfo(conflict.Message(msg.account))
 		}
 	}
 	return h, h.startSessionCmd(msg)
@@ -3139,11 +3223,14 @@ func (h *Home) accountUnusableReason(email string) string {
 		return "its account was removed"
 	}
 	u := h.accountUsageSnapshot()[email]
-	switch {
-	case u.LoggedOut:
+	if u.LoggedOut {
 		return "it is logged out"
-	case u.Exhausted(time.Now()):
-		return "its 5-hour window is spent"
+	}
+	// Named from the window that is actually blocking it, not assumed to be the
+	// 5-hour one. Exhausted covers both buckets, and they differ by days — an
+	// account whose week is gone is not coming back this afternoon.
+	if win, _, spent := u.SpentWindow(time.Now()); spent {
+		return "its " + win.Name() + " window is spent"
 	}
 	return ""
 }
@@ -3171,13 +3258,20 @@ func (h *Home) healAccountBeforeRelaunch(s *session.Session) bool {
 		return false
 	}
 
-	// Select already refuses to hand back a rejected account, but it will return
-	// a spent one when every candidate is spent — so this can land on the account
-	// it started from. Moving to itself would cost the cache for nothing.
+	// Select refuses to hand back a logged-out account, but when every candidate
+	// is spent it returns one anyway — the soonest to reset, which is routinely a
+	// *different* spent account. So the question is not "did it pick me again",
+	// it is "is what it picked any better": moving from a spent A to a spent C
+	// forces the full Restart path, discards the prompt cache and toasts a move,
+	// for an account that also cannot run the session.
+	// An empty next is not an unusable account, it is the ambient login — what
+	// Select falls back to when every candidate is logged out, and the better
+	// failure by design: the login the user is already using probably works.
 	next := h.resolveAccount(agent.Claude, s.ProjectPath)
-	if next == s.Account {
-		debuglog.Logger.Info("account heal: no better account available, keeping the pin",
-			"id", s.ID, "account", s.Account, "reason", reason)
+	if why := h.accountUnusableReason(next); next != "" && why != "" {
+		debuglog.Logger.Info("account heal: no usable account available, keeping the pin",
+			"id", s.ID, "account", s.Account, "reason", reason,
+			"candidate", next, "candidate_reason", why)
 		return false
 	}
 
@@ -3211,6 +3305,12 @@ func (h *Home) openAccountPicker() {
 		return
 	}
 	usage := h.accountUsageSnapshot()
+	// The same per-origin allowlist every other assignment path applies. This
+	// surface was the one that missed it: a user who restricted an origin to their
+	// work subscription could open the picker on one of its sessions, choose their
+	// personal account, and fleet would pin and relaunch — billing client work to
+	// the wrong subscription with no warning anywhere.
+	allowed := h.allowedAccountsFor(s.ProjectPath)
 	rows := make([]accountPickerRow, 0, h.accounts.Len())
 	for _, a := range h.accounts.List() {
 		r := accountPickerRow{email: a.Email, label: a.Name(), usage: usage[a.Email], enabled: true}
@@ -3223,6 +3323,10 @@ func (h *Home) openAccountPicker() {
 			// Offering an account nobody is logged into would trade a busy
 			// account for one that cannot run at all.
 			r.enabled, r.note = false, "logged out"
+		case !accountAllowedFor(a.Email, allowed):
+			// Dimmed rather than hidden: a row that vanishes reads as a missing
+			// account, where a disabled one with a reason teaches the policy.
+			r.enabled, r.note = false, "not allowed here"
 		}
 		rows = append(rows, r)
 	}
@@ -6121,6 +6225,32 @@ drainPriority:
 // pane re-checks — and a permission grant fires no hook, so waiting→running is
 // pane-only. A 16-minute cycle once froze every session's status for its whole
 // duration.
+// startAccountWorker launches the quota poller, at most once per process.
+//
+// Called from both reveal paths, because there are two and they do not overlap:
+// a fleet with any pinned repo or session boots through bootstrapDoneMsg, and an
+// empty one through discoveryMsg. It used to be started only from the latter —
+// so for everyone with a repo, which is everyone who would configure a second
+// account, accountUsage stayed empty for the whole process lifetime. Usage.Known
+// was false everywhere, which is not a small degradation: the header readout
+// rendered nothing, least_used silently collapsed into configured order,
+// ErrNotLoggedIn was never observed so dropLoggedOut never fired, and the heal
+// on restart could never see a spent or logged-out pin. The quota half of the
+// feature simply did not run.
+//
+// The Once, not a boolean, because the two paths are not provably exclusive and
+// two pollers would double the `security` and HTTP traffic and race on
+// writeAccountUsage.
+func (h *Home) startAccountWorker() {
+	h.accountWorkerOnce.Do(func() {
+		// Its own goroutine for the same reason gitWorker has one: the poll
+		// shells out to `security` and then makes an HTTP call, per account,
+		// sequentially. On the status worker several accounts falling due in one
+		// cycle could stall status detection for the whole fleet.
+		go h.accountWorker()
+	})
+}
+
 // accountWorker refreshes Claude account quota on its own cadence.
 //
 // Deliberately not on the status worker. maybePollAccountUsage reads a Keychain

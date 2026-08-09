@@ -213,6 +213,14 @@ func SetAccountConfigDirFunc(fn func(string) string) {
 	accountDirFn = fn
 }
 
+// accountResolverInstalled reports whether any binary wired up the store. Used
+// only to tell a wiring bug apart from a removed account when a lookup misses.
+func accountResolverInstalled() bool {
+	accountDirMu.RLock()
+	defer accountDirMu.RUnlock()
+	return accountDirFn != nil
+}
+
 func accountConfigDir(email string) string {
 	if email == "" {
 		return ""
@@ -261,8 +269,24 @@ func (s *Session) sessionEnv() []string {
 	default:
 		dir := accountConfigDir(s.Account)
 		if dir == "" {
-			// The store no longer knows this account: removed, or the resolver
-			// was never installed. Falls back rather than failing to launch.
+			// Two very different causes, so they are logged very differently.
+			//
+			// No resolver at all is a wiring bug in whichever binary is running:
+			// this session names an account, so accounts exist, so somebody forgot
+			// SetAccountConfigDirFunc. It is silent by nature — the session
+			// launches on the ambient login, persists a healthy-looking row, and
+			// keeps claiming the pinned account everywhere in the UI while billing
+			// another subscription. `fleet send` shipped that way. Error level so
+			// the next entry point to forget shows up in a log rather than an
+			// invoice.
+			if !accountResolverInstalled() {
+				debuglog.Logger.Error("session env: no account resolver installed; session will run on the ambient login",
+					"id", s.ID, "account", s.Account,
+					"fix", "call session.SetAccountConfigDirFunc during startup")
+				break
+			}
+			// The store simply no longer knows this account — the user removed it.
+			// Falls back rather than failing to launch.
 			debuglog.Logger.Warn("session env: account has no config dir, falling back to ambient login",
 				"id", s.ID, "account", s.Account)
 			break
@@ -281,9 +305,9 @@ func (s *Session) sessionEnv() []string {
 		// login sits at the *bottom* of the precedence order, so one ambient key
 		// silently redirects the entire fleet. TmuxEnv blanks the two env vars;
 		// apiKeyHelper it cannot touch, which is exactly why this must be said.
-		if conflict := claudeaccount.GuardConflictingAuth(); conflict != "" {
+		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
 			debuglog.Logger.Warn("session env: an ambient credential outranks this account's login",
-				"id", s.ID, "account", s.Account, "conflict", conflict,
+				"id", s.ID, "account", s.Account, "conflict", conflict.Name,
 				"effect", "the session will authenticate as that credential, not the chosen account")
 		}
 		// TmuxEnv, not a bare CLAUDE_CONFIG_DIR: it also blanks any credential
