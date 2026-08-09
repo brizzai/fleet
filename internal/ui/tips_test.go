@@ -17,6 +17,10 @@ func newTipHome(cfg *config.Config, statuses ...session.Status) *Home {
 		cfg:                 cfg,
 		tipEpisodeDismissed: map[string]bool{},
 		tipVisibleFor:       map[string]time.Duration{},
+		// Treat the agent skill as installed by default: its tip fires on any
+		// session, so leaving it at the zero value would shadow whichever tip
+		// each test is actually about. TestAgentSkillTip flips it back.
+		agentSkillInstalled: true,
 	}
 	for i, st := range statuses {
 		s := session.NewSession(fmt.Sprintf("s%d", i), "/tmp/repo")
@@ -154,6 +158,43 @@ func TestOnceTip_RetiresAfterLearningFeature(t *testing.T) {
 	cfg.NoteFeatureUsed(tipCmdPaletteID, tipLearnedThreshold)
 	if got := cfg.FeatureUsageCount(tipCmdPaletteID); got != tipLearnedThreshold {
 		t.Fatalf("counter should cap at %d, got %d", tipLearnedThreshold, got)
+	}
+}
+
+// The skill-install tip must appear only when the skill is missing, and must
+// not outrank a tip about something actually broken.
+func TestAgentSkillTip(t *testing.T) {
+	seen := func() *config.Config {
+		return &config.Config{SeenTips: []string{tipCmdPaletteID, tipDrawerID}}
+	}
+
+	h := newTipHome(seen(), session.StatusIdle)
+	h.agentSkillInstalled = false
+	h.refreshTips(true)
+	if h.activeTipID != tipAgentSkillID {
+		t.Fatalf("skill missing: want %q, got %q", tipAgentSkillID, h.activeTipID)
+	}
+
+	h = newTipHome(seen(), session.StatusIdle)
+	h.refreshTips(true)
+	if h.activeTipID != "" {
+		t.Fatalf("skill installed: want no tip, got %q", h.activeTipID)
+	}
+
+	// An empty fleet has nothing to delegate yet, so the tip stays quiet.
+	h = newTipHome(seen())
+	h.agentSkillInstalled = false
+	h.refreshTips(true)
+	if h.activeTipID != "" {
+		t.Fatalf("no sessions: want no tip, got %q", h.activeTipID)
+	}
+
+	// Sessions that stopped are the more urgent story.
+	h = newTipHome(seen(), errStatuses(reloadFailedThreshold)...)
+	h.agentSkillInstalled = false
+	h.refreshTips(true)
+	if h.activeTipID != tipReloadFailedID {
+		t.Fatalf("failed sessions should outrank the skill tip, got %q", h.activeTipID)
 	}
 }
 

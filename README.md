@@ -129,6 +129,10 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 **`` ` ``** opens a live terminal drawer — real shells (dev servers, log tails, scratch commands) scoped to the current repo or worktree, rendered through a true terminal emulator so streaming output, colors, and full-screen tools (vim, htop, lazygit) just work. New/close tabs with **`Ctrl+T`** / **`Ctrl+W`**, switch with **`PgUp`/`PgDn`**, **`Ctrl+G`** for full-screen attach.
 
+### Teach your agents to drive fleet
+
+**`fleet skill install`** writes an [Agent Skill](https://agentskills.io) that teaches Claude Code, Codex, Cursor, and OpenCode how to use fleet's CLI — so an agent can hand independent work to a fresh worktree session (`fleet wt fix-242 -p "…"`), message one that's already running (`fleet send`), and see what's in flight, instead of asking you to run the commands. Opt-in, never prompts, and `fleet skill uninstall` takes it back out.
+
 ### And more
 
 - **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume` / `opencode --session`)
