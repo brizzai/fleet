@@ -133,6 +133,30 @@ func mirrorSettings(realClaude, dir string) error {
 	return os.WriteFile(filepath.Join(dir, "settings.json"), data, 0600)
 }
 
+// firstRunKeys are the "you have already been asked this" flags in
+// ~/.claude.json. Copied into every account dir so a login pane opens on a
+// prompt rather than on the theme picker.
+//
+// An allowlist rather than "everything except oauthAccount": most of that file
+// is caches, counters and experiment state that belong to the installation that
+// wrote them, and carrying it wholesale would be guessing. These are settled
+// answers.
+var firstRunKeys = []string{
+	"theme",
+	"hasCompletedOnboarding",
+	"lastOnboardingVersion",
+	"installMethod",
+	"autoUpdates",
+	"shiftEnterKeyBindingInstalled",
+	"hasIdeOnboardingBeenShown",
+	"hasCompletedClaudeInChromeOnboarding",
+	"editorMode",
+	"diffTool",
+	"todoFeatureEnabled",
+	"verbose",
+	"messageIdleNotifThresholdMs",
+}
+
 // mirrorClaudeJSON carries the parts of ~/.claude.json that a session needs but
 // that a fresh config dir would not have.
 //
@@ -142,9 +166,15 @@ func mirrorSettings(realClaude, dir string) error {
 // alone that shows up as "my MCP servers vanished" and a trust prompt on every
 // session — both of which read as fleet breaking Claude Code.
 //
-// Only those two keys are copied. The rest of the file is per-login state
-// (oauthAccount, onboarding, tips) and copying it across would be lying to
-// Claude Code about who is logged in.
+// The first-run keys are carried for the same reason. A fresh config dir is a
+// fresh Claude Code install as far as Claude Code is concerned, so it opens on
+// the theme picker and the welcome flow — questions the user has already
+// answered, asked again inside a pane whose only job is a login. Preferences
+// are not per-login, so copying them is honest as well as convenient.
+//
+// oauthAccount is deliberately NOT copied: that one really is per-login, and
+// claiming an identity the dir hasn't authenticated as would be lying to Claude
+// Code about who is logged in.
 func mirrorClaudeJSON(home, dir string) error {
 	src, err := os.ReadFile(filepath.Join(home, ".claude.json"))
 	if err != nil {
@@ -171,6 +201,14 @@ func mirrorClaudeJSON(home, dir string) error {
 
 	if mcp, ok := user["mcpServers"]; ok {
 		acct["mcpServers"] = mcp
+	}
+	// Answers the user has already given. Without these the login pane opens on
+	// the theme picker and the welcome flow instead of a prompt they can type
+	// /login into.
+	for _, k := range firstRunKeys {
+		if v, ok := user[k]; ok {
+			acct[k] = v
+		}
 	}
 	// Folder trust: carried per project, and only the trust flag. Copying whole
 	// project entries would drag conversation pointers and per-project history
