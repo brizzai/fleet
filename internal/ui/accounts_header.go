@@ -79,12 +79,12 @@ func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string
 	chips := make([]string, 0, len(accounts))
 	for _, a := range accounts {
 		u := usage[a.Email]
-		// A rejected account shows even with no reading to its name — it is the
-		// one state here that is not trivia. Skipping it (which the Known check
-		// below would do, since a refused token never returns numbers) leaves the
-		// corner looking like a healthy single-account setup while half the
-		// rotation is dead.
-		if !u.Rejected && !u.Known() {
+		// A logged-out account shows even with no reading to its name — it is
+		// the one state here that is not trivia. Skipping it (which the Known
+		// check below would do, since an account with no login never returns
+		// numbers) leaves the corner looking like a healthy single-account setup
+		// while half the rotation is dead.
+		if !u.LoggedOut && !u.Known() {
 			continue
 		}
 		chips = append(chips, accountChip(a, u, win, width, now))
@@ -110,14 +110,14 @@ func accountChip(a claudeaccount.Account, u claudeaccount.Usage, win quotaWindow
 		label = dim.Render(accountShortLabel(a)) + " "
 	}
 
-	// Rejected outranks spent, which outranks the percentage. Both displace the
-	// number in either window rather than waiting their turn — a percentage is
-	// something to note, these are something to do.
+	// Logged out outranks spent, which outranks the percentage. Both displace
+	// the number in either window rather than waiting their turn — a percentage
+	// is something to note, these are something to do.
 	//
 	// The wording distinguishes them because the actions differ: "spent" is a
-	// wait and resolves itself, "rejected" needs a new token and never will.
-	if u.Rejected {
-		return label + lipgloss.NewStyle().Foreground(ColorRed).Render("✕ rejected")
+	// wait and resolves itself, "logged out" needs you to log in again.
+	if u.LoggedOut {
+		return label + lipgloss.NewStyle().Foreground(ColorRed).Render("✕ logged out")
 	}
 	if u.Exhausted(now) {
 		return label + lipgloss.NewStyle().Foreground(ColorRed).Render("spent "+resetIn(u, now))

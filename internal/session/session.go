@@ -180,35 +180,35 @@ func (s *Session) initialRunStatus() Status {
 	return StatusRunning
 }
 
-// accountTokenFn resolves a Claude account email to its OAuth token. Set once
-// at startup from the accounts store.
+// accountConfigDirFn resolves a Claude account email to its config directory —
+// a Claude Code home holding that account's own login. Set once at startup from
+// the accounts store.
 //
 // A package-level resolver rather than a field on Session because sessionEnv is
 // reached from Start, Restart and RespawnClaude — including for sessions rebuilt
-// by FromRow, which has no store to consult — and because re-adding an account
-// with a fresh token must take effect on the next relaunch without touching
-// every live Session.
+// by FromRow, which has no store to consult — and because re-logging an account
+// in must take effect on the next relaunch without touching every live Session.
 var (
-	accountTokenMu sync.RWMutex
-	accountTokenFn func(string) string
+	accountDirMu sync.RWMutex
+	accountDirFn func(string) string
 )
 
-// SetAccountTokenFunc installs the account-token resolver. Passing nil disables
+// SetAccountConfigDirFunc installs the account resolver. Passing nil disables
 // per-account auth, which is the state fleet runs in when no accounts are
 // configured.
-func SetAccountTokenFunc(fn func(string) string) {
-	accountTokenMu.Lock()
-	defer accountTokenMu.Unlock()
-	accountTokenFn = fn
+func SetAccountConfigDirFunc(fn func(string) string) {
+	accountDirMu.Lock()
+	defer accountDirMu.Unlock()
+	accountDirFn = fn
 }
 
-func accountToken(email string) string {
+func accountConfigDir(email string) string {
 	if email == "" {
 		return ""
 	}
-	accountTokenMu.RLock()
-	fn := accountTokenFn
-	accountTokenMu.RUnlock()
+	accountDirMu.RLock()
+	fn := accountDirFn
+	accountDirMu.RUnlock()
 	if fn == nil {
 		return ""
 	}
@@ -221,16 +221,23 @@ func (s *Session) sessionEnv() []string {
 		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
 	}
-	// Per-account auth. Claude only: this is a claude.ai subscription
-	// credential that Codex and OpenCode neither read nor need.
+	// Per-account auth. Claude only: this points at a claude.ai login that
+	// Codex and OpenCode neither read nor need.
+	//
+	// CLAUDE_CONFIG_DIR gives the session a complete Claude Code home of its
+	// own, whose Keychain item holds that account's login. Nothing is layered
+	// over anything, so the session authenticates exactly as a plain `claude`
+	// in a terminal does — which is why connectors and Remote Control survive
+	// here and did not under the ANTHROPIC_AUTH_TOKEN implementation this
+	// replaced.
 	//
 	// An unresolvable account (removed from the store while sessions still
 	// reference it) yields no var at all, so the session falls back to the
 	// ambient /login rather than failing to launch.
 	//
-	// Every branch logs: "which account did this session actually launch as"
-	// is the question every multi-account bug report starts with, and the
-	// answer is invisible once tmux has the env. Never the token itself.
+	// Every branch logs: "which account did this session actually launch as" is
+	// the question every multi-account bug report starts with, and the answer is
+	// invisible once tmux has the env.
 	ag := agent.Parse(string(s.Agent))
 	switch {
 	case ag != agent.Claude:
@@ -241,17 +248,24 @@ func (s *Session) sessionEnv() []string {
 	case s.Account == "":
 		debuglog.Logger.Info("session env: no account, using ambient claude login", "id", s.ID)
 	default:
-		tok := accountToken(s.Account)
-		if tok == "" {
+		dir := accountConfigDir(s.Account)
+		if dir == "" {
 			// The store no longer knows this account: removed, or the resolver
 			// was never installed. Falls back rather than failing to launch.
-			debuglog.Logger.Warn("session env: account has no token, falling back to ambient login",
+			debuglog.Logger.Warn("session env: account has no config dir, falling back to ambient login",
 				"id", s.ID, "account", s.Account)
 			break
 		}
-		env = append(env, claudeaccount.AuthEnvVar+"="+tok)
+		// Provisioned on every launch, not just at add time: the user's real
+		// ~/.claude keeps moving, and an account dir that captured its state
+		// once would drift into a subtly different environment.
+		if err := claudeaccount.Provision(dir); err != nil {
+			debuglog.Logger.Error("session env: could not provision account config dir",
+				"id", s.ID, "account", s.Account, "dir", dir, "err", err)
+		}
+		env = append(env, claudeaccount.ConfigDirEnvVar+"="+dir)
 		debuglog.Logger.Info("session env: launching as claude account",
-			"id", s.ID, "account", s.Account, "var", claudeaccount.AuthEnvVar, "token_len", len(tok))
+			"id", s.ID, "account", s.Account, "var", claudeaccount.ConfigDirEnvVar, "dir", dir)
 	}
 	return env
 }

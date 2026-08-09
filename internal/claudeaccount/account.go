@@ -1,13 +1,15 @@
 // Package claudeaccount manages multiple Claude subscriptions so sessions can
 // run under different accounts in parallel.
 //
-// The mechanism is one environment variable per tmux session (AuthEnvVar,
-// see client.go for why it is not the obvious one), carrying a year-long token
-// minted by `claude setup-token`.
-// It overrides authentication ONLY — ~/.claude stays shared, so hooks,
-// projects/ (auto-naming and --resume), skills, plugins and local MCP servers
-// keep working untouched. CLAUDE_CONFIG_DIR was deliberately rejected: it forks
-// all of that and would force per-account hook injection.
+// The mechanism is one environment variable per tmux session: CLAUDE_CONFIG_DIR
+// (ConfigDirEnvVar), pointing at a directory that holds that account's own
+// claude.ai login. Each session authenticates exactly as a normal `claude` in a
+// terminal does, with no credential layered over another — which is what keeps
+// claude.ai connectors, Remote Control and the usage endpoint working.
+//
+// See configdir.go for why this replaced an earlier ANTHROPIC_AUTH_TOKEN
+// implementation, and what Provision shares back from the user's real ~/.claude
+// so an account dir isn't a stripped-down home.
 package claudeaccount
 
 import (
@@ -24,47 +26,57 @@ import (
 
 // Account is one Claude subscription fleet can launch sessions under.
 //
-// Email is the key, and it is only sometimes an actual email. A `claude
-// setup-token` credential is inference-only by design and will not say who it
-// belongs to, so most accounts are keyed by a fingerprint of the token and
-// carry a user-supplied Label. The exception is an account whose organization
-// matches the login cached on this machine — that one names itself. See
-// identity.go.
-//
-// Whatever the key is, it is stable across re-adds of the same token, which is
-// what keeps existing sessions pointed at the right account.
+// Email is the key and it is a real email address, read from `claude auth
+// status` once the account is logged in. Worth stating because the earlier
+// token-based implementation could not do it: a `claude setup-token` credential
+// refuses to name its owner, so accounts were keyed by a hash of the token, and
+// re-running setup-token minted a second identity for one subscription that
+// orphaned every session pinned to the old one.
 type Account struct {
 	Email string `json:"email"`
-	Plan  string `json:"plan,omitempty"` // "max", "pro", … — display only
-	Label string `json:"label,omitempty"`
-	Token string `json:"token"`
-	Order int    `json:"order"` // waterfall order; also the tie-break for least-used
+	Plan  string `json:"plan,omitempty"`  // "max", "pro", … — display only
+	Label string `json:"label,omitempty"` // optional rename; display prefers it
 
-	// OrgUUID is the organization the token belongs to, from the
-	// anthropic-organization-id response header. Not an email, but a stable
-	// identity — and the thing that lets fleet recognise a token as the
-	// account already logged in on this machine.
+	// ConfigDir is this account's Claude Code home, holding its own login.
+	// Stored verbatim rather than derived: the Keychain item is keyed by a hash
+	// of this exact path, so recomputing it from anything the user can change
+	// would orphan the login on a rename.
+	ConfigDir string `json:"config_dir"`
+
+	Order int `json:"order"` // waterfall order; also the tie-break for least-used
+
+	// OrgUUID and OrgName identify the subscription behind the login. The org
+	// is what Upsert matches on, so logging the same subscription in a second
+	// time updates the existing account rather than duplicating it.
 	OrgUUID string `json:"org_uuid,omitempty"`
+	OrgName string `json:"org_name,omitempty"`
 
-	// UsageEndpointForbidden records that /api/oauth/usage refuses this token
-	// on scope, so quota must come from the probe instead. Permanent for a
-	// given token; persisted so every restart doesn't re-ask, and so a
-	// transient 429 can't be mistaken for the scope answer and restart the
-	// retry loop.
-	UsageEndpointForbidden bool `json:"usage_endpoint_forbidden,omitempty"`
-
-	// initialUsage carries the reading taken while validating, so adding an
-	// account doesn't spend a second probe seconds later. Not persisted —
-	// quota is live state, not configuration.
+	// initialUsage carries the reading taken while adding the account, so it
+	// doesn't wait a poll interval for its first number. Not persisted — quota
+	// is live state, not configuration.
 	initialUsage Usage
 }
 
-// InitialUsage returns the quota reading taken during validation, if any.
-func (a Account) InitialUsage() Usage { return a.initialUsage }
+// FromIdentity builds an account record from a resolved login.
+func FromIdentity(id Identity, dir string) Account {
+	return Account{
+		Email:     id.Email,
+		Plan:      id.Plan,
+		ConfigDir: dir,
+		OrgUUID:   id.OrgUUID,
+		OrgName:   id.OrgName,
+	}
+}
 
-// FingerprintPrefix marks an account the API declined to identify, whose key is
-// a hash of its token rather than an email.
-const FingerprintPrefix = "account-"
+// WithUsage attaches a reading taken while adding the account, so its first row
+// shows a number instead of waiting out a poll interval.
+func WithUsage(a Account, u Usage) Account {
+	a.initialUsage = u
+	return a
+}
+
+// InitialUsage returns the quota reading taken while adding the account, if any.
+func (a Account) InitialUsage() Usage { return a.initialUsage }
 
 // Name is what the UI shows: the user's label if they set one, else the email.
 func (a Account) Name() string {
@@ -74,19 +86,12 @@ func (a Account) Name() string {
 	return a.Email
 }
 
-// NeedsLabel reports that this account has no human-meaningful name — the API
-// wouldn't identify the token and the user hasn't labelled it. Callers use this
-// to ask for a name at the moment the user still knows which account it is.
-func (a Account) NeedsLabel() bool {
-	return a.Label == "" && strings.HasPrefix(a.Email, FingerprintPrefix)
-}
-
 // Store is the on-disk set of accounts.
 //
-// Deliberately a separate file from config.json rather than a field in it:
-// the bug-report flow publishes config.json into public GitHub issues, and
-// these tokens are year-long credentials. Nothing in the diagnostics path
-// reads this file. See Redact for the matching rule on logs and pane excerpts.
+// Holds no credentials: those live in the macOS Keychain, one item per account
+// config dir, written by Claude Code's own login. This file records only which
+// directories exist and who is logged into them, which is why it survived the
+// move off tokens almost unchanged while the security story got much smaller.
 type Store struct {
 	mu       sync.RWMutex
 	accounts []Account
@@ -120,10 +125,30 @@ func Load() *Store {
 		debuglog.Logger.Error("failed to parse accounts file", "path", path, "error", err)
 		return &Store{}
 	}
-	// Emails and plans only — never the tokens.
+	// Drop anything without a config dir. That is exactly the shape written by
+	// the earlier token-based implementation, and such an entry cannot run a
+	// session: there is no login to point CLAUDE_CONFIG_DIR at, and the token it
+	// used to carry is no longer read by anything.
+	//
+	// Dropped rather than kept, because a kept entry would still be a candidate
+	// in Select and would hand new sessions an account that silently falls back
+	// to the ambient login. Sessions naming it render as "your logged-in account
+	// (its account was removed)", which is true and is the prompt to re-add it.
+	kept := s.accounts[:0]
+	for _, a := range s.accounts {
+		if a.ConfigDir == "" {
+			debuglog.Logger.Error("account has no config dir and cannot be used; log it in again with Ctrl+K → Manage Claude Accounts",
+				"email", a.Email, "label", a.Label)
+			continue
+		}
+		kept = append(kept, a)
+	}
+	s.accounts = kept
+
+	// Identity only; there is no credential in this file.
 	for i, a := range s.accounts {
 		debuglog.Logger.Info("account loaded", "order", i, "email", a.Email, "plan", a.Plan,
-			"label", a.Label, "has_token", a.Token != "")
+			"label", a.Label, "org", a.OrgUUID)
 	}
 	debuglog.Logger.Info("accounts loaded", "count", len(s.accounts), "path", path)
 	return s
@@ -142,12 +167,11 @@ func (s *Store) Save() error {
 		debuglog.Logger.Error("failed to create config directory", "path", path, "error", err)
 		return err
 	}
-	// Temp-and-rename, not WriteFile: two goroutines reach here now — the Update
-	// loop when the user edits accounts, and the worker when a quota poll
-	// backfills an organization. A torn write costs every token in the file, and
-	// Load answers an unparseable file with an empty store, so every session
-	// would fall back to the ambient login with nothing on screen to say why.
-	// CreateTemp opens at 0600, same as the file it replaces.
+	// Temp-and-rename, not WriteFile: two goroutines reach here — the Update loop
+	// when the user edits accounts, and the worker after a quota poll. Load
+	// answers an unparseable file with an empty store, so a torn write would
+	// silently drop every session back to the ambient login with nothing on
+	// screen to say why. CreateTemp opens at 0600, same as the file it replaces.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".accounts-*.json")
 	if err != nil {
 		debuglog.Logger.Error("failed to stage accounts file", "path", path, "error", err)
@@ -165,7 +189,7 @@ func (s *Store) Save() error {
 		debuglog.Logger.Error("failed to write accounts file", "path", path, "error", err)
 		return err
 	}
-	// Count only — never the emails or tokens themselves.
+	// Count only — the emails are identity and stay out of the log line.
 	debuglog.Logger.Info("accounts saved", "count", len(s.accounts))
 	return nil
 }
@@ -217,27 +241,22 @@ func (s *Store) Get(email string) (Account, bool) {
 	return Account{}, false
 }
 
-// TokenFor returns the token for an email, or "" if unknown. A caller that gets
-// "" must fall back to the ambient login (set no env var) rather than failing —
-// an account can legitimately disappear from the store while sessions still
-// reference it.
-func (s *Store) TokenFor(email string) string {
+// ConfigDirFor returns the config dir for an email, or "" if unknown. A caller
+// that gets "" must fall back to the ambient login (set no env var) rather than
+// failing — an account can legitimately disappear from the store while sessions
+// still reference it.
+func (s *Store) ConfigDirFor(email string) string {
 	a, ok := s.Get(email)
 	if !ok {
 		return ""
 	}
-	return a.Token
+	return a.ConfigDir
 }
 
 // Upsert adds an account or updates the one it refers to, preserving that
 // account's key, Order and Label so re-adding a token doesn't silently reorder
 // the rotation, discard a rename, or mint a second identity for a subscription
 // fleet already knows.
-//
-// QuotaUnavailable is deliberately NOT carried over: it is a verdict about a
-// specific token, and a replacement deserves its own. Inheriting it would
-// silently disable quota forever if a future token did carry the scope, where
-// clearing it costs one HTTP call that re-marks it immediately.
 //
 // Returns the key the account is stored under, which is NOT always a.Email — an
 // org match keeps the existing key. Callers that index anything by account (the
@@ -250,11 +269,6 @@ func (s *Store) Upsert(a Account) string {
 		old := s.accounts[i]
 		if a.Label == "" {
 			a.Label = old.Label
-		}
-		// An email fleet has only just managed to resolve is worth showing, but
-		// must not become the key. Label is where display already looks first.
-		if a.Label == "" && a.Email != old.Email && !strings.HasPrefix(a.Email, FingerprintPrefix) {
-			a.Label = a.Email
 		}
 		// The stored key wins. Sessions, default_account and allowed_accounts all
 		// reference an account by this string, so changing it orphans every one of
@@ -294,32 +308,6 @@ func (s *Store) indexOfLocked(a Account) int {
 	return -1
 }
 
-// SetOrgUUID records the organization behind an account, so one added before
-// its org was readable still gains the identity that survives a token
-// rotation. Reports whether this was new information.
-//
-// Only ever fills a blank: an account whose org came back *different* is a
-// different subscription, and quietly re-pointing one at the other is the
-// mis-billing this whole mechanism exists to prevent.
-func (s *Store) SetOrgUUID(email, org string) bool {
-	if org == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.accounts {
-		if s.accounts[i].Email != email {
-			continue
-		}
-		if s.accounts[i].OrgUUID != "" {
-			return false
-		}
-		s.accounts[i].OrgUUID = org
-		return true
-	}
-	return false
-}
-
 // Remove drops the account with the given email, reporting whether it existed.
 func (s *Store) Remove(email string) bool {
 	s.mu.Lock()
@@ -327,23 +315,6 @@ func (s *Store) Remove(email string) bool {
 	for i := range s.accounts {
 		if s.accounts[i].Email == email {
 			s.accounts = append(s.accounts[:i], s.accounts[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// MarkUsageEndpointForbidden records that an account's token can never read quota,
-// so nothing asks again. Reports whether this was new information.
-func (s *Store) MarkUsageEndpointForbidden(email string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.accounts {
-		if s.accounts[i].Email == email {
-			if s.accounts[i].UsageEndpointForbidden {
-				return false
-			}
-			s.accounts[i].UsageEndpointForbidden = true
 			return true
 		}
 	}
@@ -434,16 +405,4 @@ func Redact(s string) string {
 // a truncated or mid-print token would slip under Redact's length floor.
 func RedactCaptured(s string) string {
 	return anyCredentialish.ReplaceAllString(s, "sk-ant-<redacted>")
-}
-
-// ExtractToken pulls the first Anthropic token out of arbitrary text, which is
-// how the add-account flow reads the result of `claude setup-token` off its
-// pane. It matches the token's own format rather than Claude's wording, so
-// rephrasing the surrounding prompt doesn't break it.
-func ExtractToken(s string) (string, bool) {
-	m := tokenPattern.FindString(s)
-	if m == "" {
-		return "", false
-	}
-	return m, true
 }

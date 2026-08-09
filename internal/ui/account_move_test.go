@@ -25,8 +25,8 @@ func moveHome(t *testing.T, usage map[string]claudeaccount.Usage) (*Home, *sessi
 	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
 	h.width, h.height = 120, 40
 	h.accounts = &claudeaccount.Store{}
-	h.accounts.Upsert(claudeaccount.Account{Email: "first@x.com", Token: "tok-1"})
-	h.accounts.Upsert(claudeaccount.Account{Email: "second@x.com", Token: "tok-2"})
+	h.accounts.Upsert(claudeaccount.Account{Email: "first@x.com", ConfigDir: "/d/1"})
+	h.accounts.Upsert(claudeaccount.Account{Email: "second@x.com", ConfigDir: "/d/2"})
 	h.accountUsage.Store(&usage)
 
 	s := session.NewSession("api-work", "/tmp/move-e2e")
@@ -46,18 +46,18 @@ func knownUsage(pct int) claudeaccount.Usage {
 		FiveHourReset: time.Now().Add(time.Hour)}
 }
 
-// The reason this exists: a token the API refuses cannot run the session, so a
+// The reason this exists: an account with no login cannot run the session, so a
 // restart that faithfully re-uses the pinned account just fails again. Pinning
 // protects the prompt cache, and there is no cache worth protecting on an
-// account that cannot answer.
-func TestRestartMovesOffARejectedAccount(t *testing.T) {
+// account nobody is logged into.
+func TestRestartMovesOffALoggedOutAccount(t *testing.T) {
 	h, s := moveHome(t, map[string]claudeaccount.Usage{
-		"first@x.com":  {Rejected: true, Err: claudeaccount.ErrTokenRejected},
+		"first@x.com":  {LoggedOut: true, Err: claudeaccount.ErrNotLoggedIn},
 		"second@x.com": knownUsage(30),
 	})
 
 	if !h.healAccountBeforeRelaunch(s) {
-		t.Fatal("restart kept a session on a rejected account")
+		t.Fatal("restart kept a session on a logged-out account")
 	}
 	if s.Account != "second@x.com" {
 		t.Errorf("moved to %q, want second@x.com", s.Account)
@@ -107,7 +107,7 @@ func TestRestartKeepsAWorkingAccount(t *testing.T) {
 // accounts whose state is equally unknown.
 func TestRestartDoesNotMoveOnAnUnreadableAccount(t *testing.T) {
 	h, s := moveHome(t, map[string]claudeaccount.Usage{
-		"first@x.com": {AttemptedAt: time.Now(), Err: claudeaccount.ErrNoQuotaHeaders},
+		"first@x.com": {AttemptedAt: time.Now(), Err: claudeaccount.ErrNoCredential},
 	})
 	if h.healAccountBeforeRelaunch(s) {
 		t.Fatal("an unpollable account was treated as broken")
@@ -138,7 +138,7 @@ func TestRestartLeavesAnAmbientSessionAlone(t *testing.T) {
 
 func TestRestartLeavesNonClaudeAgentsAlone(t *testing.T) {
 	h, s := moveHome(t, map[string]claudeaccount.Usage{
-		"first@x.com": {Rejected: true},
+		"first@x.com": {LoggedOut: true},
 	})
 	s.Agent = agent.Codex
 	if h.healAccountBeforeRelaunch(s) {
@@ -179,11 +179,11 @@ func TestManualMoveToTheCurrentAccountIsANoOp(t *testing.T) {
 }
 
 // The picker must offer only accounts that would actually help: the one the
-// session is already on is a no-op, and a rejected token is a downgrade.
-func TestPickerMarksCurrentAndRejectedAsUnpickable(t *testing.T) {
+// session is already on is a no-op, and an account with no login is a downgrade.
+func TestPickerMarksCurrentAndLoggedOutAsUnpickable(t *testing.T) {
 	h, _ := moveHome(t, map[string]claudeaccount.Usage{
 		"first@x.com":  knownUsage(90),
-		"second@x.com": {Rejected: true},
+		"second@x.com": {LoggedOut: true},
 	})
 	h.openAccountPicker()
 	if !h.accountPicker.IsVisible() {
@@ -197,8 +197,8 @@ func TestPickerMarksCurrentAndRejectedAsUnpickable(t *testing.T) {
 	if h.accountPicker.rows[0].note != "current" {
 		t.Errorf("first row note = %q, want current", h.accountPicker.rows[0].note)
 	}
-	if h.accountPicker.rows[1].note != "token rejected" {
-		t.Errorf("second row note = %q, want token rejected", h.accountPicker.rows[1].note)
+	if h.accountPicker.rows[1].note != "logged out" {
+		t.Errorf("second row note = %q, want logged out", h.accountPicker.rows[1].note)
 	}
 }
 

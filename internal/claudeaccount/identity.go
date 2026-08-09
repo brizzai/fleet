@@ -1,85 +1,190 @@
 package claudeaccount
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
-	"path/filepath"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
-// Identity naming, and the line this file deliberately does not cross.
+// Identity is who a config dir is logged in as.
 //
-// A `claude setup-token` credential cannot tell you who it belongs to. That is
-// intentional — Anthropic's own wording is that long-lived tokens are
-// "limited to inference-only for security reasons" — and fleet does not try to
-// defeat it. There is no scope trick here and no attempt at one.
-//
-// What fleet does instead is entirely local. Claude Code caches the profile of
-// whatever account is logged in on this machine, in ~/.claude.json. If a
-// token's organization (which the API volunteers in a response header) matches
-// that cached organization, then the token belongs to the account whose email
-// is already sitting in the user's own file — and telling them so reveals
-// nothing they don't have.
-//
-// The distinction that matters: the scope limit exists so a *leaked* token
-// can't identify its owner to whoever holds it. This match only works for
-// someone already reading the user's home directory, where the email is in
-// plain text regardless. It buys convenience on the user's own machine and
-// grants nothing to anyone else. Every other account still gets named by hand.
-
-// LocalProfile is Claude Code's cached record of the account logged in on this
-// machine, read from ~/.claude.json.
-type LocalProfile struct {
-	Email   string
-	OrgUUID string
-	OrgName string
+// It comes from `claude auth status`, which reports the real account behind a
+// real login — email, organization and plan, exactly. This is the payoff of
+// running each account as its own login rather than a token: fleet's previous
+// mechanism used a `claude setup-token` credential, which is inference-only and
+// refuses to identify itself, so accounts had to be keyed by a hash of the
+// token and a rotation orphaned every session pointing at the old hash. Nothing
+// here can drift, because the account tells us who it is.
+type Identity struct {
+	LoggedIn   bool
+	Email      string
+	OrgUUID    string
+	OrgName    string
+	Plan       string
+	AuthMethod string
 }
 
-type localConfig struct {
-	OAuthAccount struct {
-		EmailAddress     string `json:"emailAddress"`
-		OrganizationUUID string `json:"organizationUuid"`
-		OrganizationName string `json:"organizationName"`
-	} `json:"oauthAccount"`
-}
-
-// LocalIdentity returns the cached profile of the ambient login, if any.
+// ErrNotLoggedIn means the config dir has no live claude.ai login: never logged
+// in, logged out, or the credential expired or was revoked.
 //
-// Best-effort by design: a missing or unparseable file simply means fleet
-// cannot name a token automatically, which is the normal case for any account
-// other than the one currently logged in.
-func LocalIdentity() (LocalProfile, bool) {
-	home, err := os.UserHomeDir()
+// Actionable and specific, unlike a failure to run the CLI at all: the fix is
+// to log that account in again, and Select must not hand new sessions to it in
+// the meantime.
+var ErrNotLoggedIn = errors.New("not logged in")
+
+const identifyTimeout = 20 * time.Second
+
+// Identify asks Claude Code who the given config dir is logged in as.
+//
+// Local and free — no API call, no quota. Called at add time to name the
+// account, and on the quota poll to notice a login that has since expired.
+func Identify(ctx context.Context, dir string) (Identity, error) {
+	ctx, cancel := context.WithTimeout(ctx, identifyTimeout)
+	defer cancel()
+
+	// claudeBinary, not agent.Type's launch command: this is a bare status
+	// query, and going through the agent package would import the launch
+	// machinery into the account store for one string.
+	cmd := exec.CommandContext(ctx, claudeBinary, "auth", "status")
+	cmd.Env = configDirEnv(dir)
+
+	out, err := cmd.Output()
 	if err != nil {
-		return LocalProfile{}, false
+		// Distinguished from ErrNotLoggedIn on purpose. "fleet could not run
+		// claude" is fleet's problem and must not be reported to the user as
+		// their account being logged out, nor cost them an account in Select.
+		return Identity{}, err
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
-	if err != nil {
-		return LocalProfile{}, false
+
+	var raw struct {
+		LoggedIn         bool   `json:"loggedIn"`
+		AuthMethod       string `json:"authMethod"`
+		Email            string `json:"email"`
+		OrgID            string `json:"orgId"`
+		OrgName          string `json:"orgName"`
+		SubscriptionType string `json:"subscriptionType"`
 	}
-	var c localConfig
-	if err := json.Unmarshal(data, &c); err != nil {
-		debuglog.Logger.Debug("could not parse ~/.claude.json for identity", "err", err)
-		return LocalProfile{}, false
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return Identity{}, err
 	}
-	a := c.OAuthAccount
-	if a.EmailAddress == "" || a.OrganizationUUID == "" {
-		return LocalProfile{}, false
+	id := Identity{
+		LoggedIn:   raw.LoggedIn,
+		Email:      raw.Email,
+		OrgUUID:    raw.OrgID,
+		OrgName:    raw.OrgName,
+		Plan:       raw.SubscriptionType,
+		AuthMethod: raw.AuthMethod,
 	}
-	return LocalProfile{Email: a.EmailAddress, OrgUUID: a.OrganizationUUID, OrgName: a.OrganizationName}, true
+	if !id.LoggedIn {
+		return id, ErrNotLoggedIn
+	}
+	return id, nil
 }
 
-// NameForOrg returns the email for a token's organization, when that
-// organization is the one logged in on this machine. Empty otherwise — and
-// empty is the expected answer for a second, different subscription.
-func NameForOrg(orgUUID string) string {
-	if orgUUID == "" {
-		return ""
+// claudeBinary is looked up on PATH like every other agent fleet launches.
+const claudeBinary = "claude"
+
+// configDirEnv builds the environment for a command that must act on one
+// specific account.
+//
+// The scrub is not defensive tidying, it is the whole correctness argument.
+// fleet is frequently launched *from a fleet session*, so its own environment
+// can carry an inherited credential — and any of these variables outranks the
+// config dir's login, which would make `auth status` report the wrong account
+// and the usage endpoint bill the wrong subscription.
+func configDirEnv(dir string) []string {
+	drop := map[string]bool{
+		"CLAUDE_CONFIG_DIR":       true,
+		"ANTHROPIC_AUTH_TOKEN":    true,
+		"ANTHROPIC_API_KEY":       true,
+		"CLAUDE_CODE_OAUTH_TOKEN": true,
 	}
-	p, ok := LocalIdentity()
-	if !ok || p.OrgUUID != orgUUID {
-		return ""
+	out := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if k, _, ok := strings.Cut(kv, "="); ok && drop[k] {
+			continue
+		}
+		out = append(out, kv)
 	}
-	return p.Email
+	return append(out, ConfigDirEnvVar+"="+dir)
+}
+
+// ConfigDirEnvVar is the one variable fleet sets to choose which subscription a
+// Claude session runs on.
+//
+// It points Claude Code at a config directory holding its own claude.ai login,
+// so the session authenticates the way a normal `claude` in a terminal does.
+// Nothing is layered over anything: there is no precedence conflict, so
+// claude.ai connectors, Remote Control and the usage endpoint all work.
+//
+// The obvious alternative, ANTHROPIC_AUTH_TOKEN, is what fleet shipped first
+// and it is strictly worse — see the file comment in configdir.go for the full
+// account of why it was replaced.
+const ConfigDirEnvVar = "CLAUDE_CONFIG_DIR"
+
+// Login runs an interactive `claude` in the given config dir so the user can
+// complete /login in a real terminal. Returns the command fleet should run on
+// an attached pane.
+//
+// Interactive by necessity: the flow opens a browser and can ask for a code to
+// be pasted back, so there is no headless form of it.
+func LoginCommand(dir string) (string, []string) {
+	return claudeBinary, configDirEnv(dir)
+}
+
+// WaitForLogin polls until the config dir has a live login, the context ends,
+// or the deadline passes. Reports the resolved identity.
+//
+// Polling `auth status` rather than watching the pane: the previous mechanism
+// scraped a token off the screen with a regex, which coupled fleet to Claude
+// Code's exact wording. A status query is the same question asked properly.
+func WaitForLogin(ctx context.Context, dir string, every time.Duration) (Identity, error) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return Identity{}, ctx.Err()
+		case <-t.C:
+			id, err := Identify(ctx, dir)
+			if err == nil {
+				debuglog.Logger.Info("account login completed",
+					"email", id.Email, "plan", id.Plan, "org", id.OrgUUID)
+				return id, nil
+			}
+			if !errors.Is(err, ErrNotLoggedIn) {
+				debuglog.Logger.Debug("waiting for login; status query failed", "err", err)
+			}
+		}
+	}
+}
+
+// GuardConflictingAuth reports the name of an ambient credential that would
+// outrank an account's login, or "" when the coast is clear.
+//
+// This guard was nearly deleted and turns out to matter more here than it did
+// before. Under the previous ANTHROPIC_AUTH_TOKEN mechanism fleet set the
+// highest-precedence variable itself, so almost nothing could outrank it. A
+// config dir's login sits at the *bottom* of the precedence order — below
+// ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY and apiKeyHelper — so any of those
+// inherited from the user's shell silently overrides every account at once, and
+// the whole fleet quietly bills one credential.
+//
+// tmux -e can add variables but not remove them, so a session cannot scrub what
+// it inherits. Refusing loudly is the only honest answer.
+func GuardConflictingAuth() string {
+	for _, name := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+		if os.Getenv(name) != "" {
+			debuglog.Logger.Warn("ambient credential outranks every account login",
+				"var", name, "effect", "sessions would use that credential, not the chosen account")
+			return name
+		}
+	}
+	return ""
 }

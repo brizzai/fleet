@@ -53,24 +53,21 @@ type forkSessionMsg struct {
 
 // Claude-account management messages, emitted by AccountsDialog and handled in
 // app.go. The dialog owns no storage of its own — every mutation round-trips
-// through the store so the on-disk set and the token resolver stay in step.
+// through the store so the on-disk set and the config-dir resolver stay in step.
 type (
-	// accountSetupTokenMsg asks fleet to run `claude setup-token` in a pane the
-	// user drives, then capture the token it prints.
-	accountSetupTokenMsg struct{}
-	// accountValidateMsg carries a token to identify against `claude auth status`.
-	accountValidateMsg struct{ token string }
-	// accountValidatedMsg is the result. capture reports whether the token came
-	// from the pane capture rather than the paste field, which decides whether a
-	// failure falls back to the paste box or just reports.
-	accountValidatedMsg struct {
+	// accountLoginMsg asks fleet to open a pane where the user can /login
+	// another subscription into a config directory of its own.
+	accountLoginMsg struct{}
+	// accountLoggedInMsg is the result: an account already carrying its real
+	// email, organization and plan, because a completed login can be asked who
+	// it is. Nothing needs validating afterwards.
+	accountLoggedInMsg struct {
 		account claudeaccount.Account
-		capture bool
 		err     error
 	}
 	accountRemoveMsg struct{ email string }
-	// accountRenameMsg sets a display label. Needed because a token the API
-	// declines to identify is stored under a fingerprint name.
+	// accountRenameMsg sets a display label, for anyone who prefers "work" to
+	// an email address.
 	accountRenameMsg struct {
 		email string
 		label string

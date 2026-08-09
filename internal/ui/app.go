@@ -593,7 +593,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// Sessions resolve their token at launch through this, so re-adding an
 	// account with a fresh token takes effect on the next relaunch without
 	// touching any live Session.
-	session.SetAccountTokenFunc(h.accounts.TokenFor)
+	session.SetAccountConfigDirFunc(h.accounts.ConfigDirFor)
 	return h
 }
 
@@ -875,22 +875,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionCreateMsg:
 		return h.handleSessionCreate(msg)
 
-	case accountSetupTokenMsg:
-		return h, h.runSetupToken()
+	case accountLoginMsg:
+		return h, h.runAccountLogin()
 
-	case accountValidateMsg:
-		h.accountsDialog.SetBusy("Checking the token…")
-		return h, h.validateAccount(msg.token, false)
-
-	case accountValidatedMsg:
-		return h.handleAccountValidated(msg)
+	case accountLoggedInMsg:
+		return h.handleAccountLoggedIn(msg)
 
 	case accountRemoveMsg:
 		if !h.accounts.Remove(msg.email) {
 			return h, nil
 		}
 		// Sessions still naming this account fall back to the ambient login
-		// rather than failing to launch — see Store.TokenFor.
+		// rather than failing to launch — see Store.ConfigDirFor.
 		if h.cfg.DefaultAccount == msg.email {
 			h.cfg.DefaultAccount = ""
 			if err := h.cfg.Save(); err != nil {
@@ -3076,13 +3072,13 @@ func (h *Home) resolveAccount(ag agent.Type, path string) string {
 // different responses. A spent window fixes itself at the reset, a rejected
 // token needs a new one, and a removed account was the user's own doing.
 func (h *Home) accountUnusableReason(email string) string {
-	if h.accounts.TokenFor(email) == "" {
+	if h.accounts.ConfigDirFor(email) == "" {
 		return "its account was removed"
 	}
 	u := h.accountUsageSnapshot()[email]
 	switch {
-	case u.Rejected:
-		return "its token was rejected"
+	case u.LoggedOut:
+		return "it is logged out"
 	case u.Exhausted(time.Now()):
 		return "its 5-hour window is spent"
 	}
@@ -3160,10 +3156,10 @@ func (h *Home) openAccountPicker() {
 			// Shown, never pickable: the row explains where the session is now,
 			// and "moving" it to itself would restart for no reason.
 			r.enabled, r.note = false, "current"
-		case usage[a.Email].Rejected:
-			// Offering a credential the API refuses would trade a busy account for
-			// one that cannot run at all.
-			r.enabled, r.note = false, "token rejected"
+		case usage[a.Email].LoggedOut:
+			// Offering an account nobody is logged into would trade a busy
+			// account for one that cannot run at all.
+			r.enabled, r.note = false, "logged out"
 		}
 		rows = append(rows, r)
 	}

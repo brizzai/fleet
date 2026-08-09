@@ -1,25 +1,14 @@
 package claudeaccount
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
-	"os"
-	"strings"
 	"time"
-
-	"github.com/brizzai/fleet/internal/debuglog"
 )
 
 const (
-
-	// MinPollInterval is the floor between polls of one account. The endpoint
-	// rate-limits hard and, once tripped, stays tripped for a long time even if
-	// the caller backs off — so this is a floor, not a target.
+	// MinPollInterval is the floor between quota polls of one account. The
+	// reading barely moves inside five minutes and each poll shells out to the
+	// Keychain, so this is a floor, not a target.
 	MinPollInterval = 180 * time.Second
 
 	// ExhaustedPct is the utilization at which an account is treated as spent.
@@ -28,195 +17,9 @@ const (
 	ExhaustedPct = 98
 
 	httpTimeout = 10 * time.Second
-	execTimeout = 30 * time.Second
 )
 
-// ErrNoToken is returned when an operation needs a token and none was given.
-var ErrNoToken = errors.New("no token")
-
-// AuthEnvVar is the environment variable fleet sets per session to choose which
-// subscription a Claude session runs on.
-//
-// It is deliberately NOT CLAUDE_CODE_OAUTH_TOKEN, which is the obvious choice
-// and does not work. Measured against Claude Code 2.1.221: with a Keychain
-// login present, that variable is ignored outright — a deliberately invalid
-// token (one the API answers 401 to) still produced a normal reply, because the
-// CLI never consulted it. Sessions "assigned" an account all billed to the
-// ambient login, silently and with no error anywhere. The tell was a second
-// subscription pinned at exactly 0% for sixteen hours while sessions supposedly
-// ran on it.
-//
-// ANTHROPIC_AUTH_TOKEN sits at precedence 2, above ANTHROPIC_API_KEY (3) and
-// apiKeyHelper (4), and Claude Code says so in as many words when it is set:
-// "another auth source is set and takes precedence over your claude.ai login".
-// A setup-token credential passed here bills the subscription, not API credits
-// — verified by watching the unified 5h bucket move 0% → 1% across one turn.
-//
-// The visible cost is that banner: every session prints a line about claude.ai
-// connectors being disabled. The capability was already lost with this token
-// type; only the warning is new.
-const AuthEnvVar = "ANTHROPIC_AUTH_TOKEN"
-
-// profileEndpoint identifies the account behind a token.
-//
-// `claude auth status --json` cannot do this job, which is worth recording
-// because it is the obvious thing to reach for. With an auth token
-// set it answers only {"loggedIn":true,"authMethod":"oauth_token"} — no email,
-// no plan, and `loggedIn:true` even for a string of A's. It verifies nothing
-// and identifies nothing, so it is useless both as a liveness check and as a
-// source of names.
-const profileEndpoint = "https://api.anthropic.com/api/oauth/profile"
-
-// Validate checks a token is live and identifies the account behind it.
-//
-// Liveness is the HTTP status: the endpoints reject a bad bearer with 401/403,
-// which is the only real verification available (see profileEndpoint for why
-// the CLI cannot do it). Identity is best-effort on top — a valid token whose
-// owner we cannot name is still a usable account, so it gets a stable
-// fingerprint name rather than being refused.
-func Validate(ctx context.Context, token string) (Account, error) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return Account{}, ErrNoToken
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, execTimeout)
-	defer cancel()
-
-	// Token length only — never the token. Length is enough to tell a truncated
-	// paste from a whole one, which is the common failure.
-	debuglog.Logger.Info("validating claude account token", "token_len", len(token), "timeout", execTimeout)
-
-	// One call does both jobs: the status code discriminates, the body names.
-	//
-	//   401 → genuinely bad token. (Measured against a string of A's.)
-	//   403 → real token, scope-limited. `claude setup-token` mints one without
-	//         `user:profile`, and the API says so in as many words: "OAuth
-	//         token does not meet scope requirement user:profile". Valid, just
-	//         not entitled to this endpoint — accept it.
-	//   200 → valid and entitled; the body carries the identity.
-	//
-	// Anything else (network, rate limit, outage) is not evidence against the
-	// token, so it is accepted rather than refused for an unrelated failure.
-	body, status, err := getWithToken(ctx, profileEndpoint, token)
-	switch {
-	case err != nil:
-		debuglog.Logger.Warn("could not reach Anthropic to check the token; accepting it unverified", "err", err)
-		body = nil
-	case status == http.StatusUnauthorized:
-		debuglog.Logger.Error("token rejected by anthropic", "status", status)
-		return Account{}, errors.New("token was rejected — generate a fresh one with `claude setup-token`")
-	case status == http.StatusOK:
-		// The response shape is undocumented, so log it (redacted) — this is how
-		// we learn what identity fields exist without guessing at a struct.
-		debuglog.Logger.Info("account profile response", "body", Redact(strings.TrimSpace(string(body))))
-	default:
-		debuglog.Logger.Info("token is not entitled to identify itself; trying the local profile",
-			"profile_status", status)
-		body = nil
-	}
-
-	email, plan := identityFrom(body)
-
-	// Second chance, entirely local: if this token's organization is the one
-	// logged in on this machine, ~/.claude.json already holds the email. See
-	// identity.go for why this is a fair thing to do and where the line is.
-	usage, org, probeErr := ProbeUsage(ctx, token)
-	if probeErr != nil {
-		debuglog.Logger.Info("quota probe unavailable at add time", "err", Redact(probeErr.Error()))
-	}
-	if email == "" && org != "" {
-		if name := NameForOrg(org); name != "" {
-			email = name
-			debuglog.Logger.Info("named the account from the local profile", "email", email, "org", org)
-		}
-	}
-
-	if email == "" {
-		// Still anonymous, which is the expected outcome for any account other
-		// than the one logged in here. Fingerprint the token so the key is
-		// stable across re-adds and distinct between accounts, without the
-		// credential being recoverable from it. The user supplies a label.
-		email = FingerprintPrefix + fingerprint(token)
-		debuglog.Logger.Info("token carries no identity fleet can resolve; using a fingerprint name",
-			"name", email)
-	}
-
-	debuglog.Logger.Info("claude account validated",
-		"email", email, "plan", plan, "org", org, "quota_readable", probeErr == nil)
-	return Account{Email: email, Plan: plan, Token: token, OrgUUID: org, initialUsage: usage}, nil
-}
-
-// getWithToken performs an authenticated GET, returning the body and status.
-func getWithToken(ctx context.Context, url, token string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	req.Header.Set("User-Agent", fleetUserAgent())
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, resp.StatusCode, err
-	}
-	return body, resp.StatusCode, nil
-}
-
-// identityFrom digs an email and plan out of an undocumented JSON response.
-//
-// Deliberately a walk rather than a struct: the shape isn't published, and a
-// struct that guesses one nesting wrong silently yields an unnamed account. A
-// walk finds the field wherever it sits and keeps working if it moves.
-func identityFrom(body []byte) (email, plan string) {
-	if len(body) == 0 {
-		return "", ""
-	}
-	var v any
-	if err := json.Unmarshal(body, &v); err != nil {
-		return "", ""
-	}
-	var walk func(any)
-	walk = func(n any) {
-		switch t := n.(type) {
-		case map[string]any:
-			for k, val := range t {
-				s, _ := val.(string)
-				lk := strings.ToLower(k)
-				// An "@" is what makes it an address rather than a flag like
-				// "email_verified".
-				if email == "" && strings.Contains(lk, "email") && strings.Contains(s, "@") {
-					email = s
-				}
-				if plan == "" && s != "" &&
-					(lk == "subscriptiontype" || lk == "subscription_type" || lk == "plan" || lk == "tier") {
-					plan = s
-				}
-				walk(val)
-			}
-		case []any:
-			for _, val := range t {
-				walk(val)
-			}
-		}
-	}
-	walk(v)
-	return email, plan
-}
-
-// fingerprint is a short, stable, non-reversible id for a token, used to name
-// an account whose owner the API would not tell us.
-func fingerprint(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])[:8]
-}
+var httpClient = &http.Client{Timeout: httpTimeout}
 
 // Usage is one account's quota state as last read.
 //
@@ -237,28 +40,30 @@ type Usage struct {
 	AttemptedAt time.Time
 	Err         error // last poll error; nil once a poll succeeds
 
-	// Rejected records that the API refused this credential outright (see
-	// ErrTokenRejected), which is the one failure that is real information.
+	// LoggedOut records that this account has no live claude.ai login — never
+	// logged in, logged out elsewhere, or the credential expired or was revoked.
 	//
-	// Live state, never persisted on the Account: an account heals when a fresh
-	// token is added or when a later poll succeeds, and a verdict written to disk
-	// would outlive both. Polling continues on the normal cadence while it is
-	// set, which is what lets the account come back on its own.
-	Rejected bool
+	// The one failure that is real information. Every other poll error means
+	// "fleet could not ask", which says nothing about the account; this one says
+	// the account cannot run a session, so Select must skip it. Scoring it as
+	// merely unknown ranks it at the midpoint, ahead of a healthy account in
+	// active use — which is how every new session ends up on the one account
+	// that cannot work.
+	//
+	// Live state, never persisted: an account heals the moment it is logged in
+	// again, and a verdict on disk would outlive the fix.
+	LoggedOut bool
 }
 
 // Usable reports whether a session launched on this account could actually run.
 //
-// Only a rejection makes it false. Spent is not unusable — it is a wait, and it
-// clears at the reset — and an unpollable account is not unusable either, since
-// fleet not reaching the endpoint says nothing about the credential.
-func (u Usage) Usable() bool { return !u.Rejected }
+// Only a missing login makes it false. Spent is not unusable — it is a wait,
+// and it clears at the reset — and an unpollable account is not unusable
+// either, since fleet failing to read the Keychain or reach Anthropic says
+// nothing about the login.
+func (u Usage) Usable() bool { return !u.LoggedOut }
 
 // Exhausted reports whether this account should be skipped for new work.
-//
-// The endpoint is the only source: an account fleet cannot poll reads as
-// unknown rather than spent, so least-used degrades to waterfall order instead
-// of wrongly excluding a healthy subscription.
 func (u Usage) Exhausted(now time.Time) bool {
 	// A stale reading is not evidence of exhaustion: an account whose reset has
 	// passed is available again whether or not we have managed to re-poll it.
@@ -276,31 +81,4 @@ func (u Usage) Exhausted(now time.Time) bool {
 // through a later failure. Err describes the last *attempt*, not the data.
 func (u Usage) Known() bool {
 	return !u.FetchedAt.IsZero()
-}
-
-var httpClient = &http.Client{Timeout: httpTimeout}
-
-// GuardConflictingAuth reports the name of an ambient credential that would
-// outrank a per-session token, or "" when the coast is clear.
-//
-// Without this the feature fails silently and expensively: fleet sets a token,
-// Claude ignores it in favour of a higher-priority credential, and every
-// session bills to the wrong account with no error anywhere. A wrong-billing
-// failure must be loud.
-//
-// NOTE: now that AuthEnvVar is ANTHROPIC_AUTH_TOKEN (precedence 2), neither
-// name below can actually outrank it, and fleet sets its own value per session
-// via tmux -e, which overrides anything inherited. So this refuses launches it
-// no longer needs to. It fails closed rather than misbilling, so it is left
-// alone deliberately pending a decision on what — if anything — still
-// outranks precedence 2.
-func GuardConflictingAuth() string {
-	for _, name := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
-		if os.Getenv(name) != "" {
-			debuglog.Logger.Warn("ambient credential outranks fleet's per-session token",
-				"var", name, "effect", "session would bill to that credential, not the chosen account")
-			return name
-		}
-	}
-	return ""
 }

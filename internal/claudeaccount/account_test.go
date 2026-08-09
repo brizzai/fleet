@@ -1,6 +1,8 @@
 package claudeaccount
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -67,36 +69,22 @@ func TestRedactLeavesOrdinaryTextAlone(t *testing.T) {
 	}
 }
 
-func TestExtractToken(t *testing.T) {
-	// The capture matches the token's own format rather than Claude's wording,
-	// so rephrasing the surrounding prompt must not break it.
-	out := "Success! Here is your long-lived token:\n\n  " + fakeToken + "\n\nStore it safely.\n"
-	got, ok := ExtractToken(out)
-	if !ok || got != fakeToken {
-		t.Fatalf("ExtractToken = %q (ok=%v), want the token", got, ok)
-	}
-
-	if _, ok := ExtractToken("browser opened, waiting for approval…"); ok {
-		t.Fatal("ExtractToken found a token in output that has none")
-	}
-}
-
 func TestStoreUpsertPreservesOrderAndLabel(t *testing.T) {
 	// Re-adding an account after its token expires must not reorder the
 	// rotation or discard a rename the user made.
 	s := &Store{}
-	s.Upsert(Account{Email: "a@x.com", Token: "t1"})
-	s.Upsert(Account{Email: "b@x.com", Token: "t2"})
+	s.Upsert(Account{Email: "a@x.com", ConfigDir: "/d1"})
+	s.Upsert(Account{Email: "b@x.com", ConfigDir: "/d2"})
 	s.SetLabel("a@x.com", "personal")
 
-	s.Upsert(Account{Email: "a@x.com", Token: "refreshed"})
+	s.Upsert(Account{Email: "a@x.com", ConfigDir: "/refreshed"})
 
 	got, ok := s.Get("a@x.com")
 	if !ok {
 		t.Fatal("account vanished on re-add")
 	}
-	if got.Token != "refreshed" {
-		t.Errorf("token = %q, want refreshed", got.Token)
+	if got.ConfigDir != "/refreshed" {
+		t.Errorf("config dir = %q, want /refreshed", got.ConfigDir)
 	}
 	if got.Label != "personal" {
 		t.Errorf("label = %q, want personal (preserved across re-add)", got.Label)
@@ -106,30 +94,29 @@ func TestStoreUpsertPreservesOrderAndLabel(t *testing.T) {
 	}
 }
 
-// The orphaning bug this exists to prevent: an account the API declines to name
-// is keyed by a hash of its token, so running `claude setup-token` again used to
-// produce a second account for one subscription. Every session, plus
-// default_account and allowed_accounts, still named the old key — they fell back
-// to the ambient login and billed the wrong place, with only a parenthetical in
-// the sidebar to say so.
-func TestRotatedTokenLandsOnTheSameAccount(t *testing.T) {
+// Logging the same subscription in a second time must land on the account that
+// already exists, not create a duplicate — the org is what decides identity, not
+// the config dir it happens to live in. Every session, plus default_account and
+// allowed_accounts, references an account by key; a second row for one
+// subscription would leave half of them pointing at an account nobody uses.
+func TestReLoginLandsOnTheSameAccount(t *testing.T) {
 	s := &Store{}
-	s.Upsert(Account{Email: FingerprintPrefix + "aaaaaaaa", Token: "t1", OrgUUID: "org-1"})
-	s.SetLabel(FingerprintPrefix+"aaaaaaaa", "personal")
-	s.Upsert(Account{Email: "other@x.com", Token: "t2", OrgUUID: "org-2"})
+	s.Upsert(Account{Email: "acct-a", ConfigDir: "/d1", OrgUUID: "org-1"})
+	s.SetLabel("acct-a", "personal")
+	s.Upsert(Account{Email: "other@x.com", ConfigDir: "/d2", OrgUUID: "org-2"})
 
-	// Same subscription, new token — so a different fingerprint key.
-	s.Upsert(Account{Email: FingerprintPrefix + "bbbbbbbb", Token: "t3", OrgUUID: "org-1"})
+	// Same subscription, logged in again into a different config dir.
+	s.Upsert(Account{Email: "acct-b", ConfigDir: "/d3", OrgUUID: "org-1"})
 
 	if n := s.Len(); n != 2 {
-		t.Fatalf("%d accounts after a token rotation, want 2 — a rotation minted a new identity", n)
+		t.Fatalf("%d accounts after logging the same subscription in again, want 2", n)
 	}
-	got, ok := s.Get(FingerprintPrefix + "aaaaaaaa")
+	got, ok := s.Get("acct-a")
 	if !ok {
 		t.Fatal("the original key is gone — every session naming it is now orphaned")
 	}
-	if got.Token != "t3" {
-		t.Errorf("token = %q, want the rotated one", got.Token)
+	if got.ConfigDir != "/d3" {
+		t.Errorf("config dir = %q, want the re-logged-in one", got.ConfigDir)
 	}
 	if got.Label != "personal" {
 		t.Errorf("label = %q, want personal", got.Label)
@@ -143,8 +130,8 @@ func TestRotatedTokenLandsOnTheSameAccount(t *testing.T) {
 // would bill one account's work to the other — worse than the orphaning.
 func TestDifferentOrgIsADifferentAccount(t *testing.T) {
 	s := &Store{}
-	s.Upsert(Account{Email: "a@x.com", Token: "t1", OrgUUID: "org-1"})
-	s.Upsert(Account{Email: "b@x.com", Token: "t2", OrgUUID: "org-2"})
+	s.Upsert(Account{Email: "a@x.com", ConfigDir: "/d1", OrgUUID: "org-1"})
+	s.Upsert(Account{Email: "b@x.com", ConfigDir: "/d2", OrgUUID: "org-2"})
 
 	if n := s.Len(); n != 2 {
 		t.Fatalf("%d accounts, want 2 — two subscriptions collapsed into one", n)
@@ -156,56 +143,11 @@ func TestDifferentOrgIsADifferentAccount(t *testing.T) {
 // them onto the first.
 func TestBlankOrgNeverMatches(t *testing.T) {
 	s := &Store{}
-	s.Upsert(Account{Email: "a@x.com", Token: "t1"})
-	s.Upsert(Account{Email: "b@x.com", Token: "t2"})
+	s.Upsert(Account{Email: "a@x.com", ConfigDir: "/d1"})
+	s.Upsert(Account{Email: "b@x.com", ConfigDir: "/d2"})
 
 	if n := s.Len(); n != 2 {
 		t.Fatalf("%d accounts, want 2 — accounts with no org matched each other", n)
-	}
-}
-
-// The key must not move, but an email fleet has just managed to resolve is
-// still worth showing. Label is where display already looks first.
-func TestResolvedEmailBecomesTheLabelNotTheKey(t *testing.T) {
-	s := &Store{}
-	s.Upsert(Account{Email: FingerprintPrefix + "aaaaaaaa", Token: "t1", OrgUUID: "org-1"})
-
-	s.Upsert(Account{Email: "real@x.com", Token: "t2", OrgUUID: "org-1"})
-
-	a, ok := s.Get(FingerprintPrefix + "aaaaaaaa")
-	if !ok {
-		t.Fatal("the key moved to the newly resolved email, orphaning existing sessions")
-	}
-	if a.Label != "real@x.com" {
-		t.Errorf("label = %q, want the resolved email", a.Label)
-	}
-	if a.NeedsLabel() {
-		t.Error("account still asks for a label when fleet knows its email")
-	}
-}
-
-func TestSetOrgUUIDFillsOnlyABlank(t *testing.T) {
-	s := &Store{}
-	s.Upsert(Account{Email: "a@x.com", Token: "t"})
-
-	if !s.SetOrgUUID("a@x.com", "org-1") {
-		t.Fatal("first backfill should report new information")
-	}
-	if s.SetOrgUUID("a@x.com", "org-1") {
-		t.Error("repeat backfill should report nothing new, so it triggers no save")
-	}
-	// A changed org means a different subscription, not a correction.
-	if s.SetOrgUUID("a@x.com", "org-2") {
-		t.Error("backfill overwrote a known org")
-	}
-	if a, _ := s.Get("a@x.com"); a.OrgUUID != "org-1" {
-		t.Errorf("org = %q, want org-1", a.OrgUUID)
-	}
-	if s.SetOrgUUID("a@x.com", "") {
-		t.Error("an empty org is not information")
-	}
-	if s.SetOrgUUID("ghost@x.com", "org-3") {
-		t.Error("backfilling an unknown account should report false")
 	}
 }
 
@@ -241,56 +183,9 @@ func TestStoreReorderRejectsOutOfRange(t *testing.T) {
 	}
 }
 
-// The verdict is permanent and the question isn't free, so it has to survive a
-// restart — otherwise every launch re-asks, and a transient 429 in place of the
-// 403 leaves fleet retrying on a timer against an answer that cannot change.
-func TestQuotaUnavailableIsRememberedAndIdempotent(t *testing.T) {
-	s := &Store{}
-	s.Upsert(Account{Email: "a@x.com", Token: "t"})
-
-	if !s.MarkUsageEndpointForbidden("a@x.com") {
-		t.Fatal("first mark should report new information")
-	}
-	if s.MarkUsageEndpointForbidden("a@x.com") {
-		t.Error("second mark should report nothing new, so it triggers no save")
-	}
-	if a, _ := s.Get("a@x.com"); !a.UsageEndpointForbidden {
-		t.Error("flag not set on the account")
-	}
-	if s.MarkUsageEndpointForbidden("ghost@x.com") {
-		t.Error("marking an unknown account should report false")
-	}
-}
-
-func TestReAddGivesAFreshTokenAFreshVerdict(t *testing.T) {
-	// A new token deserves to be re-checked, unlike Order and Label which are
-	// the user's own choices and are preserved.
-	//
-	// The asymmetry is deliberate: carrying the flag onto a replacement token
-	// would silently disable quota forever if a future token did carry the
-	// scope, whereas clearing it costs exactly one HTTP call that re-marks it
-	// immediately. A wasted call beats a feature that quietly stops working.
-	s := &Store{}
-	s.Upsert(Account{Email: "a@x.com", Token: "old", Label: "work"})
-	s.MarkUsageEndpointForbidden("a@x.com")
-
-	s.Upsert(Account{Email: "a@x.com", Token: "new"})
-
-	a, _ := s.Get("a@x.com")
-	if a.UsageEndpointForbidden {
-		t.Error("a replacement token inherited the old token's verdict")
-	}
-	if a.Token != "new" {
-		t.Errorf("token = %q, want the refreshed one", a.Token)
-	}
-	if a.Label != "work" {
-		t.Errorf("label = %q, want it preserved — it is the user's choice, not a verdict", a.Label)
-	}
-}
-
 func TestStoreRemove(t *testing.T) {
 	s := &Store{}
-	s.Upsert(Account{Email: "a@x.com", Token: "t"})
+	s.Upsert(Account{Email: "a@x.com", ConfigDir: "/d"})
 	if !s.Remove("a@x.com") {
 		t.Fatal("Remove reported the account was absent")
 	}
@@ -299,16 +194,6 @@ func TestStoreRemove(t *testing.T) {
 	}
 	if s.Remove("a@x.com") {
 		t.Error("removing a second time should report false")
-	}
-}
-
-func TestTokenForUnknownAccountIsEmpty(t *testing.T) {
-	// An account removed while sessions still reference it must resolve to no
-	// token, so those sessions fall back to the ambient login rather than
-	// failing to launch.
-	s := &Store{}
-	if tok := s.TokenFor("ghost@x.com"); tok != "" {
-		t.Fatalf("TokenFor(unknown) = %q, want empty", tok)
 	}
 }
 
@@ -326,7 +211,7 @@ func TestNilStoreReadsAreSafe(t *testing.T) {
 	if _, ok := s.Get("a@x.com"); ok {
 		t.Error("Get() found an account on a nil store")
 	}
-	if got := s.TokenFor("a@x.com"); got != "" {
+	if got := s.ConfigDirFor("a@x.com"); got != "" {
 		t.Errorf("TokenFor() = %q on nil store, want empty", got)
 	}
 }
@@ -337,5 +222,35 @@ func TestAccountName(t *testing.T) {
 	}
 	if got := (Account{Email: "a@x.com", Label: "work"}).Name(); got != "work" {
 		t.Errorf("Name() = %q, want the label when set", got)
+	}
+}
+
+// An accounts.json written by the token-based implementation carries no config
+// dir, so its entries cannot run a session. Keeping them would leave them as
+// Select candidates that silently fall back to the ambient login — the exact
+// invisible mis-billing this whole mechanism exists to prevent.
+func TestLegacyTokenAccountsAreDroppedNotSilentlyKept(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".config", "fleet"), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// The old shape: a fingerprint key and a token, no config_dir.
+	if err := os.WriteFile(DefaultPath(), []byte(`[
+		{"email":"account-37b1194e","label":"personal","token":"sk-ant-oat01-old"},
+		{"email":"work@x.com","config_dir":"/cfg/work"}
+	]`), 0600); err != nil {
+		t.Fatalf("write accounts: %v", err)
+	}
+
+	s := Load()
+	if s.Len() != 1 {
+		t.Fatalf("loaded %d accounts, want 1 — a legacy entry survived and can still be selected", s.Len())
+	}
+	if _, ok := s.Get("account-37b1194e"); ok {
+		t.Error("the legacy token account is still a candidate")
+	}
+	if _, ok := s.Get("work@x.com"); !ok {
+		t.Error("a usable account was dropped alongside the legacy ones")
 	}
 }

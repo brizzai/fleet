@@ -190,7 +190,7 @@ func runWorktree(args []string) {
 	// wrong subscription, so an unknown name is an error rather than a silent
 	// fallback — the same rule --agent follows, and for a costlier reason.
 	accounts := claudeaccount.Load()
-	session.SetAccountTokenFunc(accounts.TokenFor)
+	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
 	account := ""
 	if !opts.noSession && ag == agent.Claude {
 		if opts.account != "" {

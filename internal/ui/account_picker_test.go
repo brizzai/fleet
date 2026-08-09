@@ -13,8 +13,8 @@ import (
 func pickerRows() []accountPickerRow {
 	return []accountPickerRow{
 		{email: "here@x.com", label: "here", enabled: false, note: "current"},
-		{email: "dead@x.com", label: "dead", enabled: false, note: "token rejected",
-			usage: claudeaccount.Usage{Rejected: true}},
+		{email: "dead@x.com", label: "dead", enabled: false, note: "logged out",
+			usage: claudeaccount.Usage{LoggedOut: true}},
 		{email: "good@x.com", label: "good", enabled: true,
 			usage: claudeaccount.Usage{FiveHourPct: 12, FetchedAt: time.Now()}},
 	}
@@ -84,7 +84,7 @@ func TestPickerEscCancelsWithoutPicking(t *testing.T) {
 func TestPickerShowsWhyEachAccountIsWhatItIs(t *testing.T) {
 	d := showPicker(t)
 	view := d.View()
-	for _, want := range []string{"current", "token rejected", "12%"} {
+	for _, want := range []string{"current", "logged out", "12%"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q:\n%s", want, view)
 		}
@@ -129,7 +129,7 @@ func TestPickerRowsAreOneLineAndFitTheBox(t *testing.T) {
 	oneRow := strings.Count(d.View(), "\n")
 	d.Show("Move x to", append(d.rows, accountPickerRow{
 		email: "b@x.com", label: "another-account-with-a-long-name", enabled: true,
-		usage: claudeaccount.Usage{Rejected: true},
+		usage: claudeaccount.Usage{LoggedOut: true},
 	}))
 	if got := strings.Count(d.View(), "\n") - oneRow; got != 1 {
 		t.Errorf("a second account added %d lines, want 1 — a row wrapped:\n%s", got, d.View())

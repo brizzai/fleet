@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -24,20 +25,17 @@ type accountsMode int
 
 const (
 	accountsList         accountsMode = iota // the account table
-	accountsPaste                            // manual token entry (the fallback path)
 	accountsConfirmRm                        // "really remove?" on the highlighted row
-	accountsWaitingToken                     // validating a token we just captured
+	accountsWaitingLogin                     // a browser login is in flight
 	accountsRename                           // typing a display label for the highlighted row
 )
 
 // AccountsDialog manages the set of Claude subscriptions fleet can launch under.
 //
-// A `claude setup-token` credential is inference-only by design and will not
-// identify its owner, so most accounts arrive anonymous. Fleet names the one
-// exception automatically — a token whose organization matches the login
-// cached on this machine — and asks for the rest at the one moment the user
-// certainly knows the answer: immediately after the browser login that
-// produced the token.
+// Adding one runs a real `claude` login in its own config directory, so the
+// account arrives already named: `claude auth status` reports the email, the
+// organization and the plan. Nothing here has to guess, and no credential
+// passes through fleet — the login lands in that directory's own Keychain item.
 type AccountsDialog struct {
 	visible bool
 	width   int
@@ -70,8 +68,7 @@ func NewAccountsDialog() *AccountsDialog {
 // rename modes, so the placeholder has to be set on entry — otherwise the
 // rename prompt asks for a name while showing a token as the example.
 const (
-	tokenPlaceholder = "sk-ant-oat01-…"
-	namePlaceholder  = "personal, work, you@example.com"
+	namePlaceholder = "personal, work, you@example.com"
 )
 
 // beginInput focuses the shared text box for a mode, seeding its value and
@@ -111,19 +108,18 @@ func (d *AccountsDialog) Refresh(accounts []claudeaccount.Account, usage map[str
 	// state is over by definition. Without this the dialog sits on "Checking
 	// the token…" forever after a *successful* add — the account is saved and
 	// the UI still says it is working.
-	if d.mode == accountsWaitingToken {
+	if d.mode == accountsWaitingLogin {
 		d.mode = accountsList
 		d.notice = ""
 	}
 }
 
-// Added puts the dialog back on the list with the new account selected, and
-// opens the rename box when the API declined to name it.
+// Added puts the dialog back on the list with the new account selected.
 //
-// Asking for the name here rather than leaving the row as `account-7ee6c0f8`
-// is the whole point: the user has just finished a browser login, so this is
-// the one moment they certainly know which account it is.
-func (d *AccountsDialog) Added(email string, needsLabel bool) {
+// No rename prompt: the login reports its own email, so the row is already
+// readable. Renaming stays available on `r` for anyone who wants "work" rather
+// than an address.
+func (d *AccountsDialog) Added(email string) {
 	d.mode = accountsList
 	d.err = ""
 	d.notice = ""
@@ -132,9 +128,6 @@ func (d *AccountsDialog) Added(email string, needsLabel bool) {
 			d.cursor = i
 			break
 		}
-	}
-	if needsLabel {
-		d.beginInput(accountsRename, "", namePlaceholder)
 	}
 }
 
@@ -145,23 +138,22 @@ func (d *AccountsDialog) SetSize(w, h int) {
 	d.height = h
 }
 
-// SetBusy puts the dialog into its validating state while a captured token is
-// checked with Anthropic.
+// SetBusy puts the dialog into its in-flight state while a browser login runs.
 func (d *AccountsDialog) SetBusy(notice string) {
-	d.mode = accountsWaitingToken
+	d.mode = accountsWaitingLogin
 	d.notice = notice
 	d.err = ""
 }
 
-// SetError returns the dialog to a usable state after a failed add, dropping
-// the user into the paste field — the fallback for a capture that missed.
-func (d *AccountsDialog) SetError(err error, offerPaste bool) {
+// SetError returns the dialog to the list after a failed add, with the reason.
+//
+// There is no fallback path to offer any more. The old flow could half-succeed
+// — a browser login that worked but whose token fleet failed to scrape off the
+// pane — so it dropped the user into a paste box. A login either completes in
+// its config dir or it doesn't, and `a` retries it.
+func (d *AccountsDialog) SetError(err error) {
 	d.err = claudeaccount.Redact(err.Error())
 	d.notice = ""
-	if offerPaste {
-		d.beginInput(accountsPaste, "", tokenPlaceholder)
-		return
-	}
 	d.mode = accountsList
 }
 
@@ -173,40 +165,14 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 	}
 
 	switch d.mode {
-	case accountsWaitingToken:
-		// Only escape works while a validation is in flight; acting on a
-		// half-added account would be acting on a state the dialog can't show.
+	case accountsWaitingLogin:
+		// Only escape works while a login is in flight; acting on a half-added
+		// account would be acting on a state the dialog can't show.
 		if keyMsg.String() == "esc" {
 			d.mode = accountsList
 			d.notice = ""
 		}
 		return d, nil
-
-	case accountsPaste:
-		switch keyMsg.String() {
-		case "esc":
-			d.mode = accountsList
-			d.input.Blur()
-			d.err = ""
-			return d, nil
-		case "enter":
-			token := strings.TrimSpace(d.input.Value())
-			if token == "" {
-				d.err = "paste the token printed by `claude setup-token`"
-				return d, nil
-			}
-			// Accept a whole pasted line, not just a bare token — people paste
-			// the surrounding output at least as often as the token alone.
-			if tok, found := claudeaccount.ExtractToken(token); found {
-				token = tok
-			}
-			d.input.Blur()
-			d.SetBusy("Checking the token…")
-			return d, func() tea.Msg { return accountValidateMsg{token: token} }
-		}
-		var cmd tea.Cmd
-		d.input, cmd = d.input.Update(msg)
-		return d, cmd
 
 	case accountsRename:
 		switch keyMsg.String() {
@@ -266,14 +232,10 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 		}
 	case "a":
 		d.err = ""
-		return d, func() tea.Msg { return accountSetupTokenMsg{} }
-	case "p":
-		// The explicit paste path, for anyone who already has a token.
-		d.err = ""
-		d.beginInput(accountsPaste, "", tokenPlaceholder)
+		return d, func() tea.Msg { return accountLoginMsg{} }
 	case "r":
-		// An account the API declined to identify gets a fingerprint name, so
-		// renaming has to be reachable or those rows stay unreadable forever.
+		// Optional now that rows carry a real email, but a two-account setup
+		// reads better as "work" and "personal" than as two addresses.
 		if a, ok := d.selected(); ok {
 			d.beginInput(accountsRename, a.Label, namePlaceholder)
 		}
@@ -307,17 +269,10 @@ func (d *AccountsDialog) selectedEmail() string {
 	return a.Email
 }
 
-// nameSuggestions are the one-key picks offered in the rename box.
-//
-// Leads with the local login's email when it is not already taken: adding a
-// second subscription usually means the *other* one is your main account, and
-// having it offered beats typing it. Then the two labels that cover almost
-// every remaining case.
+// nameSuggestions are the one-key picks offered in the rename box: the two
+// labels that cover almost every two-subscription setup.
 func (d *AccountsDialog) nameSuggestions() []string {
 	var out []string
-	if p, ok := claudeaccount.LocalIdentity(); ok && !d.labelTaken(p.Email) {
-		out = append(out, p.Email)
-	}
 	for _, s := range []string{"work", "personal"} {
 		if !d.labelTaken(s) {
 			out = append(out, s)
@@ -370,22 +325,8 @@ func (d *AccountsDialog) View() string {
 	b.WriteString("\n\n")
 
 	switch d.mode {
-	case accountsPaste:
-		for _, l := range wrapTo(inner, "Run `claude setup-token` in a terminal, then paste the token here. It lasts a year and is stored outside config.json.") {
-			b.WriteString(dimStyle.Render(l) + "\n")
-		}
-		b.WriteString("\n" + d.input.View() + "\n")
-
 	case accountsRename:
-		if a, ok := d.selected(); ok && a.NeedsLabel() {
-			// Anthropic won't identify a setup-token credential, so the row is
-			// keyed by a hash. Say so, or the box reads as a pointless chore.
-			for _, l := range wrapTo(inner, "Added. Anthropic won't say which account a token belongs to, so give it a name you'll recognise:") {
-				b.WriteString(dimStyle.Render(l) + "\n")
-			}
-		} else {
-			b.WriteString(dimStyle.Render(ansi.Truncate("Name for "+d.selectedName(), inner, "…")) + "\n")
-		}
+		b.WriteString(dimStyle.Render(ansi.Truncate("Name for "+d.selectedName(), inner, "…")) + "\n")
 		b.WriteString("\n" + d.input.View() + "\n")
 		if picks := d.nameSuggestions(); len(picks) > 0 {
 			var row []string
@@ -395,7 +336,7 @@ func (d *AccountsDialog) View() string {
 			b.WriteString(dimStyle.Render(ansi.Truncate(strings.Join(row, "   "), inner, "…")) + "\n")
 		}
 
-	case accountsWaitingToken:
+	case accountsWaitingLogin:
 		b.WriteString(d.notice + "\n")
 		b.WriteString(dimStyle.Render("Checking the token with Anthropic…") + "\n")
 
@@ -454,11 +395,9 @@ func (d *AccountsDialog) selectedName() string {
 func (d *AccountsDialog) footer(width int) []string {
 	var hints []string
 	switch d.mode {
-	case accountsPaste:
-		hints = []string{"⏎ add", "esc back"}
 	case accountsRename:
 		hints = []string{"1-9 pick", "⏎ save", "esc skip"}
-	case accountsWaitingToken:
+	case accountsWaitingLogin:
 		hints = []string{"esc cancel"}
 	case accountsConfirmRm:
 		hints = []string{"y remove", "n cancel"}
@@ -528,7 +467,7 @@ func wrapTo(width int, text string) []string {
 // width is the content width the row must not exceed; the name is truncated to
 // protect the right-hand cell, since a wrapped row reads as a broken dialog.
 func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) string {
-	selected := i == d.cursor && d.mode != accountsPaste
+	selected := i == d.cursor
 	dimStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
 
 	// Three lead cells, kept as separate columns rather than one string: the
@@ -555,8 +494,8 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 	right := ""
 	if u, ok := d.usage[a.Email]; ok {
 		switch {
-		case u.Rejected:
-			right = lipgloss.NewStyle().Foreground(ColorRed).Render("✕ token rejected")
+		case u.LoggedOut:
+			right = lipgloss.NewStyle().Foreground(ColorRed).Render("✕ logged out")
 		case u.Known():
 			right = renderQuotaCell(u)
 		case u.Err != nil:
@@ -565,10 +504,7 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 	}
 
 	name := a.Name()
-	if a.NeedsLabel() {
-		// Nudge toward the rename rather than leaving a hash looking deliberate.
-		name += dimStyle.Render("  (r to name)")
-	} else if a.Plan != "" {
+	if a.Plan != "" {
 		name += dimStyle.Render(" · " + a.Plan)
 	}
 
@@ -621,14 +557,14 @@ func quotaStyle(pct int) lipgloss.Style {
 const accountSetupPrefix = "fleetauth_"
 
 const (
-	// setupTokenPollInterval is how often the watcher checks the pane for the
-	// token. Fast enough to feel immediate, slow enough that capture-pane on an
-	// attached session costs nothing.
-	setupTokenPollInterval = 750 * time.Millisecond
-	// setupTokenWatchWindow bounds the watcher so an abandoned login can't
-	// leave a goroutine polling for the life of the process. Generous: the
-	// browser flow can involve signing in and pasting a code back.
-	setupTokenWatchWindow = 10 * time.Minute
+	// accountLoginPollInterval is how often the watcher asks whether the config
+	// dir has a login yet. Each check shells out to `claude auth status`, so
+	// this is slower than a pane capture would be and still feels immediate.
+	accountLoginPollInterval = 1500 * time.Millisecond
+	// accountLoginWindow bounds the watcher so an abandoned login can't leave a
+	// goroutine polling for the life of the process. Generous: the browser flow
+	// can involve signing in and pasting a code back.
+	accountLoginWindow = 10 * time.Minute
 )
 
 // openAccountsDialog shows the account manager.
@@ -642,31 +578,50 @@ func (h *Home) openAccountsDialog() tea.Cmd {
 	return nil
 }
 
-// runSetupToken hands the user a real terminal running `claude setup-token`,
-// then reads the token off the pane when they come back.
+// runAccountLogin hands the user a real terminal running `claude` in a fresh
+// config directory, so they can complete /login for another subscription.
 //
-// It has to be a live, attached pane rather than a captured command: the
-// browser flow sometimes asks for a code to be pasted back, which a
-// non-interactive capture could never satisfy.
-func (h *Home) runSetupToken() tea.Cmd {
-	home, err := os.UserHomeDir()
+// It has to be a live, attached pane rather than a captured command: the browser
+// flow sometimes asks for a code to be pasted back, which a non-interactive
+// capture could never satisfy.
+//
+// Unlike the setup-token flow this replaced, nothing is scraped off the screen.
+// The old watcher matched an `sk-ant-…` token in the pane, which meant fleet
+// depended on Claude Code's exact output and could half-fail — a login that
+// worked but whose token fleet missed. Here the pane is only a place for the
+// user to type; the result is read by asking `claude auth status` whether that
+// directory is logged in.
+func (h *Home) runAccountLogin() tea.Cmd {
+	dir, err := claudeaccount.NewConfigDirPath()
+	if err == nil {
+		err = claudeaccount.Provision(dir)
+	}
 	if err != nil {
+		debuglog.Logger.Error("could not prepare an account config dir", "err", err)
+		return func() tea.Msg {
+			return accountLoggedInMsg{err: fmt.Errorf("could not prepare the account directory: %w", err)}
+		}
+	}
+
+	home, herr := os.UserHomeDir()
+	if herr != nil {
 		home = os.TempDir()
 	}
-	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "setup-token", home)
-	debuglog.Logger.Info("starting claude setup-token", "tmux", ts.Name, "cwd", home)
+	ts := tmux.NewSessionWithPrefix(accountSetupPrefix, "login", home)
+	debuglog.Logger.Info("starting account login", "tmux", ts.Name, "dir", dir)
 
 	// Ctrl+Q is the fallback, not the plan — the watcher below returns the user
-	// automatically once the token lands. The hint stays because the watcher
-	// can miss (an aborted flow prints no token at all).
-	//
-	// Strip any inherited token so setup-token authenticates the browser
-	// session rather than the account fleet happens to be holding.
-	const cmd = `claude setup-token; printf '\n\033[1;35m  ✻ Waiting for the token… (Ctrl+Q returns to fleet)\033[0m\n'`
-	if err := ts.Start(cmd, claudeaccount.AuthEnvVar+"="); err != nil {
-		debuglog.Logger.Error("could not start setup-token session", "tmux", ts.Name, "err", err)
+	// automatically once the login lands. The hint stays because an abandoned
+	// flow never completes and the user needs a way out.
+	cmd := `printf '\033[1;35m  ✻ Run /login to add this account, then wait (Ctrl+Q returns to fleet)\033[0m\n\n'; claude`
+	// configDirEnv scrubs any inherited credential: fleet is often launched from
+	// a fleet session, and an ambient token would outrank this dir's login and
+	// log the wrong account in.
+	_, env := claudeaccount.LoginCommand(dir)
+	if err := ts.Start(cmd, env...); err != nil {
+		debuglog.Logger.Error("could not start login session", "tmux", ts.Name, "err", err)
 		return func() tea.Msg {
-			return accountValidatedMsg{capture: true, err: fmt.Errorf("could not start `claude setup-token`: %w", err)}
+			return accountLoggedInMsg{err: fmt.Errorf("could not start `claude`: %w", err)}
 		}
 	}
 
@@ -674,151 +629,96 @@ func (h *Home) runSetupToken() tea.Cmd {
 	h.attachStartedAt.Store(time.Now().UnixNano())
 	h.actionLog.Add("add claude account", "", true)
 
-	// Watch the pane and pull the user back the moment the token appears, so
-	// finishing the browser flow is the last thing they have to do. The token
-	// is the final thing setup-token prints, so seeing it means the flow is
-	// complete — there is no earlier state this could cut short.
-	//
-	// Runs alongside tea.Exec, which blocks until the attached client goes
-	// away; detaching from here is what makes it return.
-	captured := make(chan string, 1)
+	// Watch for the login completing and pull the user back the moment it does,
+	// so finishing the browser flow is the last thing they have to do. Runs
+	// alongside tea.Exec, which blocks until the attached client goes away;
+	// detaching from here is what makes it return.
+	identified := make(chan claudeaccount.Identity, 1)
 	go func() {
-		deadline := time.Now().Add(setupTokenWatchWindow)
-		for time.Now().Before(deadline) {
-			time.Sleep(setupTokenPollInterval)
-			pane, err := ts.CapturePaneJoined()
-			if err != nil {
-				return // session gone: the user quit the shell themselves
-			}
-			tok, ok := claudeaccount.ExtractToken(pane)
-			if !ok {
-				continue
-			}
-			captured <- tok
-			debuglog.Logger.Info("token appeared; returning from the setup pane", "tmux", ts.Name)
-			if err := ts.DetachClient(); err != nil {
-				debuglog.Logger.Error("could not auto-detach setup pane", "tmux", ts.Name, "err", err)
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), accountLoginWindow)
+		defer cancel()
+		id, err := claudeaccount.WaitForLogin(ctx, dir, accountLoginPollInterval)
+		if err != nil {
+			debuglog.Logger.Warn("account login watch ended without a login",
+				"tmux", ts.Name, "window", accountLoginWindow, "err", err)
 			return
 		}
-		debuglog.Logger.Warn("setup-token watch window expired", "tmux", ts.Name, "window", setupTokenWatchWindow)
+		identified <- id
+		if err := ts.DetachClient(); err != nil {
+			debuglog.Logger.Error("could not auto-detach login pane", "tmux", ts.Name, "err", err)
+		}
 	}()
 
 	return tea.Exec(attachCmd{session: ts}, func(execErr error) tea.Msg {
 		h.isAttaching.Store(false)
 		h.attachStartedAt.Store(0)
+		if killErr := ts.Kill(); killErr != nil {
+			debuglog.Logger.Error("failed to kill login session", "err", killErr)
+		}
 
 		// Prefer what the watcher saw. On a manual Ctrl+Q it has usually not
-		// fired yet, so fall through to reading the pane directly.
+		// fired yet, so ask once more directly — the user may well have finished
+		// logging in and detached before the next poll came round.
+		var id claudeaccount.Identity
 		select {
-		case tok := <-captured:
-			if killErr := ts.Kill(); killErr != nil {
-				debuglog.Logger.Error("failed to kill setup-token session", "err", killErr)
-			}
-			debuglog.Logger.Info("captured token from setup-token pane",
-				"tmux", ts.Name, "token_len", len(tok), "via", "watcher")
-			return accountValidateMsg{token: tok}
+		case id = <-identified:
 		default:
+			var err error
+			id, err = claudeaccount.Identify(context.Background(), dir)
+			if err != nil {
+				// The dir has no login, so it is litter. Removing it keeps an
+				// abandoned add from leaving a directory that Provision would
+				// keep refreshing forever.
+				if rmErr := claudeaccount.RemoveConfigDir(dir); rmErr != nil {
+					debuglog.Logger.Warn("could not remove an abandoned account dir", "dir", dir, "err", rmErr)
+				}
+				debuglog.Logger.Info("login pane closed without a login", "tmux", ts.Name, "err", err, "exec_err", execErr)
+				return accountLoggedInMsg{err: fmt.Errorf("no account was logged in")}
+			}
 		}
 
-		// Joined, not CapturePaneFresh: the token is ~108 characters and the
-		// shell prompt eats columns before it, so on any realistic pane width
-		// the unjoined capture returns it split across physical lines and the
-		// match stops at the wrap. That truncated string then validates as a
-		// bogus token, which is exactly what it is.
-		pane, capErr := ts.CapturePaneJoined()
-		if killErr := ts.Kill(); killErr != nil {
-			debuglog.Logger.Error("failed to kill setup-token session", "err", killErr)
+		// Read quota now so the new row shows a number immediately rather than
+		// waiting out a poll interval.
+		usage, uerr := claudeaccount.FetchUsage(context.Background(), dir)
+		if uerr != nil {
+			debuglog.Logger.Info("quota unavailable just after login", "err", uerr)
 		}
-		if capErr != nil {
-			debuglog.Logger.Error("could not capture setup-token pane", "tmux", ts.Name, "err", capErr)
-			return accountValidatedMsg{capture: true, err: fmt.Errorf("could not read the setup-token output: %w", capErr)}
-		}
-		token, found := claudeaccount.ExtractToken(pane)
-		if !found {
-			// Log the tail, aggressively redacted. Size alone can't distinguish
-			// "quit before the browser flow finished" from "the output format
-			// changed", and those need opposite fixes. RedactCaptured (not
-			// Redact) because a half-printed token would slip under Redact's
-			// length floor.
-			debuglog.Logger.Warn("no token in setup-token output",
-				"tmux", ts.Name, "pane_bytes", len(pane),
-				"pane_lines", strings.Count(pane, "\n"), "exec_err", execErr,
-				"tail", claudeaccount.RedactCaptured(lastLines(pane, 12)))
-			return accountValidatedMsg{capture: true, err: fmt.Errorf("no token found in the setup-token output — paste it instead")}
-		}
-		debuglog.Logger.Info("captured token from setup-token pane",
-			"tmux", ts.Name, "token_len", len(token))
-		return accountValidateMsg{token: token}
+		debuglog.Logger.Info("account logged in", "email", id.Email, "plan", id.Plan, "org", id.OrgUUID)
+		return accountLoggedInMsg{account: claudeaccount.WithUsage(claudeaccount.FromIdentity(id, dir), usage)}
 	})
 }
 
-// lastLines returns the final n non-blank lines of s, which is where a command
-// leaves its result and any error.
-func lastLines(s string, n int) string {
-	var keep []string
-	for _, l := range strings.Split(s, "\n") {
-		if strings.TrimSpace(l) != "" {
-			keep = append(keep, strings.TrimSpace(l))
-		}
-	}
-	if len(keep) > n {
-		keep = keep[len(keep)-n:]
-	}
-	return strings.Join(keep, " | ")
-}
-
-// validateAccount identifies a token off the Update goroutine. Claude is
-// shelled out to here, so this must never run inline.
-func (h *Home) validateAccount(token string, fromCapture bool) tea.Cmd {
-	return func() tea.Msg {
-		acct, err := claudeaccount.Validate(context.Background(), token)
-		return accountValidatedMsg{account: acct, capture: fromCapture, err: err}
-	}
-}
-
-// handleAccountValidated stores a newly identified account, or reports why it
-// could not be added.
-func (h *Home) handleAccountValidated(msg accountValidatedMsg) (tea.Model, tea.Cmd) {
+// handleAccountLoggedIn stores a newly added account, or reports why it failed.
+func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		debuglog.Logger.Error("account validation failed", "err", claudeaccount.Redact(msg.err.Error()))
-		// A capture that missed drops into the paste box, which is the whole
-		// point of having one; a paste that failed stays put with the reason.
-		h.accountsDialog.SetError(msg.err, msg.capture)
+		debuglog.Logger.Error("adding an account failed", "err", claudeaccount.Redact(msg.err.Error()))
+		h.accountsDialog.SetError(msg.err)
 		return h, nil
 	}
-	// Upsert may have matched on organization, so the account can be stored under
-	// a key that is not msg.account.Email — a rotated token arrives with a fresh
-	// fingerprint name and lands on the existing account. Everything below indexes
-	// by account, so it has to use the key Upsert actually wrote.
+
+	// Upsert matches on organization, so logging the same subscription in twice
+	// updates the existing account instead of creating a second row for it —
+	// and can therefore store under a key that is not msg.account.Email.
+	// Everything below indexes by account, so it uses the key Upsert wrote.
 	key := h.accounts.Upsert(msg.account)
 
-	// Replace this account's reading outright, even when validation couldn't get
-	// one. The numbers and any rejection belong to the *old* token, and adding a
-	// replacement is precisely how a user heals a dead account — inheriting the
-	// verdict would keep the fresh credential excluded from selection until the
-	// next poll, making the fix look like it didn't work. Same asymmetry as
-	// UsageEndpointForbidden: a new token gets a new verdict.
 	current := h.accountUsageSnapshot()
 	next := make(map[string]claudeaccount.Usage, len(current)+1)
-	for k, v := range current {
-		next[k] = v
-	}
-	// Validation already read this account's quota; keep it rather than paying
-	// for a second probe seconds later.
+	maps.Copy(next, current)
+	// Replace this account's reading outright rather than merging: a fresh login
+	// is exactly how a logged-out account is fixed, and inheriting the old
+	// verdict would keep it excluded from selection until the next poll, making
+	// the fix look like it didn't work.
 	next[key] = msg.account.InitialUsage()
 	h.accountUsage.Store(&next)
 
-	// Report the account as stored, not as validated: an org match keeps the
-	// existing key and label, so announcing msg.account would name a key that
-	// isn't in the store and re-prompt for a label the account already has.
 	stored, ok := h.accounts.Get(key)
 	if !ok {
 		stored = msg.account
 	}
 	cmd := h.persistAccounts("Added " + stored.Name())
 	// After persistAccounts, so the dialog is looking at the refreshed list.
-	h.accountsDialog.Added(key, stored.NeedsLabel())
+	h.accountsDialog.Added(key)
 	return h, cmd
 }
 
@@ -865,18 +765,18 @@ func (h *Home) maybePollAccountUsage() {
 		// quota at all. It also only tolerates callers claiming to be
 		// claude-code. One mechanism that works for every token type, under
 		// fleet's own name, is worth roughly nine tokens a poll.
-		u, org, err := claudeaccount.ProbeUsage(context.Background(), a.Token)
+		u, err := claudeaccount.FetchUsage(context.Background(), a.ConfigDir)
 		if err != nil {
-			// A refusal is the one failure that carries information. Everything
-			// else here is "fleet couldn't ask", which says nothing about the
-			// credential; a 401/403 says the credential is dead, and selection
-			// must act on that rather than scoring it as unknown.
-			rejected := errors.Is(err, claudeaccount.ErrTokenRejected)
-			if rejected {
-				// Error, not Warn: every session assigned this account is billing
-				// somewhere else or failing to run, and the account keeps looking
-				// healthy in the readout until someone reads this line.
-				debuglog.Logger.Error("account credential rejected; excluding it from new sessions",
+			// A missing login is the one failure that carries information.
+			// Everything else here means "fleet could not ask", which says
+			// nothing about the account; this says it cannot run a session at
+			// all, and selection must act on it rather than score it as unknown.
+			loggedOut := errors.Is(err, claudeaccount.ErrNotLoggedIn)
+			if loggedOut {
+				// Error, not Warn: every session assigned this account is about
+				// to fall back to the ambient login, and the account keeps
+				// looking healthy in the readout until someone reads this line.
+				debuglog.Logger.Error("account is logged out; excluding it from new sessions",
 					"account", a.Email, "err", claudeaccount.Redact(err.Error()))
 			} else {
 				// Warn, not Error: quota is an optimization and a dead endpoint
@@ -886,30 +786,15 @@ func (h *Home) maybePollAccountUsage() {
 					"account", a.Email, "err", claudeaccount.Redact(err.Error()))
 			}
 			// Keep whatever numbers we already had — a reading from three
-			// minutes ago beats none, and dropping it would pull the account
-			// out of the readout and rank it at the neutral midpoint for
-			// selection. Only the attempt clock moves.
+			// minutes ago beats none, and dropping it would pull the account out
+			// of the readout and rank it at the neutral midpoint for selection.
+			// Only the attempt clock moves.
 			prev.Err = err
 			prev.AttemptedAt = now
-			prev.Rejected = rejected
+			prev.LoggedOut = loggedOut
 			next[a.Email] = prev
 			changed = true
 			continue
-		}
-		// Backfill the organization for an account added before fleet recorded
-		// one, or whose add-time probe failed. That org is the identity a token
-		// rotation survives, so an account without one is a single `claude
-		// setup-token` away from being orphaned along with all its sessions.
-		//
-		// Saved directly rather than through persistAccounts: nothing user-visible
-		// changed and the token is untouched, while persistAccounts refreshes the
-		// dialog, which belongs to the Update goroutine and not this one.
-		if h.accounts.SetOrgUUID(a.Email, org) {
-			debuglog.Logger.Info("learned account organization", "account", a.Email)
-			if saveErr := h.accounts.Save(); saveErr != nil {
-				debuglog.Logger.Warn("could not persist account organization",
-					"account", a.Email, "err", saveErr)
-			}
 		}
 
 		u.AttemptedAt = now
@@ -936,7 +821,7 @@ func (h *Home) persistAccounts(notice string) tea.Cmd {
 		h.setError(fmt.Errorf("could not save accounts: %w", err))
 		return nil
 	}
-	session.SetAccountTokenFunc(h.accounts.TokenFor)
+	session.SetAccountConfigDirFunc(h.accounts.ConfigDirFor)
 	h.accountsDialog.Refresh(h.accounts.List(), h.accountUsageSnapshot(), h.cfg.DefaultAccount)
 	if notice != "" {
 		h.setInfo(notice)

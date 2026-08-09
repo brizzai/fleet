@@ -242,7 +242,7 @@ func runAdd(path string) {
 	// the session is account-eligible and needs one picked, or it silently
 	// ignores a configured multi-account setup.
 	accounts := claudeaccount.Load()
-	session.SetAccountTokenFunc(accounts.TokenFor)
+	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
 	cfg := config.Load()
 	if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
 		Accounts: accounts.List(),

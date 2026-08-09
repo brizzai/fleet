@@ -18,7 +18,7 @@ func dlgAccounts(emails ...string) []claudeaccount.Account {
 	return out
 }
 
-// The account was saved and the dialog still said "Checking the token…" —
+// The account was saved and the dialog still said "Waiting for the login…" —
 // Refresh updated the data but left the in-flight mode set, so a *successful*
 // add looked like a hang.
 func TestRefreshClearsTheInFlightState(t *testing.T) {
@@ -27,40 +27,15 @@ func TestRefreshClearsTheInFlightState(t *testing.T) {
 	// assertion on its text passes vacuously.
 	d.SetSize(120, 40)
 	d.Show(nil, nil, "", false)
-	d.SetBusy("Checking the token…")
+	d.SetBusy("Waiting for the login…")
 
 	d.Refresh(dlgAccounts("a@x.com"), nil, "")
 
-	if d.mode == accountsWaitingToken {
+	if d.mode == accountsWaitingLogin {
 		t.Fatal("dialog still in the waiting state after a completed operation")
 	}
 	if strings.Contains(d.View(), "Checking the token") {
 		t.Error("view still shows the in-flight message after refresh")
-	}
-}
-
-// A token the API won't identify is keyed by a hash, so the name has to be
-// asked for while the user still knows which account they just logged into.
-func TestAddedPromptsForANameWhenUnidentified(t *testing.T) {
-	d := NewAccountsDialog()
-	// Without a size, lipgloss.Place clips View() to nothing and every
-	// assertion on its text passes vacuously.
-	d.SetSize(120, 40)
-	d.Show(nil, nil, "", false)
-	d.SetBusy("Checking the token…")
-	d.Refresh(dlgAccounts("other@x.com", claudeaccount.FingerprintPrefix+"7ee6c0f8"), nil, "")
-
-	d.Added(claudeaccount.FingerprintPrefix+"7ee6c0f8", true)
-
-	if d.mode != accountsRename {
-		t.Fatalf("mode = %v, want the rename prompt", d.mode)
-	}
-	if got := d.selectedEmail(); got != claudeaccount.FingerprintPrefix+"7ee6c0f8" {
-		t.Errorf("cursor landed on %q, want the account just added", got)
-	}
-	// The box must explain itself, or it reads as a pointless chore.
-	if !strings.Contains(d.View(), "won't say which account") {
-		t.Errorf("rename prompt does not explain why a name is needed:\n%s", d.View())
 	}
 }
 
@@ -70,10 +45,10 @@ func TestAddedDoesNotPromptWhenNamed(t *testing.T) {
 	// assertion on its text passes vacuously.
 	d.SetSize(120, 40)
 	d.Show(nil, nil, "", false)
-	d.SetBusy("Checking the token…")
+	d.SetBusy("Waiting for the login…")
 	d.Refresh(dlgAccounts("real@x.com"), nil, "")
 
-	d.Added("real@x.com", false)
+	d.Added("real@x.com")
 
 	if d.mode != accountsList {
 		t.Fatalf("mode = %v, want the list — an already-named account needs nothing", d.mode)
@@ -89,7 +64,7 @@ func TestDialogNeverWraps(t *testing.T) {
 		Plan:  "max",
 		Order: 0,
 	}
-	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8", Order: 1}
+	fp := claudeaccount.Account{Email: "work@x.com", Order: 1}
 
 	// Every mode, at terminal widths from cramped to roomy.
 	modes := []struct {
@@ -103,19 +78,19 @@ func TestDialogNeverWraps(t *testing.T) {
 		{"list with quota", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{long, fp}, map[string]claudeaccount.Usage{
 				long.Email: {FiveHourPct: 42, FiveHourReset: hdrNow.Add(time.Hour), FetchedAt: hdrNow},
-				fp.Email:   {Err: claudeaccount.ErrNoQuotaHeaders, AttemptedAt: hdrNow},
+				fp.Email:   {Err: claudeaccount.ErrNoCredential, AttemptedAt: hdrNow},
 			}, "")
 		}},
 		{"manual default", func(d *AccountsDialog) {
 			d.Show([]claudeaccount.Account{long, fp}, nil, long.Email, true)
 		}},
-		{"paste", func(d *AccountsDialog) {
+		{"waiting for login", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{long}, nil, "")
-			d.mode = accountsPaste
+			d.SetBusy("Waiting for the login…")
 		}},
-		{"rename unnamed", func(d *AccountsDialog) {
+		{"rename", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{fp}, nil, "")
-			d.Added(fp.Email, true)
+			d.Added(fp.Email)
 		}},
 		{"confirm remove", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{long}, nil, "")
@@ -123,7 +98,7 @@ func TestDialogNeverWraps(t *testing.T) {
 		}},
 		{"error", func(d *AccountsDialog) {
 			d.Refresh(nil, nil, "")
-			d.SetError(errors.New("token was rejected — generate a fresh one with `claude setup-token`"), false)
+			d.SetError(errors.New("no account was logged in — run /login in the pane and wait"))
 		}},
 	}
 
@@ -169,11 +144,11 @@ func TestQuotaRowShowsTheNumberAndNamesTheGap(t *testing.T) {
 	d.SetSize(120, 40)
 	d.Show(nil, nil, "", false)
 
-	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8", Order: 0}
+	fp := claudeaccount.Account{Email: "work@x.com", Order: 0}
 	ok := claudeaccount.Account{Email: "real@x.com", Order: 1}
 	d.Refresh([]claudeaccount.Account{fp, ok}, map[string]claudeaccount.Usage{
-		// Unnamed, and its poll failed.
-		fp.Email: {Err: claudeaccount.ErrNoQuotaHeaders, AttemptedAt: hdrNow},
+		// Its poll failed — no reading, but the login is not in question.
+		fp.Email: {Err: claudeaccount.ErrNoCredential, AttemptedAt: hdrNow},
 		// Named, with a live reading.
 		ok.Email: {FiveHourPct: 42, FiveHourReset: hdrNow.Add(time.Hour), FetchedAt: hdrNow},
 	}, "")
@@ -185,45 +160,17 @@ func TestQuotaRowShowsTheNumberAndNamesTheGap(t *testing.T) {
 	if !strings.Contains(view, "quota unavailable") {
 		t.Errorf("a failed poll is silent; it should say so now that quota is expected:\n%s", view)
 	}
-	// The unnamed row still points at its own fix.
-	if !strings.Contains(view, "r to name") {
-		t.Errorf("unnamed account gives no hint that it can be named:\n%s", view)
-	}
-}
-
-// One text box serves both modes, so its placeholder has to be set on entry —
-// otherwise the rename prompt asks for a name while offering a token as the
-// example of what to type.
-func TestInputPlaceholderMatchesTheMode(t *testing.T) {
-	fp := claudeaccount.Account{Email: claudeaccount.FingerprintPrefix + "7ee6c0f8"}
-
-	d := NewAccountsDialog()
-	d.SetSize(120, 40)
-	d.Show([]claudeaccount.Account{fp}, nil, "", false)
-
-	d.Added(fp.Email, true)
-	if got := d.input.Placeholder; got != namePlaceholder {
-		t.Errorf("rename placeholder = %q, want the name example", got)
-	}
-	if strings.Contains(d.View(), "sk-ant") {
-		t.Errorf("rename prompt offers a token as the example:\n%s", d.View())
-	}
-
-	// And back the other way.
-	d.SetError(errors.New("capture missed"), true)
-	if got := d.input.Placeholder; got != tokenPlaceholder {
-		t.Errorf("paste placeholder = %q, want the token example", got)
-	}
 }
 
 // A session whose account was removed is not running on that account — fleet
-// sets no token for an unknown key, so it falls back to the ambient login. The
+// sets no config dir for an unknown key, so it falls back to the ambient
+// login. The
 // label has to say what is true now, or it reads as "running on a dead
 // account", which is both alarming and wrong.
 func TestRemovedAccountLabelNamesTheFallback(t *testing.T) {
 	h := &Home{accounts: &claudeaccount.Store{}}
 
-	got := h.accountLabel(claudeaccount.FingerprintPrefix + "4666551e")
+	got := h.accountLabel("gone@x.com")
 	if !strings.Contains(got, "logged-in account") {
 		t.Errorf("label = %q, want it to name the ambient login it actually uses", got)
 	}
@@ -234,18 +181,5 @@ func TestRemovedAccountLabelNamesTheFallback(t *testing.T) {
 	// An empty key is the same destination, reached without a removal.
 	if got := h.accountLabel(""); got != "your logged-in account" {
 		t.Errorf("unset account label = %q", got)
-	}
-}
-
-func TestNeedsLabel(t *testing.T) {
-	fp := claudeaccount.FingerprintPrefix + "abc12345"
-	if !(claudeaccount.Account{Email: fp}).NeedsLabel() {
-		t.Error("a fingerprint-keyed account with no label needs one")
-	}
-	if (claudeaccount.Account{Email: fp, Label: "work"}).NeedsLabel() {
-		t.Error("a labelled account needs nothing")
-	}
-	if (claudeaccount.Account{Email: "real@x.com"}).NeedsLabel() {
-		t.Error("an email-keyed account is already meaningful")
 	}
 }
