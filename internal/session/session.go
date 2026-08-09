@@ -69,6 +69,16 @@ type Session struct {
 	PromptCount          int
 	ForkFromID           string // Transient: if set, start with --resume <id> --fork-session (cleared after start)
 
+	// InitialPrompt is the first message to hand the agent, sent as the agent's
+	// own prompt argument so it opens already working on it. Transient and
+	// one-shot: every launch path clears it on success via
+	// consumeInitialPromptLocked, so a later restart, respawn or idle-suspend
+	// wake can't re-submit a prompt the user asked for once. Never persisted — a
+	// prompt that outlived its launch would replay on every app restart. The
+	// text reaches the pane through agent.PromptEnvVar, never the command
+	// string; see sessionEnv.
+	InitialPrompt string
+
 	// snoozedUntil mutes this session from the attention surfaces (Space jump,
 	// status pills) until the deadline passes. Deliberately NOT a Status: a
 	// snoozed session keeps running and keeps its real status — snooze is a
@@ -167,6 +177,7 @@ func (s *Session) buildAgentCmd() string {
 	return agent.Parse(string(s.Agent)).BuildLaunchCmd(agent.LaunchOpts{
 		ResumeID: s.ClaudeSessionID,
 		ForkID:   s.ForkFromID,
+		Prompt:   s.InitialPrompt,
 	})
 }
 
@@ -270,6 +281,14 @@ func (s *Session) sessionEnv() []string {
 		debuglog.Logger.Info("session env: launching as claude account",
 			"id", s.ID, "account", s.Account, "var", claudeaccount.ConfigDirEnvVar, "dir", dir)
 	}
+
+	// tmux passes -e values through as-is (no shell parses them), so this is the
+	// only place an arbitrary prompt can cross into the pane intact: the launch
+	// command expands "$FLEET_INITIAL_PROMPT" into one argv element regardless of
+	// the quotes, newlines or $(...) it contains.
+	if s.InitialPrompt != "" {
+		env = append(env, fmt.Sprintf("%s=%s", agent.PromptEnvVar, s.InitialPrompt))
+	}
 	return env
 }
 
@@ -298,9 +317,24 @@ func (s *Session) Start() error {
 	// transcript heuristic (which can't see a fork). Cleared on divergence.
 	s.forkParentID = s.ForkFromID
 	s.ForkFromID = "" // Clear after first start so restarts use session's own ClaudeSessionID.
+	s.consumeInitialPromptLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
 	return nil
+}
+
+// consumeInitialPromptLocked clears the one-shot launch prompt. Caller holds mu.
+//
+// Every path that hands the agent a command line has to call this, because each
+// of them would otherwise re-submit the prompt: Start, Restart (the `r` key, and
+// the wake from idle-suspend) and RespawnClaude all build the command from
+// buildAgentCmd and the env from sessionEnv. Missing one means a user who
+// restarts a finished session silently gets the original task asked again.
+//
+// Called only after a launch has succeeded, so a failed one can be retried with
+// the prompt intact.
+func (s *Session) consumeInitialPromptLocked() {
+	s.InitialPrompt = ""
 }
 
 // Kill terminates the tmux session.
@@ -837,6 +871,7 @@ func (s *Session) Restart() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
+	s.consumeInitialPromptLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session restarted", "id", s.ID, "title", s.Title)
 	return nil
@@ -884,6 +919,7 @@ func (s *Session) RespawnClaude() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
+	s.consumeInitialPromptLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session respawned", "id", s.ID, "title", s.Title)
 	return nil
@@ -2358,6 +2394,33 @@ func stripRightMargin(line string) string {
 func hashContent(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h[:8])
+}
+
+// PaneIndicatesWaiting reports whether raw pane content shows the agent sitting
+// on a prompt that expects a keypress — a permission menu or an approval
+// request. It exists for callers outside the status worker that are about to
+// *type into* a pane (`fleet send`): text delivered into a numbered menu is
+// swallowed, and the trailing Enter then confirms whichever option is
+// highlighted. A caller needs to know that before it acts.
+//
+// Reads the pane rather than the stored hook, on purpose. Granting a permission
+// fires no hook, so the hook status stays "waiting" long after the user
+// answered — stale in exactly the direction that would block legitimate
+// messages. The pane shows what is on screen now.
+//
+// Returns false for OpenCode: its status is plugin-driven and fleet has no
+// structural detector for its UI, so there is nothing to read here. Better a
+// caller that knows the check is unavailable than one trusting a guess.
+func PaneIndicatesWaiting(a agent.Type, rawPane string) bool {
+	clean := StripANSI(rawPane)
+	switch a {
+	case agent.Codex:
+		return codexPaneWaiting(clean)
+	case agent.OpenCode:
+		return false
+	default:
+		return detectStatus(clean, debuglog.Logger) == StatusWaiting
+	}
 }
 
 // StripANSI removes ANSI escape sequences from content.

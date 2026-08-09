@@ -40,6 +40,9 @@ type worktreeOpts struct {
 	agentName string
 	account   string
 	noSession bool
+	// prompt is the raw flag value, which may still be "-" for stdin. Reading
+	// stdin is I/O, and parsing stays pure — runWorktree resolves it.
+	prompt string
 }
 
 // worktreeFlagSet builds the `fleet worktree` flag set, binding into o.
@@ -58,6 +61,8 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.StringVar(&o.agentName, "agent", "", "agent to run: claude, codex, or opencode (default: default_agent config)")
 	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config)")
 	fs.BoolVar(&o.noSession, "no-session", false, "create the worktree only, print its path, and start no session")
+	fs.StringVar(&o.prompt, "prompt", "", "first message for the agent, which it starts working on (use - to read stdin)")
+	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
 	return fs
 }
 
@@ -102,6 +107,26 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 	if msg := workspace.ValidateBranchName(o.branch); msg != "" {
 		return o, fmt.Errorf("%s", msg)
 	}
+	// An explicitly empty prompt is almost always a command substitution that
+	// failed — `-p "$(gh issue view 999)"` on a missing issue. Silently starting
+	// a session with no prompt would look like the flag isn't wired up, so say
+	// so. fs.Visit is what separates "-p ''" from "-p not given": both leave the
+	// value empty.
+	promptSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "prompt" || f.Name == "p" {
+			promptSet = true
+		}
+	})
+	if promptSet {
+		if strings.TrimSpace(o.prompt) == "" {
+			return o, fmt.Errorf("-prompt was empty")
+		}
+		if o.noSession {
+			return o, fmt.Errorf("-prompt has no effect with -no-session (no session is started)")
+		}
+	}
+	o.prompt = strings.TrimSpace(o.prompt)
 	// agent.Parse falls back to Claude for anything it doesn't recognize, so a
 	// typo would silently launch the wrong agent. Reject it here instead.
 	if o.agentName != "" {
@@ -141,6 +166,14 @@ func runWorktree(args []string) {
 		if errors.Is(err, errMissingBranch) || strings.HasPrefix(err.Error(), "flag ") {
 			printWorktreeUsage(os.Stderr)
 		}
+		os.Exit(1)
+	}
+
+	// Resolve `-p -` before anything is created: a pipe that produced nothing
+	// should fail while the worktree still doesn't exist.
+	prompt, err := readStdinArg(opts.prompt, os.Stdin, "prompt")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
@@ -279,6 +312,7 @@ func runWorktree(args []string) {
 	s.Agent = ag
 	s.Account = account
 	s.WorkspaceName = name
+	s.InitialPrompt = prompt
 	if err := s.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Created worktree %s, but failed to start session: %v\n", info.Path, err)
 		os.Exit(1)
@@ -304,6 +338,11 @@ func runWorktree(args []string) {
 
 	fmt.Printf("Created worktree %s (%s)\n", info.Path, branchNote(opts.branch, reusedBranch))
 	fmt.Printf("Started %s session '%s' (%s)\n", ag.DisplayName(), name, s.ID)
+	// Echo the prompt back: with `-p -` the text came from a pipe the user never
+	// saw, and this is the only confirmation that what arrived is what they meant.
+	if prompt != "" {
+		fmt.Printf("Working on: %s\n", summarizeText(prompt, 60))
+	}
 }
 
 // resolveWorktreeRepo resolves the repo to create the worktree in: the given

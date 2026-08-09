@@ -546,7 +546,15 @@ func (h *Home) restartShell(sh *shell.Shell) tea.Cmd {
 // close / switch / attach) plus ` to close. There is no menu mode — Esc passes
 // through to the shell.
 func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	// Chrome is matched on the US-QWERTY position, so a non-Latin layout can
+	// close the drawer it just opened — Russian 'ё' sits on the backtick key, and
+	// without this it would open the drawer and then be typed into the shell,
+	// leaving no way back out. Only the chrome comparison is remapped: everything
+	// forwarded below stays literal, because this is a terminal and what you type
+	// has to arrive as typed. Cost: that one letter reaches the shell only via
+	// Ctrl+G full attach, which intercepts nothing — the same trade already made
+	// for Ctrl+T and Ctrl+W.
+	switch normalizeKey(msg).String() {
 	case "`":
 		return h, h.closeDrawer()
 	case "ctrl+t":

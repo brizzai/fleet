@@ -134,6 +134,56 @@ func TestParseWorktreeArgs(t *testing.T) {
 		}
 	})
 
+	t.Run("prompt long and short forms", func(t *testing.T) {
+		for _, flag := range []string{"--prompt", "-p"} {
+			o, err := parseWorktreeArgs([]string{"fix-login", flag, "fix the flaky test"})
+			if err != nil {
+				t.Fatalf("%s: unexpected error: %v", flag, err)
+			}
+			if o.prompt != "fix the flaky test" {
+				t.Errorf("%s: prompt = %q", flag, o.prompt)
+			}
+		}
+	})
+
+	t.Run("prompt keeps stdin marker for the caller", func(t *testing.T) {
+		// Parsing stays pure — "-" is resolved by runWorktree, which owns stdin.
+		o, err := parseWorktreeArgs([]string{"fix-login", "-p", "-"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.prompt != "-" {
+			t.Errorf("prompt = %q, want -", o.prompt)
+		}
+	})
+
+	t.Run("empty prompt is rejected", func(t *testing.T) {
+		// `-p "$(gh issue view 999)"` on a missing issue expands to nothing.
+		// Starting a promptless session there looks like the flag is broken.
+		for _, empty := range []string{"", "   "} {
+			if _, err := parseWorktreeArgs([]string{"fix-login", "-p", empty}); err == nil {
+				t.Errorf("prompt %q: expected an error", empty)
+			}
+		}
+	})
+
+	t.Run("unset prompt is not an error", func(t *testing.T) {
+		o, err := parseWorktreeArgs([]string{"fix-login"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.prompt != "" {
+			t.Errorf("prompt = %q, want empty", o.prompt)
+		}
+	})
+
+	t.Run("prompt conflicts with no-session", func(t *testing.T) {
+		_, err := parseWorktreeArgs([]string{"fix-login", "-p", "do it", "--no-session"})
+		if err == nil {
+			t.Fatal("expected -prompt + -no-session to be rejected")
+		}
+	})
+
 	t.Run("no-session alone", func(t *testing.T) {
 		o, err := parseWorktreeArgs([]string{"--no-session", "fix-login"})
 		if err != nil {
