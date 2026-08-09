@@ -242,3 +242,22 @@ func TestRenderQuotaBarEdges(t *testing.T) {
 		t.Error("0% usage rendered as partially filled")
 	}
 }
+
+// truncateLabel measured display width but sliced by rune index, so a label of
+// double-width characters panicked and took the render loop down with it. The
+// account rename box accepts anything the user types.
+func TestTruncateLabelSurvivesWideCharacters(t *testing.T) {
+	for _, s := range []string{
+		"日本語のアカウント", // every rune double-width
+		"🎉🎉🎉🎉🎉🎉🎉🎉",
+		"work",
+		"a-very-long-ascii-label",
+		"日本語work混在",
+	} {
+		got := truncateLabel(s) // must not panic
+		if lipgloss.Width(got) > accountLabelMax {
+			t.Errorf("truncateLabel(%q) = %q, %d columns — over the %d budget",
+				s, got, lipgloss.Width(got), accountLabelMax)
+		}
+	}
+}

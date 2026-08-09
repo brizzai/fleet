@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/claudeaccount"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // The readout alternates between the two windows rather than picking one. The
@@ -275,10 +276,16 @@ func accountShortLabel(a claudeaccount.Account) string {
 
 const accountLabelMax = 10
 
+// truncateLabel clips a label to accountLabelMax display columns.
+//
+// ansi.Truncate, not a rune slice: the test above measures display width, so a
+// label of six double-width runes (CJK, emoji) reads as 12 columns and triggers
+// truncation, while the slice holds only six elements — r[:9] then panicked and
+// took the whole render loop down with it. Reachable from the account rename
+// box, where a user can type anything.
 func truncateLabel(s string) string {
 	if lipgloss.Width(s) <= accountLabelMax {
 		return s
 	}
-	r := []rune(s)
-	return string(r[:accountLabelMax-1]) + "…"
+	return ansi.Truncate(s, accountLabelMax, "…")
 }
