@@ -29,10 +29,27 @@ const usageEndpoint = "https://api.anthropic.com/api/oauth/usage"
 // usageEndpointVar lets tests point the fetch at a local server.
 var usageEndpointVar = usageEndpoint
 
-// ErrNoCredential means the account's Keychain item could not be read: the dir
-// has never been logged in, or the OS denied access. Not a verdict on the
-// subscription.
+// ErrNoCredential means the account's Keychain item exists but fleet could not
+// make sense of it, or the OS denied access. Deliberately *not* a verdict on the
+// subscription: a locked or unreadable Keychain says nothing about whether the
+// account is logged in, and treating it as evidence would report the whole fleet
+// logged out the moment `security` had a bad day.
+//
+// The absence of the item is a different fact entirely — see errSecItemNotFound.
 var ErrNoCredential = errors.New("no stored credential for this config dir")
+
+// errSecItemNotFound is the exit code `security` uses when the Keychain holds no
+// item for the service. It is the one outcome here that carries information: the
+// dir has no credential at all, which is precisely what logging out leaves
+// behind.
+//
+// This matters because /logout deletes the item, so a genuinely logged-out
+// account never reaches the HTTP call that would return 401. Without this it
+// failed as ErrNoCredential, LoggedOut stayed false, dropLoggedOut kept it as a
+// candidate, and pctOf scored it at the unknown midpoint — which beats a healthy
+// account in active use. Every new session then went to the one account that
+// could not run.
+const errSecItemNotFound = 44
 
 // keychainService returns the macOS Keychain service name Claude Code stores a
 // config dir's credential under.
@@ -73,6 +90,10 @@ func accessToken(ctx context.Context, dir string) (string, error) {
 		"-w", "-s", keychainService(dir))
 	out, err := cmd.Output()
 	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == errSecItemNotFound {
+			return "", fmt.Errorf("%w (no keychain item for this config dir)", ErrNotLoggedIn)
+		}
 		return "", ErrNoCredential
 	}
 	var cred struct {
@@ -81,11 +102,15 @@ func accessToken(ctx context.Context, dir string) (string, error) {
 			ExpiresAt   int64  `json:"expiresAt"`
 		} `json:"claudeAiOauth"`
 	}
+	// An item fleet cannot parse is an item fleet cannot judge — the format may
+	// simply have moved on. Not evidence.
 	if err := json.Unmarshal(out, &cred); err != nil {
 		return "", ErrNoCredential
 	}
+	// A record with no token in it is a login that isn't one. Same verdict as a
+	// missing item, for the same reason: no session can start from this.
 	if cred.ClaudeAiOauth.AccessToken == "" {
-		return "", ErrNoCredential
+		return "", fmt.Errorf("%w (keychain item holds no access token)", ErrNotLoggedIn)
 	}
 	return cred.ClaudeAiOauth.AccessToken, nil
 }
