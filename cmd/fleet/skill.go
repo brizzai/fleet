@@ -108,7 +108,16 @@ func runSkill(args []string) {
 		printSkillResults(results)
 		exitOnFailure(results)
 	case "status":
-		results := skill.Status()
+		// Status defaults to every agent, not the detected ones: a skill left
+		// behind by an agent the user has since removed is what they came here
+		// to find. An explicit -agent still narrows it — silently dropping a
+		// valid filter is the same swallowing resolveAgents rejects for typos.
+		selected, err := resolveAgents(opts.agentSel, skill.Agents())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		results := skill.Status(selected)
 		printSkillResults(results)
 		for _, r := range results {
 			if r.Outcome == skill.Outdated {
@@ -158,15 +167,15 @@ func resolveAgents(sel string, fallback []skill.Agent) ([]skill.Agent, error) {
 func skillOutcomeLine(r skill.Result) (marker, label, detail string) {
 	switch r.Outcome {
 	case skill.Written:
-		return "✓", "installed", tildePath(r.Path)
+		return "✓", "installed", skillDetail(r)
 	case skill.Unchanged, skill.Installed:
-		return "✓", "up to date", tildePath(r.Path)
+		return "✓", "up to date", skillDetail(r)
 	case skill.Outdated:
-		return "!", "outdated", tildePath(r.Path)
+		return "!", "outdated", skillDetail(r)
 	case skill.Removed:
-		return "✓", "removed", tildePath(r.Path)
+		return "✓", "removed", skillDetail(r)
 	case skill.Absent:
-		return "-", "not installed", tildePath(r.Path)
+		return "-", "not installed", skillDetail(r)
 	case skill.Skipped:
 		// An agent is skipped either because it isn't here or because -agent
 		// named someone else. Re-check rather than assume: telling a Cursor user
@@ -183,6 +192,17 @@ func skillOutcomeLine(r skill.Result) (marker, label, detail string) {
 		// that visible rather than printing a bare enum value as a status.
 		return "?", string(r.Outcome), tildePath(r.Path)
 	}
+}
+
+// skillDetail renders the path, naming the agent whose write or removal also
+// covered this one. An agent the user never selected still had its file
+// changed when it shares a skills root, and the row has to say whose doing it
+// was — otherwise it reads as an action they asked for.
+func skillDetail(r skill.Result) string {
+	if r.SharedWith == "" {
+		return tildePath(r.Path)
+	}
+	return fmt.Sprintf("%s (shared with %s)", tildePath(r.Path), r.SharedWith)
 }
 
 func printSkillResults(results []skill.Result) {

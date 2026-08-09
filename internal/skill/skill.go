@@ -45,9 +45,10 @@ type Agent struct {
 	// binary is looked up on PATH to detect the agent. Empty when the agent
 	// ships no CLI.
 	binary string
-	// configDir is a second detection signal: Cursor installs its `cursor`
-	// shell command only on request, so a Cursor user commonly has ~/.cursor
-	// and no binary on PATH.
+	// configDir is a second detection signal, and nil when the agent has none
+	// worth trusting. Cursor installs its `cursor` shell command only on
+	// request, so a Cursor user commonly has ~/.cursor and no binary on PATH.
+	// A config dir only counts as evidence when fleet itself never creates it.
 	configDir func() string
 	// root returns the skills directory fleet writes into for this agent.
 	root func() string
@@ -65,8 +66,8 @@ func (a Agent) Detected() bool {
 			return true
 		}
 	}
-	if dir := a.configDir(); dir != "" {
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+	if a.configDir != nil {
+		if info, err := os.Stat(a.configDir()); err == nil && info.IsDir() {
 			return true
 		}
 	}
@@ -86,7 +87,15 @@ func agentsSkillsRoot() string { return filepath.Join(homeDir(), ".agents", "ski
 
 // agents is the full table, in the order results are reported.
 var agents = []Agent{
-	{Name: "claude", binary: "claude", configDir: hooks.GetClaudeConfigDir, root: claudeSkillsRoot},
+	// Claude is detected by binary alone. `~/.claude` is deliberately NOT a
+	// signal here: fleet's own TUI creates it on every launch (NewHome →
+	// InjectClaudeHooks → MkdirAll), so it exists on machines that have never
+	// had Claude Code. The Codex and OpenCode injections beside it are
+	// LookPath-gated precisely so fleet never conjures a config dir for an
+	// absent agent, which is what keeps their config dirs trustworthy below.
+	// Binary-only also matches how fleet launches Claude — by exec'ing `claude`
+	// — so an install fleet can't see on PATH is one it couldn't use anyway.
+	{Name: "claude", binary: "claude", root: claudeSkillsRoot},
 	{Name: "codex", binary: "codex", configDir: hooks.GetCodexConfigDir, root: agentsSkillsRoot},
 	{Name: "cursor", binary: "cursor", configDir: func() string { return filepath.Join(homeDir(), ".cursor") }, root: agentsSkillsRoot},
 	{Name: "opencode", binary: "opencode", configDir: hooks.GetOpenCodeConfigDir, root: agentsSkillsRoot},
@@ -156,6 +165,11 @@ type Result struct {
 	Path    string
 	Outcome Outcome
 	Err     error
+	// SharedWith names the selected agent whose write or removal also covered
+	// this one, and is empty otherwise. Set only for agents the user did NOT
+	// select: they share a skills root with one who was, so their file changed
+	// too. Without it the row reads as an action the user asked for.
+	SharedWith string
 }
 
 // Install writes the skill for each selected agent, and reports Skipped for the
@@ -165,43 +179,81 @@ type Result struct {
 // Never prompts and never reads stdin, so an agent can install the skill for
 // itself in one non-interactive call.
 func Install(selected []Agent) []Result {
-	return run(selected, writeSkill)
+	return run(selected, discloseSharing, writeSkill)
 }
 
 // Uninstall removes the skill for each selected agent.
 func Uninstall(selected []Agent) []Result {
-	return run(selected, removeSkill)
+	return run(selected, discloseSharing, removeSkill)
 }
 
-// Status reports where the skill currently is, for every agent, whether or not
-// that agent is installed here — a skill left behind by an uninstalled agent is
-// exactly what someone running `status` is looking for.
-func Status() []Result {
-	return run(agents, statusOf)
+// Status reports where the skill currently is. Detection plays no part — a
+// skill left behind by an agent the user has since uninstalled is exactly what
+// someone running `status` is looking for — so callers pass every agent unless
+// they mean to narrow it.
+//
+// Reading a shared file is not disclosed as sharing: nothing changed, so there
+// is no side effect to own up to, and disclosing it would make an explicit
+// -agent filter look like it had been ignored.
+func Status(selected []Agent) []Result {
+	return run(selected, reportSelectionLiterally, statusOf)
 }
 
-// run applies op to each selected agent, deduplicating by path so a shared root
-// is touched once. Agents not in selected are reported as Skipped.
-func run(selected []Agent, op func(path string) Result) []Result {
+// Whether run tells an unselected agent that its file changed anyway. Named
+// constants because the call sites read as bare booleans otherwise.
+const (
+	discloseSharing          = true
+	reportSelectionLiterally = false
+)
+
+// run applies op once per distinct path and returns one row per agent, in table
+// order.
+//
+// Selection is by agent name but the operation is by path, and the two do not
+// line up: codex, cursor and opencode all resolve to ~/.agents/skills. So op
+// runs in a first pass over the selected agents only, and the report is built
+// in a second. When op mutates the filesystem, an unselected agent sharing a
+// root with a selected one had its file written or deleted too, and says so via
+// SharedWith — reporting Skipped there would tell an OpenCode user their skill
+// was untouched in the same breath as deleting it.
+func run(selected []Agent, sharing bool, op func(path string) Result) []Result {
 	chosen := make(map[string]bool, len(selected))
 	for _, a := range selected {
 		chosen[a.Name] = true
 	}
 
+	// Pass 1: act, once per path, recording which selected agent caused each
+	// one so the report can name it.
 	done := make(map[string]Result)
-	results := make([]Result, 0, len(agents))
+	cause := make(map[string]string)
 	for _, a := range agents {
 		if !chosen[a.Name] {
-			results = append(results, Result{Agent: a.Name, Path: a.Path(), Outcome: Skipped})
 			continue
 		}
 		path := a.Path()
-		r, seen := done[path]
-		if !seen {
-			r = op(path)
-			done[path] = r
+		if _, seen := done[path]; seen {
+			continue
 		}
+		done[path] = op(path)
+		cause[path] = a.Name
+	}
+
+	// Pass 2: report.
+	results := make([]Result, 0, len(agents))
+	for _, a := range agents {
+		path := a.Path()
+		r, acted := done[path]
 		r.Agent = a.Name
+		r.Path = path
+		if chosen[a.Name] {
+			results = append(results, r)
+			continue
+		}
+		if !acted || !sharing {
+			results = append(results, Result{Agent: a.Name, Path: path, Outcome: Skipped})
+			continue
+		}
+		r.SharedWith = cause[path]
 		results = append(results, r)
 	}
 	return results
