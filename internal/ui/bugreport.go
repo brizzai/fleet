@@ -327,7 +327,7 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 		// description reached a public issue verbatim. The feature branch above
 		// already sanitizes; this path was missed. Someone describing a failed
 		// account add is exactly the person likely to paste one.
-		body = d.report.FormatMarkdownWithDesc(sanitizeForIssue(description))
+		body = d.report.FormatMarkdownWithDesc(sanitizeForIssue(description), sanitizeForIssue)
 		if d.renderStats != "" {
 			body += "\n" + d.renderStats
 		}

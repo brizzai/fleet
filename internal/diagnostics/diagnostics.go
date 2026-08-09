@@ -123,23 +123,32 @@ func (r *Report) OSSummary() string {
 }
 
 // FormatMarkdownWithDesc formats the report with a user-provided description.
-func (r *Report) FormatMarkdownWithDesc(description string) string {
-	return r.formatMarkdown(description)
+func (r *Report) FormatMarkdownWithDesc(description string, scrub Scrubber) string {
+	return r.formatMarkdown(description, scrub)
 }
 
 // FormatMarkdown formats the report as a GitHub issue body.
-func (r *Report) FormatMarkdown() string {
-	return r.formatMarkdown("")
+func (r *Report) FormatMarkdown(scrub Scrubber) string {
+	return r.formatMarkdown("", scrub)
 }
 
-func (r *Report) formatMarkdown(description string) string {
-	home, _ := os.UserHomeDir()
-	sanitize := func(s string) string {
-		if home != "" {
-			return strings.ReplaceAll(s, home, "~")
-		}
-		return s
-	}
+// Scrubber removes anything that must not reach a public issue.
+//
+// A required parameter rather than a package default, because forgetting it is
+// exactly how this went wrong: the caller in the UI ran the *description*
+// through its full redactor and then appended the Config and Debug Log blocks,
+// which only ever had the home-directory rewrite below. Those blocks published
+// account emails from config.json and from every launch and poll line in the
+// log — neither of which the reporter is shown before filing. Making it an
+// argument means a new caller has to decide, and the honest default (nil) is
+// visible at the call site.
+//
+// nil means home-rewrite only, which is right for a report going somewhere
+// private (a snapshot on disk) and wrong for anything going to GitHub.
+type Scrubber func(string) string
+
+func (r *Report) formatMarkdown(description string, scrub Scrubber) string {
+	sanitize := sanitizerFor(scrub)
 
 	var b strings.Builder
 
@@ -171,9 +180,25 @@ func (r *Report) formatMarkdown(description string) string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(r.FormatEnvironmentMarkdown(true))
+	b.WriteString(r.FormatEnvironmentMarkdown(true, scrub))
 
 	return b.String()
+}
+
+// sanitizerFor composes the caller's scrubber with the home-directory rewrite
+// every report gets. Home last, so a scrubber that rewrites a path still ends up
+// with "~" rather than a half-substituted absolute path.
+func sanitizerFor(scrub Scrubber) func(string) string {
+	home, _ := os.UserHomeDir()
+	return func(s string) string {
+		if scrub != nil {
+			s = scrub(s)
+		}
+		if home != "" {
+			s = strings.ReplaceAll(s, home, "~")
+		}
+		return s
+	}
 }
 
 // FormatEnvironmentMarkdown renders everything about the machine — versions,
@@ -187,14 +212,8 @@ func (r *Report) formatMarkdown(description string) string {
 // reporter's content, not the machine's. A wrong-status report offers to leave
 // content out, and neither the global log tail nor config.json may smuggle
 // itself back in past that choice.
-func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
-	home, _ := os.UserHomeDir()
-	sanitize := func(s string) string {
-		if home != "" {
-			return strings.ReplaceAll(s, home, "~")
-		}
-		return s
-	}
+func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) string {
+	sanitize := sanitizerFor(scrub)
 
 	var b strings.Builder
 

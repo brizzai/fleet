@@ -162,9 +162,15 @@ func Load() *Store {
 	}
 
 	// Identity only; there is no credential in this file.
+	//
+	// The org is logged as a short prefix rather than in full. debug.log is what
+	// the bug-report flow pastes into a public issue, and a full organization
+	// UUID identifies the company outright — where 8 characters still answer the
+	// only question ever asked of it here, which is whether two accounts are the
+	// same subscription.
 	for i, a := range s.accounts {
 		debuglog.Logger.Info("account loaded", "order", i, "email", a.Email, "plan", a.Plan,
-			"label", a.Label, "org", a.OrgUUID)
+			"label", a.Label, "org", shortOrg(a.OrgUUID))
 	}
 	debuglog.Logger.Info("accounts loaded", "count", len(s.accounts), "path", path)
 	return s
@@ -421,4 +427,13 @@ func Redact(s string) string {
 // a truncated or mid-print token would slip under Redact's length floor.
 func RedactCaptured(s string) string {
 	return anyCredentialish.ReplaceAllString(s, "sk-ant-<redacted>")
+}
+
+// shortOrg trims an organization UUID to a prefix for logging. Empty stays
+// empty, so a personal account doesn't log a meaningless stub.
+func shortOrg(org string) string {
+	if len(org) > 8 {
+		return org[:8]
+	}
+	return org
 }

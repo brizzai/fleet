@@ -179,13 +179,56 @@ func TestBugDescriptionIsRedactedBeforeItReachesAnIssue(t *testing.T) {
 		if kind == kindFeature {
 			body = sanitizeForIssue(desc)
 		} else {
-			body = (&diagnostics.Report{}).FormatMarkdownWithDesc(sanitizeForIssue(desc))
+			body = (&diagnostics.Report{}).FormatMarkdownWithDesc(sanitizeForIssue(desc), sanitizeForIssue)
 		}
 		if strings.Contains(body, tok) {
 			t.Errorf("kind %v published the credential verbatim:\n%s", kind, body)
 		}
 		if !strings.Contains(body, "sk-ant-<redacted>") {
 			t.Errorf("kind %v did not redact the credential:\n%s", kind, body)
+		}
+	}
+}
+
+// The case the strict pattern misses, and the reason RedactCaptured exists.
+//
+// Pane lines are wrapped and clipped, so a credential printed near the boundary
+// arrives as a fragment. Redact's pattern needs 16+ characters after the prefix,
+// so it matched nothing and the fragment was filed verbatim — while the test
+// above, which feeds a full-length token, passed the whole time.
+func TestTruncatedCredentialIsRedactedToo(t *testing.T) {
+	for _, frag := range []string{
+		"sk-ant-oat01-AbCdEf", // clipped mid-token
+		"sk-ant-oat01-",       // clipped right after the prefix
+		"sk-ant-oat01-AbCd…",  // clipped by the pane renderer's ellipsis
+	} {
+		if got := sanitizeForIssue("pane: " + frag); strings.Contains(got, frag) {
+			t.Errorf("fragment %q survived sanitizeForIssue: %q", frag, got)
+		}
+	}
+	// A guard against over-matching: the loose pattern only eats things that
+	// already begin sk-ant-, so ordinary prose must come through untouched.
+	const clean = "the session went idle and never came back"
+	if got := sanitizeForIssue(clean); got != clean {
+		t.Errorf("sanitizeForIssue mangled clean prose: %q", got)
+	}
+}
+
+// Emails reach a public issue through two blocks the reporter is never shown:
+// config.json (default_account, allowed_accounts) and the debug log, which
+// names the account on every launch and every quota poll.
+func TestAccountEmailsNeverReachAnIssue(t *testing.T) {
+	body := sanitizeForIssue(`"default_account": "yuval@company.com"` + "\n" +
+		`account usage polled account=someone@acme.co.uk`)
+	for _, email := range []string{"yuval@company.com", "someone@acme.co.uk"} {
+		if strings.Contains(body, email) {
+			t.Errorf("published %s verbatim:\n%s", email, body)
+		}
+	}
+	// The domain goes with it: on a work subscription the domain is the client.
+	for _, domain := range []string{"company.com", "acme.co.uk"} {
+		if strings.Contains(body, domain) {
+			t.Errorf("published the domain %s:\n%s", domain, body)
 		}
 	}
 }

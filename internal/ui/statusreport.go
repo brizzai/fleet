@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -350,21 +351,39 @@ func (d *BugReportDialog) viewStatusForm() string {
 // sanitizes while the title above it publishes /Users/<name>/... verbatim leaks
 // on the one line GitHub shows in search results and notification mail.
 //
-// Two things are removed:
+// Three things are removed:
 //
 //   - The user's home directory, rewritten to "~".
-//   - Anthropic credentials. The add-account flow puts a year-long
-//     account token on a real tmux pane, and pane excerpts are
-//     published here — so the redaction lives at the chokepoint rather than at
-//     each call site, where a future caller could forget it.
+//   - Anthropic credentials, using the *loose* pattern. RedactCaptured, not
+//     Redact: the biggest thing published through here is a 40-line pane
+//     excerpt, and pane lines are wrapped and clipped, so a credential split at
+//     the boundary leaves fragments shorter than Redact's 16-character floor and
+//     files verbatim. Widening costs nothing — the loose pattern still only
+//     matches strings beginning `sk-ant-`, so ordinary prose is untouched.
+//   - Email addresses, local part and domain both. The multi-account work put
+//     account emails into config.json (default_account, allowed_accounts) and
+//     into the debug log on every launch and poll, and both blocks are published
+//     without ever being shown to the reporter. The domain goes too: on a work
+//     subscription the domain is the client's name.
+//
+// Organization UUIDs are handled at the source instead — they are logged as an
+// 8-character prefix — because redacting every UUID-shaped string here would
+// also mask the Claude and Codex session ids that wrong-status reports exist to
+// compare.
 func sanitizeForIssue(s string) string {
-	s = claudeaccount.Redact(s)
+	s = claudeaccount.RedactCaptured(s)
+	s = emailPattern.ReplaceAllString(s, "<redacted-email>")
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return s
 	}
 	return strings.ReplaceAll(s, home, "~")
 }
+
+// emailPattern is deliberately plain rather than RFC-complete: it needs to catch
+// the addresses fleet itself writes into config and logs, and over-matching is
+// the safe error in a redactor.
+var emailPattern = regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+`)
 
 // shortSessionID trims an agent session id to its leading block for the issue
 // table. The only question asked of these ids is whether the one on disk is the
@@ -468,7 +487,7 @@ func buildStatusReportBody(desc string, expected session.Status, f *statusReport
 
 	if !f.captured {
 		b.WriteString("_Status snapshot unavailable — the capture failed or the session had no live tmux pane._\n\n")
-		b.WriteString(r.FormatEnvironmentMarkdown(false))
+		b.WriteString(r.FormatEnvironmentMarkdown(false, sanitizeForIssue))
 		return b.String()
 	}
 
@@ -575,7 +594,7 @@ func buildStatusReportBody(desc string, expected session.Status, f *statusReport
 	// global debug log follows the content toggle — the session-filtered tail
 	// above is the relevant one, and shipping the global tail regardless would
 	// walk straight around a reporter who opted out.
-	b.WriteString(r.FormatEnvironmentMarkdown(f.includeContent))
+	b.WriteString(r.FormatEnvironmentMarkdown(f.includeContent, sanitizeForIssue))
 
 	return b.String()
 }
