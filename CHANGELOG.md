@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.25.0] - 2026-08-09
+
+### Added
+
+- **Message a session from the shell.** `fleet send fix-242 "now run the tests and push"` types into a running session without attaching — name it by title, branch, id or `@3` slot. It refuses when the agent is sitting on a permission prompt, where the message would be swallowed and its Enter would approve whatever was highlighted.
+- **Start a worktree already working.** `fleet wt fix-242 -p "fix the flaky worker test"` creates the worktree and opens the agent on that first message. `-p -` reads stdin, so `gh issue view 242 | fleet wt fix-242 -p -` hands the agent the whole issue.
+
+### Fixed
+
+- **Non-English layouts now work.** Shortcuts respond on Hebrew, Russian, Arabic, and Greek keyboards — `j`/`k` navigate from the same physical keys instead of doing nothing at all.
+- **OpenCode prompts wait again.** An `AskUserQuestion` prompt in an OpenCode session showed as `running`, so `Space` skipped straight past it. OpenCode sessions started before this update need a restart to pick up the fix.
+- **Stale CI failures** — A PR badge no longer goes red for a failure a later run of the same workflow is already recomputing; you see pending until the new verdict lands.
+
 ## [2.24.1] - 2026-08-02
 
 ### Improved
@@ -486,7 +499,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.24.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.25.0...HEAD
+[2.25.0]: https://github.com/brizzai/fleet/releases/tag/v2.25.0
 [2.24.1]: https://github.com/brizzai/fleet/releases/tag/v2.24.1
 [2.24.0]: https://github.com/brizzai/fleet/releases/tag/v2.24.0
 [2.23.2]: https://github.com/brizzai/fleet/releases/tag/v2.23.2
