@@ -37,6 +37,7 @@ func hdrUsage(fiveHour, sevenDay int) claudeaccount.Usage {
 		FiveHourPct:   fiveHour,
 		FiveHourReset: hdrNow.Add(90 * time.Minute),
 		SevenDayPct:   sevenDay,
+		SevenDayReset: hdrNow.Add(5 * 24 * time.Hour),
 		FetchedAt:     hdrNow,
 	}
 }
@@ -53,13 +54,16 @@ func TestAccountHeaderHiddenForSingleAccount(t *testing.T) {
 	}
 }
 
-func TestAccountHeaderHiddenWhenNarrow(t *testing.T) {
+// The readout adapts rather than disappearing, so it hides only when even the
+// tightest form would overflow — at which point drawing it would push the
+// What's New badge out of its corner.
+func TestAccountHeaderHiddenWhenEvenTheTightestOverflows(t *testing.T) {
 	got := renderAccountUsageHeader(
 		hdrAccounts("a@x.com", "b@x.com"),
 		map[string]claudeaccount.Usage{"a@x.com": hdrUsage(10, 20), "b@x.com": hdrUsage(30, 40)},
-		60, hdrNow)
+		12, hdrNow)
 	if got != "" {
-		t.Fatalf("want empty below the width floor, got %q", got)
+		t.Fatalf("want empty when nothing fits, got %q", got)
 	}
 }
 
@@ -84,7 +88,7 @@ func TestAccountHeaderRotatesBetweenWindows(t *testing.T) {
 	accts := hdrAccounts("yuval@x.com", "work@x.com")
 
 	weekly := renderAccountUsageHeader(accts, usage, 140, atWindow(windowSevenDay))
-	for _, want := range []string{"34%", "71%", "7d", "yuval", "work"} {
+	for _, want := range []string{"34%", "71%", "weekly", "yuval", "work"} {
 		if !strings.Contains(weekly, want) {
 			t.Errorf("weekly turn missing %q: %q", want, weekly)
 		}
@@ -94,7 +98,7 @@ func TestAccountHeaderRotatesBetweenWindows(t *testing.T) {
 	}
 
 	fiveHour := renderAccountUsageHeader(accts, usage, 140, atWindow(windowFiveHour))
-	for _, want := range []string{"10%", "20%", "5h"} {
+	for _, want := range []string{"10%", "20%", "5-hour"} {
 		if !strings.Contains(fiveHour, want) {
 			t.Errorf("5-hour turn missing %q: %q", want, fiveHour)
 		}
@@ -131,33 +135,78 @@ func TestAccountHeaderSpentAccountShowsCountdownNotPercent(t *testing.T) {
 	if !strings.Contains(got, "spent") {
 		t.Errorf("spent account not marked: %q", got)
 	}
-	if !strings.Contains(got, "in 2h") {
-		t.Errorf("want a relative countdown, got %q", got)
+	if !strings.Contains(got, "spent ") {
+		t.Errorf("want a relative countdown after \"spent\": %q", got)
 	}
 	if strings.Contains(got, "44%") {
 		t.Errorf("spent account still showed its weekly percentage: %q", got)
 	}
 }
 
-func TestAccountHeaderDropsLabelsWhenCramped(t *testing.T) {
-	wide := renderAccountUsageHeader(
-		hdrAccounts("yuval@x.com", "work@x.com"),
-		map[string]claudeaccount.Usage{"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71)},
-		140, hdrNow)
-	narrow := renderAccountUsageHeader(
-		hdrAccounts("yuval@x.com", "work@x.com"),
-		map[string]claudeaccount.Usage{"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71)},
-		80, hdrNow)
+// The strip gives things up in order as the budget shrinks, rather than
+// switching between two fixed layouts. Each step must actually be narrower than
+// the one before, or a density is dead weight.
+func TestReadoutGetsTighterAsTheBudgetShrinks(t *testing.T) {
+	accounts := hdrAccounts("yuval@x.com", "work@x.com")
+	usage := map[string]claudeaccount.Usage{
+		"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
+	}
 
-	if strings.Contains(narrow, "yuval") {
-		t.Errorf("labels should drop at narrow widths: %q", narrow)
+	seen := map[int]bool{}
+	prev := 1 << 30
+	for budget := 200; budget >= 20; budget-- {
+		got := renderAccountUsageHeader(accounts, usage, budget, hdrNow)
+		if got == "" {
+			continue
+		}
+		w := lipgloss.Width(got)
+		if w > budget {
+			t.Fatalf("budget %d produced %d columns: %q", budget, w, got)
+		}
+		if w > prev {
+			t.Fatalf("budget %d widened to %d columns from %d — the ladder must only tighten", budget, w, prev)
+		}
+		prev = w
+		seen[w] = true
+		// Whatever it gives up, the numbers are the point and must survive.
+		if !strings.Contains(got, "34%") || !strings.Contains(got, "71%") {
+			t.Errorf("budget %d lost a percentage: %q", budget, got)
+		}
 	}
-	if lipgloss.Width(narrow) >= lipgloss.Width(wide) {
-		t.Errorf("narrow readout (%d) should be shorter than wide (%d)", lipgloss.Width(narrow), lipgloss.Width(wide))
+	if len(seen) < 4 {
+		t.Errorf("only %d distinct widths across the sweep; the density ladder is barely being used", len(seen))
 	}
-	// Still has to carry the numbers, or dropping the labels bought nothing.
-	if !strings.Contains(narrow, "34%") || !strings.Contains(narrow, "71%") {
-		t.Errorf("compact readout lost its percentages: %q", narrow)
+}
+
+// The horizon is the whole reason the reset was added: "54% of a week" means
+// nothing until you know whether it refills tomorrow or in six days. It must
+// survive further down the ladder than the account names do.
+func TestCountdownOutlivesTheAccountNames(t *testing.T) {
+	accounts := hdrAccounts("yuval@x.com", "work@x.com")
+	usage := map[string]claudeaccount.Usage{
+		"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
+	}
+	tight := renderAccountUsageHeader(accounts, usage, 30, hdrNow)
+	if strings.Contains(tight, "yuval") {
+		t.Errorf("names survived at 30 columns: %q", tight)
+	}
+	if !strings.Contains(tight, "5d") {
+		t.Errorf("countdown dropped before the names did: %q", tight)
+	}
+}
+
+// The window is named as a word so it can never be read as one of the
+// countdowns beside it — the two are the same shape and opposite meanings.
+func TestWindowIsNamedNotDurationShaped(t *testing.T) {
+	got := renderAccountUsageHeader(
+		hdrAccounts("a@x.com", "b@x.com"),
+		map[string]claudeaccount.Usage{"a@x.com": hdrUsage(10, 34), "b@x.com": hdrUsage(20, 71)},
+		200, atWindow(windowSevenDay))
+	if strings.Contains(got, "7d ") || strings.HasSuffix(got, "7d") {
+		t.Errorf("window rendered as a bare duration, indistinguishable from a countdown: %q", got)
+	}
+	if !strings.Contains(got, "weekly") {
+		t.Errorf("window not named: %q", got)
 	}
 }
 
@@ -179,17 +228,17 @@ func TestAccountHeaderFitsItsWidth(t *testing.T) {
 }
 
 func TestRenderQuotaBarEdges(t *testing.T) {
-	if got := lipgloss.Width(renderQuotaBar(0)); got != accountBarCells {
+	if got := lipgloss.Width(renderQuotaBar(0, accountBarCells)); got != accountBarCells {
 		t.Errorf("bar width at 0%% = %d, want %d", got, accountBarCells)
 	}
-	if got := lipgloss.Width(renderQuotaBar(100)); got != accountBarCells {
+	if got := lipgloss.Width(renderQuotaBar(100, accountBarCells)); got != accountBarCells {
 		t.Errorf("bar width at 100%% = %d, want %d", got, accountBarCells)
 	}
 	// Any nonzero usage must show a cell, or a busy account reads as untouched.
-	if !strings.Contains(renderQuotaBar(1), "▰") {
+	if !strings.Contains(renderQuotaBar(1, accountBarCells), "▰") {
 		t.Error("1% usage rendered as completely empty")
 	}
-	if strings.Contains(renderQuotaBar(0), "▰") {
+	if strings.Contains(renderQuotaBar(0, accountBarCells), "▰") {
 		t.Error("0% usage rendered as partially filled")
 	}
 }
