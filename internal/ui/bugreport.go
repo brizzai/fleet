@@ -321,7 +321,13 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 				d.report.Version, d.report.OSSummary(), d.report.Arch)
 	} else {
 		// Inject user description and render stats into the report.
-		body = d.report.FormatMarkdownWithDesc(description)
+		//
+		// sanitizeForIssue, not the raw description: the report formatter only
+		// rewrites the home directory, so a credential pasted into a bug
+		// description reached a public issue verbatim. The feature branch above
+		// already sanitizes; this path was missed. Someone describing a failed
+		// account add is exactly the person likely to paste one.
+		body = d.report.FormatMarkdownWithDesc(sanitizeForIssue(description))
 		if d.renderStats != "" {
 			body += "\n" + d.renderStats
 		}

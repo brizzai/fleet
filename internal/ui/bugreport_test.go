@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/brizzai/fleet/internal/diagnostics"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -162,5 +163,29 @@ func TestBugReportDialog_Esc_Hides(t *testing.T) {
 	msg := cmd()
 	if _, ok := msg.(bugReportClosedMsg); !ok {
 		t.Fatalf("expected bugReportClosedMsg, got %T", msg)
+	}
+}
+
+// Only the feature path sanitized its description; the plain Bug path handed it
+// straight to the report formatter, whose sanitizer rewrites the home directory
+// and nothing else. Someone describing a failed account add is exactly the
+// person likely to paste a token into that box.
+func TestBugDescriptionIsRedactedBeforeItReachesAnIssue(t *testing.T) {
+	const tok = "sk-ant-oat01-AbCdEf0123456789_-GhIjKlMnOpQrStUvWxYz0123456789AbCdEf"
+	desc := "adding an account failed, the token was " + tok
+
+	for _, kind := range []reportKind{kindBug, kindFeature} {
+		var body string
+		if kind == kindFeature {
+			body = sanitizeForIssue(desc)
+		} else {
+			body = (&diagnostics.Report{}).FormatMarkdownWithDesc(sanitizeForIssue(desc))
+		}
+		if strings.Contains(body, tok) {
+			t.Errorf("kind %v published the credential verbatim:\n%s", kind, body)
+		}
+		if !strings.Contains(body, "sk-ant-<redacted>") {
+			t.Errorf("kind %v did not redact the credential:\n%s", kind, body)
+		}
 	}
 }

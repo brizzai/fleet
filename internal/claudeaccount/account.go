@@ -135,8 +135,10 @@ func Load() *Store {
 	// to the ambient login. Sessions naming it render as "your logged-in account
 	// (its account was removed)", which is true and is the prompt to re-add it.
 	kept := s.accounts[:0]
+	dropped := 0
 	for _, a := range s.accounts {
 		if a.ConfigDir == "" {
+			dropped++
 			debuglog.Logger.Error("account has no config dir and cannot be used; log it in again with Ctrl+K → Manage Claude Accounts",
 				"email", a.Email, "label", a.Label)
 			continue
@@ -144,6 +146,20 @@ func Load() *Store {
 		kept = append(kept, a)
 	}
 	s.accounts = kept
+
+	// Rewrite immediately when anything was dropped. Filtering in memory leaves
+	// the old record — and its year-long sk-ant-* token — sitting in
+	// accounts.json until some unrelated future save happens to overwrite it.
+	// The migration would read as done while the credential it was meant to
+	// retire is still on disk.
+	if dropped > 0 {
+		if err := s.Save(); err != nil {
+			debuglog.Logger.Error("could not rewrite accounts.json after dropping legacy records; their tokens remain on disk",
+				"path", path, "dropped", dropped, "error", err)
+		} else {
+			debuglog.Logger.Info("removed legacy token records from accounts.json", "dropped", dropped)
+		}
+	}
 
 	// Identity only; there is no credential in this file.
 	for i, a := range s.accounts {
