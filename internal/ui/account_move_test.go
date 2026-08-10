@@ -3,9 +3,11 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/claudeaccount"
@@ -235,13 +237,107 @@ func TestRemovingAnAccountDeletesItsConfigDir(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	h.accounts.Upsert(claudeaccount.Account{Email: "third@x.com", ConfigDir: dir})
 
-	h.Update(accountRemoveMsg{email: "third@x.com"})
+	_, cmd := h.Update(accountRemoveMsg{email: "third@x.com"})
+
+	// The store is updated synchronously — the row must be gone before the next
+	// render, or the user sees an account they just deleted.
+	if h.accounts.ConfigDirFor("third@x.com") != "" {
+		t.Error("account still in the store after removal")
+	}
+
+	// The directory is not. RemoveAll is unbounded filesystem work, which must
+	// not run on the Update goroutine, so it comes back as a command for Bubble
+	// Tea to run off-thread. Draining the batch here is what a real program does
+	// a moment later.
+	if cmd == nil {
+		t.Fatal("removal produced no cleanup command")
+	}
+	runCmdTree(t, cmd)
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("config dir survived the remove: %v", err)
 	}
-	if h.accounts.ConfigDirFor("third@x.com") != "" {
-		t.Error("account still in the store after removal")
+}
+
+// runCmdTree executes a tea.Cmd, following tea.Batch one level deep.
+//
+// Batch does not run anything itself — it returns a BatchMsg holding the
+// commands — so a test that just calls cmd() exercises the batching and none of
+// the work.
+func runCmdTree(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, c := range msg {
+			if c != nil {
+				c()
+			}
+		}
+	}
+}
+
+// An allowlist that names no configured account must not quietly fall through
+// to the ambient login — which may be the very account it excludes.
+//
+// Select returns false for this the same way it does for "no accounts at all",
+// so resolveAccount reports the two apart and the caller refuses rather than
+// launching. The refusal is returned rather than logged, so no creation path can
+// reach a session without having seen it.
+func TestSessionCreationRefusesWhenTheAllowlistNamesNothingConfigured(t *testing.T) {
+	h, s := moveHome(t, map[string]claudeaccount.Usage{
+		"first@x.com":  knownUsage(10),
+		"second@x.com": knownUsage(20),
+	})
+	h.writeGitInfo(func(m map[string]*git.RepoInfo) bool {
+		m[s.ProjectPath] = &git.RepoInfo{OriginKey: "github.com/acme/api"}
+		return true
+	})
+	h.cfg.AllowedAccounts = map[string][]string{
+		OriginExpandKey("github.com/acme/api"): {"gone@acme.com"},
+	}
+
+	account, blocked := h.resolveAccount(agent.Claude, s.ProjectPath)
+	if blocked == "" {
+		t.Fatal("an unsatisfiable allowlist resolved silently to the ambient login")
+	}
+	if account != "" {
+		t.Errorf("account = %q, want none", account)
+	}
+	// The message has to name the accounts, or the user cannot tell a typo from
+	// a removed account.
+	if !strings.Contains(blocked, "gone@acme.com") {
+		t.Errorf("refusal does not name the allowlist: %q", blocked)
+	}
+}
+
+// The other half, and the one easiest to break by "simplifying" the branch
+// above: every allowed account being logged out is a deliberate fallback, not a
+// refusal. A fleet whose logins have all expired must still start sessions on
+// the login the user is sitting in.
+func TestSessionCreationStillLaunchesWhenEveryAllowedAccountIsLoggedOut(t *testing.T) {
+	h, s := moveHome(t, map[string]claudeaccount.Usage{
+		"first@x.com":  {LoggedOut: true, Err: claudeaccount.ErrNotLoggedIn},
+		"second@x.com": {LoggedOut: true, Err: claudeaccount.ErrNotLoggedIn},
+	})
+	h.writeGitInfo(func(m map[string]*git.RepoInfo) bool {
+		m[s.ProjectPath] = &git.RepoInfo{OriginKey: "github.com/acme/api"}
+		return true
+	})
+	h.cfg.AllowedAccounts = map[string][]string{
+		OriginExpandKey("github.com/acme/api"): {"first@x.com", "second@x.com"},
+	}
+
+	account, blocked := h.resolveAccount(agent.Claude, s.ProjectPath)
+	if blocked != "" {
+		t.Fatalf("refused a session because the logins expired: %q", blocked)
+	}
+	if account != "" {
+		t.Errorf("account = %q, want the ambient login", account)
+	}
+	// Silent fallback was the original complaint, so the notice is part of the
+	// contract, not decoration.
+	if h.infoMsg == "" {
+		t.Error("fell back to the ambient login without saying so")
 	}
 }
 

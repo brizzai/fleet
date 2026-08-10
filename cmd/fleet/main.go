@@ -248,14 +248,15 @@ func runAdd(path string) {
 	accounts := claudeaccount.Load()
 	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
 	cfg := config.Load()
+	// The same per-origin allowlist the TUI and `fleet worktree` enforce.
+	// Shelling out to git is fine here where it is not in the TUI: this is a
+	// one-shot CLI, not the Update goroutine.
+	allowed := cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(path)))
 	if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
 		Accounts: accounts.List(),
 		Strategy: cfg.GetAccountStrategy(),
 		Manual:   cfg.DefaultAccount,
-		// The same per-origin allowlist the TUI and `fleet worktree` enforce.
-		// Shelling out to git is fine here where it is not in the TUI: this is a
-		// one-shot CLI, not the Update goroutine.
-		Allowed: cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(path))),
+		Allowed:  allowed,
 	}); ok {
 		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
 			fmt.Fprintln(os.Stderr, conflict.Message(acct.Email))
@@ -266,6 +267,17 @@ func runAdd(path string) {
 			}
 		}
 		s.Account = acct.Email
+	} else if accounts.Len() > 0 {
+		// Same split as `fleet worktree` — see claudeaccount.AllowedConfigured.
+		if !claudeaccount.AllowedConfigured(accounts.List(), allowed) {
+			fmt.Fprintf(os.Stderr, "allowed_accounts for this origin names no account fleet knows about (%s)\n",
+				strings.Join(allowed, ", "))
+			fmt.Fprintln(os.Stderr, "add one of them, or drop the restriction — launching would bill whichever account you happen to be logged into")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "Note: every account allowed here is logged out — starting on your ambient Claude login.")
+		debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
+			"allowed", allowed, "configured", accounts.Len())
 	}
 
 	if err := s.Start(); err != nil {

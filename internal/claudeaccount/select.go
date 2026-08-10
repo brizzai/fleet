@@ -145,6 +145,29 @@ func dropLoggedOut(accounts []Account, usage map[string]Usage) []Account {
 	return out
 }
 
+// AllowedConfigured reports whether an origin's allowlist names at least one
+// account that actually exists.
+//
+// Exists because Select's single false answer covers three situations that call
+// for three different responses, and only the caller can act on the difference:
+//
+//   - nothing configured at all — the ambient login is correct, and silence is
+//     correct with it;
+//   - an allowlist naming no configured account — a typo, or an account since
+//     removed. Falling back here is the one genuinely wrong answer: Select's own
+//     contract says using a disallowed account is worse than waiting, and the
+//     ambient login may be precisely such an account;
+//   - every allowed account logged out — dropLoggedOut deliberately falls back,
+//     because the login the user is already sitting in probably works and one
+//     nobody is logged into certainly does not.
+//
+// This answers the middle case, so callers can refuse there without having to
+// reimplement filterAllowed or reverse the third decision by accident. It is a
+// question about configuration, not about state: usage never enters into it.
+func AllowedConfigured(accounts []Account, allowed []string) bool {
+	return len(filterAllowed(accounts, allowed)) > 0
+}
+
 // filterAllowed keeps only accounts named in allowed. An empty allowlist means
 // no restriction, which is the default for every origin.
 func filterAllowed(accounts []Account, allowed []string) []Account {

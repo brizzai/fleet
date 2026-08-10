@@ -260,12 +260,31 @@ func runWorktree(args []string) {
 			account = acct.Email
 			// Quota lives only in a running TUI's memory, so SelectOpts.Usage is
 			// empty here and least_used degrades to configured order. Said out
-			// loud: a scripted `fleet worktree` can otherwise land on a nearly
-			// spent account with nothing to indicate the strategy didn't apply.
+			// loud — on stderr, not only in debug.log, since the person running a
+			// scripted `fleet worktree` never opens that: it can otherwise land on
+			// a nearly spent account with nothing to indicate the strategy didn't
+			// apply.
 			if cfg.GetAccountStrategy() == claudeaccount.StrategyLeastUsed && accounts.Len() > 1 {
+				fmt.Fprintf(os.Stderr, "Note: quota isn't available outside the TUI, so configured order chose %s.\n", account)
 				debuglog.Logger.Info("account select: no quota available from the CLI, configured order decided",
 					"chosen", account, "strategy", cfg.GetAccountStrategy())
 			}
+		} else if accounts.Len() > 0 {
+			// Select declined, and the two reasons it can decline want opposite
+			// answers — see claudeaccount.AllowedConfigured.
+			if !claudeaccount.AllowedConfigured(accounts.List(), allowed) {
+				fmt.Fprintf(os.Stderr, "allowed_accounts for this origin names no account fleet knows about (%s)\n",
+					strings.Join(allowed, ", "))
+				fmt.Fprintln(os.Stderr, "add one of them, or drop the restriction — launching would bill whichever account you happen to be logged into")
+				os.Exit(1)
+			}
+			// Every allowed account is logged out. Falling back to the ambient
+			// login is deliberate (see dropLoggedOut) — but saying nothing about
+			// it is not: the session is about to run as somebody fleet did not
+			// choose.
+			fmt.Fprintln(os.Stderr, "Note: every account allowed here is logged out — starting on your ambient Claude login.")
+			debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
+				"allowed", allowed, "configured", accounts.Len())
 		}
 		if account != "" {
 			if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {

@@ -887,6 +887,32 @@ func (h *Home) persistAccounts(notice string) tea.Cmd {
 	return nil
 }
 
+// removeConfigDirCmd deletes a removed account's config dir, off the Update
+// goroutine.
+//
+// A tea.Cmd rather than work pushed into the account worker: that worker is a
+// poll loop with its own cadence, so handing it one-shot work would mean a
+// channel and a result message for something Bubble Tea already runs off-thread.
+// This keeps the ordering plain — the store is updated and persisted
+// synchronously, and only the filesystem call is deferred.
+//
+// Returns nil rather than a message: nothing on screen depends on the outcome,
+// the account row is already gone, and a failure is a log line rather than
+// something to interrupt the user with — the alternative, refusing the removal
+// because a directory would not delete, is the wrong trade.
+func (h *Home) removeConfigDirCmd(email, dir string) tea.Cmd {
+	if dir == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		if err := claudeaccount.RemoveConfigDir(dir); err != nil {
+			debuglog.Logger.Error("could not remove account config dir",
+				"account", email, "dir", dir, "err", err)
+		}
+		return nil
+	}
+}
+
 // setAccountLoginCancel installs the watcher's cancel, stopping any previous
 // one first so retrying with `a` cannot stack watchers.
 func (h *Home) setAccountLoginCancel(cancel context.CancelFunc) {

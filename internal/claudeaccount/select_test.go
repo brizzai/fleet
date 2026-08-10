@@ -287,6 +287,58 @@ func TestSelectAllowlistExcludingEverythingReturnsFalse(t *testing.T) {
 	}
 }
 
+// Select answers false for three different situations, and the caller has to be
+// able to tell them apart because two of them want opposite responses.
+//
+// AllowedConfigured is the discriminator: it asks whether the allowlist names
+// anything that exists, which is a question about configuration, not state.
+func TestAllowedConfiguredSeparatesPolicyFromState(t *testing.T) {
+	all := accts("a", "b")
+
+	// No allowlist means unrestricted, matching Select.
+	if !AllowedConfigured(all, nil) {
+		t.Error("an empty allowlist must read as unrestricted")
+	}
+	// Names something real: the origin is satisfiable, whatever the accounts'
+	// current state happens to be.
+	if !AllowedConfigured(all, []string{"b"}) {
+		t.Error("an allowlist naming a configured account must read as satisfiable")
+	}
+	// Names nothing real — a typo, or the account was removed. This is the case
+	// callers must refuse on rather than fall back to the ambient login.
+	if AllowedConfigured(all, []string{"gone@example.com"}) {
+		t.Error("an allowlist naming no configured account must not read as satisfiable")
+	}
+	// No accounts at all is not a policy failure: it is the ordinary
+	// single-account setup, where the ambient login is the right answer.
+	if AllowedConfigured(nil, nil) {
+		t.Error("no configured accounts must not read as satisfiable")
+	}
+}
+
+// The distinction above is load-bearing, so this pins the half that is easiest
+// to lose.
+//
+// A reviewer's suggested patch for the ambient-fallback hole collapsed "the
+// allowlist excludes everything" and "everything is logged out" into one exit.
+// That would mean a fleet whose logins have all expired can no longer create
+// sessions at all — where dropLoggedOut deliberately falls back, because the
+// login the user is already sitting in probably works and one nobody is logged
+// into certainly does not.
+func TestAllLoggedOutIsSatisfiablePolicyNotAPolicyFailure(t *testing.T) {
+	all := accts("a", "b")
+	usage := map[string]Usage{"a": loggedOut(), "b": loggedOut()}
+
+	if _, ok := Select(SelectOpts{Accounts: all, Usage: usage, Strategy: StrategyLeastUsed, Now: testNow}); ok {
+		t.Fatal("want ok=false so the caller falls back to the ambient login")
+	}
+	// ...but the policy is satisfied, so the caller must warn and continue
+	// rather than refuse.
+	if !AllowedConfigured(all, []string{"a", "b"}) {
+		t.Error("logged-out accounts must still count as configured — state is not policy")
+	}
+}
+
 func TestExhaustedRespectsPassedReset(t *testing.T) {
 	// A stale high reading whose window has already rolled over is not
 	// evidence of exhaustion — otherwise a failed re-poll would strand an

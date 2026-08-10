@@ -972,15 +972,14 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// subscription out of Claude Code entirely — a far larger action than
 		// "remove from fleet", and not fleet's credential to revoke. The confirm
 		// dialog says so, because a survivor nobody names is a surprise.
-		if dir != "" {
-			if err := claudeaccount.RemoveConfigDir(dir); err != nil {
-				// Logged, not raised: the account is already gone from fleet's
-				// model, and refusing the remove over an undeletable directory
-				// would be the wrong trade.
-				debuglog.Logger.Error("could not remove account config dir",
-					"account", msg.email, "dir", dir, "err", err)
-			}
-		}
+		//
+		// Handed back as a tea.Cmd rather than run here: this is a RemoveAll, and
+		// nothing that touches the filesystem for an unbounded time belongs on the
+		// Update goroutine. The dir is small in practice (RemoveAll unlinks the
+		// shared symlinks rather than walking into ~/.claude) but it holds Claude
+		// Code's own caches, and on a network-mounted home it would stall every
+		// frame.
+		cleanup := h.removeConfigDirCmd(msg.email, dir)
 		// Sessions still naming this account fall back to the ambient login
 		// rather than failing to launch — see Store.ConfigDirFor.
 		if h.cfg.DefaultAccount == msg.email {
@@ -989,7 +988,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				debuglog.Logger.Error("failed to save config after clearing default account", "err", err)
 			}
 		}
-		return h, h.persistAccounts("Removed " + msg.email)
+		return h, tea.Batch(h.persistAccounts("Removed "+msg.email), cleanup)
 
 	case accountRenameMsg:
 		if !h.accounts.SetLabel(msg.email, msg.label) {
@@ -1042,7 +1041,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// to the ambient account, and the fork would resume it as someone else.
 		s.Account = msg.account
 		if !msg.accountSet && s.Account == "" {
-			s.Account = h.resolveAccount(ag, msg.path)
+			// A blocked policy leaves the fork on the ambient login here rather
+			// than refusing: this is the fork of a session that already exists,
+			// and the parent's own creation was gated by the same rule. The
+			// refusal belongs at creation, not on a resume of work already done.
+			s.Account, _ = h.resolveAccount(ag, msg.path)
 		}
 		// Record which conversation we're forking from. The fork resumes the
 		// source session's ClaudeSessionID; if that id is stale (a missed
@@ -3147,7 +3150,15 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 	}
 	msg.agent = ag
 	if msg.account == "" {
-		msg.account = h.resolveAccount(ag, msg.path)
+		account, blocked := h.resolveAccount(ag, msg.path)
+		if blocked != "" {
+			// Refused rather than launched on the ambient login: the allowlist
+			// exists precisely because using an account it excludes is worse than
+			// not proceeding, and the ambient login may be that account.
+			h.setError(errors.New(blocked))
+			return h, nil
+		}
+		msg.account = account
 	}
 	// A conflicting ambient credential outranks the per-session login, so the
 	// session would run on that credential while every fleet surface claimed it
@@ -3178,13 +3189,20 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 //
 // Claude-only: the account token is a claude.ai subscription credential
 // that the other agents neither read nor need.
-func (h *Home) resolveAccount(ag agent.Type, path string) string {
+// The second return is a user-facing refusal reason, empty when there is none.
+// A session must not be created while it is set: it names the case where an
+// origin's allowlist excludes every account fleet has, and launching anyway
+// would run on the ambient login — possibly the very account being excluded.
+// Returned rather than logged so no caller can create a session without having
+// seen it; "" for the account already means "the ambient login", which is a
+// legitimate answer everywhere else.
+func (h *Home) resolveAccount(ag agent.Type, path string) (string, string) {
 	if ag != agent.Claude {
-		return ""
+		return "", ""
 	}
 	if h.accounts == nil || h.accounts.Len() == 0 {
 		debuglog.Logger.Info("account select: none configured, using ambient login", "path", path)
-		return ""
+		return "", ""
 	}
 	strategy := h.cfg.GetAccountStrategy()
 	allowed := h.allowedAccountsFor(path)
@@ -3198,9 +3216,21 @@ func (h *Home) resolveAccount(ag agent.Type, path string) string {
 		Allowed:  allowed,
 	})
 	if !ok {
-		debuglog.Logger.Warn("account select: no candidate, falling back to ambient login",
+		// Select's one false answer covers two situations that want opposite
+		// responses — see claudeaccount.AllowedConfigured. An allowlist naming
+		// nothing configured must not fall through to the ambient login, which
+		// may be the very account it excludes; everything being logged out
+		// deliberately does fall through, and only needs saying out loud.
+		if !claudeaccount.AllowedConfigured(h.accounts.List(), allowed) {
+			debuglog.Logger.Error("account select: allowed_accounts names no configured account",
+				"path", path, "allowed", allowed, "configured", h.accounts.Len())
+			return "", fmt.Sprintf("allowed_accounts for this repo names no account fleet knows about (%s) — "+
+				"add one, or drop the restriction", strings.Join(allowed, ", "))
+		}
+		debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
 			"path", path, "strategy", strategy, "allowed", allowed, "configured", h.accounts.Len())
-		return ""
+		h.setInfo("Every account allowed for this repo is logged out — starting on your logged-in account.")
+		return "", ""
 	}
 	// The inputs as well as the verdict: "why this account" is unanswerable
 	// from the choice alone, and the usual answer is a stale or missing poll.
@@ -3208,7 +3238,7 @@ func (h *Home) resolveAccount(ag agent.Type, path string) string {
 		"chosen", acct.Email, "strategy", strategy, "path", path,
 		"allowed", allowed, "candidates", h.accounts.Len(),
 		"usage_known", len(usage), "chosen_five_hour_pct", usage[acct.Email].FiveHourPct)
-	return acct.Email
+	return acct.Email, ""
 }
 
 // accountUnusableReason says why a session's pinned account cannot run it right
@@ -3267,7 +3297,15 @@ func (h *Home) healAccountBeforeRelaunch(s *session.Session) bool {
 	// An empty next is not an unusable account, it is the ambient login — what
 	// Select falls back to when every candidate is logged out, and the better
 	// failure by design: the login the user is already using probably works.
-	next := h.resolveAccount(agent.Claude, s.ProjectPath)
+	next, blocked := h.resolveAccount(agent.Claude, s.ProjectPath)
+	if blocked != "" {
+		// The allowlist names nothing usable, so there is nowhere to heal *to*.
+		// Keeping the broken pin beats moving to the ambient login, which is the
+		// one account this origin may specifically not use.
+		debuglog.Logger.Warn("account heal: policy leaves no account to move to, keeping the pin",
+			"id", s.ID, "account", s.Account, "reason", reason, "blocked", blocked)
+		return false
+	}
 	if why := h.accountUnusableReason(next); next != "" && why != "" {
 		debuglog.Logger.Info("account heal: no usable account available, keeping the pin",
 			"id", s.ID, "account", s.Account, "reason", reason,
@@ -3518,12 +3556,21 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 	// regardless of account_strategy, on the one path that makes several at once.
 	ag := agent.Parse(h.cfg.GetDefaultAgent())
 	for _, it := range items {
+		account, blocked := h.resolveAccount(ag, it.Path)
+		if blocked != "" {
+			// Skipped, not aborted: this creates several sessions at once, and one
+			// repo with an unsatisfiable allowlist must not cost the user the rest
+			// of their selection. Named so the gap in the sidebar has a reason.
+			h.setError(fmt.Errorf("%s: %s", filepath.Base(it.Path), blocked))
+			h.actionLog.Add("launchpad skip", it.Path, false)
+			continue
+		}
 		h.actionLog.Add("launchpad add", it.Path, true)
 		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
 			path:           it.Path,
 			title:          it.Title,
 			resumeClaudeID: it.ClaudeSessionID,
-			account:        h.resolveAccount(ag, it.Path),
+			account:        account,
 		}))
 	}
 	return tea.Batch(cmds...)
