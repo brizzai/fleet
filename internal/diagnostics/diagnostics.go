@@ -217,15 +217,28 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 
 	var b strings.Builder
 
+	// Every dynamic value below goes through sanitize, without judging which
+	// ones could plausibly carry something private.
+	//
+	// Two of them used to and the rest did not, which is the actual defect:
+	// somebody had already decided a version string can hold a path, and the
+	// inconsistency meant new fields inherited whichever neighbour they were
+	// pasted next to. The odds on any single field are low — LANG is
+	// `en_US.UTF-8`, `tmux -V` is a version — but the cost of applying it is a
+	// function call, and this is the block that reaches a public issue without
+	// the reporter ever seeing it. Uniform is the only version that stays true as
+	// fields get added, which is exactly how the Config and Debug Log blocks came
+	// to leak in the first place.
+
 	// Diagnostics.
 	b.WriteString("### Diagnostics\n")
-	fmt.Fprintf(&b, "- **Version**: %s\n", r.Version)
-	fmt.Fprintf(&b, "- **OS**: %s (%s)\n", r.OSSummary(), r.Arch)
+	fmt.Fprintf(&b, "- **Version**: %s\n", sanitize(r.Version))
+	fmt.Fprintf(&b, "- **OS**: %s (%s)\n", sanitize(r.OSSummary()), sanitize(r.Arch))
 	if r.KernelVersion != "" {
-		fmt.Fprintf(&b, "- **Kernel**: %s\n", r.KernelVersion)
+		fmt.Fprintf(&b, "- **Kernel**: %s\n", sanitize(r.KernelVersion))
 	}
 	if r.TmuxVersion != "" {
-		fmt.Fprintf(&b, "- **tmux**: %s\n", r.TmuxVersion)
+		fmt.Fprintf(&b, "- **tmux**: %s\n", sanitize(r.TmuxVersion))
 	}
 	if r.ClaudeVersion != "" {
 		fmt.Fprintf(&b, "- **Claude CLI**: %s\n", sanitize(r.ClaudeVersion))
@@ -234,7 +247,7 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 		fmt.Fprintf(&b, "- **Codex CLI**: %s\n", sanitize(r.CodexVersion))
 	}
 	if r.GhVersion != "" {
-		fmt.Fprintf(&b, "- **gh CLI**: %s\n", r.GhVersion)
+		fmt.Fprintf(&b, "- **gh CLI**: %s\n", sanitize(r.GhVersion))
 	}
 	fmt.Fprintf(&b, "- **Sessions**: %d\n", r.SessionCount)
 	b.WriteString("\n")
@@ -242,28 +255,28 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 	// Terminal environment.
 	te := r.TerminalEnv
 	b.WriteString("### Terminal Environment\n")
-	fmt.Fprintf(&b, "- **TERM**: `%s`\n", te.TERM)
+	fmt.Fprintf(&b, "- **TERM**: `%s`\n", sanitize(te.TERM))
 	if te.TermProgram != "" {
 		ver := te.TermProgram
 		if te.TermProgramVersion != "" {
 			ver += " " + te.TermProgramVersion
 		}
-		fmt.Fprintf(&b, "- **Terminal**: %s\n", ver)
+		fmt.Fprintf(&b, "- **Terminal**: %s\n", sanitize(ver))
 	}
 	if te.ColorTerm != "" {
-		fmt.Fprintf(&b, "- **COLORTERM**: %s\n", te.ColorTerm)
+		fmt.Fprintf(&b, "- **COLORTERM**: %s\n", sanitize(te.ColorTerm))
 	}
 	if te.SttySize != "" {
-		fmt.Fprintf(&b, "- **stty size**: %s\n", te.SttySize)
+		fmt.Fprintf(&b, "- **stty size**: %s\n", sanitize(te.SttySize))
 	}
 	if r.TUIWidth > 0 || r.TUIHeight > 0 {
 		fmt.Fprintf(&b, "- **TUI size**: %dx%d\n", r.TUIWidth, r.TUIHeight)
 	}
 	if te.Lang != "" {
-		fmt.Fprintf(&b, "- **LANG**: %s\n", te.Lang)
+		fmt.Fprintf(&b, "- **LANG**: %s\n", sanitize(te.Lang))
 	}
 	if te.LCAll != "" {
-		fmt.Fprintf(&b, "- **LC_ALL**: %s\n", te.LCAll)
+		fmt.Fprintf(&b, "- **LC_ALL**: %s\n", sanitize(te.LCAll))
 	}
 	if te.InsideTmux {
 		b.WriteString("- **Nested tmux**: yes ($TMUX is set)\n")
@@ -272,10 +285,10 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 		b.WriteString("- **SSH session**: yes\n")
 	}
 	if te.TmuxDefaultTerm != "" {
-		fmt.Fprintf(&b, "- **tmux default-terminal**: `%s`\n", te.TmuxDefaultTerm)
+		fmt.Fprintf(&b, "- **tmux default-terminal**: `%s`\n", sanitize(te.TmuxDefaultTerm))
 	}
 	if te.TmuxMouse != "" {
-		fmt.Fprintf(&b, "- **tmux mouse**: %s\n", te.TmuxMouse)
+		fmt.Fprintf(&b, "- **tmux mouse**: %s\n", sanitize(te.TmuxMouse))
 	}
 	b.WriteString("\n")
 
