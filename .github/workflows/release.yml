@@ -12,10 +12,11 @@ on:
         type: string
 
 env:
-  # Pinned to 1.26.5: 1.26.4 has stdlib vuln GO-2026-5856 (crypto/tls, govulncheck).
-  # Exact pin so setup-go pulls 1.26.5 from go.dev until the actions manifest
+  # Pinned to 1.26.6: 1.26.5 has stdlib vulns GO-2026-6218 (net/url), GO-2026-6090
+  # (crypto/tls), GO-2026-5972 (encoding/asn1), GO-2026-5026 (net/http) (govulncheck).
+  # Exact pin so setup-go pulls 1.26.6 from go.dev until the actions manifest
   # lists it; revert to floating "1.26" once it does.
-  GO_VERSION: "1.26.5"
+  GO_VERSION: "1.26.6"
 
 permissions:
   contents: write
