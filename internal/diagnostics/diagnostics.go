@@ -123,23 +123,32 @@ func (r *Report) OSSummary() string {
 }
 
 // FormatMarkdownWithDesc formats the report with a user-provided description.
-func (r *Report) FormatMarkdownWithDesc(description string) string {
-	return r.formatMarkdown(description)
+func (r *Report) FormatMarkdownWithDesc(description string, scrub Scrubber) string {
+	return r.formatMarkdown(description, scrub)
 }
 
 // FormatMarkdown formats the report as a GitHub issue body.
-func (r *Report) FormatMarkdown() string {
-	return r.formatMarkdown("")
+func (r *Report) FormatMarkdown(scrub Scrubber) string {
+	return r.formatMarkdown("", scrub)
 }
 
-func (r *Report) formatMarkdown(description string) string {
-	home, _ := os.UserHomeDir()
-	sanitize := func(s string) string {
-		if home != "" {
-			return strings.ReplaceAll(s, home, "~")
-		}
-		return s
-	}
+// Scrubber removes anything that must not reach a public issue.
+//
+// A required parameter rather than a package default, because forgetting it is
+// exactly how this went wrong: the caller in the UI ran the *description*
+// through its full redactor and then appended the Config and Debug Log blocks,
+// which only ever had the home-directory rewrite below. Those blocks published
+// account emails from config.json and from every launch and poll line in the
+// log — neither of which the reporter is shown before filing. Making it an
+// argument means a new caller has to decide, and the honest default (nil) is
+// visible at the call site.
+//
+// nil means home-rewrite only, which is right for a report going somewhere
+// private (a snapshot on disk) and wrong for anything going to GitHub.
+type Scrubber func(string) string
+
+func (r *Report) formatMarkdown(description string, scrub Scrubber) string {
+	sanitize := sanitizerFor(scrub)
 
 	var b strings.Builder
 
@@ -171,9 +180,25 @@ func (r *Report) formatMarkdown(description string) string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(r.FormatEnvironmentMarkdown(true))
+	b.WriteString(r.FormatEnvironmentMarkdown(true, scrub))
 
 	return b.String()
+}
+
+// sanitizerFor composes the caller's scrubber with the home-directory rewrite
+// every report gets. Home last, so a scrubber that rewrites a path still ends up
+// with "~" rather than a half-substituted absolute path.
+func sanitizerFor(scrub Scrubber) func(string) string {
+	home, _ := os.UserHomeDir()
+	return func(s string) string {
+		if scrub != nil {
+			s = scrub(s)
+		}
+		if home != "" {
+			s = strings.ReplaceAll(s, home, "~")
+		}
+		return s
+	}
 }
 
 // FormatEnvironmentMarkdown renders everything about the machine — versions,
@@ -187,26 +212,33 @@ func (r *Report) formatMarkdown(description string) string {
 // reporter's content, not the machine's. A wrong-status report offers to leave
 // content out, and neither the global log tail nor config.json may smuggle
 // itself back in past that choice.
-func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
-	home, _ := os.UserHomeDir()
-	sanitize := func(s string) string {
-		if home != "" {
-			return strings.ReplaceAll(s, home, "~")
-		}
-		return s
-	}
+func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) string {
+	sanitize := sanitizerFor(scrub)
 
 	var b strings.Builder
 
+	// Every dynamic value below goes through sanitize, without judging which
+	// ones could plausibly carry something private.
+	//
+	// Two of them used to and the rest did not, which is the actual defect:
+	// somebody had already decided a version string can hold a path, and the
+	// inconsistency meant new fields inherited whichever neighbour they were
+	// pasted next to. The odds on any single field are low — LANG is
+	// `en_US.UTF-8`, `tmux -V` is a version — but the cost of applying it is a
+	// function call, and this is the block that reaches a public issue without
+	// the reporter ever seeing it. Uniform is the only version that stays true as
+	// fields get added, which is exactly how the Config and Debug Log blocks came
+	// to leak in the first place.
+
 	// Diagnostics.
 	b.WriteString("### Diagnostics\n")
-	fmt.Fprintf(&b, "- **Version**: %s\n", r.Version)
-	fmt.Fprintf(&b, "- **OS**: %s (%s)\n", r.OSSummary(), r.Arch)
+	fmt.Fprintf(&b, "- **Version**: %s\n", sanitize(r.Version))
+	fmt.Fprintf(&b, "- **OS**: %s (%s)\n", sanitize(r.OSSummary()), sanitize(r.Arch))
 	if r.KernelVersion != "" {
-		fmt.Fprintf(&b, "- **Kernel**: %s\n", r.KernelVersion)
+		fmt.Fprintf(&b, "- **Kernel**: %s\n", sanitize(r.KernelVersion))
 	}
 	if r.TmuxVersion != "" {
-		fmt.Fprintf(&b, "- **tmux**: %s\n", r.TmuxVersion)
+		fmt.Fprintf(&b, "- **tmux**: %s\n", sanitize(r.TmuxVersion))
 	}
 	if r.ClaudeVersion != "" {
 		fmt.Fprintf(&b, "- **Claude CLI**: %s\n", sanitize(r.ClaudeVersion))
@@ -215,7 +247,7 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
 		fmt.Fprintf(&b, "- **Codex CLI**: %s\n", sanitize(r.CodexVersion))
 	}
 	if r.GhVersion != "" {
-		fmt.Fprintf(&b, "- **gh CLI**: %s\n", r.GhVersion)
+		fmt.Fprintf(&b, "- **gh CLI**: %s\n", sanitize(r.GhVersion))
 	}
 	fmt.Fprintf(&b, "- **Sessions**: %d\n", r.SessionCount)
 	b.WriteString("\n")
@@ -223,28 +255,28 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
 	// Terminal environment.
 	te := r.TerminalEnv
 	b.WriteString("### Terminal Environment\n")
-	fmt.Fprintf(&b, "- **TERM**: `%s`\n", te.TERM)
+	fmt.Fprintf(&b, "- **TERM**: `%s`\n", sanitize(te.TERM))
 	if te.TermProgram != "" {
 		ver := te.TermProgram
 		if te.TermProgramVersion != "" {
 			ver += " " + te.TermProgramVersion
 		}
-		fmt.Fprintf(&b, "- **Terminal**: %s\n", ver)
+		fmt.Fprintf(&b, "- **Terminal**: %s\n", sanitize(ver))
 	}
 	if te.ColorTerm != "" {
-		fmt.Fprintf(&b, "- **COLORTERM**: %s\n", te.ColorTerm)
+		fmt.Fprintf(&b, "- **COLORTERM**: %s\n", sanitize(te.ColorTerm))
 	}
 	if te.SttySize != "" {
-		fmt.Fprintf(&b, "- **stty size**: %s\n", te.SttySize)
+		fmt.Fprintf(&b, "- **stty size**: %s\n", sanitize(te.SttySize))
 	}
 	if r.TUIWidth > 0 || r.TUIHeight > 0 {
 		fmt.Fprintf(&b, "- **TUI size**: %dx%d\n", r.TUIWidth, r.TUIHeight)
 	}
 	if te.Lang != "" {
-		fmt.Fprintf(&b, "- **LANG**: %s\n", te.Lang)
+		fmt.Fprintf(&b, "- **LANG**: %s\n", sanitize(te.Lang))
 	}
 	if te.LCAll != "" {
-		fmt.Fprintf(&b, "- **LC_ALL**: %s\n", te.LCAll)
+		fmt.Fprintf(&b, "- **LC_ALL**: %s\n", sanitize(te.LCAll))
 	}
 	if te.InsideTmux {
 		b.WriteString("- **Nested tmux**: yes ($TMUX is set)\n")
@@ -253,10 +285,10 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool) string {
 		b.WriteString("- **SSH session**: yes\n")
 	}
 	if te.TmuxDefaultTerm != "" {
-		fmt.Fprintf(&b, "- **tmux default-terminal**: `%s`\n", te.TmuxDefaultTerm)
+		fmt.Fprintf(&b, "- **tmux default-terminal**: `%s`\n", sanitize(te.TmuxDefaultTerm))
 	}
 	if te.TmuxMouse != "" {
-		fmt.Fprintf(&b, "- **tmux mouse**: %s\n", te.TmuxMouse)
+		fmt.Fprintf(&b, "- **tmux mouse**: %s\n", sanitize(te.TmuxMouse))
 	}
 	b.WriteString("\n")
 

@@ -35,6 +35,32 @@ func TestParseWorktreeArgs(t *testing.T) {
 		}
 	})
 
+	t.Run("account flag", func(t *testing.T) {
+		o, err := parseWorktreeArgs([]string{"--account", "work@example.com", "fix-login"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.account != "work@example.com" {
+			t.Errorf("account = %q, want work@example.com", o.account)
+		}
+	})
+
+	// --account is a claude.ai credential; the other agents never read it, so
+	// accepting the combination would silently do nothing.
+	t.Run("account with non-claude agent", func(t *testing.T) {
+		_, err := parseWorktreeArgs([]string{"--account", "work@example.com", "--agent", "codex", "fix-login"})
+		if err == nil || !strings.Contains(err.Error(), "only applies to claude") {
+			t.Errorf("err = %v, want a claude-only rejection", err)
+		}
+	})
+
+	t.Run("account with no-session", func(t *testing.T) {
+		_, err := parseWorktreeArgs([]string{"--account", "work@example.com", "--no-session", "fix-login"})
+		if err == nil || !strings.Contains(err.Error(), "no effect") {
+			t.Errorf("err = %v, want a no-effect rejection", err)
+		}
+	})
+
 	// `fleet worktree my-branch --no-session` is the order most people type, and
 	// a plain flag.Parse would reject it — it stops at the first positional.
 	t.Run("flags after branch", func(t *testing.T) {

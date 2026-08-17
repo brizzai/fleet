@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
@@ -24,6 +25,9 @@ type sessionCreateMsg struct {
 	workspaceName  string
 	agent          agent.Type
 	resumeClaudeID string
+	// account is the Claude account (email) to authenticate as. Empty means
+	// "let the configured strategy pick", resolved in handleSessionCreate.
+	account string
 }
 
 // forkSessionMsg is sent when the user forks an existing session.
@@ -41,7 +45,45 @@ type forkSessionMsg struct {
 	title                 string
 	workspaceName         string
 	agent                 agent.Type // inherited from the parent session
+	accountSet            bool       // true when account was carried from the parent, even if empty
+	// account is inherited from the parent session and must not be re-picked:
+	// the fork resumes the parent's conversation, and that conversation's
+	// prompt cache lives on the parent's account.
+	//
+	// accountSet distinguishes "the parent runs on the ambient login" from "no
+	// account was carried". Both are the empty string, and treating the first as
+	// the second re-picks an account for a fork whose conversation belongs to
+	// the ambient login — it would then authenticate as someone else.
+	account string
 }
+
+// Claude-account management messages, emitted by AccountsDialog and handled in
+// app.go. The dialog owns no storage of its own — every mutation round-trips
+// through the store so the on-disk set and the config-dir resolver stay in step.
+type (
+	// accountLoginMsg asks fleet to open a pane where the user can /login
+	// another subscription into a config directory of its own.
+	accountLoginMsg struct{}
+	// accountLoggedInMsg is the result: an account already carrying its real
+	// email, organization and plan, because a completed login can be asked who
+	// it is. Nothing needs validating afterwards.
+	accountLoggedInMsg struct {
+		account claudeaccount.Account
+		err     error
+	}
+	accountRemoveMsg struct{ email string }
+	// accountRenameMsg sets a display label, for anyone who prefers "work" to
+	// an email address.
+	accountRenameMsg struct {
+		email string
+		label string
+	}
+	accountReorderMsg struct {
+		email string
+		delta int
+	}
+	accountSetDefaultMsg struct{ email string }
+)
 
 // NewSessionDialog handles the new session creation flow with directory autocomplete.
 type NewSessionDialog struct {

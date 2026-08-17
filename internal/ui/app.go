@@ -2,13 +2,16 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +24,7 @@ import (
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/chrome"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/discovery"
@@ -244,6 +248,7 @@ type Home struct {
 	commandPalette        *CommandPaletteDialog
 	contextMenu           *ContextMenuDialog
 	snoozeDialog          *SnoozeDialog
+	accountPicker         *AccountPickerDialog
 	// The row the open context menu was built for. Its entries resolve their
 	// subject from h.cursor, which an async rebuild can move — see contextMenuTarget.
 	contextMenuTarget   contextMenuTarget
@@ -436,6 +441,24 @@ type Home struct {
 	cfg     *config.Config
 	version string
 
+	// Claude accounts. accounts is the on-disk set of subscriptions; usage is
+	// their quota state, written by the background worker and read while
+	// assigning a session, so it follows gitInfoCache's immutable-snapshot
+	// pattern rather than a lock.
+	accounts       *claudeaccount.Store
+	accountUsage   atomic.Pointer[map[string]claudeaccount.Usage]
+	accountsDialog *AccountsDialog
+	// accountWorkerOnce guards the quota poller — see startAccountWorker.
+	accountWorkerOnce sync.Once
+	// accountLoginCancel stops the in-flight login watcher, if any. Written from
+	// Update and from the tea.Exec completion callback, hence the mutex.
+	accountLoginMu     sync.Mutex
+	accountLoginCancel context.CancelFunc
+	// originKeyCache memoizes git.GetOriginKey per repo path — see
+	// allowedAccountsFor, which needs the answer on the Update goroutine.
+	originKeyMu    sync.Mutex
+	originKeyCache map[string]string
+
 	// Pre-resolved per-install identity (device hash + git name/email +
 	// OS version). Discovered in main.go before the TUI starts so Init
 	// doesn't shell out on the Bubble Tea Update() thread.
@@ -538,6 +561,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		commandPalette:         NewCommandPaletteDialog(),
 		contextMenu:            NewContextMenuDialog(),
 		snoozeDialog:           NewSnoozeDialog(),
+		accountPicker:          NewAccountPickerDialog(),
 		sessionCreateDialog:    NewSessionCreateDialog(),
 		consentDialog:          NewConsentDialog(),
 		onboardingDialog:       NewOnboardingDialog(cfg),
@@ -572,7 +596,115 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	}
 	emptyCache := make(map[string]*git.RepoInfo)
 	h.gitInfoCache.Store(&emptyCache)
+
+	h.accounts = claudeaccount.Load()
+	h.accountsDialog = NewAccountsDialog()
+	// Fleet identifies as itself to Anthropic, not as claude-code. Measured
+	// 2026-08-04: the messages endpoint serves fleet/<version> identically, so
+	// there is nothing to gain by impersonating the CLI.
+	claudeaccount.SetUserAgent(version)
+	// One startup line carrying the whole multi-account picture, so a bug
+	// report shows the configuration without needing the user to describe it.
+	debuglog.Logger.Info("claude accounts ready",
+		"count", h.accounts.Len(), "strategy", cfg.GetAccountStrategy(),
+		"manual_default", cfg.DefaultAccount, "origins_restricted", len(cfg.AllowedAccounts),
+		"conflicting_auth", claudeaccount.GuardConflictingAuth().Name)
+	emptyUsage := make(map[string]claudeaccount.Usage)
+	h.accountUsage.Store(&emptyUsage)
+	// Sessions resolve their token at launch through this, so re-adding an
+	// account with a fresh token takes effect on the next relaunch without
+	// touching any live Session.
+	session.SetAccountConfigDirFunc(h.accounts.ConfigDirFor)
 	return h
+}
+
+// writeAccountUsage swaps one account's reading into the snapshot.
+//
+// CompareAndSwap, not Load-copy-Store: the quota poll runs on the worker and an
+// account add runs on the Update goroutine, so a plain store can land on top of
+// a concurrent one and silently drop the newer reading until the next poll
+// cycle. Same shape and same fix as writeGitInfo.
+func (h *Home) writeAccountUsage(mutate func(map[string]claudeaccount.Usage)) {
+	for {
+		cur := h.accountUsage.Load()
+		next := make(map[string]claudeaccount.Usage, len(*cur)+1)
+		maps.Copy(next, *cur)
+		mutate(next)
+		if h.accountUsage.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
+}
+
+// accountUsageSnapshot returns the current immutable quota snapshot. The
+// returned map MUST NOT be mutated.
+func (h *Home) accountUsageSnapshot() map[string]claudeaccount.Usage {
+	if p := h.accountUsage.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// allowedAccountsFor returns the accounts permitted for sessions at repoPath,
+// or nil for unrestricted.
+//
+// Resolved from the cached git info rather than shelling out, since this runs
+// on the Update goroutine. An origin the cache hasn't reached yet reads as
+// unrestricted — which is also the default, so the fallback can only ever be
+// permissive in the same way an unconfigured origin already is.
+func (h *Home) allowedAccountsFor(repoPath string) []string {
+	if len(h.cfg.AllowedAccounts) == 0 {
+		return nil
+	}
+	// The cache is populated asynchronously, so for the first seconds after
+	// launch it has no OriginKey for a repo. Returning nil there would read as
+	// "no restriction" — Select treats an empty allowlist as unrestricted — and
+	// a session created in that window could land on a disallowed account. With
+	// an allowlist configured, resolve it directly rather than guess.
+	origin := ""
+	if info, ok := h.gitInfo()[repoPath]; ok && info != nil {
+		origin = info.OriginKey
+	}
+	if origin == "" {
+		origin = h.originKeyFor(repoPath)
+	}
+	// GetOriginKey always answers — a repo with no remote keys as
+	// "local:<dir>", which is exactly how the sidebar groups it, so an origin
+	// allowlist can be written against a local-only checkout too.
+	return h.cfg.GetAllowedAccounts(OriginExpandKey(origin))
+}
+
+// accountAllowedFor reports whether email passes an origin's allowlist. An empty
+// allowlist means unrestricted, matching claudeaccount.Select.
+func accountAllowedFor(email string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	return slices.Contains(allowed, email)
+}
+
+// originKeyFor resolves a repo's origin key, memoized for the process.
+//
+// git.GetOriginKey shells out, and this runs on the Update goroutine — pressing
+// `a` on a repo on a slow or networked filesystem would block the whole TUI, and
+// launchLaunchpadSet multiplies it by one call per selected repo. A repo's
+// origin does not meaningfully change while fleet is open, so one exec per repo
+// per process buys the correctness without the recurring stall.
+//
+// Only reached when an allowlist is configured and the git cache has not yet
+// warmed, which is a few seconds after launch at most.
+func (h *Home) originKeyFor(repoPath string) string {
+	h.originKeyMu.Lock()
+	defer h.originKeyMu.Unlock()
+	if origin, ok := h.originKeyCache[repoPath]; ok {
+		return origin
+	}
+	origin := git.GetOriginKey(repoPath)
+	if h.originKeyCache == nil {
+		h.originKeyCache = make(map[string]string)
+	}
+	h.originKeyCache[repoPath] = origin
+	return origin
 }
 
 // Init implements tea.Model.
@@ -692,7 +824,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.commandPalette.SetSize(msg.Width, msg.Height)
 		h.contextMenu.SetSize(msg.Width, msg.Height)
 		h.snoozeDialog.SetSize(msg.Width, msg.Height)
+		h.accountPicker.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
+		h.accountsDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
@@ -705,6 +839,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.snoozeDialog.IsVisible() {
 			h.snoozeDialog.SetAnchor(h.contextMenuAnchor())
+		}
+		if h.accountPicker.IsVisible() {
+			h.accountPicker.SetAnchor(h.contextMenuAnchor())
 		}
 		return h, nil
 
@@ -821,6 +958,72 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionCreateMsg:
 		return h.handleSessionCreate(msg)
 
+	case accountLoginMsg:
+		return h, h.runAccountLogin()
+
+	case accountLoggedInMsg:
+		return h.handleAccountLoggedIn(msg)
+
+	case accountRemoveMsg:
+		// Read before Remove drops the record — it is the only thing that knows
+		// where this account's directory lives.
+		dir := h.accounts.ConfigDirFor(msg.email)
+		if !h.accounts.Remove(msg.email) {
+			return h, nil
+		}
+		// A deliberate remove used to leak what an abandoned add cleans up: the
+		// dir stayed on disk holding the mirrored .claude.json, Provision kept
+		// refreshing it on every launch, and re-adding the same subscription minted
+		// a fresh random dir and orphaned another one.
+		//
+		// The Keychain login is deliberately left alone. Deleting it would log that
+		// subscription out of Claude Code entirely — a far larger action than
+		// "remove from fleet", and not fleet's credential to revoke. The confirm
+		// dialog says so, because a survivor nobody names is a surprise.
+		//
+		// Handed back as a tea.Cmd rather than run here: this is a RemoveAll, and
+		// nothing that touches the filesystem for an unbounded time belongs on the
+		// Update goroutine. The dir is small in practice (RemoveAll unlinks the
+		// shared symlinks rather than walking into ~/.claude) but it holds Claude
+		// Code's own caches, and on a network-mounted home it would stall every
+		// frame.
+		cleanup := h.removeConfigDirCmd(msg.email, dir)
+		// Sessions still naming this account fall back to the ambient login
+		// rather than failing to launch — see Store.ConfigDirFor.
+		if h.cfg.DefaultAccount == msg.email {
+			h.cfg.DefaultAccount = ""
+			if err := h.cfg.Save(); err != nil {
+				debuglog.Logger.Error("failed to save config after clearing default account", "err", err)
+			}
+		}
+		return h, tea.Batch(h.persistAccounts("Removed "+msg.email), cleanup)
+
+	case accountRenameMsg:
+		if !h.accounts.SetLabel(msg.email, msg.label) {
+			return h, nil
+		}
+		return h, h.persistAccounts("")
+
+	case accountReorderMsg:
+		if !h.accounts.Reorder(msg.email, msg.delta) {
+			return h, nil
+		}
+		return h, h.persistAccounts("")
+
+	case accountSetDefaultMsg:
+		// Only the manual strategy consults this, so setting it under an
+		// automatic strategy would be a control that visibly does nothing.
+		if h.cfg.GetAccountStrategy() != claudeaccount.StrategyManual {
+			h.setInfo("Set the account strategy to Manual in Settings to pin an account")
+			return h, nil
+		}
+		h.cfg.DefaultAccount = msg.email
+		if err := h.cfg.Save(); err != nil {
+			h.setError(fmt.Errorf("could not save default account: %w", err))
+			return h, nil
+		}
+		return h, h.persistAccounts("Default account: " + msg.email)
+
 	case forkSessionMsg:
 		ag := msg.agent
 		if ag == "" {
@@ -836,6 +1039,22 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
 		s.Agent = ag
+		// Inherit rather than re-pick: the fork resumes the parent's
+		// conversation, so it has to authenticate as the account that
+		// conversation belongs to. A fork whose account was chosen afresh would
+		// resume against a different subscription and lose the prompt cache.
+		// An empty account is only re-picked when the parent never carried one.
+		// "" is a live identity — it means the ambient login — so using it as
+		// the "unset" sentinel would reassign a fork whose conversation belongs
+		// to the ambient account, and the fork would resume it as someone else.
+		s.Account = msg.account
+		if !msg.accountSet && s.Account == "" {
+			// A blocked policy leaves the fork on the ambient login here rather
+			// than refusing: this is the fork of a session that already exists,
+			// and the parent's own creation was gated by the same rule. The
+			// refusal belongs at creation, not on a resume of work already done.
+			s.Account, _ = h.resolveAccount(ag, msg.path)
+		}
 		// Record which conversation we're forking from. The fork resumes the
 		// source session's ClaudeSessionID; if that id is stale (a missed
 		// rotation), the fork opens the wrong conversation (issue #142). Logging
@@ -1005,6 +1224,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.applySnoozeUntil(sc, msg.until, msg.durationID)
 		return h, nil
+
+	case accountPickedMsg:
+		// Same discipline as snoozeSelectedMsg: the picker named one row, and an
+		// async rebuild may have moved the cursor while it was open. Getting this
+		// wrong here bills a different session's work to the chosen subscription.
+		if !h.focusContextMenuTarget() {
+			h.setInfo("That session is gone — nothing to move")
+			return h, nil
+		}
+		return h, h.moveSelectedToAccount(msg.email)
 
 	case contextMenuMsg:
 		// Put the cursor back on the row the menu was opened for before dispatching —
@@ -1503,6 +1732,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Started here, not earlier: gitWorker and the bootstrap probe both
 		// touch repoLastHotAt unlocked, and bootstrap is done by now.
 		go h.gitWorker()
+		h.startAccountWorker()
 		return h, nil
 
 	case splashFrameMsg:
@@ -1524,6 +1754,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// branch/dirty/PR would stay blank for the whole process lifetime.
 			// No bootstrap probe runs here, so the repoLastHotAt reasoning holds.
 			go h.gitWorker()
+			h.startAccountWorker()
 		}
 		if len(msg.items) > 0 {
 			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
@@ -1738,9 +1969,34 @@ func (h *Home) View() tea.View {
 	// Animated "What's New" badge, top-right of the header row. Only when there
 	// are unseen highlights and no modal owns the screen (a modal makes
 	// renderBody return its own full-screen view).
+	// Both live on the header's top-right, so they share it: the badge keeps the
+	// corner (it is transient and demands attention) and the quota readout is
+	// laid out to its left. Tracking the badge's occupied width here is what
+	// keeps them from overprinting each other.
+	rightEdge := h.width - 1
 	if h.hasUnseenWhatsNew && !h.modalOpen() {
 		badge := renderWhatsNewBadge(h.whatsNewFrame)
-		base = overlayAt(badge, base, h.width-lipgloss.Width(badge)-1, 0)
+		badgeW := lipgloss.Width(badge)
+		base = overlayAt(badge, base, rightEdge-badgeW, 0)
+		rightEdge -= badgeW + 2
+	}
+	if ShowAccountUsage && !h.modalOpen() {
+		// The budget is the space left of rightEdge, not rightEdge itself.
+		// rightEdge is an x-coordinate: passing it as a width let the strip pick
+		// the widest density that fits the *whole screen* (~74 columns for two
+		// labelled chips) and then overlay it on top of the breadcrumb, cutting
+		// it mid-word. The badge gets away with the same pattern only because it
+		// is ~14 columns wide.
+		//
+		// Measured from what was actually drawn, so a long session title shrinks
+		// the strip rather than colliding with it. A budget that goes non-positive
+		// yields "" from the density loop, which is the right answer — no strip is
+		// better than a broken header.
+		budget := rightEdge - lipgloss.Width(h.renderHeader()) - accountReadoutGap
+		readout := renderAccountUsageHeader(h.accounts.List(), h.accountUsageSnapshot(), budget, time.Now())
+		if readout != "" {
+			base = overlayAt(readout, base, rightEdge-lipgloss.Width(readout), 0)
+		}
 	}
 	// Command palette is a true overlay: render it on top of the main UI so
 	// the sidebar/preview stay visible behind the dialog box. The base is
@@ -1758,6 +2014,11 @@ func (h *Home) View() tea.View {
 	if mv := h.contextMenu.View(); mv != "" {
 		x, y := h.contextMenu.Position(lipgloss.Width(mv), lipgloss.Height(mv))
 		base = overlayAt(mv, base, x, y)
+	}
+	// Account picker: same row-anchored dropdown treatment as the context menu.
+	if av := h.accountPicker.View(); av != "" {
+		x, y := h.accountPicker.Position(lipgloss.Width(av), lipgloss.Height(av))
+		base = overlayAt(av, base, x, y)
 	}
 	// Snooze picker: same row-anchored dropdown treatment as the context menu.
 	if sv := h.snoozeDialog.View(); sv != "" {
@@ -1830,12 +2091,14 @@ func (h *Home) modalOpen() bool {
 		h.worktreeDialog.IsVisible() ||
 		h.branchDialog.IsVisible() ||
 		h.sessionCreateDialog.IsVisible() ||
+		h.accountsDialog.IsVisible() ||
 		h.newDialog.IsVisible() ||
 		h.confirmDialog.IsVisible() ||
 		h.renameDialog.IsVisible() ||
 		h.commandPalette.IsVisible() ||
 		h.contextMenu.IsVisible() ||
 		h.snoozeDialog.IsVisible() ||
+		h.accountPicker.IsVisible() ||
 		h.launchpadActive()
 }
 
@@ -1871,6 +2134,9 @@ func (h *Home) renderBody() string {
 	}
 	if h.sessionCreateDialog.IsVisible() {
 		return h.sessionCreateDialog.View()
+	}
+	if h.accountsDialog.IsVisible() {
+		return h.accountsDialog.View()
 	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
@@ -1965,7 +2231,7 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
-		previewFooter := BuildPreviewFooter(s, h.width-6)
+		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
 		b.WriteString(RenderBorderedPanelInsets(previewInner, previewTitle, "", shellChips, previewFooter, h.width, previewHeight, h.focusMode))
 	default: // dual
@@ -2024,7 +2290,7 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
-		previewFooter := BuildPreviewFooter(s, previewWidth-6)
+		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
 		// collapsed chips ride the preview's bottom-left border (shellChips is
 		// "" while the drawer is open, since the drawer then shows the shells).
@@ -2172,6 +2438,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		dialog, cmd := h.commandPalette.Update(msg)
 		h.commandPalette = dialog
 		return cmd, true
+	case h.accountPicker.IsVisible():
+		dialog, cmd := h.accountPicker.Update(msg)
+		h.accountPicker = dialog
+		return cmd, true
 	case h.snoozeDialog.IsVisible():
 		dialog, cmd := h.snoozeDialog.Update(msg)
 		h.snoozeDialog = dialog
@@ -2183,6 +2453,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.sessionCreateDialog.IsVisible():
 		dialog, cmd := h.sessionCreateDialog.Update(cmdMsg)
 		h.sessionCreateDialog = dialog
+		return cmd, true
+	case h.accountsDialog.IsVisible():
+		dialog, cmd := h.accountsDialog.Update(msg)
+		h.accountsDialog = dialog
 		return cmd, true
 	case h.newDialog.IsVisible():
 		dialog, cmd := h.newDialog.Update(msg)
@@ -2883,7 +3157,271 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	msg.agent = ag
+	if msg.account == "" {
+		account, blocked := h.resolveAccount(ag, msg.path)
+		if blocked != "" {
+			// Refused rather than launched on the ambient login: the allowlist
+			// exists precisely because using an account it excludes is worse than
+			// not proceeding, and the ambient login may be that account.
+			h.setError(errors.New(blocked))
+			return h, nil
+		}
+		msg.account = account
+	}
+	// A conflicting ambient credential outranks the per-session login, so the
+	// session would run on that credential while every fleet surface claimed it
+	// was on the chosen account.
+	//
+	// Refusing is right when one `unset` fixes it — a wrong-subscription charge
+	// is not recoverable and the cost of stopping is a single command. It is
+	// wrong for apiKeyHelper, which no shell command clears: refusing there meant
+	// a user who configured a helper months ago could not create *any* Claude
+	// session, by any route, and the error told them to unset a JSON key. So the
+	// helper says its piece and the session launches.
+	if msg.account != "" {
+		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
+			if conflict.Fatal {
+				h.setError(errors.New(conflict.Message(msg.account)))
+				return h, nil
+			}
+			h.setInfo(conflict.Message(msg.account))
+		}
+	}
 	return h, h.startSessionCmd(msg)
+}
+
+// resolveAccount picks the Claude account a new session at path should run as,
+// per the configured strategy. Returns "" for the ambient /login account, which
+// is both the no-accounts-configured case and the fallback when an origin's
+// allowlist leaves nothing to choose from.
+//
+// Claude-only: the account token is a claude.ai subscription credential
+// that the other agents neither read nor need.
+// The second return is a user-facing refusal reason, empty when there is none.
+// A session must not be created while it is set: it names the case where an
+// origin's allowlist excludes every account fleet has, and launching anyway
+// would run on the ambient login — possibly the very account being excluded.
+// Returned rather than logged so no caller can create a session without having
+// seen it; "" for the account already means "the ambient login", which is a
+// legitimate answer everywhere else.
+func (h *Home) resolveAccount(ag agent.Type, path string) (string, string) {
+	if ag != agent.Claude {
+		return "", ""
+	}
+	if h.accounts == nil || h.accounts.Len() == 0 {
+		debuglog.Logger.Info("account select: none configured, using ambient login", "path", path)
+		return "", ""
+	}
+	strategy := h.cfg.GetAccountStrategy()
+	allowed := h.allowedAccountsFor(path)
+	usage := h.accountUsageSnapshot()
+
+	acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
+		Accounts: h.accounts.List(),
+		Usage:    usage,
+		Strategy: strategy,
+		Manual:   h.cfg.DefaultAccount,
+		Allowed:  allowed,
+	})
+	if !ok {
+		// Select's one false answer covers two situations that want opposite
+		// responses — see claudeaccount.AllowedConfigured. An allowlist naming
+		// nothing configured must not fall through to the ambient login, which
+		// may be the very account it excludes; everything being logged out
+		// deliberately does fall through, and only needs saying out loud.
+		if !claudeaccount.AllowedConfigured(h.accounts.List(), allowed) {
+			debuglog.Logger.Error("account select: allowed_accounts names no configured account",
+				"path", path, "allowed", allowed, "configured", h.accounts.Len())
+			return "", fmt.Sprintf("allowed_accounts for this repo names no account fleet knows about (%s) — "+
+				"add one, or drop the restriction", strings.Join(allowed, ", "))
+		}
+		debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
+			"path", path, "strategy", strategy, "allowed", allowed, "configured", h.accounts.Len())
+		h.setInfo("Every account allowed for this repo is logged out — starting on your logged-in account.")
+		return "", ""
+	}
+	// The inputs as well as the verdict: "why this account" is unanswerable
+	// from the choice alone, and the usual answer is a stale or missing poll.
+	debuglog.Logger.Info("account select",
+		"chosen", acct.Email, "strategy", strategy, "path", path,
+		"allowed", allowed, "candidates", h.accounts.Len(),
+		"usage_known", len(usage), "chosen_five_hour_pct", usage[acct.Email].FiveHourPct)
+	return acct.Email, ""
+}
+
+// accountUnusableReason says why a session's pinned account cannot run it right
+// now, or "" when it can. The strings are user-facing — they go in the toast
+// that explains why the session moved.
+//
+// Deliberately three separate causes rather than one "broken": they call for
+// different responses. A spent window fixes itself at the reset, a rejected
+// token needs a new one, and a removed account was the user's own doing.
+func (h *Home) accountUnusableReason(email string) string {
+	if h.accounts.ConfigDirFor(email) == "" {
+		return "its account was removed"
+	}
+	u := h.accountUsageSnapshot()[email]
+	if u.LoggedOut {
+		return "it is logged out"
+	}
+	// Named from the window that is actually blocking it, not assumed to be the
+	// 5-hour one. Exhausted covers both buckets, and they differ by days — an
+	// account whose week is gone is not coming back this afternoon.
+	if win, _, spent := u.SpentWindow(time.Now()); spent {
+		return "its " + win.Name() + " window is spent"
+	}
+	return ""
+}
+
+// healAccountBeforeRelaunch re-picks a session's account when the pinned one can
+// no longer run it, and reports whether it moved.
+//
+// Sessions are pinned at creation and deliberately never rotate: Claude's prompt
+// cache is per-account, so re-picking on every restart would throw away the very
+// thing a restart is trying to preserve. That reasoning holds only while the pin
+// is usable. A pin to a rejected token, a spent window or an account that has
+// been removed is not protecting a cache — it is a session that cannot run, and
+// "restart it and carry on" is precisely what the user wants from `r`.
+//
+// So the rule is: keep the pin whenever it could possibly work, heal it when it
+// can't. An unpollable account is left alone — fleet failing to reach Anthropic
+// is not evidence against the credential, and healing on it would rotate the
+// whole fleet during an outage.
+func (h *Home) healAccountBeforeRelaunch(s *session.Session) bool {
+	if s == nil || agentOf(s) != agent.Claude || s.Account == "" || h.accounts.Len() == 0 {
+		return false
+	}
+	reason := h.accountUnusableReason(s.Account)
+	if reason == "" {
+		return false
+	}
+
+	// Select refuses to hand back a logged-out account, but when every candidate
+	// is spent it returns one anyway — the soonest to reset, which is routinely a
+	// *different* spent account. So the question is not "did it pick me again",
+	// it is "is what it picked any better": moving from a spent A to a spent C
+	// forces the full Restart path, discards the prompt cache and toasts a move,
+	// for an account that also cannot run the session.
+	// An empty next is not an unusable account, it is the ambient login — what
+	// Select falls back to when every candidate is logged out, and the better
+	// failure by design: the login the user is already using probably works.
+	next, blocked := h.resolveAccount(agent.Claude, s.ProjectPath)
+	if blocked != "" {
+		// The allowlist names nothing usable, so there is nowhere to heal *to*.
+		// Keeping the broken pin beats moving to the ambient login, which is the
+		// one account this origin may specifically not use.
+		debuglog.Logger.Warn("account heal: policy leaves no account to move to, keeping the pin",
+			"id", s.ID, "account", s.Account, "reason", reason, "blocked", blocked)
+		return false
+	}
+	if why := h.accountUnusableReason(next); next != "" && why != "" {
+		debuglog.Logger.Info("account heal: no usable account available, keeping the pin",
+			"id", s.ID, "account", s.Account, "reason", reason,
+			"candidate", next, "candidate_reason", why)
+		return false
+	}
+
+	from := h.accountLabel(s.Account)
+	if err := h.storage.UpdateAccount(s.ID, next); err != nil {
+		// The in-memory move still stands: launching on a working account and
+		// forgetting by the next restart beats refusing to launch at all.
+		debuglog.Logger.Error("account heal: could not persist the move",
+			"id", s.ID, "from", s.Account, "to", next, "err", err)
+	}
+	debuglog.Logger.Info("account heal: moved session to a usable account",
+		"id", s.ID, "title", s.Title, "from", s.Account, "to", next, "reason", reason)
+	s.Account = next
+
+	// Said out loud, not just logged: the session is about to bill a different
+	// subscription than the one the user assigned it, which they must never
+	// discover from an invoice.
+	h.actionLog.Add("move account", fmt.Sprintf("%s → %s (%s)", from, h.accountLabel(next), reason), true)
+	h.setInfo(fmt.Sprintf("Moved to %s — %s %s", h.accountLabel(next), from, reason))
+	return true
+}
+
+// openAccountPicker offers the other subscriptions for the session under the
+// cursor. The automatic heal on restart covers an account that has plainly
+// stopped working; this covers everything it deliberately won't — moving off an
+// account that is merely busy, or onto a specific one, which is a judgement call
+// fleet has no business making on its own.
+func (h *Home) openAccountPicker() {
+	s := h.selectedSession()
+	if s == nil {
+		return
+	}
+	usage := h.accountUsageSnapshot()
+	// The same per-origin allowlist every other assignment path applies. This
+	// surface was the one that missed it: a user who restricted an origin to their
+	// work subscription could open the picker on one of its sessions, choose their
+	// personal account, and fleet would pin and relaunch — billing client work to
+	// the wrong subscription with no warning anywhere.
+	allowed := h.allowedAccountsFor(s.ProjectPath)
+	rows := make([]accountPickerRow, 0, h.accounts.Len())
+	for _, a := range h.accounts.List() {
+		r := accountPickerRow{email: a.Email, label: a.Name(), usage: usage[a.Email], enabled: true}
+		switch {
+		case a.Email == s.Account:
+			// Shown, never pickable: the row explains where the session is now,
+			// and "moving" it to itself would restart for no reason.
+			r.enabled, r.note = false, "current"
+		case usage[a.Email].LoggedOut:
+			// Offering an account nobody is logged into would trade a busy
+			// account for one that cannot run at all.
+			r.enabled, r.note = false, "logged out"
+		case !accountAllowedFor(a.Email, allowed):
+			// Dimmed rather than hidden: a row that vanishes reads as a missing
+			// account, where a disabled one with a reason teaches the policy.
+			r.enabled, r.note = false, "not allowed here"
+		}
+		rows = append(rows, r)
+	}
+
+	// Remember which row this picker speaks for and re-anchor from the cursor:
+	// reached from the context menu the target is already set, but the palette
+	// and any future key entry point set neither.
+	h.contextMenuTarget = h.targetForCursor()
+	h.accountPicker.SetAnchor(h.contextMenuAnchor())
+	h.accountPicker.Show("Move "+s.Title+" to", rows)
+}
+
+// moveSelectedToAccount pins the selected session to email and relaunches it.
+//
+// The relaunch is not optional. The token is baked into the tmux session's
+// environment at launch, so changing the record alone would leave the sidebar
+// naming one account while the live process billed another — the exact lie the
+// account labelling was fixed to stop telling. So the picker says "move +
+// restart" and this does both, or neither.
+func (h *Home) moveSelectedToAccount(email string) tea.Cmd {
+	s := h.selectedSession()
+	if s == nil || email == "" || email == s.Account {
+		return nil
+	}
+	from := h.accountLabel(s.Account)
+	if err := h.storage.UpdateAccount(s.ID, email); err != nil {
+		// Refuse rather than half-move: an in-memory move that isn't persisted
+		// would silently revert at the next fleet restart, and a session quietly
+		// returning to a spent account is worse than one that never left.
+		h.setError(fmt.Errorf("could not move account: %w", err))
+		return nil
+	}
+	s.Account = email
+	debuglog.Logger.Info("moved session account",
+		"id", s.ID, "title", s.Title, "from", from, "to", email)
+	h.actionLog.Add("move account", fmt.Sprintf("%s → %s", from, h.accountLabel(email)), true)
+	h.setInfo(fmt.Sprintf("Moved to %s — restarting", h.accountLabel(email)))
+
+	// Full restart, never a respawn: see the comment in restartSession for why a
+	// changed account can't ride respawn-pane's layered environment.
+	h.markSessionAccessed(s)
+	id := s.ID
+	return func() tea.Msg {
+		err := s.Restart()
+		if err != nil {
+			debuglog.Logger.Error("restart after account move failed", "id", id, "err", err)
+		}
+		return sessionRestartMsg{id: id, err: err}
+	}
 }
 
 // tccProbeResultMsg carries the outcome of a lazy macOS-TCC access probe.
@@ -2993,6 +3531,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	s := session.NewSession(msg.title, msg.path)
 	s.WorkspaceName = msg.workspaceName
 	s.Agent = msg.agent
+	s.Account = msg.account
 	if msg.resumeClaudeID != "" {
 		s.ClaudeSessionID = msg.resumeClaudeID
 	}
@@ -3019,12 +3558,27 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 	}
 	analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{"count": len(items)})
 	cmds := make([]tea.Cmd, 0, len(items))
+	// startSessionCmd is called directly here rather than through
+	// handleSessionCreate, so the account has to be resolved per item — without
+	// this every session the launchpad creates lands on the ambient login
+	// regardless of account_strategy, on the one path that makes several at once.
+	ag := agent.Parse(h.cfg.GetDefaultAgent())
 	for _, it := range items {
+		account, blocked := h.resolveAccount(ag, it.Path)
+		if blocked != "" {
+			// Skipped, not aborted: this creates several sessions at once, and one
+			// repo with an unsatisfiable allowlist must not cost the user the rest
+			// of their selection. Named so the gap in the sidebar has a reason.
+			h.setError(fmt.Errorf("%s: %s", filepath.Base(it.Path), blocked))
+			h.actionLog.Add("launchpad skip", it.Path, false)
+			continue
+		}
 		h.actionLog.Add("launchpad add", it.Path, true)
 		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
 			path:           it.Path,
 			title:          it.Title,
 			resumeClaudeID: it.ClaudeSessionID,
+			account:        account,
 		}))
 	}
 	return tea.Batch(cmds...)
@@ -3721,12 +4275,21 @@ func (h *Home) restartSession(s *session.Session) tea.Cmd {
 	h.actionLog.Add("restart session", s.Title, true)
 	analytics.Track(analytics.EventSessionRestarted, nil)
 	h.markSessionAccessed(s)
+	// A restart is the moment a stuck session gets unstuck, so it is also the
+	// moment to get it off an account that cannot run it.
+	healed := h.healAccountBeforeRelaunch(s)
 	id := s.ID
 	title := s.Title
 	debuglog.Logger.Info("restarting session", "id", id, "title", title)
 	return func() tea.Msg {
 		var err error
-		if s.IsAlive() && !s.GetTmuxSession().IsPaneDead() {
+		// A heal always takes the full-restart path. respawn-pane layers its -e
+		// over the environment tmux created the session with, so a move *to* the
+		// ambient login — which sets no variable at all — would silently inherit
+		// the old account's token and bill exactly the account we just left.
+		// Rebuilding the tmux session is the only way the env is precisely what
+		// sessionEnv says, and a heal is rare enough to pay for it.
+		if !healed && s.IsAlive() && !s.GetTmuxSession().IsPaneDead() {
 			// Tmux session alive, just respawn the pane.
 			err = s.RespawnClaude()
 			if err != nil {
@@ -3751,6 +4314,10 @@ func (h *Home) resumeSelected(s *session.Session) tea.Cmd {
 	h.actionLog.Add("resume session", s.Title, true)
 	analytics.Track(analytics.EventSessionRestarted, nil)
 	h.markSessionAccessed(s)
+	// Waking is a relaunch like any other, and a session suspended for hours is
+	// the likeliest of all to find its account spent or its token expired. No
+	// healed/respawn branch here: this path is always a full Restart.
+	h.healAccountBeforeRelaunch(s)
 	h.attachAfterResumeID = s.ID
 	s.SetStatus(session.StatusStarting)
 	h.rebuildFlatItems()
@@ -4090,6 +4657,7 @@ func (h *Home) forkSelected() tea.Cmd {
 	path := s.ProjectPath
 	workspaceName := s.WorkspaceName
 	parentAgent := s.Agent
+	parentAccount := s.Account
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		claudeSessionID, stale := s.ResolveLaunchID()
@@ -4103,6 +4671,8 @@ func (h *Home) forkSelected() tea.Cmd {
 			title:                 title,
 			workspaceName:         workspaceName,
 			agent:                 parentAgent,
+			account:               parentAccount,
+			accountSet:            true,
 		}
 	}
 }
@@ -4141,6 +4711,12 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 	sourceID := ctx.parentSessionID
 	sourceTitle := ctx.parentTitle
 	sourcePath := ctx.parentProjectPath
+	// Both inherited from the parent, captured on the Update goroutine. The
+	// fork resumes the parent's conversation, so it must run the same agent and
+	// authenticate as the same account — re-picking either would resume against
+	// something that doesn't hold that conversation.
+	parentAgent := parent.Agent
+	parentAccount := parent.Account
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		parentClaudeSessionID, stale := parent.ResolveLaunchID()
@@ -4153,6 +4729,9 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 			path:                  destPath,
 			title:                 title,
 			workspaceName:         destWorkspaceName,
+			agent:                 parentAgent,
+			account:               parentAccount,
+			accountSet:            true,
 		}
 	}
 }
@@ -5701,6 +6280,64 @@ drainPriority:
 // pane re-checks — and a permission grant fires no hook, so waiting→running is
 // pane-only. A 16-minute cycle once froze every session's status for its whole
 // duration.
+// startAccountWorker launches the quota poller, at most once per process.
+//
+// Called from both reveal paths, because there are two and they do not overlap:
+// a fleet with any pinned repo or session boots through bootstrapDoneMsg, and an
+// empty one through discoveryMsg. It used to be started only from the latter —
+// so for everyone with a repo, which is everyone who would configure a second
+// account, accountUsage stayed empty for the whole process lifetime. Usage.Known
+// was false everywhere, which is not a small degradation: the header readout
+// rendered nothing, least_used silently collapsed into configured order,
+// ErrNotLoggedIn was never observed so dropLoggedOut never fired, and the heal
+// on restart could never see a spent or logged-out pin. The quota half of the
+// feature simply did not run.
+//
+// The Once, not a boolean, because the two paths are not provably exclusive and
+// two pollers would double the `security` and HTTP traffic and race on
+// writeAccountUsage.
+func (h *Home) startAccountWorker() {
+	h.accountWorkerOnce.Do(func() {
+		// Its own goroutine for the same reason gitWorker has one: the poll
+		// shells out to `security` and then makes an HTTP call, per account,
+		// sequentially. On the status worker several accounts falling due in one
+		// cycle could stall status detection for the whole fleet.
+		go h.accountWorker()
+	})
+}
+
+// accountWorker refreshes Claude account quota on its own cadence.
+//
+// Deliberately not on the status worker. maybePollAccountUsage reads a Keychain
+// item via `security` and then calls the usage endpoint, once per account, in
+// sequence — so a slow endpoint with several accounts due could hold up session
+// status detection, hook processing and pane refresh for the entire fleet. That
+// is the exact failure the gitWorker split was created to avoid for git and gh.
+//
+// The poll is self-throttled to MinPollInterval per account, so this ticking at
+// the normal cadence costs nothing on the cycles where nothing is due.
+func (h *Home) accountWorker() {
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					debuglog.Logger.Error("accountWorker panic recovered", "panic", r)
+				}
+			}()
+			h.maybePollAccountUsage()
+		}()
+	}
+}
+
 func (h *Home) gitWorker() {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -7201,6 +7838,8 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		forkWorktree.Enabled = true
 	}
 
+	// Each clause names the reason it actually failed — a constant note here
+	// would contradict the account the readout shows on the same screen.
 	suspend := ContextMenuItem{ID: "suspend_session", Label: "Suspend Session"}
 	switch {
 	case status == session.StatusSuspended:
@@ -7213,11 +7852,25 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		suspend.Enabled = true
 	}
 
+	// Each clause names the reason it actually failed. "Claude only" on a Codex
+	// row is true; showing it on a Claude session with one subscription would
+	// contradict the account this very session is running on.
+	moveAccount := ContextMenuItem{ID: "move_account", Label: "Move to Account…"}
+	switch {
+	case s.Agent != agent.Claude:
+		moveAccount.Note = "Claude only"
+	case h.accounts.Len() < 2:
+		moveAccount.Note = "only one account"
+	default:
+		moveAccount.Enabled = true
+	}
+
 	items := []ContextMenuItem{
 		open,
 		{ID: "focus", Label: "Focus Preview", Shortcut: tabKey, Key: "tab", Enabled: true},
 		approve,
 		{ID: "restart", Label: "Restart", Shortcut: "r", Key: "r", Enabled: true},
+		moveAccount,
 		{ID: "rename", Label: "Rename", Shortcut: "R", Key: "R", Enabled: true},
 		unread,
 		{ID: "editor", Label: "Open in Editor", Shortcut: "e", Key: "e", Enabled: true},
@@ -7303,6 +7956,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "jump_next", Name: "Jump to Next Waiting", Shortcut: "Space"},
 		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
+		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
 		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -7502,6 +8156,8 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		}
 		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
 		return h, nil
+	case "manage_accounts":
+		return h, h.openAccountsDialog()
 	case "new_repo":
 		h.newDialog.Show()
 		return h, nil
@@ -7535,6 +8191,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.resumeSelected(s)
 	case "restart":
 		return h, h.confirmRestartSelected()
+	case "move_account":
+		h.openAccountPicker()
+		return h, nil
 	case "suspend_session":
 		return h, h.suspendSelected()
 	case "suspend_now":

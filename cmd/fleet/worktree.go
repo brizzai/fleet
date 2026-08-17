@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
@@ -37,6 +39,7 @@ type worktreeOpts struct {
 	base      string
 	repoPath  string
 	agentName string
+	account   string
 	noSession bool
 	// prompt is the raw flag value, which may still be "-" for stdin. Reading
 	// stdin is I/O, and parsing stays pure — runWorktree resolves it.
@@ -57,6 +60,7 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.StringVar(&o.base, "base", "", "base branch to branch from (default: the repo's default branch)")
 	fs.StringVar(&o.repoPath, "path", "", "repo to create the worktree in (default: current directory)")
 	fs.StringVar(&o.agentName, "agent", "", "agent to run: claude, codex, or opencode (default: default_agent config)")
+	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config)")
 	fs.BoolVar(&o.noSession, "no-session", false, "create the worktree only, print its path, and start no session")
 	fs.StringVar(&o.prompt, "prompt", "", "first message for the agent, which it starts working on (use - to read stdin)")
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
@@ -136,6 +140,16 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 			return o, fmt.Errorf("--agent has no effect with --no-session (no session is started)")
 		}
 	}
+	if o.account != "" {
+		if o.noSession {
+			return o, fmt.Errorf("--account has no effect with --no-session (no session is started)")
+		}
+		// The account token is a claude.ai credential; the other agents
+		// never read it, so accepting the flag here would silently do nothing.
+		if o.agentName != "" && agent.Type(o.agentName) != agent.Claude {
+			return o, fmt.Errorf("--account only applies to claude sessions (got --agent %s)", o.agentName)
+		}
+	}
 	return o, nil
 }
 
@@ -206,6 +220,83 @@ func runWorktree(args []string) {
 		}
 	}
 
+	// Resolve the Claude account before doing any work. A typo here bills the
+	// wrong subscription, so an unknown name is an error rather than a silent
+	// fallback — the same rule --agent follows, and for a costlier reason.
+	accounts := claudeaccount.Load()
+	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
+	account := ""
+	// Re-checked here, not only at parse time: the parse-time guard can compare
+	// --account against --agent only when --agent was given. With default_agent
+	// set to codex or opencode, an explicit --account would otherwise be dropped
+	// on the floor and the session created as the wrong agent — the silent typo
+	// the explicit validation exists to prevent.
+	if opts.account != "" && ag != agent.Claude {
+		fmt.Fprintf(os.Stderr, "--account only applies to claude sessions (default_agent is %s)\n", ag)
+		os.Exit(1)
+	}
+	if !opts.noSession && ag == agent.Claude {
+		// The same per-origin allowlist the TUI enforces. Without it the policy
+		// held in one surface and not the other, which is worse than not having
+		// one — including for an explicit --account, which could name an account
+		// the origin disallows.
+		allowed := cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(repoPath)))
+		if opts.account != "" {
+			if _, ok := accounts.Get(opts.account); !ok {
+				fmt.Fprintf(os.Stderr, "unknown account %q — configure it in fleet first\n", opts.account)
+				os.Exit(1)
+			}
+			if !accountAllowed(opts.account, allowed) {
+				fmt.Fprintf(os.Stderr, "account %q is not in allowed_accounts for this origin\n", opts.account)
+				os.Exit(1)
+			}
+			account = opts.account
+		} else if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
+			Accounts: accounts.List(),
+			Strategy: cfg.GetAccountStrategy(),
+			Manual:   cfg.DefaultAccount,
+			Allowed:  allowed,
+		}); ok {
+			account = acct.Email
+			// Quota lives only in a running TUI's memory, so SelectOpts.Usage is
+			// empty here and least_used degrades to configured order. Said out
+			// loud — on stderr, not only in debug.log, since the person running a
+			// scripted `fleet worktree` never opens that: it can otherwise land on
+			// a nearly spent account with nothing to indicate the strategy didn't
+			// apply.
+			if cfg.GetAccountStrategy() == claudeaccount.StrategyLeastUsed && accounts.Len() > 1 {
+				fmt.Fprintf(os.Stderr, "Note: quota isn't available outside the TUI, so configured order chose %s.\n", account)
+				debuglog.Logger.Info("account select: no quota available from the CLI, configured order decided",
+					"chosen", account, "strategy", cfg.GetAccountStrategy())
+			}
+		} else if accounts.Len() > 0 {
+			// Select declined, and the two reasons it can decline want opposite
+			// answers — see claudeaccount.AllowedConfigured.
+			if !claudeaccount.AllowedConfigured(accounts.List(), allowed) {
+				fmt.Fprintf(os.Stderr, "allowed_accounts for this origin names no account fleet knows about (%s)\n",
+					strings.Join(allowed, ", "))
+				fmt.Fprintln(os.Stderr, "add one of them, or drop the restriction — launching would bill whichever account you happen to be logged into")
+				os.Exit(1)
+			}
+			// Every allowed account is logged out. Falling back to the ambient
+			// login is deliberate (see dropLoggedOut) — but saying nothing about
+			// it is not: the session is about to run as somebody fleet did not
+			// choose.
+			fmt.Fprintln(os.Stderr, "Note: every account allowed here is logged out — starting on your ambient Claude login.")
+			debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
+				"allowed", allowed, "configured", accounts.Len())
+		}
+		if account != "" {
+			if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
+				fmt.Fprintln(os.Stderr, conflict.Message(account))
+				// Only an env var is fatal — see AuthConflict.
+				if conflict.Fatal {
+					os.Exit(1)
+				}
+			}
+		}
+	}
+
 	name := workspace.SanitizeBranchName(opts.branch)
 	provider := workspace.ResolveProvider(repoPath)
 	if !provider.CanCreate() {
@@ -269,6 +360,7 @@ func runWorktree(args []string) {
 
 	s := session.NewSession(name, info.Path)
 	s.Agent = ag
+	s.Account = account
 	s.WorkspaceName = name
 	s.InitialPrompt = prompt
 	if err := s.Start(); err != nil {
@@ -401,4 +493,22 @@ func copyClaudeSettings(srcRepo, dstRepo string) {
 	if err := os.WriteFile(filepath.Join(dstDir, "settings.local.json"), data, 0600); err != nil {
 		debuglog.Logger.Error("copyClaudeSettings: failed to write settings file", "dst", dstRepo, "err", err)
 	}
+}
+
+// originExpandKey mirrors the TUI's key space for per-origin config
+// (`origin:<key>`), so allowed_accounts means the same thing from the CLI.
+func originExpandKey(originKey string) string {
+	if originKey == "" {
+		return ""
+	}
+	return "origin:" + originKey
+}
+
+// accountAllowed reports whether email passes the origin's allowlist. An empty
+// allowlist means unrestricted, matching claudeaccount.Select.
+func accountAllowed(email string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	return slices.Contains(allowed, email)
 }

@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -52,6 +53,7 @@ type Session struct {
 	Title                string
 	ProjectPath          string
 	Agent                agent.Type // which coding agent runs in this session (claude/codex)
+	Account              string     // Claude account (email) this session authenticates as; "" = ambient /login
 	Status               Status
 	TmuxSessionName      string
 	CreatedAt            time.Time
@@ -189,12 +191,133 @@ func (s *Session) initialRunStatus() Status {
 	return StatusRunning
 }
 
+// accountConfigDirFn resolves a Claude account email to its config directory —
+// a Claude Code home holding that account's own login. Set once at startup from
+// the accounts store.
+//
+// A package-level resolver rather than a field on Session because sessionEnv is
+// reached from Start, Restart and RespawnClaude — including for sessions rebuilt
+// by FromRow, which has no store to consult — and because re-logging an account
+// in must take effect on the next relaunch without touching every live Session.
+var (
+	accountDirMu sync.RWMutex
+	accountDirFn func(string) string
+)
+
+// SetAccountConfigDirFunc installs the account resolver. Passing nil disables
+// per-account auth, which is the state fleet runs in when no accounts are
+// configured.
+func SetAccountConfigDirFunc(fn func(string) string) {
+	accountDirMu.Lock()
+	defer accountDirMu.Unlock()
+	accountDirFn = fn
+}
+
+// accountResolverInstalled reports whether any binary wired up the store. Used
+// only to tell a wiring bug apart from a removed account when a lookup misses.
+func accountResolverInstalled() bool {
+	accountDirMu.RLock()
+	defer accountDirMu.RUnlock()
+	return accountDirFn != nil
+}
+
+func accountConfigDir(email string) string {
+	if email == "" {
+		return ""
+	}
+	accountDirMu.RLock()
+	fn := accountDirFn
+	accountDirMu.RUnlock()
+	if fn == nil {
+		return ""
+	}
+	return fn(email)
+}
+
 // sessionEnv returns the env vars to set on the tmux session for this fleet session.
 func (s *Session) sessionEnv() []string {
 	env := []string{
 		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
 	}
+	// Per-account auth. Claude only: this points at a claude.ai login that
+	// Codex and OpenCode neither read nor need.
+	//
+	// CLAUDE_CONFIG_DIR gives the session a complete Claude Code home of its
+	// own, whose Keychain item holds that account's login. Nothing is layered
+	// over anything, so the session authenticates exactly as a plain `claude`
+	// in a terminal does — which is why connectors and Remote Control survive
+	// here and did not under the ANTHROPIC_AUTH_TOKEN implementation this
+	// replaced.
+	//
+	// An unresolvable account (removed from the store while sessions still
+	// reference it) yields no var at all, so the session falls back to the
+	// ambient /login rather than failing to launch.
+	//
+	// Every branch logs: "which account did this session actually launch as" is
+	// the question every multi-account bug report starts with, and the answer is
+	// invisible once tmux has the env.
+	ag := agent.Parse(string(s.Agent))
+	switch {
+	case ag != agent.Claude:
+		if s.Account != "" {
+			debuglog.Logger.Info("session env: account ignored for non-claude agent",
+				"id", s.ID, "agent", ag, "account", s.Account)
+		}
+	case s.Account == "":
+		debuglog.Logger.Info("session env: no account, using ambient claude login", "id", s.ID)
+	default:
+		dir := accountConfigDir(s.Account)
+		if dir == "" {
+			// Two very different causes, so they are logged very differently.
+			//
+			// No resolver at all is a wiring bug in whichever binary is running:
+			// this session names an account, so accounts exist, so somebody forgot
+			// SetAccountConfigDirFunc. It is silent by nature — the session
+			// launches on the ambient login, persists a healthy-looking row, and
+			// keeps claiming the pinned account everywhere in the UI while billing
+			// another subscription. `fleet send` shipped that way. Error level so
+			// the next entry point to forget shows up in a log rather than an
+			// invoice.
+			if !accountResolverInstalled() {
+				debuglog.Logger.Error("session env: no account resolver installed; session will run on the ambient login",
+					"id", s.ID, "account", s.Account,
+					"fix", "call session.SetAccountConfigDirFunc during startup")
+				break
+			}
+			// The store simply no longer knows this account — the user removed it.
+			// Falls back rather than failing to launch.
+			debuglog.Logger.Warn("session env: account has no config dir, falling back to ambient login",
+				"id", s.ID, "account", s.Account)
+			break
+		}
+		// Provisioned on every launch, not just at add time: the user's real
+		// ~/.claude keeps moving, and an account dir that captured its state
+		// once would drift into a subtly different environment.
+		if err := claudeaccount.Provision(dir); err != nil {
+			debuglog.Logger.Error("session env: could not provision account config dir",
+				"id", s.ID, "account", s.Account, "dir", dir, "err", err)
+		}
+		// Warned here rather than only at the creation sites, because every
+		// launch path funnels through sessionEnv — create, restart, respawn and
+		// the idle-suspend wake. A conflicting credential can appear in the
+		// shell long after a session was created cleanly, and a config dir's
+		// login sits at the *bottom* of the precedence order, so one ambient key
+		// silently redirects the entire fleet. TmuxEnv blanks the two env vars;
+		// apiKeyHelper it cannot touch, which is exactly why this must be said.
+		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
+			debuglog.Logger.Warn("session env: an ambient credential outranks this account's login",
+				"id", s.ID, "account", s.Account, "conflict", conflict.Name,
+				"effect", "the session will authenticate as that credential, not the chosen account")
+		}
+		// TmuxEnv, not a bare CLAUDE_CONFIG_DIR: it also blanks any credential
+		// the tmux server inherited, which would otherwise outrank this dir's
+		// login and quietly run the session on someone else's billing.
+		env = append(env, claudeaccount.TmuxEnv(dir)...)
+		debuglog.Logger.Info("session env: launching as claude account",
+			"id", s.ID, "account", s.Account, "var", claudeaccount.ConfigDirEnvVar, "dir", dir)
+	}
+
 	// tmux passes -e values through as-is (no shell parses them), so this is the
 	// only place an arbitrary prompt can cross into the pane intact: the launch
 	// command expands "$FLEET_INITIAL_PROMPT" into one argv element regardless of
@@ -1595,6 +1718,7 @@ func (s *Session) ToRow() *SessionRow {
 		Title:           s.Title,
 		ProjectPath:     s.ProjectPath,
 		Agent:           string(s.Agent),
+		Account:         s.Account,
 		Status:          string(s.Status),
 		TmuxSession:     s.TmuxSessionName,
 		CreatedAt:       s.CreatedAt,
@@ -1681,6 +1805,7 @@ func FromRow(row *SessionRow) *Session {
 		Title:           row.Title,
 		ProjectPath:     row.ProjectPath,
 		Agent:           agent.Parse(row.Agent),
+		Account:         row.Account,
 		Status:          status,
 		TmuxSessionName: row.TmuxSession,
 		CreatedAt:       row.CreatedAt,

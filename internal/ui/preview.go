@@ -186,7 +186,14 @@ func previewPRSummary(pr *github.PR) string {
 // BuildPreviewFooter renders the rich bottom-border footer for the preview
 // panel: "<path> · <relative-time>". Path is shortened to use ~ for home and
 // truncated from the start ("…trailing/components") when too long.
-func BuildPreviewFooter(s *session.Session, maxWidth int) string {
+// BuildPreviewFooter renders the bottom-border chips for the selected session.
+//
+// account, when non-empty, names the Claude account this session authenticates
+// as. It lives here rather than on a sidebar row because it is reference
+// information — you want it for the one session you are looking at, not on
+// forty rows at once — and here it costs no title width. Callers pass "" when
+// no accounts are configured, so a single-subscription fleet is unchanged.
+func BuildPreviewFooter(s *session.Session, account string, maxWidth int) string {
 	if s == nil {
 		return ""
 	}
@@ -202,6 +209,11 @@ func BuildPreviewFooter(s *session.Session, maxWidth int) string {
 	parts := []string{bright.Render(path)}
 	if !s.LastAccessedAt.IsZero() {
 		parts = append(parts, bright.Render(relativeTime(s.LastAccessedAt)))
+	}
+	// Dim, and last: it answers a question you ask occasionally, so it should
+	// not compete with the path and the clock you read at a glance.
+	if account != "" {
+		parts = append(parts, DimStyle.Render(account))
 	}
 	return strings.Join(parts, DimStyle.Render(" · "))
 }

@@ -84,6 +84,27 @@ func TestBuildStatusReportBody_NeverLeaksUserPrompt(t *testing.T) {
 	}
 }
 
+// The add-account flow runs `claude setup-token` on a real tmux pane, so a
+// year-long credential can sit in pane scrollback and in the debug tail — both
+// of which this body publishes. Redaction lives in sanitizeForIssue so no call
+// site can forget it; this is the guard on that.
+func TestBuildStatusReportBody_NeverLeaksAccountToken(t *testing.T) {
+	const token = "sk-ant-oat01-AbCdEf0123456789_-GhIjKlMnOpQrStUvWxYz0123456789AbCdEf"
+
+	f := statusFormFixture()
+	f.snap.paneClean = "❯ paste this token:\n" + token + "\n"
+	f.snap.debugTail = "time=... msg=\"launching\" token=" + token
+	r := &diagnostics.Report{Version: "v2.22.0", OS: "darwin", Arch: "arm64"}
+
+	for _, includeContent := range []bool{true, false} {
+		f.includeContent = includeContent
+		body := buildStatusReportBody("wrong status after adding an account", session.StatusWaiting, f, r)
+		if strings.Contains(body, token) {
+			t.Fatalf("issue body leaked an account token (includeContent=%v):\n%s", includeContent, body)
+		}
+	}
+}
+
 func TestBuildStatusReportBody_AlwaysCarriesSignals(t *testing.T) {
 	f := statusFormFixture()
 	f.includeContent = false

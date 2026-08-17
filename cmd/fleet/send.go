@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/migration"
@@ -118,6 +119,15 @@ func runSend(args []string) {
 	migration.Run()
 	debuglog.Init()
 	defer debuglog.Close()
+
+	// Installed here for the same reason main.go and worktree.go install it: this
+	// command relaunches sessions. Waking a suspended one goes through Restart()
+	// → sessionEnv, and without the resolver that lookup misses, no
+	// CLAUDE_CONFIG_DIR is set, and the session comes back on the ambient login —
+	// then persists a healthy-looking row while every fleet surface keeps naming
+	// the account it is no longer running as. That is a wrong-subscription charge
+	// discovered from an invoice.
+	session.SetAccountConfigDirFunc(claudeaccount.Load().ConfigDirFor)
 
 	if err := tmux.IsTmuxAvailable(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

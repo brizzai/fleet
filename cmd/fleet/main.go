@@ -13,8 +13,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/brizzai/fleet/internal/analytics"
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/session"
@@ -241,6 +243,44 @@ func runAdd(path string) {
 
 	title := session.TitleFromPath(path)
 	s := session.NewSession(title, path)
+
+	// `fleet add` leaves Agent empty, which resolves to Claude at launch — so
+	// the session is account-eligible and needs one picked, or it silently
+	// ignores a configured multi-account setup.
+	accounts := claudeaccount.Load()
+	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
+	cfg := config.Load()
+	// The same per-origin allowlist the TUI and `fleet worktree` enforce.
+	// Shelling out to git is fine here where it is not in the TUI: this is a
+	// one-shot CLI, not the Update goroutine.
+	allowed := cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(path)))
+	if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
+		Accounts: accounts.List(),
+		Strategy: cfg.GetAccountStrategy(),
+		Manual:   cfg.DefaultAccount,
+		Allowed:  allowed,
+	}); ok {
+		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
+			fmt.Fprintln(os.Stderr, conflict.Message(acct.Email))
+			// A helper is not fatal: there is no command that clears it for one
+			// launch, so refusing would leave no way to run the session at all.
+			if conflict.Fatal {
+				os.Exit(1)
+			}
+		}
+		s.Account = acct.Email
+	} else if accounts.Len() > 0 {
+		// Same split as `fleet worktree` — see claudeaccount.AllowedConfigured.
+		if !claudeaccount.AllowedConfigured(accounts.List(), allowed) {
+			fmt.Fprintf(os.Stderr, "allowed_accounts for this origin names no account fleet knows about (%s)\n",
+				strings.Join(allowed, ", "))
+			fmt.Fprintln(os.Stderr, "add one of them, or drop the restriction — launching would bill whichever account you happen to be logged into")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "Note: every account allowed here is logged out — starting on your ambient Claude login.")
+		debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
+			"allowed", allowed, "configured", accounts.Len())
+	}
 
 	if err := s.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start session: %v\n", err)
