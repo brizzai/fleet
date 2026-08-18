@@ -1649,6 +1649,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prompt:        prompt,
 		})
 
+	case worktreeTicketTickMsg, worktreeTicketsMsg:
+		// Routed here, not through routeToModal: that is only reached from
+		// handleKey and handlePaste, so it carries key and paste messages only.
+		// These two are tea.Cmd results — the debounce firing and the lookup
+		// replying — and with no case here they were dropped in Update and the
+		// suggestion list never appeared at all. Both self-guard on visibility
+		// and generation, so forwarding unconditionally is safe.
+		dialog, cmd := h.worktreeDialog.Update(msg)
+		h.worktreeDialog = dialog
+		return h, cmd
 	case linearDisconnectedMsg:
 		h.connectLinear.Show() // re-reads the (now empty) credential state
 		return h, nil
