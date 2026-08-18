@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/git"
@@ -152,5 +154,88 @@ func TestTicketsTabIsInertWithoutLinear(t *testing.T) {
 	}
 	if cmd := h.maybeLoadPaletteTickets(); cmd != nil {
 		t.Error("an unconnected fleet must not spend a request on Ctrl+K")
+	}
+}
+
+// renderedPalette returns the palette's view with ANSI stripped, for asserting
+// on layout rather than styling.
+func renderedPalette(t *testing.T, h *Home) string {
+	t.Helper()
+	return ansi.Strip(h.commandPalette.View())
+}
+
+// TestTicketTabLayout pins what the tab actually looks like: grouped by Linear
+// state with counts, the state NOT repeated on every row, and fleet presence
+// carried in the badge column.
+func TestTicketTabLayout(t *testing.T) {
+	h := ticketHome(t)
+	h.sessions = []*session.Session{
+		{ID: "a", ProjectPath: "/c/brizzai-brz-2644-x", Status: session.StatusRunning},
+	}
+	h.writeGitInfo(func(m map[string]*git.RepoInfo) bool {
+		m["/c/brizzai-brz-2644-x"] = &git.RepoInfo{Branch: "brz-2644-x"}
+		return true
+	})
+	tickets := []linear.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started"},
+		{Identifier: "BRZ-3142", Title: "BYOCH backfill", StateName: "Todo", StateType: "unstarted"},
+		{Identifier: "BRZ-2732", Title: "audit feature flags", StateName: "Todo", StateType: "unstarted"},
+	}
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems(tickets))
+
+	got := renderedPalette(t, h)
+
+	// Grouped, with counts.
+	for _, want := range []string{"In Progress  1", "Todo  2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing group header %q:\n%s", want, got)
+		}
+	}
+	// The header carries the state, so the row must not repeat it.
+	if strings.Count(got, "In Progress") != 1 {
+		t.Errorf("the Linear state should appear once, as a header, not on every row:\n%s", got)
+	}
+	// Fleet presence: the session's status is on the row that has one.
+	if !strings.Contains(got, "running") {
+		t.Errorf("a ticket with a live session must say so:\n%s", got)
+	}
+	// A ticket row must never be badged "cmd" — the badge column is where
+	// "is this in fleet" lives.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "BRZ-") && strings.Contains(line, "cmd") {
+			t.Errorf("ticket row carries a cmd badge: %q", line)
+		}
+	}
+	// Titles must not be truncated to nothing on a wide terminal.
+	if !strings.Contains(got, "Storage optimization") {
+		t.Errorf("title was truncated despite the width being available:\n%s", got)
+	}
+	// One prompt marker, not two.
+	if strings.Contains(got, "> >") {
+		t.Errorf("the input is drawing a second prompt:\n%s", got)
+	}
+}
+
+// TestFilteredTicketsKeepTheirState: with no headers, the state has to come
+// back onto the row or a searched ticket loses it entirely.
+func TestFilteredTicketsKeepTheirState(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started"},
+	}))
+
+	h.commandPalette.filterInput.SetValue("storage")
+	h.commandPalette.rebuildFiltered()
+
+	got := renderedPalette(t, h)
+	if strings.Contains(got, "In Progress  1") {
+		t.Errorf("filtering must drop the group headers:\n%s", got)
+	}
+	if !strings.Contains(got, "In Progress") {
+		t.Errorf("a filtered row must carry its state, since no header does:\n%s", got)
 	}
 }

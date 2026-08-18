@@ -124,6 +124,11 @@ var (
 	// Panel title style (cyan/blue like agent-deck).
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 
+	// PaletteSectionStyle labels a group of palette rows (a Linear state). Dim
+	// and uppercase-spaced so it reads as structure rather than as another row
+	// competing with the ones under it.
+	PaletteSectionStyle = lipgloss.NewStyle().Foreground(ColorTextDim).Bold(true)
+
 	// Header bar style — no background fill so the top bar reads as part of
 	// the canvas, not a separate ribbon.
 	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
@@ -207,6 +212,11 @@ func ApplyPalette(p Palette) {
 	SessionStatusSelDimStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
 
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
+
+	// PaletteSectionStyle labels a group of palette rows (a Linear state). Dim
+	// and uppercase-spaced so it reads as structure rather than as another row
+	// competing with the ones under it.
+	PaletteSectionStyle = lipgloss.NewStyle().Foreground(ColorTextDim).Bold(true)
 	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
 
 	HelpKeyStyle = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)

@@ -10,6 +10,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/sahilm/fuzzy"
+
+	"github.com/brizzai/fleet/internal/session"
 )
 
 // sortRecents orders the recents slice by the rank map (lower rank = more recent).
@@ -43,6 +45,18 @@ type PaletteItem struct {
 	Detail   string // dim right-side detail (branch for places, empty for commands)
 	Shortcut string // right-aligned keybinding hint (commands only)
 	Haystack string // string used for fuzzy matching
+
+	// Group is a section header this row sits under when nothing is typed
+	// (ticket rows only — their Linear state). Empty means no section.
+	Group string
+
+	// SessionStatus is the status of the fleet session already working this
+	// row, and HasSession says whether there is one at all. They are separate
+	// because a zero Status is a real status, and "no session" has to be
+	// distinguishable from it — that distinction is the whole point of the
+	// badge column for tickets: is this in fleet, or not.
+	SessionStatus session.Status
+	HasSession    bool
 }
 
 // PaletteTab restricts which kinds of items show in the palette.
@@ -76,6 +90,7 @@ type CommandPaletteDialog struct {
 	scrollOff     int
 	activeTab     PaletteTab
 	filterInput   textinput.Model
+	sectionCounts map[string]int
 
 	// ticketsLoaded distinguishes an empty ticket tab that is still fetching
 	// from one that genuinely has nothing — the difference between "wait" and
@@ -86,8 +101,9 @@ type CommandPaletteDialog struct {
 type scoredItem struct {
 	PaletteItem
 	score          int
-	matchedIndexes []int // rune positions in Haystack — used to highlight matched chars in Name
-	recent         bool  // true when this row is sitting in the "recent" section
+	matchedIndexes []int  // rune positions in Haystack — used to highlight matched chars in Name
+	recent         bool   // true when this row is sitting in the "recent" section
+	section        string // group header this row falls under; "" for none
 }
 
 const paletteMaxVisible = 14
@@ -95,7 +111,10 @@ const paletteMaxVisible = 14
 // NewCommandPaletteDialog creates a new command palette dialog.
 func NewCommandPaletteDialog() *CommandPaletteDialog {
 	fi := textinput.New()
-	fi.Placeholder = "search commands, repos, worktrees..."
+	fi.Placeholder = "search commands, repos, worktrees, tickets..."
+	// The dialog draws its own dim prompt, so the input must not draw a second
+	// one — that is what rendered as "> >".
+	fi.Prompt = ""
 	fi.CharLimit = 64
 	fi.SetWidth(40)
 
@@ -228,17 +247,35 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 			if _, ok := recentRank[it.ID]; ok {
 				recents = append(recents, scoredItem{PaletteItem: it, recent: true})
 			} else {
-				rest = append(rest, scoredItem{PaletteItem: it})
+				// Sections only when nothing is typed. Grouping a fuzzy result
+				// is noise: the matches are already ordered by score, and
+				// headers would fragment ten rows into six sections.
+				rest = append(rest, scoredItem{PaletteItem: it, section: it.Group})
 			}
 		}
 		sortRecents(recents, recentRank)
 		d.filtered = append(d.filtered, recents...)
 		d.filtered = append(d.filtered, rest...)
+
+		d.sectionCounts = map[string]int{}
+		for _, it := range rest {
+			if it.section != "" {
+				d.sectionCounts[it.section]++
+			}
+		}
 	} else {
+		// Filtering drops the headers, so the state has to come back onto the
+		// row — otherwise a searched ticket loses the one fact the header was
+		// carrying for it.
+		d.sectionCounts = nil
 		matches := fuzzy.Find(query, haystacks)
 		for _, m := range matches {
+			it := tabItems[m.Index]
+			if it.Group != "" {
+				it.Detail = joinDetail(it.Group, it.Detail)
+			}
 			d.filtered = append(d.filtered, scoredItem{
-				PaletteItem:    tabItems[m.Index],
+				PaletteItem:    it,
 				score:          m.Score,
 				matchedIndexes: m.MatchedIndexes,
 			})
@@ -352,17 +389,33 @@ func (d *CommandPaletteDialog) View() string {
 
 		// Column layout: [prefix 2][badge 4][sep 1][name N][gap 2][right]
 		const reserved = 2 + paletteBadgeWidth + 1 + 2
-		const maxNameCap = 22
 
+		// Measure BOTH columns and give the name whatever the right column
+		// genuinely needs left over, rather than capping it at a constant. A
+		// fixed cap truncated ticket titles to "Storage opt…" on a wide
+		// terminal while the right half sat empty.
+		rightCol := 0
 		nameCol := 0
 		for i := d.scrollOff; i < end; i++ {
-			n := runeLen(d.filtered[i].Name)
-			if n > nameCol {
+			it := d.filtered[i]
+			if n := runeLen(it.Name); n > nameCol {
 				nameCol = n
 			}
+			r := runeLen(it.Detail)
+			if it.Shortcut != "" {
+				r += runeLen(it.Shortcut) + 1
+			}
+			if r > rightCol {
+				rightCol = r
+			}
 		}
-		if nameCol > maxNameCap {
-			nameCol = maxNameCap
+		// Never let the right column take more than half; a single verbose
+		// detail must not squeeze every name on screen.
+		if half := d.innerContentWidth() / 2; rightCol > half {
+			rightCol = half
+		}
+		if avail := d.innerContentWidth() - reserved - rightCol; nameCol > avail {
+			nameCol = avail
 		}
 
 		rightBudget := d.innerContentWidth() - reserved - nameCol
@@ -371,6 +424,13 @@ func (d *CommandPaletteDialog) View() string {
 		}
 
 		prevRecent := false
+		prevSection := ""
+		if d.scrollOff > 0 {
+			// Scrolled into the middle of a section: carry its name forward so
+			// the first visible row does not re-print a header it is under.
+			prevSection = d.filtered[d.scrollOff-1].section
+			prevRecent = d.filtered[d.scrollOff-1].recent
+		}
 		for i := d.scrollOff; i < end; i++ {
 			it := d.filtered[i]
 			selected := i == d.cursor
@@ -385,12 +445,30 @@ func (d *CommandPaletteDialog) View() string {
 			}
 			prevRecent = it.recent
 
+			if it.section != "" && it.section != prevSection {
+				if i > d.scrollOff || d.scrollOff == 0 {
+					if prevSection != "" {
+						b.WriteString("\n") // breathe between groups
+					}
+				}
+				head := it.section
+				if n := d.sectionCounts[it.section]; n > 0 {
+					head += "  " + fmt.Sprint(n)
+				}
+				b.WriteString("  " + PaletteSectionStyle.Render(head))
+				b.WriteString("\n")
+			}
+			prevSection = it.section
+
 			prefix := "  "
 			if selected {
 				prefix = SessionSelectionPrefix.Render("▸ ")
 			}
 
 			badge := renderKindBadge(it.Kind)
+			if it.Kind == PaletteKindTicket {
+				badge = renderTicketBadge(it.PaletteItem)
+			}
 
 			// Haystack is `Name + " " + Detail` (for places) or just `Name` (commands).
 			// Map matched haystack indexes back to the Name and Detail substrings.
@@ -497,6 +575,47 @@ func renderKindBadge(k PaletteItemKind) string {
 	return lipgloss.NewStyle().Foreground(col).Render(label)
 }
 
+// renderTicketBadge answers "is this already in fleet?" in the badge column.
+//
+// A ticket row's most useful fact is not that it is a ticket — the whole tab is
+// tickets — but whether work on it already exists here, and what that work is
+// doing. So the column carries the sidebar's own status vocabulary, and a
+// ticket with no worktree is deliberately BLANK rather than dimly marked:
+// absence should read as absence at a glance down the column.
+func renderTicketBadge(it PaletteItem) string {
+	if !it.HasSession {
+		return strings.Repeat(" ", paletteBadgeWidth)
+	}
+	glyph, style := sessionBadgeGlyph(it.SessionStatus)
+	return style.Render(pad(glyph, paletteBadgeWidth))
+}
+
+// sessionBadgeGlyph maps a session status onto the same dot and colour the
+// sidebar uses, so a status means the same thing everywhere in fleet.
+func sessionBadgeGlyph(st session.Status) (string, lipgloss.Style) {
+	switch st {
+	case session.StatusError:
+		return "✕", StatusErrorStyle
+	case session.StatusWaiting:
+		return "◐", StatusWaitingStyle
+	case session.StatusRunning, session.StatusStarting:
+		return "●", StatusRunningStyle
+	case session.StatusFinished:
+		return "●", StatusFinishedStyle
+	case session.StatusSuspended:
+		return "·", StatusSuspendedStyle
+	}
+	return "○", DimStyle
+}
+
+// pad right-pads to a rune width.
+func pad(s string, w int) string {
+	if n := runeLen(s); n < w {
+		return s + strings.Repeat(" ", w-n)
+	}
+	return s
+}
+
 func truncRunes(s string, maxRunes int) string {
 	if maxRunes <= 0 {
 		return ""
@@ -513,10 +632,21 @@ func truncRunes(s string, maxRunes int) string {
 
 func runeLen(s string) int { return len([]rune(s)) }
 
+// joinDetail combines a group label with a row detail for the filtered view,
+// where there are no headers to carry the group.
+func joinDetail(group, detail string) string {
+	if detail == "" {
+		return group
+	}
+	return group + " · " + detail
+}
+
 func (d *CommandPaletteDialog) dialogWidth() int {
-	w := d.width - 4
-	if w > 64 {
-		w = 64
+	w := d.width - 8
+	// Wide enough that a ticket title is readable rather than an ellipsis, and
+	// still an overlay rather than a takeover.
+	if w > 96 {
+		w = 96
 	}
 	if w < 30 {
 		w = 30

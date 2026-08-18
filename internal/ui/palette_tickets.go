@@ -113,19 +113,26 @@ func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 
 	items := make([]PaletteItem, 0, len(tickets))
 	for _, t := range tickets {
-		detail := t.StateName
-		if s := byTicket[t.Identifier]; s != nil {
-			detail = fmt.Sprintf("%s · %s", t.StateName, s.Status)
+		it := PaletteItem{
+			Kind: PaletteKindTicket,
+			ID:   t.Identifier,
+			Name: fmt.Sprintf("%s  %s", t.Identifier, t.Title),
+			// The Linear state is the group header, so it is deliberately NOT
+			// repeated on every row. The right column carries what fleet knows
+			// instead — and stays empty when there is nothing to say.
+			Group: t.StateName,
+			// Haystack must be exactly Name + " " + <right column>, because the
+			// renderer maps matched haystack indexes back onto those two
+			// strings by offset. Composing it any other way lights up the
+			// wrong characters.
+			Haystack: fmt.Sprintf("%s  %s %s", t.Identifier, t.Title, t.StateName),
 		}
-		items = append(items, PaletteItem{
-			Kind:   PaletteKindTicket,
-			ID:     t.Identifier,
-			Name:   fmt.Sprintf("%s  %s", t.Identifier, t.Title),
-			Detail: detail,
-			// The identifier and title both match, so "2644" and "storage"
-			// find the same row.
-			Haystack: t.Identifier + " " + t.Title + " " + t.StateName,
-		})
+		if s := byTicket[t.Identifier]; s != nil {
+			it.HasSession = true
+			it.SessionStatus = s.Status
+			it.Detail = string(s.Status)
+		}
+		items = append(items, it)
 	}
 	return items
 }
