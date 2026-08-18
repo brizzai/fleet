@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/claudeaccount"
+	"github.com/brizzai/fleet/internal/config"
 )
 
 func dlgAccounts(emails ...string) []claudeaccount.Account {
@@ -289,5 +290,59 @@ func accountsFixture() []claudeaccount.Account {
 	return []claudeaccount.Account{
 		{Email: "first@x.com", ConfigDir: "/d/1"},
 		{Email: "second@x.com", ConfigDir: "/d/2"},
+	}
+}
+
+// The test that would have caught the shipped bug, and the reason it exists in
+// this shape: every other test here calls Select directly or hands Show an
+// already-normalized literal, so nothing crossed the config.Config boundary —
+// which is exactly where a getter was flattening three strategies into one.
+//
+// So this drives the Settings cycler the way the dialog does, writing back to
+// config each step. With the flattening getter it visited least_used_5h forever
+// and never reached Waterfall or Manual.
+func TestSettingsCyclerVisitsEveryStrategy(t *testing.T) {
+	for _, dir := range []int{1, -1} {
+		cfg := &config.Config{}
+		seen := map[string]bool{}
+		for i := 0; i < len(accountStrategySet); i++ {
+			cfg.AccountStrategy = cycleString(cfg.GetAccountStrategy(), accountStrategySet, dir)
+			seen[cfg.GetAccountStrategy()] = true
+		}
+		for _, s := range accountStrategySet {
+			if !seen[s] {
+				t.Errorf("dir=%d: cycling never reached %q (visited %d of %d)", dir, s, len(seen), len(accountStrategySet))
+			}
+		}
+		// A full cycle must return to where it started, or the picker drifts.
+		if got := cfg.GetAccountStrategy(); got != claudeaccount.Strategies[0] {
+			t.Errorf("dir=%d: a full cycle ended on %q, want %q", dir, got, claudeaccount.Strategies[0])
+		}
+	}
+}
+
+// The label is read off config, so a getter that loses the value makes the row
+// look frozen: the key writes something the label never reflects.
+func TestSettingsLabelFollowsTheStoredStrategy(t *testing.T) {
+	for _, s := range claudeaccount.Strategies {
+		cfg := &config.Config{AccountStrategy: s}
+		if got, want := claudeaccount.StrategyLabel(cfg.GetAccountStrategy()), claudeaccount.StrategyLabel(s); got != want {
+			t.Errorf("stored %q renders %q, want %q", s, got, want)
+		}
+	}
+}
+
+// And the dialog agrees, since it is seeded from the same getter — with the old
+// one, 5-hour on disk opened the dialog reading "weekly" and the first s
+// re-saved the value already in force, so the keypress appeared to do nothing.
+func TestAccountsDialogOpensOnTheStoredStrategy(t *testing.T) {
+	for _, s := range claudeaccount.Strategies {
+		cfg := &config.Config{AccountStrategy: s}
+		d := NewAccountsDialog()
+		d.SetSize(120, 40)
+		d.Show(accountsFixture(), nil, "", cfg.GetAccountStrategy())
+		if d.strategy != s {
+			t.Errorf("stored %q, dialog opened on %q", s, d.strategy)
+		}
 	}
 }

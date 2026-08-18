@@ -100,20 +100,39 @@ func StrategyLabels() []string {
 	return out
 }
 
-// rankWindow says which usage window a strategy orders accounts by. The second
-// return is false for the strategies that don't rank at all (waterfall takes
-// configured order, manual takes the one it was given) — deliberately a bool
-// rather than a third Window value, because Window means "one of the two buckets
-// Anthropic reports" and a not-a-bucket member would leak into Name() and Pct().
-func rankWindow(strategy string) (Window, bool) {
+// RanksByUsage reports whether a strategy orders accounts by how much quota
+// they have left — true for the least-used family, false for waterfall
+// (configured order) and manual (the account it was given).
+//
+// Exported because callers outside this package need to say "does the usage
+// reading matter here" without naming the members, which is how the least-used
+// split broke a caller that compared against a single constant.
+func RanksByUsage(strategy string) bool {
 	switch ParseStrategy(strategy) {
-	case StrategyLeastUsed5H:
-		return WindowFiveHour, true
-	case StrategyLeastUsedWeekly:
-		return WindowSevenDay, true
+	case StrategyLeastUsed5H, StrategyLeastUsedWeekly:
+		return true
 	default:
-		return WindowFiveHour, false
+		return false
 	}
+}
+
+// rankWindow says which usage window orders accounts under this strategy.
+//
+// Total, and deliberately so. It used to return a second "does this strategy
+// rank at all" bool alongside a placeholder window, and Select discarded the
+// bool — so the one path that reaches the ranking with a non-least-used
+// strategy (manual, whose pin names no configured account, falling through by
+// design) balanced the 5-hour window while the default is weekly. A return
+// value every caller drops is not a safeguard.
+//
+// The non-ranking strategies answer with the default strategy's window, which
+// is also the semantically right answer: a user on manual has expressed no
+// ranking preference, so the fall-through should behave like an unset config.
+func rankWindow(strategy string) Window {
+	if ParseStrategy(strategy) == StrategyLeastUsed5H {
+		return WindowFiveHour
+	}
+	return WindowSevenDay
 }
 
 // SelectOpts are the inputs to an assignment decision.
@@ -180,7 +199,7 @@ func Select(o SelectOpts) (Account, bool) {
 	// Which window "least used" means is the strategy's whole content: the two
 	// buckets fail on different timescales, so ranking on the wrong one balances
 	// a resource that was never scarce.
-	win, _ := rankWindow(o.Strategy)
+	win := rankWindow(o.Strategy)
 	best := live[0]
 	bestPct := pctOf(o.Usage, best.Email, win)
 	for _, a := range live[1:] {

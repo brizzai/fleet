@@ -504,3 +504,44 @@ func TestAllSpentPicksTheAccountWhoseBlockingWindowClearsFirst(t *testing.T) {
 		t.Fatalf("selected %q, want hourly — it is the one that actually returns first", got.Email)
 	}
 }
+
+// Manual falls through to the automatic ranking when its pin names no
+// configured account — and that fall-through must rank on the *default*
+// window, not on whatever placeholder the strategy lookup happened to return.
+//
+// rankWindow used to hand back (WindowFiveHour, false) for manual and Select
+// dropped the bool, so this path silently balanced the fast window while the
+// documented default is weekly.
+func TestManualFallThroughRanksOnTheDefaultWindow(t *testing.T) {
+	// a wins on 5-hour, b wins on weekly. Neither is spent.
+	usage := map[string]Usage{
+		"a": {FiveHourPct: 10, SevenDayPct: 80, FetchedAt: testNow, FiveHourReset: testNow.Add(time.Hour)},
+		"b": {FiveHourPct: 80, SevenDayPct: 10, FetchedAt: testNow, FiveHourReset: testNow.Add(time.Hour)},
+	}
+	got, ok := Select(SelectOpts{
+		Accounts: accts("a", "b"),
+		Usage:    usage,
+		Strategy: StrategyManual,
+		Manual:   "removed@example.com", // no longer configured → falls through
+		Now:      testNow,
+	})
+	if !ok || got.Email != "b" {
+		t.Fatalf("manual fall-through = %q, want b — it ranked on the 5-hour window, not the weekly default", got.Email)
+	}
+}
+
+// RanksByUsage exists so callers outside this package can ask "does the quota
+// reading matter here" without naming members — the split broke a caller that
+// compared against a single constant, and would break it again.
+func TestRanksByUsageCoversTheWholeLeastUsedFamily(t *testing.T) {
+	for _, s := range []string{StrategyLeastUsedWeekly, StrategyLeastUsed5H, StrategyLeastUsed, ""} {
+		if !RanksByUsage(s) {
+			t.Errorf("RanksByUsage(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{StrategyWaterfall, StrategyManual} {
+		if RanksByUsage(s) {
+			t.Errorf("RanksByUsage(%q) = true, want false", s)
+		}
+	}
+}

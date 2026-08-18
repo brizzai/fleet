@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
@@ -65,11 +66,12 @@ type Config struct {
 	// GetSessionSuspendMode. See internal/ui suspend sweep.
 	SessionSuspendMode string `json:"session_suspend_mode,omitempty"`
 
-	// AccountStrategy picks which Claude account a new session runs under:
-	// "least_used" (default), "waterfall", or "manual". Read via
-	// GetAccountStrategy. Accounts themselves live in accounts.json, not here —
-	// their tokens are year-long credentials and this file is published in bug
-	// reports.
+	// AccountStrategy picks which Claude account a new session runs under. The
+	// values are claudeaccount.Strategies, resolved by claudeaccount.ParseStrategy
+	// via GetAccountStrategy — deliberately not restated here, since a stale copy
+	// of that list in this package is exactly what made one mode unreachable.
+	// Accounts themselves live in accounts.json, not here — this file is
+	// published in bug reports.
 	AccountStrategy string `json:"account_strategy,omitempty"`
 	// DefaultAccount is the account email used under the "manual" strategy.
 	DefaultAccount string `json:"default_account,omitempty"`
@@ -156,18 +158,19 @@ func (c *Config) GetDefaultAgent() string {
 	}
 }
 
-// GetAccountStrategy returns the normalized Claude-account assignment strategy
-// ("least_used", "waterfall", or "manual"), defaulting to least_used. Normalized
-// like GetDefaultAgent so a hand-edited " Waterfall " still resolves.
+// GetAccountStrategy returns the normalized Claude-account assignment strategy.
+//
+// Delegated to claudeaccount.ParseStrategy rather than switching here, which is
+// what this used to do: the strategy set grew a member (the least-used split)
+// and this copy did not, so it flattened every least-used value back to the
+// legacy alias. That silently made one whole mode unreachable — the config
+// round-trip lost it, the Settings cycler could never leave the value the alias
+// mapped to, and the label reported a mode the user had not chosen.
+//
+// One list of strategies, one parser. Enumerating the values in a doc comment
+// here is the same mistake in prose, so it doesn't.
 func (c *Config) GetAccountStrategy() string {
-	switch strings.TrimSpace(strings.ToLower(c.AccountStrategy)) {
-	case "waterfall":
-		return "waterfall"
-	case "manual":
-		return "manual"
-	default:
-		return "least_used"
-	}
+	return claudeaccount.ParseStrategy(c.AccountStrategy)
 }
 
 // GetAllowedAccounts returns the account emails permitted under the given
