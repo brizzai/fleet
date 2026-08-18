@@ -38,7 +38,12 @@ const oauthScopes = "read,write"
 // setup can point at its own registration.
 var clientID = defaultClientID
 
-const defaultClientID = ""
+// Registered in the Linear workspace `fleet` (linear.app/brizz-fleet), which
+// exists only to own this application. A dedicated workspace is Linear's own
+// recommendation and it keeps the registration out of any company workspace,
+// where an admin could revoke it and break browser sign-in for every fleet user
+// at once.
+const defaultClientID = "209efefc234aea3e928525f6d7ba73ee"
 
 // callbackPorts are the loopback ports fleet will listen on, in order.
 //
@@ -47,6 +52,10 @@ const defaultClientID = ""
 // them, because a developer machine running a dozen services will occasionally
 // have one taken, and losing the whole sign-in to a port collision would be a
 // silly way to fail.
+//
+// These EXACTLY mirror the redirect URIs registered on the application. Changing
+// this list without updating the registration breaks sign-in with an error that
+// comes from Linear and says nothing about ports.
 var callbackPorts = []int{53682, 53683, 53684}
 
 const callbackPath = "/oauth/callback"
