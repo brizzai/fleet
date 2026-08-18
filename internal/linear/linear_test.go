@@ -12,69 +12,147 @@ import (
 	"testing"
 )
 
-// stringLiteralsIn returns every string literal inside the named function, so a
-// guard can assert on the argv a subprocess is built from.
-func stringLiteralsIn(t *testing.T, file, fn string) string {
-	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, file, nil, 0)
+// TestNoLinearSubprocess is the point of the move off the CLI, pinned.
+//
+// An earlier version of this package shelled out to `linear`, which cost three
+// version-skew bugs in one session: a release compiled without network access to
+// uploads.linear.app that failed every image download and still exited 0, an
+// `auth login` command that did not exist in the installed version, and an error
+// message naming a `configure` command that never existed at all. None of that
+// can come back while this holds.
+//
+// The guard is an allowlist rather than a ban, because the package legitimately
+// runs three OS helpers — two keychains and a browser opener. An allowlist fails
+// on anything new, which is the property that matters: adding a subprocess here
+// should require saying so out loud.
+func TestNoLinearSubprocess(t *testing.T) {
+	allowed := map[string]string{
+		"security":    "macOS keychain",
+		"secret-tool": "libsecret keychain",
+		"open":        "browser, macOS",
+		"xdg-open":    "browser, Linux",
+	}
+
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse %s: %v", file, err)
+		t.Fatal(err)
 	}
-	var out strings.Builder
-	found := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		d, ok := n.(*ast.FuncDecl)
-		if !ok || d.Name.Name != fn {
-			return true
+	fset := token.NewFileSet()
+	scanned := 0
+
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-		found = true
-		ast.Inspect(d.Body, func(m ast.Node) bool {
-			if lit, ok := m.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				out.WriteString(lit.Value + " ")
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-			return true
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "exec" {
+				return true
+			}
+			if sel.Sel.Name != "Command" && sel.Sel.Name != "CommandContext" && sel.Sel.Name != "LookPath" {
+				return true
+			}
+			// The binary is the first string-literal argument, after the ctx
+			// that CommandContext takes.
+			for _, arg := range call.Args {
+				lit, ok := arg.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				bin := strings.Trim(lit.Value, `"`)
+				if _, allow := allowed[bin]; !allow {
+					t.Errorf("%s runs %q — the data path is HTTP now, on purpose. "+
+						"If this is a genuinely new OS helper, add it to the allowlist above.", name, bin)
+				}
+				return false
+			}
+			return false
 		})
-		return false
-	})
-	if !found {
-		t.Fatalf("%s not found in %s — renamed? this guard is now vacuous", fn, file)
 	}
-	return out.String()
-}
-
-// TestMarkdownFetchNeverUsesJSON is the guard for the bug that cost the user
-// every screenshot on every ticket. The CLI returns from its --json branch
-// BEFORE its image downloader runs, so a JSON fetch can never produce images —
-// it is structural, survives CLI upgrades, and is invisible (exit code 0).
-func TestMarkdownFetchNeverUsesJSON(t *testing.T) {
-	md := stringLiteralsIn(t, "cli.go", "fetchMarkdown")
-	if strings.Contains(md, `"--json"`) || strings.Contains(md, `"-j"`) {
-		t.Error("fetchMarkdown must NOT pass --json: the CLI returns from the JSON branch " +
-			"before downloadIssueImages runs, so the images never reach disk and the agent " +
-			"is handed 401 uploads.linear.app URLs instead")
-	}
-	if !strings.Contains(md, `"--no-pager"`) {
-		t.Error("fetchMarkdown must pass --no-pager")
-	}
-
-	// Converse arm, so this can't pass by fetchMarkdown quietly losing its argv.
-	if meta := stringLiteralsIn(t, "cli.go", "Fetch"); !strings.Contains(meta, `"--json"`) {
-		t.Error("Fetch (metadata) must pass --json")
+	if scanned == 0 {
+		t.Fatal("scanned no files — this guard is vacuous")
 	}
 }
 
-// TestStateWriteNeverUsesIssueStart pins the other CLI trap: `linear issue
-// start` moves the state AND creates its own git branch, which would collide
-// with the worktree fleet just made.
-func TestStateWriteNeverUsesIssueStart(t *testing.T) {
-	lits := stringLiteralsIn(t, "cli.go", "MoveToStarted")
-	if strings.Contains(lits, `"start"`) {
-		t.Error("MoveToStarted must use `issue update -s started`, never `issue start` — " +
-			"the latter also creates a branch and would collide with fleet's worktree")
+// TestStartedStateResolvesByTypeAndPosition pins how the one mutation picks a
+// state.
+//
+// Matching on TYPE rather than name is what makes this work on a team whose
+// started state is called "In Dev" or "Doing". Position ordering matters just as
+// much: a real team has several started states, and the lowest position is the
+// one a human means by "I am starting this" — picking any other would move a
+// fresh ticket straight to In Review.
+func TestStartedStateResolvesByTypeAndPosition(t *testing.T) {
+	issue := &issueFull{Team: &issueTeam{}}
+	issue.Team.States.Nodes = []workflowState{
+		{ID: "d", Name: "Done", Type: "completed", Position: 3},
+		{ID: "r", Name: "In Review", Type: "started", Position: 1002},
+		{ID: "p", Name: "In Dev", Type: "started", Position: 2},
+		{ID: "b", Name: "Backlog", Type: "backlog", Position: 0},
 	}
-	if !strings.Contains(lits, `"update"`) || !strings.Contains(lits, `"started"`) {
-		t.Errorf("MoveToStarted should run `issue update <id> -s started`, got literals: %s", lits)
+	got, ok := issue.startedState()
+	if !ok || got.ID != "p" {
+		t.Fatalf("startedState = (%+v, %v), want the lowest-position started state (In Dev)", got, ok)
+	}
+
+	// A team with no started state at all is a team fleet has nothing to say
+	// about, not an error.
+	issue.Team.States.Nodes = []workflowState{{ID: "b", Name: "Backlog", Type: "backlog"}}
+	if _, ok := issue.startedState(); ok {
+		t.Error("a team with no started state must report none")
+	}
+}
+
+// TestGraphQLErrorClassification pins the shapes the live API actually returns.
+//
+// Captured from api.linear.app rather than guessed, because the obvious guess is
+// wrong in the case that matters most: an unknown issue comes back as HTTP 200
+// with an errors[] entry whose own extensions carry statusCode 400. Classifying
+// on the HTTP status alone would report "no such issue" as a generic failure and
+// break the negative pin that stops fleet re-asking on every session start.
+func TestGraphQLErrorClassification(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		errs   []gqlErrorEntry
+		want   error
+	}{
+		{"ok", 200, nil, nil},
+		{"unknown issue is a 200", 200,
+			[]gqlErrorEntry{{Message: "Entity not found: Issue"}}, ErrNotFound},
+		{"rejected credential", 401,
+			[]gqlErrorEntry{{Message: "Authentication required, not authenticated"}}, ErrNotAuthenticated},
+		{"auth error code without a 401", 200,
+			[]gqlErrorEntry{{Message: "nope", Extensions: struct {
+				Type string `json:"type"`
+				Code string `json:"code"`
+			}{Code: "AUTHENTICATION_ERROR"}}}, ErrNotAuthenticated},
+		{"forbidden", 403, nil, ErrNotAuthenticated},
+	}
+	for _, c := range cases {
+		got := classifyGraphQL(c.status, c.errs)
+		if got != c.want {
+			t.Errorf("%s: classifyGraphQL = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// An unrecognised error must still be an error, not a silent success.
+	if err := classifyGraphQL(200, []gqlErrorEntry{{Message: "Query too complex"}}); err == nil {
+		t.Error("an unclassified errors[] entry must not read as success")
 	}
 }
 
@@ -141,58 +219,71 @@ func TestSeedPromptOmitsImagesWhenNoneDownloaded(t *testing.T) {
 }
 
 func TestIdentifierFromBranch(t *testing.T) {
+	brz := []string{"BRZ"}
 	cases := []struct {
-		branch, team, want string
+		branch string
+		teams  []string
+		want   string
 	}{
-		{"brz-3182-magic-fix", "BRZ", "BRZ-3182"},
-		{"BRZ-3182-Remove-streamer", "BRZ", "BRZ-3182"},
-		{"alice/brz-1594-conversation-items", "BRZ", "BRZ-1594"},
-		{"brz-3182", "BRZ", "BRZ-3182"},
-		{"BRZ-3182", "brz", "BRZ-3182"},
+		{"brz-3182-magic-fix", brz, "BRZ-3182"},
+		{"BRZ-3182-Remove-streamer", brz, "BRZ-3182"},
+		{"alice/brz-1594-conversation-items", brz, "BRZ-1594"},
+		{"brz-3182", brz, "BRZ-3182"},
+		{"BRZ-3182", []string{"brz"}, "BRZ-3182"},
 
-		// The whole point of the team gate. The CLI's own branch parser has no
-		// gate and reads these as identifiers for teams that don't exist.
-		{"fix-123-something", "BRZ", ""},
-		{"release-2024-cleanup", "BRZ", ""},
-		{"eng-42-other-team", "BRZ", ""},
+		// A repo may track more than one team — a workspace routinely has
+		// several, and both must resolve.
+		{"prd-7-spec", []string{"BRZ", "PRD"}, "PRD-7"},
+		{"brz-9-x", []string{"BRZ", "PRD"}, "BRZ-9"},
+
+		// The whole point of the team gate. An ungated parser reads these as
+		// identifiers for teams that don't exist.
+		{"fix-123-something", brz, ""},
+		{"release-2024-cleanup", brz, ""},
+		{"eng-42-other-team", brz, ""},
 
 		// Real non-ticket branches from the user's tree.
-		{"kinshasa", "BRZ", ""},
-		{"frosty-mahavira", "BRZ", ""},
-		{"brzctl-gcp-project-default", "BRZ", ""},
-		{"master", "BRZ", ""},
+		{"kinshasa", brz, ""},
+		{"frosty-mahavira", brz, ""},
+		{"brzctl-gcp-project-default", brz, ""},
+		{"master", brz, ""},
 
-		{"brz-3182-x", "", ""},
-		{"", "BRZ", ""},
+		{"brz-3182-x", nil, ""},
+		{"", brz, ""},
 	}
 	for _, c := range cases {
-		if got := IdentifierFromBranch(c.branch, c.team); got != c.want {
-			t.Errorf("IdentifierFromBranch(%q, %q) = %q, want %q", c.branch, c.team, got, c.want)
+		if got := IdentifierFromBranch(c.branch, c.teams); got != c.want {
+			t.Errorf("IdentifierFromBranch(%q, %v) = %q, want %q", c.branch, c.teams, got, c.want)
 		}
 	}
 }
 
 func TestLooksLikeIdentifier(t *testing.T) {
+	brz := []string{"BRZ"}
 	cases := []struct {
-		text, team, want string
-		ok               bool
+		text  string
+		teams []string
+		want  string
+		ok    bool
 	}{
-		{"BRZ-3182", "BRZ", "BRZ-3182", true},
-		{"brz-3182", "BRZ", "BRZ-3182", true},
-		{" BRZ-3182 ", "BRZ", "BRZ-3182", true},
+		{"BRZ-3182", brz, "BRZ-3182", true},
+		{"brz-3182", brz, "BRZ-3182", true},
+		{" BRZ-3182 ", brz, "BRZ-3182", true},
+		{"prd-7", []string{"BRZ", "PRD"}, "PRD-7", true},
 
 		// Prose must NOT look like an identifier — this is what keeps the
 		// suggestion list from ever stealing Enter from someone naming a branch.
-		{"drawer", "BRZ", "", false},
-		{"brz-3182-fix", "BRZ", "", false},
-		{"fix-123", "BRZ", "", false},
-		{"", "BRZ", "", false},
+		{"drawer", brz, "", false},
+		{"brz-3182-fix", brz, "", false},
+		{"fix-123", brz, "", false},
+		{"", brz, "", false},
+		{"BRZ-3182", nil, "", false},
 	}
 	for _, c := range cases {
-		got, ok := LooksLikeIdentifier(c.text, c.team)
+		got, ok := LooksLikeIdentifier(c.text, c.teams)
 		if got != c.want || ok != c.ok {
-			t.Errorf("LooksLikeIdentifier(%q, %q) = (%q, %v), want (%q, %v)",
-				c.text, c.team, got, ok, c.want, c.ok)
+			t.Errorf("LooksLikeIdentifier(%q, %v) = (%q, %v), want (%q, %v)",
+				c.text, c.teams, got, ok, c.want, c.ok)
 		}
 	}
 }
@@ -247,37 +338,107 @@ func TestDetectExtRecoversExtension(t *testing.T) {
 	}
 }
 
-func TestFindImagesClassifiesLocalAndRemote(t *testing.T) {
+// TestFindImagesTakesOnlyRemoteLinks pins what fleet is willing to go and fetch.
+//
+// Linear's markdown carries absolute uploads.linear.app URLs; anything else in a
+// description — a relative path, a data URI, a link to someone's laptop — is not
+// something fleet has any business reading off the filesystem and copying into a
+// worktree.
+func TestFindImagesTakesOnlyRemoteLinks(t *testing.T) {
 	md := []byte("text\n" +
-		"![shot](/var/folders/x/linear-cli-images/abc/image)\n" +
+		"![shot](/etc/passwd)\n" +
+		"![rel](../../secrets.png)\n" +
+		"![inline](data:image/png;base64,AAAA)\n" +
 		"![other](https://uploads.linear.app/a/b/c)\n")
 	refs := findImages(md)
-	if len(refs) != 2 {
-		t.Fatalf("found %d images, want 2", len(refs))
+	if len(refs) != 1 {
+		t.Fatalf("found %d images, want only the remote one: %+v", len(refs), refs)
 	}
-	if refs[0].remote {
-		t.Error("an absolute local path must not be classified remote")
-	}
-	if !refs[1].remote {
-		t.Error("an uploads.linear.app URL must be classified remote — that is the " +
-			"signal that the CLI's downloader failed and fleet should fetch it")
+	if refs[0].target != "https://uploads.linear.app/a/b/c" {
+		t.Errorf("kept the wrong link: %q", refs[0].target)
 	}
 }
 
-func TestTeamKeyReadsOnlyTeamID(t *testing.T) {
+func TestTeamKeysReadOnlyTeamID(t *testing.T) {
 	dir := t.TempDir()
 	toml := "# linear cli\nworkspace = \"brizz\"\nteam_id = \"BRZ\"\napi_key = \"lin_api_SECRET\"\n"
-	if err := os.WriteFile(filepath.Join(dir, configFile), []byte(toml), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, linearConfigFile), []byte(toml), 0644); err != nil {
 		t.Fatal(err)
 	}
-	key, ok := TeamKey(dir)
-	if !ok || key != "BRZ" {
-		t.Fatalf("TeamKey = (%q, %v), want (BRZ, true)", key, ok)
+	got := TeamKeys(dir)
+	if len(got) != 1 || got[0] != "BRZ" {
+		t.Fatalf("TeamKeys = %v, want [BRZ]", got)
 	}
 
-	// fleet must never carry a credential; the key never leaves the file.
-	if _, ok := TeamKey(t.TempDir()); ok {
-		t.Error("a repo with no .linear.toml must report not-connected")
+	// fleet resolves its own credential. An api_key sitting in another tool's
+	// config is none of its business, and must never be adopted.
+	if data, err := os.ReadFile(filepath.Join(dir, linearConfigFile)); err != nil {
+		t.Fatal(err)
+	} else if !strings.Contains(string(data), "lin_api_SECRET") {
+		t.Fatal("precondition: the fixture should contain an api_key to ignore")
+	}
+
+	// A repo naming no team is the resting state — nil, not an error, and it is
+	// what keeps an unrelated repo silent for a connected user.
+	if got := TeamKeys(t.TempDir()); got != nil {
+		t.Errorf("a repo with no Linear config must report no teams, got %v", got)
+	}
+
+	// .fleet.json wins over .linear.toml: it is fleet's own config, and it is
+	// the only form available to someone who never installed the other tool.
+	if err := os.WriteFile(filepath.Join(dir, ".fleet.json"),
+		[]byte(`{"linear":{"teams":["prd","inf"]}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got = TeamKeys(dir)
+	if len(got) != 2 || got[0] != "PRD" || got[1] != "INF" {
+		t.Fatalf("TeamKeys = %v, want [PRD INF] upper-cased from .fleet.json", got)
+	}
+}
+
+// TestCredentialResolutionOrder pins that the environment outranks the store.
+//
+// That order is what lets a stale or wrong stored credential be overridden
+// without any UI, and it is the only path that works in CI, where there is no
+// keychain to read.
+func TestCredentialResolutionOrder(t *testing.T) {
+	orig := getenv
+	t.Cleanup(func() { getenv = orig; resetCredentialForTest() })
+
+	getenv = func(k string) string {
+		if k == APIKeyEnvVar {
+			return "lin_api_fromEnv"
+		}
+		return ""
+	}
+	resetCredentialForTest()
+	if !Available() {
+		t.Fatal("an environment key must make Linear available without touching the keychain")
+	}
+	c, err := credential()
+	if err != nil || c.Token != "lin_api_fromEnv" || c.Kind != credAPIKey {
+		t.Fatalf("credential = (%+v, %v), want the environment key", c, err)
+	}
+	if got := ConnectedVia(); !strings.Contains(got, APIKeyEnvVar) {
+		t.Errorf("ConnectedVia = %q, should name the environment so the dialog can say it is not disconnectable from here", got)
+	}
+
+	getenv = func(string) string { return "" }
+	resetCredentialForTest()
+	if _, err := credential(); err != ErrNotConnected {
+		t.Errorf("with no environment key and nothing stored, credential must be ErrNotConnected, got %v", err)
+	}
+}
+
+// TestAuthHeaderFormDiffersByKind pins the one place the two credential kinds
+// diverge. A personal API key is sent raw; an OAuth token takes Bearer. Sending
+// either in the other form reads as a rejected credential.
+func TestAuthHeaderFormDiffersByKind(t *testing.T) {
+	if got := (Credential{Kind: credAPIKey, Token: "k"}).authHeader(); got != "k" {
+		t.Errorf("api key header = %q, want the raw token", got)
+	}
+	if got := (Credential{Kind: credOAuth, Token: "k"}).authHeader(); got != "Bearer k" {
+		t.Errorf("oauth header = %q, want Bearer", got)
 	}
 }
 
@@ -313,33 +474,12 @@ func TestNegativePinStopsRefetch(t *testing.T) {
 	}
 }
 
-// TestDecodeTicketListAgainstV2Payload pins the JSON shape `linear issue query
-// --json` actually returns on CLI v2.5.0.
-//
-// It is NOT a bare array: v2.0.0 changed the output to preserve GraphQL
-// connection shapes, so it arrives as {"nodes": [...], "pageInfo": {...}}. A
-// decoder written against the obvious guess returns nothing, silently, and the
-// suggestion list simply never appears.
-//
-// The fixture mirrors a real response's structure — all 17 v2 keys per node, a
-// nested state object — with invented content, because this repo is public and
-// a captured payload would publish a workspace's roadmap.
-func TestDecodeTicketListAgainstV2Payload(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "query_v2.json"))
-	if err != nil {
-		t.Skipf("no captured payload: %v", err)
-	}
-	got := decodeTicketList(data)
-	if len(got) == 0 {
-		t.Fatal("decoded no tickets from a v2-shaped query payload")
-	}
-	for _, ti := range got {
-		if ti.Identifier == "" || ti.Title == "" {
-			t.Errorf("incomplete ticket decoded: %+v", ti)
-		}
-	}
-	if got[0].StateName == "" {
-		t.Error("state.name did not decode — the suggestion rows would show no state")
-	}
-	t.Logf("decoded %d tickets, first = %s %q (%s)", len(got), got[0].Identifier, got[0].Title, got[0].StateName)
+// resetCredentialForTest drops the cached credential so a test can re-resolve.
+func resetCredentialForTest() {
+	credState.mu.Lock()
+	credState.cred = Credential{}
+	credState.loaded = false
+	credState.warmed.Store(false)
+	credState.present.Store(false)
+	credState.mu.Unlock()
 }

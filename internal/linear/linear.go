@@ -1,53 +1,54 @@
-// Package linear reads Linear issues by shelling out to the `linear` CLI
-// (github.com/schpet/linear-cli), the same way internal/github shells out to
-// `gh` for PR badges.
+// Package linear reads Linear issues through Linear's own GraphQL API.
 //
 // Design rules, in the order they matter:
 //
-//   - fleet stores no credential. The CLI owns auth (LINEAR_API_KEY, or api_key
-//     in .linear.toml). We never read that file's api_key, never persist a
-//     token, and never forward one into a session's tmux environment.
-//   - The feature is per-repo and opt-out-by-absence: no `linear` on PATH, or no
-//     .linear.toml at the repo root, and every entry point here is inert.
-//   - Nothing in this package runs on the Bubble Tea Update goroutine or in the
-//     status/git workers. Every call is event-driven and one-shot, which is what
-//     keeps it clear of workerStallThreshold's budget.
+//   - fleet holds exactly one credential and nothing else. It is stored in the
+//     OS keychain where there is one, read at request time, and never written
+//     into a session's tmux environment, a log line, or a bug report.
+//   - The feature is per-repo and opt-out-by-absence: a repo that names no
+//     Linear team (via .fleet.json or .linear.toml) behaves exactly as it did
+//     before this package existed, even for a connected user.
+//   - Nothing here runs on the Bubble Tea Update goroutine or in the status/git
+//     workers. Every call is event-driven and one-shot, which is what keeps it
+//     clear of workerStallThreshold's budget. The two functions the UI does call
+//     synchronously — Available and TeamKeys — touch no network and no keychain.
+//
+// There is deliberately no `linear` CLI anywhere in here. An earlier version
+// shelled out to one, which cost three version-skew bugs in a single session and
+// would not have transferred to Jira.
 package linear
 
 import (
 	"errors"
-	"os/exec"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/brizzai/fleet/internal/workspace"
 )
 
-// Timeouts. Each is sized against a measured cost, in the style of ghTimeout.
+// Timeouts. Each is sized against a measured cost.
 const (
-	// metaTimeout bounds `linear issue view --json`: one GraphQL round trip,
-	// measured at ~0.5s. 10s is 20x headroom for a slow link while staying small
-	// enough that a wedged metadata call still leaves budget for the markdown
-	// pass inside an inference deadline.
+	// metaTimeout bounds the small queries — a lite issue fetch, a search, the
+	// workspace read. One GraphQL round trip, measured at ~260ms. 10s is ~40x
+	// headroom for a slow link while staying well inside an inference deadline.
 	metaTimeout = 10 * time.Second
 
-	// markdownTimeout bounds the markdown pass, which is one GraphQL round trip
-	// PLUS N image downloads the CLI performs sequentially. At the image cap and
-	// a few seconds each that is tens of seconds; 45s clears it. This never runs
-	// on the status worker, so it cannot interact with workerStallThreshold.
-	markdownTimeout = 45 * time.Second
+	// fullTimeout bounds the full issue document (description, comments,
+	// labels, workflow states). Same single round trip as metaTimeout, but a
+	// much larger payload, so it gets its own budget rather than borrowing one
+	// sized for a five-field reply.
+	fullTimeout = 20 * time.Second
 
-	// stateTimeout bounds `linear issue update -s started`: a workflow-states
-	// query then an issueUpdate mutation — two round trips, the shape ghTimeout
-	// was sized for.
+	// stateTimeout bounds the one mutation fleet ever makes. The workflow states
+	// came along with the full fetch, so this really is a single round trip.
 	stateTimeout = 15 * time.Second
 
-	// authTimeout bounds `linear auth token`, which only reads local config and
-	// env. Past a few seconds it is wedged, not slow.
-	authTimeout = 5 * time.Second
-
-	// imageFetchTimeout bounds one fallback download of an uploads.linear.app
-	// asset that the CLI failed to fetch. Sized for maxImageBytes on a poor link.
+	// imageFetchTimeout bounds one uploads.linear.app download, sized for
+	// maxImageBytes on a poor link.
 	imageFetchTimeout = 20 * time.Second
 )
 
@@ -60,30 +61,29 @@ const (
 	maxImages     = 12
 	maxImageBytes = 8 << 20
 	maxTotalBytes = 32 << 20
+
+	// maxResponseBytes caps a GraphQL reply. An issue with fifty long comments
+	// is well under a megabyte; this exists so a wedged or hostile endpoint
+	// can't stream unboundedly into memory.
+	maxResponseBytes = 8 << 20
 )
 
 var (
-	// ErrNotInstalled means the `linear` binary is not on PATH. Never surfaced
-	// as an error to a user who did not ask for Linear.
-	ErrNotInstalled = errors.New("linear: CLI not installed")
+	// ErrNotConnected means fleet has no Linear credential. This is the resting
+	// state for everyone who has not connected, so it is never surfaced as an
+	// error — the ticket surfaces simply stay inert.
+	ErrNotConnected = errors.New("linear: not connected")
 
-	// ErrNotConfigured means the CLI found no API token.
-	ErrNotConfigured = errors.New("linear: no API token configured")
-
-	// ErrNotAuthenticated means the token was rejected.
-	ErrNotAuthenticated = errors.New("linear: API token rejected")
+	// ErrNotAuthenticated means the credential was rejected: a revoked key, a
+	// typo, or an OAuth token whose refresh failed.
+	ErrNotAuthenticated = errors.New("linear: credential rejected")
 
 	// ErrNotFound means there is no such issue. This is an ordinary answer for a
 	// branch-inferred identifier, not a failure.
 	ErrNotFound = errors.New("linear: issue not found")
 )
 
-// Ticket is the version-defensive projection of `linear issue view --json`.
-//
-// Every field is optional on purpose: CLI v1.7.0 returns six keys and v2.5.0
-// returns fifteen, and the JSON shape changed in v2.0.0 to preserve GraphQL
-// field names. A field that moves or disappears must degrade to a zero value,
-// never to an error.
+// Ticket is the projection of an issue that fleet's UI needs.
 type Ticket struct {
 	Identifier string // "BRZ-3182"; empty means the payload was unusable
 	Title      string
@@ -94,35 +94,51 @@ type Ticket struct {
 // Ok reports whether the payload carried enough to be worth acting on.
 func (t Ticket) Ok() bool { return t.Identifier != "" }
 
-// Available reports whether the `linear` CLI is installed.
+// linearConfigFile is the `linear` CLI's own per-repo config. fleet does not
+// require, write, or depend on that CLI, but reading the team key out of a file
+// someone already has costs nothing and makes this zero-touch for them.
 //
-// Deliberately exec.LookPath and not `linear --version`: this is called on the
-// path that opens the worktree dialog, so it must cost microseconds.
-func Available() bool {
-	_, err := exec.LookPath("linear")
-	return err == nil
-}
-
-// configFile is the CLI's own per-repo config. Its presence is fleet's signal
-// that a repo is Linear-connected — better than a global setting, because it is
-// per-repo and already true for anyone using the CLI seriously.
-const configFile = ".linear.toml"
+// Only team_id is read. api_key lives in the same file and is deliberately never
+// touched: fleet resolves its own credential and has no business adopting one
+// left there for another tool.
+const linearConfigFile = ".linear.toml"
 
 var teamIDRe = regexp.MustCompile(`(?m)^\s*team_id\s*=\s*["']([A-Za-z][A-Za-z0-9]*)["']`)
 
-// TeamKey returns the team identifier (e.g. "BRZ") from .linear.toml at
-// repoPath, and whether the repo is Linear-connected at all.
+// TeamKeys returns the Linear team keys this repo tracks, or nil if it tracks
+// none.
 //
-// Only team_id is read. api_key lives in the same file and is deliberately not
-// touched: fleet holding a credential is exactly what this design avoids.
-func TeamKey(repoPath string) (string, bool) {
-	data, err := readFileLimited(filepath.Join(repoPath, configFile), 64<<10)
+// Nil is the answer that keeps an unrelated repo silent for a connected user, so
+// there is deliberately NO fallback to "every team in the workspace": that would
+// put Linear suggestions under the branch field of every repo on the machine.
+//
+// Free and non-blocking — two small file reads, no network — because the branch
+// inference path calls it from the Update goroutine.
+func TeamKeys(repoPath string) []string {
+	if repoPath == "" {
+		return nil
+	}
+	if keys := workspace.LinearTeamKeys(repoPath); len(keys) > 0 {
+		return keys
+	}
+	data, err := readFileLimited(filepath.Join(repoPath, linearConfigFile), 64<<10)
 	if err != nil {
-		return "", false
+		return nil
 	}
 	m := teamIDRe.FindSubmatch(data)
 	if m == nil {
-		return "", false
+		return nil
 	}
-	return strings.ToUpper(string(m[1])), true
+	return []string{strings.ToUpper(string(m[1]))}
+}
+
+// readFileLimited reads at most limit bytes, so a pathological config file
+// can't be pulled into memory whole.
+func readFileLimited(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, limit))
 }

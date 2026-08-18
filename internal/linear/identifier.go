@@ -12,19 +12,34 @@ import (
 // BRZ-3182, brz-3182-some-slug, and (after the last "/") alice/brz-3182-x.
 //
 // It is deliberately loose about the team prefix, because the CALLER gates on
-// the real team key. That split matters: the CLI's own `linear issue id` uses a
-// pattern like this with no gate, which makes it read fix-123-thing as FIX-123
-// and release-2024-cleanup as RELEASE-2024 — identifiers for teams that don't
-// exist, costing a subprocess and a wrong answer.
+// the repo's real team keys. That split matters: an ungated pattern like this
+// reads fix-123-thing as FIX-123 and release-2024-cleanup as RELEASE-2024 —
+// identifiers for teams that don't exist, costing a network round trip and a
+// wrong answer.
 var identifierRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9]{0,9})-(\d{1,7})(?:[-_./]|$)`)
 
+// matchesTeam reports whether candidate is one of the repo's team keys.
+//
+// This is the gate the loose regex above depends on, and passing a SET rather
+// than a single key is what lets one repo track more than one team — a real
+// case, since a workspace routinely has several (this one has BRZ and PRD) and
+// a repo may legitimately see branches from both.
+func matchesTeam(candidate string, teamKeys []string) bool {
+	for _, k := range teamKeys {
+		if strings.EqualFold(candidate, k) {
+			return true
+		}
+	}
+	return false
+}
+
 // IdentifierFromBranch extracts the Linear identifier a branch names, gated on
-// teamKey. It returns "" when the branch names no issue for that team.
+// teamKeys. It returns "" when the branch names no issue for those teams.
 //
 // Matching starts after the last "/", so Linear's own suggested branch names
 // (alice/brz-3182-slug) resolve as well as fleet's (brz-3182-slug).
-func IdentifierFromBranch(branch, teamKey string) string {
-	if branch == "" || teamKey == "" {
+func IdentifierFromBranch(branch string, teamKeys []string) string {
+	if branch == "" || len(teamKeys) == 0 {
 		return ""
 	}
 	seg := branch
@@ -32,31 +47,25 @@ func IdentifierFromBranch(branch, teamKey string) string {
 		seg = seg[i+1:]
 	}
 	m := identifierRe.FindStringSubmatch(seg)
-	if m == nil {
-		return ""
-	}
-	if !strings.EqualFold(m[1], teamKey) {
+	if m == nil || !matchesTeam(m[1], teamKeys) {
 		return ""
 	}
 	return strings.ToUpper(m[1]) + "-" + m[2]
 }
 
-// LooksLikeIdentifier reports whether text is an identifier for teamKey and
-// nothing else — the shape test the worktree dialog uses to decide whether what
-// you typed denotes a ticket or is just a branch name.
+// LooksLikeIdentifier reports whether text is an identifier for one of teamKeys
+// and nothing else — the shape test the worktree dialog uses to decide whether
+// what you typed denotes a ticket or is just a branch name.
 //
 // This is what keeps a picker from ever stealing the Enter key from someone
 // naming a branch: prose fails this test, so the literal text stays the default.
-func LooksLikeIdentifier(text, teamKey string) (string, bool) {
+func LooksLikeIdentifier(text string, teamKeys []string) (string, bool) {
 	t := strings.TrimSpace(text)
-	if t == "" || teamKey == "" {
+	if t == "" || len(teamKeys) == 0 {
 		return "", false
 	}
 	m := identifierRe.FindStringSubmatch(t)
-	if m == nil || len(m[0]) != len(t) {
-		return "", false
-	}
-	if !strings.EqualFold(m[1], teamKey) {
+	if m == nil || len(m[0]) != len(t) || !matchesTeam(m[1], teamKeys) {
 		return "", false
 	}
 	return strings.ToUpper(m[1]) + "-" + m[2], true
@@ -70,7 +79,7 @@ const maxBranchSlug = 40
 // BranchNameFor derives fleet's branch name for an issue: the lowercased
 // identifier, then a slug of the title.
 //
-// Deliberately not the CLI's own `branchName` field, which carries an owner
+// Deliberately not Linear's own `branchName` field, which carries an owner
 // prefix (alice/brz-3182-…). Linear links a PR by finding the identifier
 // ANYWHERE in the branch name, so both forms link identically — and this form
 // matches the convention already in use across the user's worktrees.

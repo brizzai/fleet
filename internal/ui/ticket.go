@@ -17,7 +17,7 @@ import (
 // ticketMaterializeBudget bounds the whole fetch-and-write step when it runs on
 // the session-creation path, where a human is waiting for a pane to appear.
 // Generous enough for a ticket with a dozen screenshots on a slow link, short
-// enough that a wedged CLI doesn't feel like a hang: the session starts either
+// enough that a wedged request doesn't feel like a hang: the session starts either
 // way, and past this the prompt simply isn't seeded.
 const ticketMaterializeBudget = 25 * time.Second
 
@@ -37,7 +37,7 @@ type ticketReadyMsg struct {
 // it never fails its caller. A nil result means no prompt gets seeded, which is
 // the honest outcome, because a prompt pointing at files that were never
 // written is worse than no prompt.
-func materializeTicket(repoPath, worktreePath string, t *linear.Ticket, moveState bool) (*linear.Result, error) {
+func materializeTicket(worktreePath string, t *linear.Ticket, moveState bool) (*linear.Result, error) {
 	if t == nil || !t.Ok() {
 		return nil, nil
 	}
@@ -45,10 +45,8 @@ func materializeTicket(repoPath, worktreePath string, t *linear.Ticket, moveStat
 	defer cancel()
 
 	res, err := linear.Materialize(ctx, linear.Opts{
-		RepoDir:      repoPath,
 		WorktreePath: worktreePath,
 		Identifier:   t.Identifier,
-		Ticket:       *t,
 		MoveState:    moveState,
 	})
 	if err != nil {
@@ -65,7 +63,7 @@ func materializeTicket(repoPath, worktreePath string, t *linear.Ticket, moveStat
 // comes from the git cache the worker already maintains, the identifier is a
 // regex, and the reuse check is one ReadDir plus one ReadFile. That last check
 // is the steady state — every session after the first in a ticket worktree hits
-// it, with no subprocess and no network.
+// it, with no network at all.
 //
 // Returns (prompt, nil) for the fast path, ("", cmd) when a fetch is needed, and
 // ("", nil) when there is nothing to do.
@@ -78,11 +76,11 @@ func (h *Home) ticketPromptFor(msg sessionCreateMsg) (string, tea.Cmd) {
 	}
 
 	repoRoot := session.GetRepoRoot(msg.path)
-	// The .linear.toml gate is what keeps false positives free: a branch named
-	// fix-123 in a repo that doesn't use Linear never costs a subprocess.
-	teamKey, connected := linear.TeamKey(msg.path)
-	if !connected {
-		if teamKey, connected = linear.TeamKey(repoRoot); !connected {
+	// The per-repo team gate is what keeps false positives free: a branch named
+	// fix-123 in a repo that tracks no Linear team never costs a round trip.
+	teamKeys := linear.TeamKeys(msg.path)
+	if len(teamKeys) == 0 {
+		if teamKeys = linear.TeamKeys(repoRoot); len(teamKeys) == 0 {
 			return "", nil
 		}
 	}
@@ -91,11 +89,11 @@ func (h *Home) ticketPromptFor(msg sessionCreateMsg) (string, tea.Cmd) {
 	if info, ok := h.gitInfo()[repoRoot]; ok && info != nil {
 		branch = info.Branch
 	}
-	id := linear.IdentifierFromBranch(branch, teamKey)
+	id := linear.IdentifierFromBranch(branch, teamKeys)
 	if id == "" {
 		// A worktree fleet made is named <repo>-<branch>, so the directory
 		// still carries the identifier when the git cache is cold.
-		id = linear.IdentifierFromBranch(pathTailAfterRepo(msg.path), teamKey)
+		id = linear.IdentifierFromBranch(pathTailAfterRepo(msg.path), teamKeys)
 	}
 	if id == "" || linear.NegativelyPinned(msg.path, id) {
 		return "", nil
@@ -111,7 +109,6 @@ func (h *Home) ticketPromptFor(msg sessionCreateMsg) (string, tea.Cmd) {
 		// session in a worktree that already exists is not, and by then a human
 		// may have moved the issue on.
 		res, err := linear.Materialize(ctx, linear.Opts{
-			RepoDir:      path,
 			WorktreePath: path,
 			Identifier:   id,
 			MoveState:    false,
@@ -138,7 +135,10 @@ func pathTailAfterRepo(path string) string {
 func ticketStatusLine(res *linear.Result, err error) string {
 	switch {
 	case err != nil:
-		if errors.Is(err, linear.ErrNotFound) || errors.Is(err, linear.ErrNotInstalled) {
+		// Both are resting states, not failures: a branch that names no real
+		// issue, and a fleet that was never connected to Linear. Neither is
+		// worth a line on the session the user just started.
+		if errors.Is(err, linear.ErrNotFound) || errors.Is(err, linear.ErrNotConnected) {
 			return ""
 		}
 		return fmt.Sprintf("Linear: %v — starting without the ticket", err)
@@ -147,10 +147,7 @@ func ticketStatusLine(res *linear.Result, err error) string {
 	}
 
 	line := fmt.Sprintf("%s materialized", res.Identifier)
-	switch {
-	case res.Images > 0 && res.UsedFallback:
-		line += fmt.Sprintf(" with %d image(s) — fetched directly, your `linear` CLI is too old to download them", res.Images)
-	case res.Images > 0:
+	if res.Images > 0 {
 		line += fmt.Sprintf(" with %d image(s)", res.Images)
 	}
 	if res.StateMoved != "" {

@@ -38,22 +38,13 @@ type Result struct {
 
 	Images        int
 	ImagesDropped int
-	UsedFallback  bool   // fleet downloaded images the CLI failed to fetch
 	StateMoved    string // resulting state name; "" if not attempted or failed
 }
 
 // Opts configures one materialization.
 type Opts struct {
-	// RepoDir is any directory inside the repo — the CLI locates .linear.toml
-	// by shelling `git rev-parse --show-toplevel` in its own cwd, so this must
-	// not be empty and must not point outside the checkout.
-	RepoDir      string
 	WorktreePath string
 	Identifier   string
-
-	// Ticket, when already fetched (the worktree dialog pays that ~0.5s round
-	// trip while the user is still looking at the form), skips the metadata call.
-	Ticket Ticket
 
 	// MoveState requests the one mutation fleet ever makes.
 	MoveState bool
@@ -83,7 +74,7 @@ func TicketDir(worktreePath, id string) string {
 //
 // This is the fast path and the steady state: every session after the first in
 // a ticket worktree hits it, at the cost of one ReadDir and one ReadFile, with
-// no subprocess and no network. The filesystem is the ledger — it survives
+// no network. The filesystem is the ledger — it survives
 // restarts, survives losing state.db, and a user who deletes the directory gets
 // a re-fetch, which is the natural "refresh this ticket" gesture.
 func ExistingPrompt(worktreePath string) (string, bool) {
@@ -131,9 +122,6 @@ func pinNoTicket(worktreePath, id string) {
 func Materialize(ctx context.Context, o Opts) (Result, error) {
 	var res Result
 
-	if !Available() {
-		return res, ErrNotInstalled
-	}
 	if o.WorktreePath == "" || o.Identifier == "" {
 		return res, fmt.Errorf("linear: materialize needs a worktree and an identifier")
 	}
@@ -144,27 +132,17 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	}
 	defer inFlight.Delete(o.WorktreePath)
 
-	repoDir := o.RepoDir
-	if repoDir == "" {
-		repoDir = o.WorktreePath
-	}
-
-	// Metadata first: it is the cheap call, and it is what tells us the ticket
-	// exists at all before we create directories for it.
-	t := o.Ticket
-	if !t.Ok() {
-		fetched, err := Fetch(ctx, repoDir, id)
-		if err != nil {
-			if err == ErrNotFound {
-				pinNoTicket(o.WorktreePath, id)
-			}
-			return res, err
+	// One round trip for everything: description, comments, labels, and the
+	// team's workflow states so the optional state write needs no second query.
+	issue, err := fetchFull(ctx, id)
+	if err != nil {
+		if err == ErrNotFound {
+			pinNoTicket(o.WorktreePath, id)
 		}
-		t = fetched
+		return res, err
 	}
-	res.Ticket = t
-	res.Identifier = t.Identifier
 
+	res.Ticket = issue.ticket()
 	dir := TicketDir(o.WorktreePath, res.Identifier)
 	res.Dir = dir
 	res.RelDir = filepath.Join(fleetDir, ticketDir, res.Identifier)
@@ -182,21 +160,14 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 		return res, fmt.Errorf("create %s: %w", imgDir, err)
 	}
 
-	// The markdown pass, never --json: the JSON branch returns before the CLI's
-	// image downloader runs.
-	markdown, err := fetchMarkdown(ctx, repoDir, res.Identifier)
-	if err != nil {
-		return res, err
-	}
-
-	body, images, dropped, fallback := o.collectImages(ctx, repoDir, markdown, imgDir)
-	res.Images, res.ImagesDropped, res.UsedFallback = images, dropped, fallback
+	body, images, dropped := collectImages(ctx, renderBody(issue), imgDir)
+	res.Images, res.ImagesDropped = images, dropped
 
 	if images == 0 {
 		_ = os.Remove(imgDir) // only succeeds when empty, which is what we want
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, ticketFile), renderTicketFile(res, body), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ticketFile), renderTicketFile(res, issue, body), 0644); err != nil {
 		return res, fmt.Errorf("write %s: %w", ticketFile, err)
 	}
 
@@ -209,10 +180,10 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 
 	m := meta{Identifier: res.Identifier, FetchedAt: time.Now(), Images: images, StateWrite: "skipped"}
 	if o.MoveState {
-		if name, err := MoveToStarted(ctx, repoDir, res.Identifier); err != nil {
+		if name, err := MoveToStarted(ctx, issue); err != nil {
 			m.StateWrite = "failed"
 			debuglog.Logger.Warn("linear: could not move issue to started", "id", res.Identifier, "error", err)
-		} else {
+		} else if name != "" {
 			m.StateWrite = "done"
 			res.StateMoved = name
 		}
@@ -220,100 +191,164 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	writeMeta(dir, m)
 
 	analytics.Track(analytics.EventLinearTicketMaterialized, map[string]any{
-		"images":   images,
-		"dropped":  dropped,
-		"fallback": fallback,
+		"images":  images,
+		"dropped": dropped,
 	})
 	return res, nil
 }
 
-// collectImages copies every image the markdown references into imgDir and
+// fetchFull reads the whole issue in one query.
+func fetchFull(ctx context.Context, id string) (*issueFull, error) {
+	var out struct {
+		Issue *issueFull `json:"issue"`
+	}
+	if err := execute(ctx, fullTimeout, issueFullQuery, map[string]any{"id": id}, &out); err != nil {
+		return nil, err
+	}
+	if out.Issue == nil || out.Issue.Identifier == "" {
+		return nil, ErrNotFound
+	}
+	return out.Issue, nil
+}
+
+// renderBody turns the issue into the markdown an agent will read.
+//
+// fleet composes this itself rather than asking the API for a rendered form,
+// which is what lets comments carry their author and time. "Who asked for this
+// and when" is usually the part that decides whether a ticket is still current.
+func renderBody(i *issueFull) string {
+	var b strings.Builder
+	desc := strings.TrimSpace(i.Description)
+	if desc == "" {
+		desc = "_(no description)_"
+	}
+	b.WriteString("## Description\n\n")
+	b.WriteString(desc)
+	b.WriteString("\n")
+
+	if n := len(i.Comments.Nodes); n > 0 {
+		fmt.Fprintf(&b, "\n## Comments (%d)\n", n)
+		for _, c := range i.Comments.Nodes {
+			author := "someone"
+			if c.User != nil && c.User.DisplayName != "" {
+				author = c.User.DisplayName
+			}
+			fmt.Fprintf(&b, "\n### %s — %s\n\n", author, c.CreatedAt.Format("2006-01-02 15:04"))
+			b.WriteString(strings.TrimSpace(c.Body))
+			b.WriteString("\n")
+		}
+	}
+
+	if n := len(i.Children.Nodes); n > 0 {
+		b.WriteString("\n## Sub-issues\n\n")
+		for _, c := range i.Children.Nodes {
+			fmt.Fprintf(&b, "- %s — %s\n", c.Identifier, c.Title)
+		}
+	}
+
+	// Attachments are links (PRs, Figma, Slack threads), not files. Listed
+	// rather than downloaded: fleet fetches images because an agent cannot
+	// follow a URL, and it deliberately does not go crawling anything else.
+	if n := len(i.Attachments.Nodes); n > 0 {
+		b.WriteString("\n## Links\n\n")
+		for _, a := range i.Attachments.Nodes {
+			title := a.Title
+			if title == "" {
+				title = a.URL
+			}
+			fmt.Fprintf(&b, "- [%s](%s)\n", title, a.URL)
+		}
+	}
+	return b.String()
+}
+
+// collectImages downloads every image the body references into imgDir and
 // rewrites the links to the relative paths the agent will read.
 //
-// Both halves are required and neither is sufficient alone: an absolute
-// $TMPDIR path is outside the project root (so an agent's read prompts for
-// permission, or the file has been purged), and an extensionless filename
-// defeats extension dispatch. Fix one and the agent still sees nothing.
-func (o Opts) collectImages(ctx context.Context, repoDir string, markdown []byte, imgDir string) (body string, kept, dropped int, usedFallback bool) {
-	refs := findImages(markdown)
-	body = string(markdown)
+// Both halves are required and neither is sufficient alone: an uploads.linear.app
+// URL is 401 to an agent with no credential, and an extensionless filename
+// defeats extension dispatch in its file-read tool. Fix one and the agent still
+// sees nothing.
+func collectImages(ctx context.Context, markdown, imgDir string) (body string, kept, dropped int) {
+	refs := findImages([]byte(markdown))
+	body = markdown
 
-	var token string
-	var tokenTried bool
 	var total int64
-
 	for i, ref := range refs {
 		if kept >= maxImages || total >= maxTotalBytes {
 			dropped++
 			continue
 		}
-
-		var name string
-		var size int64
-		var err error
-
-		if ref.remote {
-			// The CLI's downloader failed and swallowed the error — the
-			// signature of the v1.7.0 build compiled without
-			// --allow-net=uploads.linear.app. Fetch it ourselves.
-			if !tokenTried {
-				tokenTried = true
-				token, _ = authToken(ctx, repoDir)
-			}
-			if token == "" {
-				dropped++
-				continue
-			}
-			name, size, err = fetchRemoteImage(ctx, ref.target, token, imgDir, ref.alt, i+1)
-			if err == nil {
-				usedFallback = true
-			}
-		} else {
-			name, size, err = copyLocalImage(ref.target, imgDir, i+1)
-		}
-
+		name, size, err := fetchImage(ctx, ref.target, imgDir, ref.alt, i+1)
 		if err != nil {
-			debuglog.Logger.Debug("linear: image unavailable", "target", ref.target, "error", err)
+			debuglog.Logger.Debug("linear: image unavailable", "error", err)
 			dropped++
 			continue
 		}
-
 		kept++
 		total += size
 		body = strings.ReplaceAll(body, ref.target, filepath.Join(imagesDir, name))
 	}
-	return body, kept, dropped, usedFallback
+	return body, kept, dropped
 }
 
-// renderTicketFile writes front matter carrying the two things the markdown
-// pass does not emit — the URL and the state — plus honest provenance, so a
-// reader (human or agent) knows this is a snapshot rather than live state.
-func renderTicketFile(r Result, body string) []byte {
+// renderTicketFile writes front matter carrying the fields the body does not,
+// plus honest provenance, so a reader (human or agent) knows this is a snapshot
+// rather than live state.
+func renderTicketFile(r Result, i *issueFull, body string) []byte {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "ticket: %s\n", r.Identifier)
+	fmt.Fprintf(&b, "title: %s\n", r.Title)
 	if r.URL != "" {
 		fmt.Fprintf(&b, "url: %s\n", r.URL)
 	}
 	if r.StateName != "" {
 		fmt.Fprintf(&b, "state_when_fetched: %s\n", r.StateName)
 	}
+	if i.Assignee != nil && i.Assignee.DisplayName != "" {
+		fmt.Fprintf(&b, "assignee: %s\n", i.Assignee.DisplayName)
+	}
+	if p := priorityName(i.Priority); p != "" {
+		fmt.Fprintf(&b, "priority: %s\n", p)
+	}
+	if n := len(i.Labels.Nodes); n > 0 {
+		names := make([]string, 0, n)
+		for _, l := range i.Labels.Nodes {
+			names = append(names, l.Name)
+		}
+		fmt.Fprintf(&b, "labels: %s\n", strings.Join(names, ", "))
+	}
+	if i.Parent != nil && i.Parent.Identifier != "" {
+		fmt.Fprintf(&b, "parent: %s — %s\n", i.Parent.Identifier, i.Parent.Title)
+	}
 	fmt.Fprintf(&b, "fetched_at: %s\n", time.Now().UTC().Format(time.RFC3339))
-	fmt.Fprintf(&b, "fetched_by: fleet, via `linear issue view %s`\n", r.Identifier)
 	fmt.Fprintf(&b, "images: %d\n", r.Images)
 	b.WriteString("---\n\n")
-	b.WriteString("<!-- Read-only snapshot. The live ticket may have moved on since fetched_at. -->\n\n")
+	b.WriteString("<!-- Read-only snapshot fetched by fleet. The live ticket may have moved on since fetched_at. -->\n\n")
 	b.WriteString(strings.TrimSpace(body))
 	b.WriteString("\n")
 	if r.ImagesDropped > 0 {
 		fmt.Fprintf(&b, "\n> %d further image(s) were not downloaded: over fleet's per-ticket cap, "+
 			"or not a readable image.\n", r.ImagesDropped)
 	}
-	if r.Images == 0 {
-		b.WriteString("\n> No images were downloaded. If this ticket has screenshots, your `linear` " +
-			"CLI may be too old to fetch them — `brew upgrade schpet/tap/linear`.\n")
-	}
 	return []byte(b.String())
+}
+
+// priorityName maps Linear's numeric priority. 0 means "not set", which is not
+// worth a line in the front matter.
+func priorityName(p int) string {
+	switch p {
+	case 1:
+		return "urgent"
+	case 2:
+		return "high"
+	case 3:
+		return "medium"
+	case 4:
+		return "low"
+	}
+	return ""
 }
 
 func writeMeta(dir string, m meta) {

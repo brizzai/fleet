@@ -2,9 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -46,6 +48,7 @@ const (
 	tipTCCBlockedID        = "tcc_blocked_folder"
 	tipSessionsSuspendedID = "sessions_suspended"
 	tipAgentSkillID        = "agent_skill"
+	tipConnectLinearID     = "connect_linear"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -108,6 +111,22 @@ var tipRegistry = []Tip{
 		text: func(h *Home) string {
 			return "Tip: run `fleet skill install` in a terminal — it teaches Claude Code, Codex, and Cursor " +
 				"to drive fleet themselves, so an agent can spin up a worktree session or message another one."
+		},
+	},
+	{
+		// Fires only for someone who is demonstrably working from tickets: a
+		// branch shaped like an identifier, and no Linear credential. That is a
+		// far better trigger than "has sessions", because it never appears for
+		// anyone the feature would not help — and it appears at the exact
+		// moment it would have helped.
+		ID:         tipConnectLinearID,
+		Policy:     tipOnce,
+		Priority:   11,
+		LearnedKey: tipConnectLinearID,
+		active:     func(h *Home) bool { return h.anyTicketShapedBranch() },
+		text: func(h *Home) string {
+			return "That branch looks like a ticket. `Ctrl+K` → \"Connect Linear\" and fleet will pull the " +
+				"ticket and its screenshots into the worktree, and open the agent already told to read them."
 		},
 	},
 	{
@@ -297,4 +316,34 @@ func renderTip(body string, maxWidth int) string {
 		return ""
 	}
 	return renderHintBox("✦", ColorAccent, body, "shift+X to dismiss", width)
+}
+
+// ticketShapedBranch matches the generic <team>-<number> shape shared by Linear
+// and Jira.
+//
+// Deliberately NOT linear.IdentifierFromBranch: that one is gated on the repo's
+// configured team keys, which by definition nobody has yet at the moment this
+// tip should fire. The looser pattern is safe here precisely because the tip
+// only offers — it never fetches anything, so a false positive on a branch like
+// `fix-123` costs one dismissible hint rather than a wrong ticket.
+var ticketShapedBranch = regexp.MustCompile(`(?i)(^|/)[a-z]{2,6}-\d{1,6}($|[-_/])`)
+
+// anyTicketShapedBranch reports whether any session sits on a branch that looks
+// like ticket work while fleet has no Linear credential.
+//
+// Reads the git cache the worker already maintains, so it costs nothing on the
+// ~2s tick that evaluates tips.
+func (h *Home) anyTicketShapedBranch() bool {
+	// Resolved before Available: until the startup lookup finishes, "no
+	// credential" is ignorance rather than a fact, and offering to connect a
+	// fleet that is already connected is the one thing this tip must not do.
+	if !linear.Resolved() || linear.Available() {
+		return false
+	}
+	for _, info := range h.gitInfo() {
+		if info != nil && ticketShapedBranch.MatchString(info.Branch) {
+			return true
+		}
+	}
+	return false
 }

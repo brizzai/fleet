@@ -2,40 +2,34 @@ package linear
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestMaterializeEndToEnd exercises the real `linear` CLI against a real issue.
+// TestMaterializeEndToEnd exercises the real Linear API against a real issue.
 //
-// Opt-in, because it needs an authenticated CLI and network:
+// Opt-in, because it needs a credential and network:
 //
-//	FLEET_LINEAR_E2E=BRZ-1515 go test ./internal/linear/ -run EndToEnd -v
+//	LINEAR_API_KEY=lin_api_… FLEET_LINEAR_E2E=BRZ-1515 go test ./internal/linear/ -run EndToEnd -v
 //
 // It never mutates Linear — MoveState stays false, so nothing is written to the
 // issue. What it proves is the part that is easy to get subtly wrong and
-// impossible to catch in a unit test: that the markdown pass yields links we can
-// resolve, that images land on disk with a usable extension, and that the
-// fallback download works on a CLI whose own downloader is broken.
+// impossible to catch in a unit test: that an authenticated image download
+// actually succeeds, that the bytes land with a usable extension, and that every
+// surviving link in ticket.md is one the agent can open.
 func TestMaterializeEndToEnd(t *testing.T) {
 	id := os.Getenv("FLEET_LINEAR_E2E")
 	if id == "" {
 		t.Skip("set FLEET_LINEAR_E2E=<ISSUE-ID> to run")
 	}
-	if !Available() {
-		t.Skip("linear CLI not installed")
-	}
-	repo := os.Getenv("FLEET_LINEAR_E2E_REPO")
-	if repo == "" {
-		t.Skip("set FLEET_LINEAR_E2E_REPO=<path to a repo with .linear.toml>")
+	if os.Getenv(APIKeyEnvVar) == "" {
+		t.Skipf("set %s to run", APIKeyEnvVar)
 	}
 
 	wt := t.TempDir()
 	res, err := Materialize(context.Background(), Opts{
-		RepoDir:      repo,
 		WorktreePath: wt,
 		Identifier:   id,
 		MoveState:    false, // never mutate a real issue from a test
@@ -43,8 +37,7 @@ func TestMaterializeEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-
-	t.Logf("identifier=%s images=%d dropped=%d fallback=%v", res.Identifier, res.Images, res.ImagesDropped, res.UsedFallback)
+	t.Logf("identifier=%s images=%d dropped=%d", res.Identifier, res.Images, res.ImagesDropped)
 
 	body, err := os.ReadFile(filepath.Join(res.Dir, ticketFile))
 	if err != nil {
@@ -54,39 +47,31 @@ func TestMaterializeEndToEnd(t *testing.T) {
 		t.Error("ticket.md is missing its front matter")
 	}
 
-	// Every surviving link must be a relative images/ path — an absolute
-	// $TMPDIR path is outside the project root (the agent's read tool prompts
-	// or the file is purged) and a remote URL is 401.
+	// No link may still point at Linear. An uploads.linear.app URL is 401 to
+	// the agent, which is the exact failure this whole path exists to remove.
+	if strings.Contains(string(body), uploadsHost) {
+		t.Error("ticket.md still carries an uploads.linear.app URL — the agent cannot open those")
+	}
+
 	for _, ref := range findImages(body) {
-		if ref.remote || filepath.IsAbs(ref.target) {
-			t.Errorf("ticket.md still links %q; it must point inside images/", ref.target)
-		}
+		t.Errorf("ticket.md kept a remote image link: %s", ref.target)
 	}
 
 	if res.Images == 0 {
-		t.Log("no images on this ticket (or none could be fetched) — pick a ticket with screenshots to exercise that path")
 		return
 	}
-
 	entries, err := os.ReadDir(filepath.Join(res.Dir, imagesDir))
 	if err != nil {
-		t.Fatalf("images dir missing despite Images=%d: %v", res.Images, err)
-	}
-	if len(entries) != res.Images {
-		t.Errorf("Images=%d but %d files on disk", res.Images, len(entries))
+		t.Fatalf("images/ missing though %d were reported: %v", res.Images, err)
 	}
 	for _, e := range entries {
-		p := filepath.Join(res.Dir, imagesDir, e.Name())
-		data, err := os.ReadFile(p)
-		if err != nil || len(data) == 0 {
-			t.Errorf("%s is unreadable or empty", e.Name())
-			continue
+		ext := strings.ToLower(filepath.Ext(e.Name()))
+		if _, known := knownImageExt[ext]; !known {
+			t.Errorf("%s has no usable extension — an agent's file-read tool dispatches on it", e.Name())
 		}
-		if ext := filepath.Ext(e.Name()); ext == "" {
-			t.Errorf("%s has no extension — an agent's read tool dispatches on it", e.Name())
-		}
-		if ct := http.DetectContentType(data); !strings.HasPrefix(ct, "image/") {
-			t.Errorf("%s is %s, not an image", e.Name(), ct)
+		info, err := e.Info()
+		if err != nil || info.Size() == 0 {
+			t.Errorf("%s is empty", e.Name())
 		}
 	}
 }

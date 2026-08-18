@@ -352,7 +352,7 @@ func runWorktree(args []string) {
 	var ticket *linear.Ticket
 	if opts.ticket != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		t, ferr := linear.Fetch(ctx, repoPath, opts.ticket)
+		t, ferr := linear.Fetch(ctx, opts.ticket)
 		cancel()
 		switch {
 		case ferr != nil && opts.branch == "":
@@ -429,17 +429,15 @@ func runWorktree(args []string) {
 	if ticket != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		res, merr := linear.Materialize(ctx, linear.Opts{
-			RepoDir:      repoPath,
 			WorktreePath: info.Path,
 			Identifier:   ticket.Identifier,
-			Ticket:       *ticket,
 			MoveState:    cfg.IsLinearTicketStartEnabled() && !opts.noTicketStart,
 		})
 		cancel()
 		if merr != nil {
 			fmt.Fprintf(os.Stderr, "Couldn't materialize %s: %v\n", ticket.Identifier, merr)
 		} else {
-			fmt.Fprintf(os.Stderr, "Wrote %s (%s)%s\n", res.RelDir, describeTicketFiles(res), fallbackNote(res))
+			fmt.Fprintf(os.Stderr, "Wrote %s (%s)\n", res.RelDir, describeTicketFiles(res))
 			if res.StateMoved != "" {
 				fmt.Fprintf(os.Stderr, "Moved %s to its team's started state\n", res.Identifier)
 			}
@@ -624,14 +622,4 @@ func describeTicketFiles(r linear.Result) string {
 		return "ticket.md, no images"
 	}
 	return fmt.Sprintf("ticket.md + %d image(s)", r.Images)
-}
-
-// fallbackNote names the degraded path when fleet had to fetch the screenshots
-// itself. Worth saying out loud: it means the installed `linear` is old enough
-// that its own downloader is broken, and every ticket pays the slow path.
-func fallbackNote(r linear.Result) string {
-	if !r.UsedFallback {
-		return ""
-	}
-	return " — fetched directly; upgrade with `brew upgrade schpet/tap/linear`"
 }

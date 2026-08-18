@@ -16,7 +16,7 @@ func ticketDialog(t *testing.T, tickets ...linear.Ticket) *WorktreeDialog {
 	t.Helper()
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", "BRZ")
+	d.Show(nil, nil, nil, "/repo", "master", []string{"BRZ"})
 	d.tickets = tickets
 	return d
 }
@@ -244,7 +244,7 @@ func TestWorktreeEnterAlwaysCreates(t *testing.T) {
 		name  string
 		setup func(*WorktreeDialog)
 	}{
-		{"no linear at all", func(d *WorktreeDialog) { d.linearTeam = "" }},
+		{"no linear at all", func(d *WorktreeDialog) { d.linearTeams = nil }},
 		{"latched off", func(d *WorktreeDialog) { d.ticketsOff = true }},
 		{"lookup in flight", func(d *WorktreeDialog) { d.ticketPending = true }},
 		{"error note showing", func(d *WorktreeDialog) { d.ticketNote = "linear: timed out" }},
@@ -301,17 +301,17 @@ func TestWorktreeTicketDropsWhenFieldEditedAway(t *testing.T) {
 // TestWorktreeBlankRenderUnchangedWithoutLinear: a user with no Linear must not
 // be able to tell this feature shipped.
 func TestWorktreeBlankRenderUnchangedWithoutLinear(t *testing.T) {
-	mk := func(team string) string {
+	mk := func(teams []string) string {
 		d := NewWorktreeDialog()
 		d.SetSize(120, 40)
-		d.Show(nil, nil, nil, "/repo", "master", team)
+		d.Show(nil, nil, nil, "/repo", "master", teams)
 		d.newBranchInput.SetValue("my-experiment")
 		return d.View()
 	}
-	if mk("") == "" {
+	if mk(nil) == "" {
 		t.Fatal("empty render")
 	}
-	plain := mk("")
+	plain := mk(nil)
 	if strings.Contains(plain, "BRZ") || strings.Contains(plain, "ticket") {
 		t.Errorf("a repo with no .linear.toml shows Linear chrome:\n%s", plain)
 	}

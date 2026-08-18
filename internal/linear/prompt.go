@@ -37,8 +37,8 @@ Do not edit files, run builds, or begin implementing until I tell you to.%s
 // SeedPrompt renders the first message for a materialized ticket.
 //
 // The images clauses collapse to nothing when no image made it to disk. That is
-// the honest-degradation rule in concrete form: a broken CLI plus a failed
-// fallback must not produce a prompt that points at an images/ directory which
+// the honest-degradation rule in concrete form: a ticket whose images all failed
+// to download must not produce a prompt pointing at an images/ directory that
 // does not exist.
 func SeedPrompt(r Result) string {
 	imagesBlock := ""

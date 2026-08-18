@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 )
@@ -14,6 +15,7 @@ type RepoWorkspaceConfig struct {
 	Workspace ShellConfig     `json:"workspace"`
 	PRChecks  PRChecksConfig  `json:"pr_checks"`
 	CopyFiles CopyFilesConfig `json:"copy_files"`
+	Linear    LinearConfig    `json:"linear"`
 }
 
 // ShellConfig holds shell command configuration for workspace operations.
@@ -38,6 +40,21 @@ type CopyFilesConfig struct {
 	Paths []string `json:"paths,omitempty"`
 }
 
+// LinearConfig names the Linear team(s) whose issues this repo tracks.
+//
+// Its presence is what turns the ticket features on for a repo: without it (and
+// without a .linear.toml) a repo behaves exactly as it did before Linear
+// existed, which is the property that lets a connected user keep unrelated
+// repos quiet. Team is the common single-team form; Teams is for a repo that
+// genuinely spans several. Both merge additively.
+//
+// .fleet.local.json is usually the better home for it — account policy and team
+// membership are personal, and .fleet.json is committed.
+type LinearConfig struct {
+	Team  string   `json:"team,omitempty"`
+	Teams []string `json:"teams,omitempty"`
+}
+
 // loadMergedRepoConfig resolves .fleet.json / .fleet.local.json (with legacy
 // .bc.json / .bc.local.json fallback) and returns the merged config. Workspace
 // fields are merged field-by-field (local overrides base); PRChecks.Ignore is
@@ -60,6 +77,11 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 
 	merged.PRChecks.Ignore = dedupeStrings(append(base.PRChecks.Ignore, local.PRChecks.Ignore...))
 	merged.CopyFiles.Paths = dedupeStrings(append(base.CopyFiles.Paths, local.CopyFiles.Paths...))
+
+	if local.Linear.Team != "" {
+		merged.Linear.Team = local.Linear.Team
+	}
+	merged.Linear.Teams = dedupeStrings(append(base.Linear.Teams, local.Linear.Teams...))
 	return merged
 }
 
@@ -91,6 +113,22 @@ func IgnorePatterns(repoPath string) []string {
 // (or literal paths). Used by CopyConfiguredFiles when a worktree is created.
 func CopyFilesPatterns(repoPath string) []string {
 	return loadMergedRepoConfig(repoPath).CopyFiles.Paths
+}
+
+// LinearTeamKeys returns the merged, upper-cased Linear team keys for a repo,
+// or nil when the repo names none. Nil means "this repo is not Linear-tracked",
+// which every ticket surface treats as off.
+func LinearTeamKeys(repoPath string) []string {
+	cfg := loadMergedRepoConfig(repoPath).Linear
+	var out []string
+	if cfg.Team != "" {
+		out = append(out, cfg.Team)
+	}
+	out = append(out, cfg.Teams...)
+	for i, k := range out {
+		out[i] = strings.ToUpper(strings.TrimSpace(k))
+	}
+	return dedupeStrings(out)
 }
 
 // ResolveProvider loads workspace config from repoPath. Preference is by file

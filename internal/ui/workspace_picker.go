@@ -21,11 +21,11 @@ type (
 		repoPath      string
 		defaultBranch string
 		originKey     string // origin of repoPath (native provider); seeds gitInfoCache so the phantom groups correctly
-		// linearTeam is the team key from the repo's .linear.toml, resolved
-		// off-loop alongside the worktree list. Empty means the repo isn't
-		// Linear-connected and every ticket surface below stays inert.
-		linearTeam string
-		err        error
+		// linearTeams are the team keys this repo tracks, resolved off-loop
+		// alongside the worktree list. Empty means the repo tracks no Linear
+		// team and every ticket surface below stays inert.
+		linearTeams []string
+		err         error
 	}
 	workspaceSelectedMsg struct {
 		info workspace.WorkspaceInfo
@@ -79,10 +79,10 @@ type WorktreeDialog struct {
 
 	// --- Linear ticket suggestions under the New branch field ---
 
-	// linearTeam is the team key from .linear.toml. Empty means the whole
+	// linearTeams are the team keys this repo tracks. Empty means the whole
 	// feature is inert: no lookups, no rows, no footer changes, and the dialog
 	// renders exactly as it did before any of this existed.
-	linearTeam string
+	linearTeams []string
 
 	// ticketCursor is the second coordinate of the highlight while focus is
 	// focusNewBranch: ticketOnInput is the field, 0..n-1 is a row. Forced back
@@ -127,7 +127,7 @@ func NewWorktreeDialog() *WorktreeDialog {
 }
 
 // Show populates and shows the dialog.
-func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*session.Session, provider workspace.Provider, repoPath, defaultBranch, linearTeam string) {
+func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*session.Session, provider workspace.Provider, repoPath, defaultBranch string, linearTeams []string) {
 	d.visible = true
 	d.workspaces = workspaces
 	d.provider = provider
@@ -139,7 +139,7 @@ func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*
 	d.baseBranchInput.SetValue(defaultBranch)
 	d.newBranchInput.SetValue("")
 
-	d.linearTeam = linearTeam
+	d.linearTeams = linearTeams
 	d.tickets = nil
 	d.resolved = nil
 	d.lastInput = ""
@@ -402,12 +402,12 @@ func (d *WorktreeDialog) View() string {
 	b.WriteString(d.baseBranchInput.View())
 	b.WriteString("\n\n")
 
-	// New branch input. The team key beside the label is the whole
-	// configuration disclosure, three characters: this repo is Linear-connected
-	// and that is its team.
+	// New branch input. The team keys beside the label are the whole
+	// configuration disclosure, a few characters: this repo tracks Linear and
+	// these are its teams.
 	b.WriteString(DimStyle.Render("New branch:"))
-	if d.linearTeam != "" {
-		b.WriteString(DimStyle.Render("   " + d.linearTeam))
+	if len(d.linearTeams) > 0 {
+		b.WriteString(DimStyle.Render("   " + strings.Join(d.linearTeams, " ")))
 	}
 	b.WriteString("\n")
 	b.WriteString(d.newBranchInput.View())

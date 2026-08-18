@@ -14,7 +14,7 @@ import (
 
 // imageLinkRe matches a markdown image: ![alt](target). A narrow regex rather
 // than a markdown parser — we only ever need the two capture groups, and the
-// input is the CLI's own generated output, not arbitrary user markdown.
+// input is Linear's own markdown, not an arbitrary document.
 var imageLinkRe = regexp.MustCompile(`!\[([^\]]*)\]\(([^)\s]+)\)`)
 
 const uploadsHost = "uploads.linear.app"
@@ -35,36 +35,39 @@ var extByContentType = map[string]string{
 	"image/svg+xml": ".svg",
 }
 
-// imageRef is one image link found in the CLI's markdown.
+// imageRef is one image link found in an issue's markdown.
 type imageRef struct {
 	alt    string
-	target string // absolute local path (CLI downloaded it) or a remote URL
-	remote bool
+	target string
 }
 
+// findImages returns the remote image links in a body.
+//
+// Only http(s) targets are collected. Linear's own markdown carries absolute
+// uploads.linear.app URLs, and anything else — a relative path, a data URI —
+// is not something fleet has any business fetching.
 func findImages(markdown []byte) []imageRef {
 	var refs []imageRef
 	for _, m := range imageLinkRe.FindAllSubmatch(markdown, -1) {
 		target := string(m[2])
-		refs = append(refs, imageRef{
-			alt:    string(m[1]),
-			target: target,
-			remote: strings.Contains(target, uploadsHost) || strings.HasPrefix(target, "http"),
-		})
+		if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+			continue
+		}
+		refs = append(refs, imageRef{alt: string(m[1]), target: target})
 	}
 	return refs
 }
 
 // detectExt recovers a file extension for image bytes.
 //
-// This is not cosmetic. The CLI names downloads after sanitize(alt), so a real
-// PNG lands on disk as "Filter bar renders cramped (screenshot)" with no
-// extension — and an agent's file-read tool dispatches on extension, so a
-// perfectly downloaded screenshot is unreadable. Recovering the extension is
-// the difference between "we fetched it" and "the agent can see it".
+// This is not cosmetic. Linear's default alt text is literally "image.png" and
+// its upload URLs carry no filename at all, so a real PNG would land on disk
+// unnamed and unextensioned — and an agent's file-read tool dispatches on
+// extension, making a perfectly downloaded screenshot unreadable. Recovering the
+// extension is the difference between "we fetched it" and "the agent can see it".
 //
-// http.DetectContentType sniffs magic bytes, so it works for the
-// already-downloaded case where the response headers are long gone.
+// http.DetectContentType sniffs magic bytes, so it is the backstop when the
+// response headers say nothing useful.
 func detectExt(name string, body []byte) (string, bool) {
 	if ext := strings.ToLower(filepath.Ext(name)); ext != "" {
 		for _, known := range extByContentType {
@@ -84,44 +87,17 @@ func detectExt(name string, body []byte) (string, bool) {
 	return ext, ok
 }
 
-// copyLocalImage reads an image the CLI already downloaded and writes it into
-// destDir with a recovered extension. Returns the destination's base name.
-func copyLocalImage(src, destDir string, index int) (string, int64, error) {
-	info, err := os.Stat(src)
-	if err != nil {
-		return "", 0, err
-	}
-	// A zero-byte file is the v1.7.0 symptom: the CLI created the directory,
-	// the download failed, and nothing was written. Treat it as a miss so the
-	// caller can fall back to fetching it directly.
-	if info.Size() == 0 {
-		return "", 0, fmt.Errorf("empty file")
-	}
-	if info.Size() > maxImageBytes {
-		return "", 0, fmt.Errorf("over per-image cap (%d bytes)", info.Size())
-	}
-	body, err := os.ReadFile(src)
-	if err != nil {
-		return "", 0, err
-	}
-	ext, ok := detectExt(filepath.Base(src), body)
-	if !ok {
-		return "", 0, fmt.Errorf("not a recognised image")
-	}
-	name := sanitizeFilename(filepath.Base(src), index) + ext
-	if err := os.WriteFile(filepath.Join(destDir, name), body, 0644); err != nil {
-		return "", 0, err
-	}
-	return name, int64(len(body)), nil
-}
-
-// fetchRemoteImage downloads an uploads.linear.app asset the CLI failed to get.
+// fetchImage downloads one uploads.linear.app asset into destDir.
 //
-// Reached when the markdown still carries a remote URL, which means the CLI's
-// downloader threw and swallowed the error — the signature of the v1.7.0 build
-// compiled without --allow-net=uploads.linear.app. Those URLs are 401 without
-// auth, so the token is borrowed for the request and never kept.
-func fetchRemoteImage(ctx context.Context, url, token, destDir, alt string, index int) (string, int64, error) {
+// These URLs are 401 unauthenticated, which is the whole reason this exists:
+// an agent handed the raw markdown could not open a single screenshot. The
+// credential is read per request and never written anywhere.
+func fetchImage(ctx context.Context, url, destDir, alt string, index int) (string, int64, error) {
+	cred, err := credential()
+	if err != nil {
+		return "", 0, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, imageFetchTimeout)
 	defer cancel()
 
@@ -129,11 +105,9 @@ func fetchRemoteImage(ctx context.Context, url, token, destDir, alt string, inde
 	if err != nil {
 		return "", 0, err
 	}
-	// Raw token, not "Bearer <token>" — this matches how the CLI itself sets
-	// the header for uploads.linear.app.
-	req.Header.Set("Authorization", token)
+	req.Header.Set("Authorization", cred.authHeader())
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", 0, err
 	}

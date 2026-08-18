@@ -449,6 +449,7 @@ type Home struct {
 	accounts       *claudeaccount.Store
 	accountUsage   atomic.Pointer[map[string]claudeaccount.Usage]
 	accountsDialog *AccountsDialog
+	connectLinear  *ConnectLinearDialog
 	// accountWorkerOnce guards the quota poller — see startAccountWorker.
 	accountWorkerOnce sync.Once
 	// accountLoginCancel stops the in-flight login watcher, if any. Written from
@@ -600,6 +601,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 
 	h.accounts = claudeaccount.Load()
 	h.accountsDialog = NewAccountsDialog()
+	h.connectLinear = NewConnectLinearDialog()
 	// Fleet identifies as itself to Anthropic, not as claude-code. Measured
 	// 2026-08-04: the messages endpoint serves fleet/<version> identically, so
 	// there is nothing to gain by impersonating the CLI.
@@ -715,7 +717,31 @@ func (h *Home) Init() tea.Cmd {
 		h.tick(),
 		h.previewTick(),
 		h.loadReleaseNotes(), // compute the What's New badge without opening the dialog
+		warmLinear(),         // resolve the Linear credential off the Update goroutine
 	)
+}
+
+// warmLinear resolves the stored Linear credential once, at startup.
+//
+// It has to happen here rather than lazily because linear.Available() is
+// consulted from the Update goroutine — branch inference asks it on every
+// session creation — and it must never be the thing that reads a keychain. So
+// the keychain read is done once, here, and Available() afterwards is two atomic
+// loads. Reading the workspace behind it is the same story one level up: the
+// Connect dialog and the team-key display want it, and neither is a good place
+// to discover you need a network round trip.
+func warmLinear() tea.Cmd {
+	return func() tea.Msg {
+		linear.Warm()
+		if linear.Available() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if _, err := linear.FetchWorkspace(ctx); err != nil {
+				debuglog.Logger.Debug("linear: could not read workspace at startup", "error", err)
+			}
+		}
+		return nil
+	}
 }
 
 // SetProgram wires up the running tea.Program so worker goroutines can
@@ -828,6 +854,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.accountPicker.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.accountsDialog.SetSize(msg.Width, msg.Height)
+		h.connectLinear.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
@@ -1475,7 +1502,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return true
 			})
 		}
-		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.linearTeam)
+		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.linearTeams)
 		return h, nil
 
 	case workspaceSelectedMsg:
@@ -1559,7 +1586,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Third file step, same posture as the two above: advisory
 				// only. Once the worktree exists the session always starts, so
 				// a Linear outage costs the prompt, never the worktree.
-				tres, terr = materializeTicket(repoPath, info.Path, ticket, moveState)
+				tres, terr = materializeTicket(info.Path, ticket, moveState)
 			} else if err == nil && info != nil && info.Path == "" {
 				debuglog.Logger.Debug("workspace create returned empty path — skipping file copies",
 					"repo", repoPath, "name", name)
@@ -1622,6 +1649,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prompt:        prompt,
 		})
 
+	case linearDisconnectedMsg:
+		h.connectLinear.Show() // re-reads the (now empty) credential state
+		return h, nil
+	case linearConnectedMsg:
+		dialog, cmd := h.connectLinear.Update(msg)
+		h.connectLinear = dialog
+		h.setInfo("Linear connected — " + msg.workspace.Name)
+		return h, cmd
+	case linearConnectFailedMsg:
+		// Routed here rather than through routeToModal, which only carries key
+		// presses: this arrives from a tea.Cmd while the dialog is showing a
+		// spinner, and it is the only thing that can take it out of that state.
+		dialog, cmd := h.connectLinear.Update(msg)
+		h.connectLinear = dialog
+		return h, cmd
 	case ticketReadyMsg:
 		// Inference finished. The session starts either way — a Linear failure
 		// costs the seeded prompt, never the pane.
@@ -2124,6 +2166,7 @@ func (h *Home) modalOpen() bool {
 		h.branchDialog.IsVisible() ||
 		h.sessionCreateDialog.IsVisible() ||
 		h.accountsDialog.IsVisible() ||
+		h.connectLinear.IsVisible() ||
 		h.newDialog.IsVisible() ||
 		h.confirmDialog.IsVisible() ||
 		h.renameDialog.IsVisible() ||
@@ -2166,6 +2209,9 @@ func (h *Home) renderBody() string {
 	}
 	if h.sessionCreateDialog.IsVisible() {
 		return h.sessionCreateDialog.View()
+	}
+	if h.connectLinear.IsVisible() {
+		return h.connectLinear.View()
 	}
 	if h.accountsDialog.IsVisible() {
 		return h.accountsDialog.View()
@@ -2485,6 +2531,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.sessionCreateDialog.IsVisible():
 		dialog, cmd := h.sessionCreateDialog.Update(cmdMsg)
 		h.sessionCreateDialog = dialog
+		return cmd, true
+	case h.connectLinear.IsVisible():
+		dialog, cmd := h.connectLinear.Update(msg)
+		h.connectLinear = dialog
 		return cmd, true
 	case h.accountsDialog.IsVisible():
 		dialog, cmd := h.accountsDialog.Update(msg)
@@ -7005,13 +7055,13 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		// filesystem or PATH from Update(). Empty when the repo has no
 		// .linear.toml or `linear` isn't installed, which makes every ticket
 		// surface in the dialog inert.
-		linearTeam := ""
+		var linearTeams []string
 		if linear.Available() {
-			linearTeam, _ = linear.TeamKey(repoPath)
+			linearTeams = linear.TeamKeys(repoPath)
 		}
 		return workspaceListMsg{
 			workspaces: workspaces, provider: provider, repoPath: repoPath,
-			defaultBranch: defaultBranch, originKey: originKey, linearTeam: linearTeam, err: err,
+			defaultBranch: defaultBranch, originKey: originKey, linearTeams: linearTeams, err: err,
 		}
 	}
 }
@@ -8013,6 +8063,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
+		{Kind: PaletteKindCommand, ID: "connect_linear", Name: "Connect Linear"},
 		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -8214,6 +8265,14 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
+	case "connect_linear":
+		h.actionLog.Add("connect linear", "", true)
+		// Opening the dialog is the feature the tip teaches, so this is where
+		// it retires — reaching the dialog is the whole ask, whether or not the
+		// user goes on to paste a key today.
+		h.cfg.NoteFeatureUsed(tipConnectLinearID, tipLearnedThreshold)
+		h.connectLinear.Show()
+		return h, nil
 	case "new_repo":
 		h.newDialog.Show()
 		return h, nil

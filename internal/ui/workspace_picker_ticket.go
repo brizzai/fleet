@@ -15,7 +15,7 @@ import (
 
 // ticketDebounce is how long the field must be still before a lookup fires.
 //
-// Not per-keystroke: `linear issue view` is a ~0.5s subprocess, so typing an
+// Not per-keystroke: each lookup is a network round trip, so typing an
 // 8-character identifier at normal speed would fork eight of them and their
 // replies would land out of order. 250ms is below the threshold where a pause
 // feels deliberate, and the generation counter cleans up the rest.
@@ -46,7 +46,7 @@ type (
 
 // ticketsEnabled reports whether any ticket surface should exist at all.
 func (d *WorktreeDialog) ticketsEnabled() bool {
-	return d.linearTeam != "" && !d.ticketsOff
+	return len(d.linearTeams) > 0 && !d.ticketsOff
 }
 
 // visibleTicketCount is how many rows are actually rendered, which is what the
@@ -85,7 +85,7 @@ func (d *WorktreeDialog) onFieldChanged(text string) tea.Cmd {
 	})
 }
 
-// onDebounceElapsed decides whether the pause earns a subprocess.
+// onDebounceElapsed decides whether the pause earns a round trip.
 func (d *WorktreeDialog) onDebounceElapsed(m worktreeTicketTickMsg) tea.Cmd {
 	if !d.visible || m.gen != d.ticketGen || !d.ticketsEnabled() {
 		return nil
@@ -96,11 +96,10 @@ func (d *WorktreeDialog) onDebounceElapsed(m worktreeTicketTickMsg) tea.Cmd {
 		return nil
 	}
 
-	repoPath := d.repoPath
-	team := d.linearTeam
+	teams := d.linearTeams
 	gen := m.gen
 
-	if id, ok := linear.LooksLikeIdentifier(text, team); ok {
+	if id, ok := linear.LooksLikeIdentifier(text, teams); ok {
 		if d.resolved != nil && strings.EqualFold(d.resolved.Identifier, id) {
 			return nil // already resolved; don't refire on a redraw
 		}
@@ -108,7 +107,7 @@ func (d *WorktreeDialog) onDebounceElapsed(m worktreeTicketTickMsg) tea.Cmd {
 		return func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), ticketLookupTimeout)
 			defer cancel()
-			t, err := linear.Fetch(ctx, repoPath, id)
+			t, err := linear.Fetch(ctx, id)
 			return worktreeTicketsMsg{gen: gen, query: text, byID: true, tickets: []linear.Ticket{t}, err: err}
 		}
 	}
@@ -120,7 +119,7 @@ func (d *WorktreeDialog) onDebounceElapsed(m worktreeTicketTickMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), ticketLookupTimeout)
 		defer cancel()
-		items, err := linear.Search(ctx, repoPath, team, text, ticketMaxRows)
+		items, err := linear.Search(ctx, text, ticketMaxRows)
 		return worktreeTicketsMsg{gen: gen, query: text, tickets: items, err: err}
 	}
 }
@@ -146,10 +145,11 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 			if m.byID {
 				d.ticketNote = m.query + " — no such issue"
 			}
-		case errors.Is(m.err, linear.ErrNotConfigured), errors.Is(m.err, linear.ErrNotAuthenticated):
-			d.ticketNote = "linear: not authenticated — run `linear auth login`"
-			d.ticketsOff = true // it will keep failing; stop forking subprocesses
-		case errors.Is(m.err, linear.ErrNotInstalled):
+		case errors.Is(m.err, linear.ErrNotAuthenticated):
+			d.ticketNote = "linear: credential rejected — Ctrl+K → Connect Linear"
+			d.ticketsOff = true // it will keep failing; stop spending round trips
+		case errors.Is(m.err, linear.ErrNotConnected):
+			// Never connected is a resting state, not a complaint. Go quiet.
 			d.ticketsOff = true
 		case errors.Is(m.err, context.DeadlineExceeded):
 			d.ticketNote = "linear: timed out"
