@@ -465,8 +465,13 @@ func (d *CommandPaletteDialog) View() string {
 				prefix = SessionSelectionPrefix.Render("▸ ")
 			}
 
+			// The badge column answers a different question per context, so it
+			// is chosen by tab rather than by kind alone. In the tickets tab
+			// every row is a ticket, so "tkt" would say nothing and the useful
+			// fact is whether the work exists here yet. In the mixed tab a
+			// blank reads as a missing badge, not as "not in fleet".
 			badge := renderKindBadge(it.Kind)
-			if it.Kind == PaletteKindTicket {
+			if it.Kind == PaletteKindTicket && d.activeTab == PaletteTabTickets {
 				badge = renderTicketBadge(it.PaletteItem)
 			}
 
@@ -481,7 +486,7 @@ func (d *CommandPaletteDialog) View() string {
 			namePad := strings.Repeat(" ", nameCol-runeLen(rawName))
 			var name string
 			if selected {
-				name = SessionTitleSelStyle.Render(rawName + namePad)
+				name = PaletteSelectedStyle.Render(rawName + namePad)
 			} else {
 				name = highlightMatches(rawName, nameIdx) + namePad
 			}
@@ -494,7 +499,15 @@ func (d *CommandPaletteDialog) View() string {
 			}
 			right = truncRunes(right, rightBudget)
 
-			b.WriteString(prefix + badge + " " + name + "  ")
+			b.WriteString(prefix + badge + " " + name)
+			if selected {
+				// Carry the fill across the gap and the right column, padded to
+				// the row, so the selection is one continuous band.
+				b.WriteString(PaletteSelectedDimStyle.Render("  " + pad(right, rightBudget)))
+				b.WriteString("\n")
+				continue
+			}
+			b.WriteString("  ")
 			if right != "" {
 				if highlightRight {
 					b.WriteString(highlightMatchesDim(right, detailIdx))
@@ -569,6 +582,8 @@ func renderKindBadge(k PaletteItemKind) string {
 		label, col = "repo", ColorPurple
 	case PaletteKindWorktree:
 		label, col = "wkt ", ColorGreen
+	case PaletteKindTicket:
+		label, col = "tkt ", ColorBlue
 	default:
 		label, col = "cmd ", ColorTextDim
 	}

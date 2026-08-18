@@ -111,12 +111,22 @@ func ticketSessionRank(s *session.Session) int {
 func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 	byTicket := h.sessionsByTicket(tickets)
 
+	// Identifiers vary in length (BRZ-453 vs BRZ-3142), so pad them to the
+	// widest in the set: otherwise every title starts at a slightly different
+	// column and the list reads as ragged rather than as a table.
+	idWidth := 0
+	for _, t := range tickets {
+		if n := len(t.Identifier); n > idWidth {
+			idWidth = n
+		}
+	}
+
 	items := make([]PaletteItem, 0, len(tickets))
 	for _, t := range tickets {
 		it := PaletteItem{
 			Kind: PaletteKindTicket,
 			ID:   t.Identifier,
-			Name: fmt.Sprintf("%s  %s", t.Identifier, t.Title),
+			Name: fmt.Sprintf("%-*s  %s", idWidth, t.Identifier, t.Title),
 			// The Linear state is the group header, so it is deliberately NOT
 			// repeated on every row. The right column carries what fleet knows
 			// instead — and stays empty when there is nothing to say.
@@ -125,12 +135,15 @@ func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 			// renderer maps matched haystack indexes back onto those two
 			// strings by offset. Composing it any other way lights up the
 			// wrong characters.
-			Haystack: fmt.Sprintf("%s  %s %s", t.Identifier, t.Title, t.StateName),
+			Haystack: fmt.Sprintf("%-*s  %s %s", idWidth, t.Identifier, t.Title, t.StateName),
 		}
 		if s := byTicket[t.Identifier]; s != nil {
 			it.HasSession = true
 			it.SessionStatus = s.Status
-			it.Detail = string(s.Status)
+			// Deliberately no status WORD. The dot already carries it, in the
+			// colour and shape the sidebar uses, and printing "suspended" at
+			// the far right said the same thing a second time — while eating
+			// the width the title needed. One fact, one place.
 		}
 		items = append(items, it)
 	}

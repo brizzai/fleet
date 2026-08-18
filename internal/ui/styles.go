@@ -124,6 +124,15 @@ var (
 	// Panel title style (cyan/blue like agent-deck).
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 
+	// PaletteSelectedStyle and PaletteSelectedDimStyle fill the WHOLE selected
+	// row, not just its name column — a fill that stops mid-row reads as a
+	// rendering fault rather than a selection. Deliberately the quiet
+	// border-background pair the sidebar uses for a selected row, with the
+	// accent left to the ▸ marker: a solid accent fill across 96 columns
+	// shouts, and the marker already says which row it is.
+	PaletteSelectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(ColorBorder)
+	PaletteSelectedDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim).Background(ColorBorder)
+
 	// PaletteSectionStyle labels a group of palette rows (a Linear state). Dim
 	// and uppercase-spaced so it reads as structure rather than as another row
 	// competing with the ones under it.
@@ -212,6 +221,15 @@ func ApplyPalette(p Palette) {
 	SessionStatusSelDimStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
 
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
+
+	// PaletteSelectedStyle and PaletteSelectedDimStyle fill the WHOLE selected
+	// row, not just its name column — a fill that stops mid-row reads as a
+	// rendering fault rather than a selection. Deliberately the quiet
+	// border-background pair the sidebar uses for a selected row, with the
+	// accent left to the ▸ marker: a solid accent fill across 96 columns
+	// shouts, and the marker already says which row it is.
+	PaletteSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(ColorBorder)
+	PaletteSelectedDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim).Background(ColorBorder)
 
 	// PaletteSectionStyle labels a group of palette rows (a Linear state). Dim
 	// and uppercase-spaced so it reads as structure rather than as another row

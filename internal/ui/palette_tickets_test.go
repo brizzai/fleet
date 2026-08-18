@@ -103,16 +103,22 @@ func TestTicketRowsCarryTheirSession(t *testing.T) {
 	for _, it := range items {
 		byID[it.ID] = it
 	}
-	if !strings.Contains(byID["BRZ-2644"].Detail, "running") {
-		t.Errorf("BRZ-2644 should report its live session, got %q", byID["BRZ-2644"].Detail)
+	if !byID["BRZ-2644"].HasSession || byID["BRZ-2644"].SessionStatus != session.StatusRunning {
+		t.Errorf("BRZ-2644 should carry its live session, got %+v", byID["BRZ-2644"])
 	}
-	if !strings.Contains(byID["BRZ-2996"].Detail, "waiting") {
-		t.Errorf("BRZ-2996 should report its live session, got %q", byID["BRZ-2996"].Detail)
+	if !byID["BRZ-2996"].HasSession || byID["BRZ-2996"].SessionStatus != session.StatusWaiting {
+		t.Errorf("BRZ-2996 should carry its live session, got %+v", byID["BRZ-2996"])
 	}
-	// A ticket with no worktree must say only its Linear state — inventing a
-	// session status for it would be a lie about the machine.
-	if strings.Contains(byID["BRZ-3013"].Detail, "·") {
-		t.Errorf("BRZ-3013 has no session; detail should be the state alone, got %q", byID["BRZ-3013"].Detail)
+	// A ticket with no worktree must be plainly absent, not merely quiet.
+	if byID["BRZ-3013"].HasSession {
+		t.Error("BRZ-3013 has no worktree and must not claim a session")
+	}
+	// The status is carried by the badge, never repeated as a word — the dot
+	// already says it, and the word ate the width the title needed.
+	for _, it := range items {
+		if it.Detail != "" {
+			t.Errorf("%s carries a redundant detail %q; the badge is the status", it.ID, it.Detail)
+		}
 	}
 
 	// Typing either the number or a word from the title must find the row.
@@ -197,9 +203,22 @@ func TestTicketTabLayout(t *testing.T) {
 	if strings.Count(got, "In Progress") != 1 {
 		t.Errorf("the Linear state should appear once, as a header, not on every row:\n%s", got)
 	}
-	// Fleet presence: the session's status is on the row that has one.
-	if !strings.Contains(got, "running") {
-		t.Errorf("a ticket with a live session must say so:\n%s", got)
+	// Fleet presence is the badge: a session shows a dot, and a ticket with no
+	// worktree shows nothing at all in that column.
+	var withSession, without string
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "BRZ-2644") {
+			withSession = line
+		}
+		if strings.Contains(line, "BRZ-3142") {
+			without = line
+		}
+	}
+	if !strings.ContainsAny(withSession, "●◐○✕·") {
+		t.Errorf("a ticket with a live session must carry a status dot: %q", withSession)
+	}
+	if strings.ContainsAny(without, "●◐○✕·") {
+		t.Errorf("a ticket with no worktree must leave the badge column blank: %q", without)
 	}
 	// A ticket row must never be badged "cmd" — the badge column is where
 	// "is this in fleet" lives.
@@ -207,6 +226,10 @@ func TestTicketTabLayout(t *testing.T) {
 		if strings.Contains(line, "BRZ-") && strings.Contains(line, "cmd") {
 			t.Errorf("ticket row carries a cmd badge: %q", line)
 		}
+	}
+	// Identifiers pad to a common width so titles start in one column.
+	if !strings.Contains(got, "BRZ-2732  audit") {
+		t.Errorf("identifiers should pad to a common width so titles align:\n%s", got)
 	}
 	// Titles must not be truncated to nothing on a wide terminal.
 	if !strings.Contains(got, "Storage optimization") {
