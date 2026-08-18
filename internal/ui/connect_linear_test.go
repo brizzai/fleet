@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -181,5 +182,41 @@ func TestConnectWithoutOAuthAppFallsBackToPaste(t *testing.T) {
 	}
 	if d.stage != connectChoosing {
 		t.Errorf("stage = %v, want to stay on the chooser", d.stage)
+	}
+}
+
+// TestPersistFailureStillReportsConnected pins the distinction the first
+// version got wrong.
+//
+// SetCredential makes the credential live before it tries to store it, so a
+// keychain that refuses costs you the next launch, not this one. Reporting that
+// as a connect failure sent people back to re-paste a key that was already
+// working — and it contradicted the code's own stated posture.
+func TestPersistFailureStillReportsConnected(t *testing.T) {
+	d := connectDialog(t)
+	d.stage = connectWorking
+
+	d, _ = d.Update(linearConnectedMsg{
+		workspace:  linear.Workspace{Name: "Brizz", TeamKeys: []string{"BRZ"}},
+		via:        "API key",
+		persistErr: errors.New("keychain write failed: signal: killed"),
+	})
+
+	if d.stage != connectDone {
+		t.Fatalf("stage = %v, want connectDone — the credential works", d.stage)
+	}
+	if d.err != nil {
+		t.Errorf("a persistence failure must not read as a connect failure, got %v", d.err)
+	}
+
+	got := d.View()
+	if !strings.Contains(got, "connected") {
+		t.Error("it must still say it is connected")
+	}
+	if !strings.Contains(got, "this session") {
+		t.Errorf("it must say what was actually lost — the next launch, not this one:\n%s", got)
+	}
+	if !strings.Contains(got, linear.APIKeyEnvVar) {
+		t.Errorf("it must name the way out that needs no keychain:\n%s", got)
 	}
 }

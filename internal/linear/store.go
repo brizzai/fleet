@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 )
 
@@ -90,16 +91,20 @@ func saveStored(s stored) error {
 	return writeSecret(data)
 }
 
-func readSecret() ([]byte, bool) {
+func readSecret() ([]byte, bool) { return readSecretFrom(keychainService) }
+
+// readSecretFrom is readSecret against an explicit service name, matching
+// writeSecretTo so the PTY regression test can round-trip its own item.
+func readSecretFrom(service string) ([]byte, bool) {
 	switch {
 	case useKeychain():
-		out, err := runQuiet(storeTimeout, nil, "security", "find-generic-password", "-w", "-s", keychainService)
+		out, err := runQuiet(storeTimeout, nil, "security", "find-generic-password", "-w", "-s", service)
 		if err != nil {
 			return nil, false
 		}
 		return bytes.TrimSpace(out), true
 	case useSecretTool():
-		out, err := runQuiet(storeTimeout, nil, "secret-tool", "lookup", "service", keychainService)
+		out, err := runQuiet(storeTimeout, nil, "secret-tool", "lookup", "service", service)
 		if err != nil {
 			return nil, false
 		}
@@ -124,12 +129,16 @@ func readSecret() ([]byte, bool) {
 // the secret from stdin — twice, because it is implementing an interactive
 // "type it again" prompt and does not care that stdin is a pipe. secret-tool
 // reads it once. Both were verified against a live keychain.
-func writeSecret(data []byte) error {
+func writeSecret(data []byte) error { return writeSecretTo(keychainService, data) }
+
+// writeSecretTo is writeSecret against an explicit service name, so the PTY
+// regression test can use a namespaced item instead of the real one.
+func writeSecretTo(service string, data []byte) error {
 	switch {
 	case useKeychain():
 		twice := append(append(append([]byte{}, data...), '\n'), append(data, '\n')...)
 		_, err := runQuiet(storeTimeout, twice, "security", "add-generic-password",
-			"-U", "-s", keychainService, "-a", keychainAccount, "-w")
+			"-U", "-s", service, "-a", keychainAccount, "-w")
 		if err != nil {
 			return fmt.Errorf("keychain write failed: %w", err)
 		}
@@ -189,5 +198,19 @@ func runQuiet(timeout time.Duration, stdin []byte, name string, args ...string) 
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	cmd.Stderr = nil
+	// Detach from the controlling terminal. This is not hygiene, it is the
+	// difference between working and hanging: `security ... -w` implements an
+	// interactive prompt, and when a controlling tty exists it opens /dev/tty
+	// and reads the password from THERE, ignoring the stdin we piped it. Inside
+	// the TUI that means the prompt is painted over fleet's own screen and the
+	// process blocks until the context kills it — "keychain write failed:
+	// signal: killed", with nothing stored.
+	//
+	// Setsid puts the child in a new session with no controlling terminal, so
+	// /dev/tty cannot be opened and it falls back to stdin.
+	//
+	// This reproduces ONLY under a real tty, which is why it has a PTY-based
+	// test: verifying it from a pipe-only shell passes while the app is broken.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd.Output()
 }

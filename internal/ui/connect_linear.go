@@ -17,10 +17,17 @@ import (
 // measured at ~260ms; past this the network is the problem, not the key.
 const connectLinearTimeout = 20 * time.Second
 
-// linearConnectedMsg lands when a credential has been verified and stored.
+// linearConnectedMsg lands when a credential has been verified.
+//
+// persistErr is carried separately from a connect failure on purpose: the
+// credential is live in memory the moment it verifies, so a keychain that
+// refuses to store it costs you the NEXT launch, not this one. Reporting that
+// as "connect failed" contradicted the code and sent people back to re-paste a
+// key that was already working.
 type linearConnectedMsg struct {
-	workspace linear.Workspace
-	via       string
+	workspace  linear.Workspace
+	via        string
+	persistErr error
 }
 
 // linearConnectFailedMsg lands when it hasn't.
@@ -65,9 +72,10 @@ type ConnectLinearDialog struct {
 	focus int
 	input textinput.Model
 
-	err       error
-	workspace linear.Workspace
-	via       string
+	err        error
+	persistErr error
+	workspace  linear.Workspace
+	via        string
 }
 
 func NewConnectLinearDialog() *ConnectLinearDialog {
@@ -87,7 +95,7 @@ func (d *ConnectLinearDialog) SetSize(w, h int) { d.width, d.height = w, h }
 
 func (d *ConnectLinearDialog) Show() {
 	d.visible = true
-	d.err = nil
+	d.err, d.persistErr = nil, nil
 	d.input.SetValue("")
 	d.input.Blur()
 	d.workspace, _ = linear.WorkspaceInfo()
@@ -120,7 +128,8 @@ func (d *ConnectLinearDialog) setFocus(i int) {
 func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd) {
 	switch m := msg.(type) {
 	case linearConnectedMsg:
-		d.stage, d.workspace, d.via, d.err = connectDone, m.workspace, m.via, nil
+		d.stage, d.workspace, d.via = connectDone, m.workspace, m.via
+		d.err, d.persistErr = nil, m.persistErr
 		return d, nil
 	case linearConnectFailedMsg:
 		// Back to the field that produced it, so the fix is one keystroke away
@@ -233,10 +242,9 @@ func verifyAndStoreLinearKey(key string) tea.Cmd {
 			return linearConnectFailedMsg{err: err}
 		}
 		cred.Workspace = ws.Name
-		if err := linear.SetCredential(cred); err != nil {
-			return linearConnectFailedMsg{err: err}
-		}
-		return linearConnectedMsg{workspace: ws, via: linear.ConnectedVia()}
+		// Not an error path: the credential is already live. See linearConnectedMsg.
+		persistErr := linear.SetCredential(cred)
+		return linearConnectedMsg{workspace: ws, via: linear.ConnectedVia(), persistErr: persistErr}
 	}
 }
 
@@ -254,10 +262,8 @@ func signInToLinear() tea.Cmd {
 			return linearConnectFailedMsg{err: err}
 		}
 		cred.Workspace = ws.Name
-		if err := linear.SetCredential(cred); err != nil {
-			return linearConnectFailedMsg{err: err}
-		}
-		return linearConnectedMsg{workspace: ws, via: linear.ConnectedVia()}
+		persistErr := linear.SetCredential(cred)
+		return linearConnectedMsg{workspace: ws, via: linear.ConnectedVia(), persistErr: persistErr}
 	}
 }
 
@@ -278,6 +284,15 @@ func (d *ConnectLinearDialog) View() string {
 		b.WriteString("\n")
 		if d.via != "" {
 			b.WriteString(DimStyle.Render("via " + d.via))
+			b.WriteString("\n")
+		}
+		if d.persistErr != nil {
+			b.WriteString("\n")
+			b.WriteString(ErrorStyle.Render("⚠ couldn't save it: " + d.persistErr.Error()))
+			b.WriteString("\n")
+			b.WriteString(DimStyle.Render("Linear works for this session; you'll reconnect after a restart."))
+			b.WriteString("\n")
+			b.WriteString(DimStyle.Render("To make it stick, set " + linear.APIKeyEnvVar + " in your shell instead."))
 			b.WriteString("\n")
 		}
 		if len(d.workspace.TeamKeys) > 0 {
