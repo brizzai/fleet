@@ -494,14 +494,13 @@ func resetCredentialForTest() {
 // handed off.
 func TestAssignedIssuesOrderPutsWorkInHand(t *testing.T) {
 	mk := func(id, name, typ string, pos float64) issueLite {
-		n := issueLite{Identifier: id, Title: id}
-		n.State = &struct {
-			Name     string  `json:"name"`
-			Type     string  `json:"type"`
-			Position float64 `json:"position"`
-		}{Name: name, Type: typ, Position: pos}
-		return n
+		return mkWithPriority(id, name, typ, pos, 0)
 	}
+	mkp := func(id, name, typ string, pos float64, pri int) issueLite {
+		return mkWithPriority(id, name, typ, pos, pri)
+	}
+	_ = mkp
+
 	nodes := []issueLite{
 		mk("BRZ-4", "Backlog", "backlog", 0),
 		mk("BRZ-3", "Todo", "unstarted", 1),
@@ -535,4 +534,65 @@ func TestAssignedIssuesOrderPutsWorkInHand(t *testing.T) {
 	if nodes[len(nodes)-1].Identifier != "BRZ-9" {
 		t.Errorf("a stateless issue should sort last, got order ending in %s", nodes[len(nodes)-1].Identifier)
 	}
+}
+
+// mkWithPriority builds a decoded node for the ordering tests.
+func mkWithPriority(id, stateName, stateType string, pos float64, pri int) issueLite {
+	n := issueLite{Identifier: id, Title: id, Priority: pri}
+	n.State = &struct {
+		Name     string  `json:"name"`
+		Type     string  `json:"type"`
+		Position float64 `json:"position"`
+	}{Name: stateName, Type: stateType, Position: pos}
+	return n
+}
+
+// TestPriorityOrderingWithinAState pins the second sort key.
+//
+// The raw Linear number cannot be sorted on: 0 means "not set", so ascending
+// order would float every unprioritised ticket above the urgent ones. And
+// priority alone is not enough — most of a real backlog shares one priority
+// (21 of 50 in the workspace this was built against were High), so recency has
+// to survive as the tiebreak or that block reorders itself between opens.
+func TestPriorityOrderingWithinAState(t *testing.T) {
+	if got := PriorityRank(0); got <= PriorityRank(4) {
+		t.Errorf("unset priority ranked %d, must sort BELOW low (%d)", got, PriorityRank(4))
+	}
+	for _, c := range []struct{ hi, lo int }{{1, 2}, {2, 3}, {3, 4}, {4, 0}} {
+		if PriorityRank(c.hi) >= PriorityRank(c.lo) {
+			t.Errorf("priority %d should outrank %d", c.hi, c.lo)
+		}
+	}
+
+	// Same state, mixed priorities, entering in a deliberately unhelpful order.
+	nodes := []issueLite{
+		mkWithPriority("BRZ-none", "Todo", "unstarted", 1, 0),
+		mkWithPriority("BRZ-high-a", "Todo", "unstarted", 1, 2),
+		mkWithPriority("BRZ-urgent", "Todo", "unstarted", 1, 1),
+		mkWithPriority("BRZ-high-b", "Todo", "unstarted", 1, 2),
+		mkWithPriority("BRZ-low", "Todo", "unstarted", 1, 4),
+	}
+	sort.SliceStable(nodes, func(a, b int) bool {
+		ra, rb := stateTypeRank(nodes[a].stateType()), stateTypeRank(nodes[b].stateType())
+		if ra != rb {
+			return ra < rb
+		}
+		if pa, pb := nodes[a].statePosition(), nodes[b].statePosition(); pa != pb {
+			return pa < pb
+		}
+		return PriorityRank(nodes[a].Priority) < PriorityRank(nodes[b].Priority)
+	})
+
+	var got []string
+	for _, n := range nodes {
+		got = append(got, n.Identifier)
+	}
+	want := []string{"BRZ-urgent", "BRZ-high-a", "BRZ-high-b", "BRZ-low", "BRZ-none"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+	}
+	// high-a before high-b is the recency tiebreak surviving: they entered in
+	// that order and a stable sort must not disturb it.
 }

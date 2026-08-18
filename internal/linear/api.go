@@ -246,7 +246,7 @@ const assignedIssuesQuery = `query Mine($first: Int!) {
       filter: { state: { type: { nin: ["completed", "canceled"] } } }
       orderBy: updatedAt
     ) {
-      nodes { identifier title url state { name type position } }
+      nodes { identifier title url priority state { name type position } }
     }
   }
 }`
@@ -270,6 +270,7 @@ type issueLite struct {
 	Identifier string `json:"identifier"`
 	Title      string `json:"title"`
 	URL        string `json:"url"`
+	Priority   int    `json:"priority"`
 	State      *struct {
 		Name     string  `json:"name"`
 		Type     string  `json:"type"`
@@ -297,7 +298,7 @@ func (i *issueLite) ticket() Ticket {
 	if i == nil {
 		return Ticket{}
 	}
-	t := Ticket{Identifier: i.Identifier, Title: i.Title, URL: i.URL}
+	t := Ticket{Identifier: i.Identifier, Title: i.Title, URL: i.URL, Priority: i.Priority}
 	if i.State != nil {
 		t.StateName, t.StateType = i.State.Name, i.State.Type
 	}
@@ -477,6 +478,25 @@ func MoveToStarted(ctx context.Context, issue *issueFull) (string, error) {
 // stateTypeRank orders Linear's state categories by how close the work is to
 // your hands. Ranking on the TYPE rather than the name is what makes this work
 // on a team that renamed its states.
+// PriorityRank orders Linear's priorities most-urgent-first.
+//
+// It exists because the raw number cannot be sorted on: Linear uses 0 for "not
+// set", so ascending order would put every unprioritised ticket above the
+// urgent ones. Unset sorts last, which is what "not set" should mean in a queue.
+func PriorityRank(p int) int {
+	switch p {
+	case 1: // urgent
+		return 0
+	case 2: // high
+		return 1
+	case 3: // medium
+		return 2
+	case 4: // low
+		return 3
+	}
+	return 4 // unset
+}
+
 func stateTypeRank(t string) int {
 	switch t {
 	case "started":
@@ -517,12 +537,20 @@ func AssignedIssues(ctx context.Context, limit int) ([]Ticket, error) {
 	// and "In Review" leading the list. A work queue wants the one you are
 	// actually in the middle of.
 	nodes := out.Viewer.AssignedIssues.Nodes
+	// State, then priority, then whatever the server gave us — which is
+	// updatedAt. Recency has to be the tiebreak rather than the whole rule:
+	// most of a real backlog shares one priority (21 of 50 here were High), and
+	// priority alone would leave that block in an order that shifts between
+	// opens for no visible reason.
 	sort.SliceStable(nodes, func(a, b int) bool {
 		ra, rb := stateTypeRank(nodes[a].stateType()), stateTypeRank(nodes[b].stateType())
 		if ra != rb {
 			return ra < rb
 		}
-		return nodes[a].statePosition() < nodes[b].statePosition()
+		if pa, pb := nodes[a].statePosition(), nodes[b].statePosition(); pa != pb {
+			return pa < pb
+		}
+		return PriorityRank(nodes[a].Priority) < PriorityRank(nodes[b].Priority)
 	})
 
 	tickets := make([]Ticket, 0, len(nodes))

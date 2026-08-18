@@ -89,6 +89,11 @@ type Ticket struct {
 	Title      string
 	URL        string
 	StateName  string
+	// Priority is Linear's numeric priority: 1 urgent, 2 high, 3 medium,
+	// 4 low, 0 unset. Note that 0 means "not set" rather than "most
+	// important", which is why it cannot be sorted on directly.
+	Priority int
+
 	// StateType is Linear's own category for the state — "started",
 	// "unstarted", "backlog", "triage". Carried alongside the name because the
 	// name is whatever a team called it ("In Dev", "Doing") and cannot be

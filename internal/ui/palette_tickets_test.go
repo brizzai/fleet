@@ -262,3 +262,56 @@ func TestFilteredTicketsKeepTheirState(t *testing.T) {
 		t.Errorf("a filtered row must carry its state, since no header does:\n%s", got)
 	}
 }
+
+// TestPriorityIsVisibleBecauseItIsSorted: the list orders by priority, so
+// priority has to show. Ordering on an invisible key reads as arbitrary.
+//
+// Only urgent and high are marked — labelling all fifty rows is the density
+// this view was trimmed to avoid, and blank-is-normal matches how the badge
+// column already works.
+func TestPriorityIsVisibleBecauseItIsSorted(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
+		{Identifier: "BRZ-1", Title: "urgent one", StateName: "Todo", StateType: "unstarted", Priority: 1},
+		{Identifier: "BRZ-2", Title: "high one", StateName: "Todo", StateType: "unstarted", Priority: 2},
+		{Identifier: "BRZ-3", Title: "medium one", StateName: "Todo", StateType: "unstarted", Priority: 3},
+		{Identifier: "BRZ-4", Title: "unset one", StateName: "Todo", StateType: "unstarted", Priority: 0},
+	}))
+
+	got := renderedPalette(t, h)
+	rows := map[string]string{}
+	for _, line := range strings.Split(got, "\n") {
+		for _, id := range []string{"BRZ-1", "BRZ-2", "BRZ-3", "BRZ-4"} {
+			if strings.Contains(line, id+" ") {
+				rows[id] = line
+			}
+		}
+	}
+	if !strings.Contains(rows["BRZ-1"], "!!") {
+		t.Errorf("urgent must be marked: %q", rows["BRZ-1"])
+	}
+	if !strings.Contains(rows["BRZ-2"], "!") || strings.Contains(rows["BRZ-2"], "!!") {
+		t.Errorf("high must be marked once: %q", rows["BRZ-2"])
+	}
+	for _, id := range []string{"BRZ-3", "BRZ-4"} {
+		if strings.Contains(rows[id], "!") {
+			t.Errorf("%s is medium/unset and must carry no mark: %q", id, rows[id])
+		}
+	}
+
+	// The mark is shape, not colour: colour in this list means session status
+	// and adding a second colour language would make neither readable.
+	raw := h.commandPalette.View()
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.Contains(ansi.Strip(line), "urgent one") && strings.Contains(line, "38;2") {
+			// The row may be styled as a whole; what must not happen is the
+			// mark carrying its own colour distinct from the title's.
+			plain := ansi.Strip(line)
+			if strings.Index(plain, "!!") > strings.Index(plain, "BRZ-1") {
+				t.Error("the mark should precede the identifier")
+			}
+		}
+	}
+}
