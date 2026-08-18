@@ -143,7 +143,14 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 		switch {
 		case errors.Is(m.err, linear.ErrNotFound):
 			if m.byID {
-				d.ticketNote = m.query + " — no such issue"
+				// "no such issue" is the wrong diagnosis when the credential
+				// simply cannot see this repo's workspace — the issue exists,
+				// we are looking in the wrong place.
+				if note, wrong := d.workspaceMismatchNote(); wrong {
+					d.ticketNote = note
+				} else {
+					d.ticketNote = m.query + " — no such issue"
+				}
 			}
 		case errors.Is(m.err, linear.ErrNotAuthenticated):
 			d.ticketNote = "linear: credential rejected — Ctrl+K → Connect Linear"
@@ -182,9 +189,46 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 	if len(d.tickets) > ticketMaxRows {
 		d.tickets = d.tickets[:ticketMaxRows]
 	}
+	// A search that matched nothing is normally not worth a word. But when the
+	// credential belongs to a workspace that has none of this repo's teams,
+	// EVERY search returns nothing, and rendering that as silence leaves the
+	// user typing into a feature that looks broken with no way to find out why.
+	if len(d.tickets) == 0 {
+		if note, wrong := d.workspaceMismatchNote(); wrong {
+			d.ticketNote = note
+		}
+	}
 	if d.focus == focusNewBranch {
 		d.setSelection(focusNewBranch, d.ticketCursor)
 	}
+}
+
+// workspaceMismatchNote reports when the connected Linear workspace contains
+// none of this repo's teams.
+//
+// This is a real and easily-hit state: authorizing browser sign-in against the
+// wrong workspace produces a credential that works perfectly and can see none
+// of your issues. Nothing else in the flow catches it — the team keys come from
+// a file, so the dialog lights up; the API answers happily; the results are
+// simply always empty.
+func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
+	ws, known := linear.WorkspaceInfo()
+	if !known || len(d.linearTeams) == 0 || len(ws.TeamKeys) == 0 {
+		return "", false
+	}
+	for _, repoTeam := range d.linearTeams {
+		for _, wsTeam := range ws.TeamKeys {
+			if strings.EqualFold(repoTeam, wsTeam) {
+				return "", false
+			}
+		}
+	}
+	name := ws.Name
+	if name == "" {
+		name = "that workspace"
+	}
+	return fmt.Sprintf("connected to %s, which has no %s team — Ctrl+K → Connect Linear",
+		name, strings.Join(d.linearTeams, "/")), true
 }
 
 // pickTicket fills the field from a highlighted row and collapses back to the

@@ -526,3 +526,12 @@ func fetchWorkspaceWith(ctx context.Context, cred Credential, useStored bool) (W
 	wsCache.mu.Unlock()
 	return ws, nil
 }
+
+// SetWorkspaceForTest installs a workspace reading without a network call, so
+// UI tests can exercise the wrong-workspace path. An empty Workspace clears it.
+func SetWorkspaceForTest(ws Workspace) {
+	wsCache.mu.Lock()
+	defer wsCache.mu.Unlock()
+	wsCache.ws = ws
+	wsCache.loaded = ws.Name != "" || len(ws.TeamKeys) > 0
+}
