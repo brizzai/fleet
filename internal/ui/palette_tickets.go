@@ -123,16 +123,16 @@ func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 
 	items := make([]PaletteItem, 0, len(tickets))
 	for _, t := range tickets {
-		// The list is sorted by priority, so priority has to be visible:
-		// ordering on an invisible key reads as arbitrary. Only urgent and high
-		// are marked — labelling all fifty rows is the density we just cut, and
-		// blank-is-normal matches how the badge column already works. Shape,
-		// never colour: the status dot owns colour in this list.
-		name := fmt.Sprintf("%-2s  %-*s  %s", priorityMark(t.Priority), idWidth, t.Identifier, t.Title)
+		// Priority rides in its own column (see PaletteItem.Priority), NOT in
+		// the name: baked into the name it could not be coloured, and it pushed
+		// every ticket title out of line with every command and worktree row in
+		// the mixed tab.
+		name := fmt.Sprintf("%-*s  %s", idWidth, t.Identifier, t.Title)
 		it := PaletteItem{
-			Kind: PaletteKindTicket,
-			ID:   t.Identifier,
-			Name: name,
+			Kind:     PaletteKindTicket,
+			ID:       t.Identifier,
+			Name:     name,
+			Priority: t.Priority,
 			// The Linear state is the group header, so it is deliberately NOT
 			// repeated on every row. The right column carries what fleet knows
 			// instead — and stays empty when there is nothing to say.
@@ -154,19 +154,6 @@ func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 		items = append(items, it)
 	}
 	return items
-}
-
-// priorityMark renders Linear's priority as shape. Empty for medium, low and
-// unset, so the marks at the top of a group stand out instead of every row
-// carrying one.
-func priorityMark(p int) string {
-	switch p {
-	case 1:
-		return "!!"
-	case 2:
-		return "!"
-	}
-	return ""
 }
 
 // openTicketFromPalette acts on a chosen ticket.

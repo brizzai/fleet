@@ -315,3 +315,46 @@ func TestPriorityIsVisibleBecauseItIsSorted(t *testing.T) {
 		}
 	}
 }
+
+// TestPriorityColumnOnlyInTheTicketsTab pins the alignment.
+//
+// The priority mark started life baked into Name, which meant the mixed tab
+// gained a lead column no other kind had — every ticket title sat four columns
+// right of every command and worktree, and the list read as broken. It is a
+// column of its own now, rendered only where every row is a ticket.
+func TestPriorityColumnOnlyInTheTicketsTab(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
+		{Identifier: "BRZ-2124", Title: "The magic fix button", StateName: "In Review", StateType: "started", Priority: 2},
+	}))
+
+	// In the tickets tab the mark shows.
+	if got := renderedPalette(t, h); !strings.Contains(got, "!") {
+		t.Errorf("the tickets tab must show the priority mark:\n%s", got)
+	}
+
+	// In the mixed tab it must not, and ticket names must start in the same
+	// column as command names.
+	h.commandPalette.activeTab = PaletteTabAll
+	h.commandPalette.filterInput.SetValue("magic")
+	h.commandPalette.rebuildFiltered()
+	got := renderedPalette(t, h)
+
+	var ticketLine string
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "BRZ-2124") {
+			ticketLine = line
+		}
+	}
+	if ticketLine == "" {
+		t.Fatalf("expected the ticket to match 'magic':\n%s", got)
+	}
+	if strings.Contains(ticketLine, "!") {
+		t.Errorf("the mixed tab must not carry the priority column: %q", ticketLine)
+	}
+	if !strings.Contains(ticketLine, "tkt  BRZ-2124") {
+		t.Errorf("ticket names must start right after the badge, like every other kind: %q", ticketLine)
+	}
+}

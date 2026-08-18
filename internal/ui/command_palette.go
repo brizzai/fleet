@@ -50,6 +50,13 @@ type PaletteItem struct {
 	// (ticket rows only — their Linear state). Empty means no section.
 	Group string
 
+	// Priority is the row's Linear priority (1 urgent … 4 low, 0 unset). It is
+	// rendered in a column of its own rather than baked into Name for two
+	// reasons: a column can be coloured, and a column can be omitted. In the
+	// mixed tab it IS omitted, because a lead column no other kind has would
+	// push every ticket title out of line with every command and worktree.
+	Priority int
+
 	// SessionStatus is the status of the fleet session already working this
 	// row, and HasSession says whether there is one at all. They are separate
 	// because a zero Status is a real status, and "no session" has to be
@@ -387,8 +394,12 @@ func (d *CommandPaletteDialog) View() string {
 			end = len(d.filtered)
 		}
 
-		// Column layout: [prefix 2][badge 4][sep 1][name N][gap 2][right]
-		const reserved = 2 + paletteBadgeWidth + 1 + 2
+		// Column layout: [prefix 2][badge 4][sep 1][lead L][name N][gap 2][right]
+		leadCol := 0
+		if d.activeTab == PaletteTabTickets {
+			leadCol = paletteLeadWidth
+		}
+		reserved := 2 + paletteBadgeWidth + 1 + leadCol + 2
 
 		// Measure BOTH columns and give the name whatever the right column
 		// genuinely needs left over, rather than capping it at a constant. A
@@ -499,7 +510,11 @@ func (d *CommandPaletteDialog) View() string {
 			}
 			right = truncRunes(right, rightBudget)
 
-			b.WriteString(prefix + badge + " " + name)
+			lead := ""
+			if leadCol > 0 {
+				lead = renderPriorityLead(it.Priority)
+			}
+			b.WriteString(prefix + badge + " " + lead + name)
 			if selected {
 				// Carry the fill across the gap and the right column, padded to
 				// the row, so the selection is one continuous band.
@@ -621,6 +636,27 @@ func sessionBadgeGlyph(st session.Status) (string, lipgloss.Style) {
 		return "·", StatusSuspendedStyle
 	}
 	return "○", DimStyle
+}
+
+// paletteLeadWidth is the priority column: two glyphs plus a space.
+const paletteLeadWidth = 3
+
+// renderPriorityLead marks urgent and high, and nothing else.
+//
+// Coloured, and that is a deliberate reversal: the first cut left this the same
+// colour as the title on the grounds that the status dot owns colour in this
+// list. With real data that rule was protecting a column only a handful of rows
+// ever fill, while leaving fifty rows uniformly flat. Red and orange sit in a
+// different column from the dot's green/blue/amber and mean a different kind of
+// urgency, so the two read as separate axes rather than as one confused one.
+func renderPriorityLead(priority int) string {
+	switch priority {
+	case 1:
+		return lipgloss.NewStyle().Foreground(ColorRed).Bold(true).Render(pad("!!", paletteLeadWidth))
+	case 2:
+		return lipgloss.NewStyle().Foreground(ColorOrange).Render(pad("!", paletteLeadWidth))
+	}
+	return strings.Repeat(" ", paletteLeadWidth)
 }
 
 // pad right-pads to a rune width.
