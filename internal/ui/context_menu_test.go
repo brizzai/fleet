@@ -378,7 +378,7 @@ func TestContextMenuOriginRow(t *testing.T) {
 	h := menuHome(item)
 
 	_, items := h.buildContextMenuItems()
-	want := []string{"toggle_group", "new_worktree", "snooze", "delete_at_cursor"}
+	want := []string{"toggle_group", "new_worktree", "allowed_accounts", "snooze", "delete_at_cursor"}
 	got := ids(items)
 	if len(got) != len(want) {
 		t.Fatalf("origin menu = %v, want %v", got, want)

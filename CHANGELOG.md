@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-08-18
+
+### Added
+
+- **Per-repo account rules.** Press `.` on a repo group and pick **Allowed Accounts…** to choose which Claude subscriptions may run there — client work on the work subscription, side projects on your own. Previously only editable by hand in `config.json`.
+
+## [2.26.0] - 2026-08-17
+
+### Highlights
+
+- **Teach your agents to drive fleet.** `fleet skill install` writes an Agent Skill that shows Claude Code, Codex, Cursor, and OpenCode how to use `fleet wt` and `fleet send` — so an agent can hand work to a fresh worktree session or message a running one instead of asking you to. Opt-in, and it never prompts, so an agent can install it for itself.
+- **Two Claude subscriptions, one fleet.** Add a second account with `Ctrl+K` → "Manage Claude Accounts" → `a`, log in, and each new session runs on whichever account has more headroom — so one spent 5-hour window no longer stalls every session. Each account keeps a full claude.ai login, so connectors and Remote Control work exactly as they do outside fleet. Restarting a session whose account is spent or logged out moves it to one that works, and `.` → "Move to Account…" moves any session by hand. A top-right readout alternates between each account's 5-hour and weekly usage.
+
+### Added
+
+- **Teach your agents to drive fleet.** `fleet skill install` writes an Agent Skill that shows Claude Code, Codex, Cursor, and OpenCode how to use `fleet wt` and `fleet send` — so an agent can hand work to a fresh worktree session or message a running one instead of asking you to. Opt-in, and it never prompts, so an agent can install it for itself.
+- **Two Claude subscriptions, one fleet.** Add a second account with `Ctrl+K` → "Manage Claude Accounts" → `a`, log in, and each new session runs on whichever account has more headroom — so one spent 5-hour window no longer stalls every session. Each account keeps a full claude.ai login, so connectors and Remote Control work exactly as they do outside fleet. Restarting a session whose account is spent or logged out moves it to one that works, and `.` → "Move to Account…" moves any session by hand. A top-right readout alternates between each account's 5-hour and weekly usage.
+
+### Improved
+
+- **Quota with a deadline.** The account readout now shows when each window resets — `weekly │ yuval ▰▰▱▱ 40%·2h │ hayke102 ▰▰▱▱ 54%·5d` — because "54% of a week" tells you nothing until you know whether it refills tomorrow or in five days.
+
 ## [2.25.0] - 2026-08-09
 
 ### Added
@@ -499,7 +521,9 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.25.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.27.0...HEAD
+[2.27.0]: https://github.com/brizzai/fleet/releases/tag/v2.27.0
+[2.26.0]: https://github.com/brizzai/fleet/releases/tag/v2.26.0
 [2.25.0]: https://github.com/brizzai/fleet/releases/tag/v2.25.0
 [2.24.1]: https://github.com/brizzai/fleet/releases/tag/v2.24.1
 [2.24.0]: https://github.com/brizzai/fleet/releases/tag/v2.24.0
