@@ -7,8 +7,23 @@ import (
 
 // Assignment strategies for new sessions.
 const (
-	// StrategyLeastUsed gives a new session whichever allowed account has the
-	// most headroom in its 5-hour window. The default.
+	// StrategyLeastUsedWeekly gives a new session whichever allowed account has
+	// the most headroom in its *weekly* window. The default.
+	//
+	// Weekly rather than 5-hour because the two windows fail differently. A
+	// 5-hour bucket refills this afternoon, so spending it early costs an hour
+	// of waiting; a weekly bucket spent on Tuesday is gone until the following
+	// week. Balancing the slow window is therefore what keeps the fleet running
+	// at all, and the fast window largely takes care of itself.
+	StrategyLeastUsedWeekly = "least_used_weekly"
+	// StrategyLeastUsed5H ranks on the 5-hour window instead — the right choice
+	// when the day's throughput matters more than the week's, e.g. one long
+	// session per account where nothing is close to a weekly cap.
+	StrategyLeastUsed5H = "least_used_5h"
+	// StrategyLeastUsed is the pre-split name. Kept as an alias rather than a
+	// value: every config carrying it got it as the default, so it follows the
+	// default forward. ParseStrategy resolves it; nothing else should compare
+	// against it.
 	StrategyLeastUsed = "least_used"
 	// StrategyWaterfall drains accounts in configured order, skipping spent
 	// ones. Needs only a binary "is it spent" signal, so it is the mode that
@@ -26,16 +41,78 @@ const (
 // order rather than picking arbitrarily.
 const unknownPct = 50
 
-// ParseStrategy normalizes a configured strategy, falling back to least-used
-// for anything unrecognized (including empty).
+// ParseStrategy normalizes a configured strategy, falling back to weekly
+// least-used for anything unrecognized (including empty).
+//
+// The legacy "least_used" resolves to the weekly variant, so an unset config and
+// one carrying the old name mean the same thing. The alternative — mapping the
+// old name to the 5-hour variant — would make the same file behave differently
+// depending on whether the key was present or absent, which is a miserable thing
+// to debug from a bug report.
 func ParseStrategy(s string) string {
 	switch strings.TrimSpace(strings.ToLower(s)) {
 	case StrategyWaterfall:
 		return StrategyWaterfall
 	case StrategyManual:
 		return StrategyManual
+	case StrategyLeastUsed5H:
+		return StrategyLeastUsed5H
 	default:
-		return StrategyLeastUsed
+		return StrategyLeastUsedWeekly
+	}
+}
+
+// Strategies is the assignment modes in the order surfaces should offer them,
+// least surprising first. The legacy alias is deliberately absent: it is a value
+// ParseStrategy accepts, never one a user should be able to select.
+var Strategies = []string{
+	StrategyLeastUsedWeekly,
+	StrategyLeastUsed5H,
+	StrategyWaterfall,
+	StrategyManual,
+}
+
+// StrategyLabel is the strategy as shown to a user.
+//
+// Here rather than in the UI for the same reason Window.Name is: the Settings
+// cycler and the accounts dialog both name these, and two copies of the strings
+// is how they stop agreeing. The least-used pair names its window, because
+// which window it ranks on is the entire difference between them.
+func StrategyLabel(s string) string {
+	switch ParseStrategy(s) {
+	case StrategyLeastUsed5H:
+		return "Least used · 5-hour"
+	case StrategyWaterfall:
+		return "Waterfall"
+	case StrategyManual:
+		return "Manual"
+	default:
+		return "Least used · weekly"
+	}
+}
+
+// StrategyLabels is every label, for width budgeting.
+func StrategyLabels() []string {
+	out := make([]string, 0, len(Strategies))
+	for _, s := range Strategies {
+		out = append(out, StrategyLabel(s))
+	}
+	return out
+}
+
+// rankWindow says which usage window a strategy orders accounts by. The second
+// return is false for the strategies that don't rank at all (waterfall takes
+// configured order, manual takes the one it was given) — deliberately a bool
+// rather than a third Window value, because Window means "one of the two buckets
+// Anthropic reports" and a not-a-bucket member would leak into Name() and Pct().
+func rankWindow(strategy string) (Window, bool) {
+	switch ParseStrategy(strategy) {
+	case StrategyLeastUsed5H:
+		return WindowFiveHour, true
+	case StrategyLeastUsedWeekly:
+		return WindowSevenDay, true
+	default:
+		return WindowFiveHour, false
 	}
 }
 
@@ -100,24 +177,29 @@ func Select(o SelectOpts) (Account, bool) {
 		return live[0], true // already ordered by Store.List
 	}
 
+	// Which window "least used" means is the strategy's whole content: the two
+	// buckets fail on different timescales, so ranking on the wrong one balances
+	// a resource that was never scarce.
+	win, _ := rankWindow(o.Strategy)
 	best := live[0]
-	bestPct := pctOf(o.Usage, best.Email)
+	bestPct := pctOf(o.Usage, best.Email, win)
 	for _, a := range live[1:] {
 		// Strictly-less keeps ties on the earlier account, so equal utilization
-		// resolves by configured order rather than arbitrarily.
-		if p := pctOf(o.Usage, a.Email); p < bestPct {
+		// resolves by configured order rather than arbitrarily. Ties are routine
+		// on the weekly window early in the week, where every account reads 0.
+		if p := pctOf(o.Usage, a.Email, win); p < bestPct {
 			best, bestPct = a, p
 		}
 	}
 	return best, true
 }
 
-func pctOf(usage map[string]Usage, email string) int {
+func pctOf(usage map[string]Usage, email string, win Window) int {
 	u, ok := usage[email]
 	if !ok || !u.Known() {
 		return unknownPct
 	}
-	return u.FiveHourPct
+	return u.Pct(win)
 }
 
 // dropLoggedOut removes accounts with no live claude.ai login.

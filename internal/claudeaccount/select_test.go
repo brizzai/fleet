@@ -16,9 +16,16 @@ func accts(emails ...string) []Account {
 	return out
 }
 
-// used builds a known usage reading at the given 5-hour utilization.
+// used builds a known usage reading at the given utilization in *both* windows,
+// so a test about ranking says the same thing whichever window the strategy
+// ranks on. Tests that care about the two diverging build the Usage themselves
+// (see TestLeastUsedRanksOnTheStrategysWindow).
+//
+// SevenDayReset is deliberately left zero, as it always was: every value here is
+// below ExhaustedPct, so no window reads as spent and the reset logic is
+// untouched by the second field.
 func used(pct int) Usage {
-	return Usage{FiveHourPct: pct, FetchedAt: testNow, FiveHourReset: testNow.Add(time.Hour)}
+	return Usage{FiveHourPct: pct, SevenDayPct: pct, FetchedAt: testNow, FiveHourReset: testNow.Add(time.Hour)}
 }
 
 // loggedOut builds the reading for an account with no live login. Note it
@@ -360,14 +367,85 @@ func TestUnpolledAccountIsNotExhausted(t *testing.T) {
 
 func TestParseStrategyNormalizes(t *testing.T) {
 	for in, want := range map[string]string{
-		" Waterfall ": StrategyWaterfall,
-		"MANUAL":      StrategyManual,
-		"":            StrategyLeastUsed,
-		"nonsense":    StrategyLeastUsed,
+		" Waterfall ":       StrategyWaterfall,
+		"MANUAL":            StrategyManual,
+		"least_used_5h":     StrategyLeastUsed5H,
+		" Least_Used_5H ":   StrategyLeastUsed5H,
+		"least_used_weekly": StrategyLeastUsedWeekly,
+		"":                  StrategyLeastUsedWeekly,
+		"nonsense":          StrategyLeastUsedWeekly,
+		// The pre-split name. It resolves to the same thing an unset config
+		// does, so a file carrying it and a file missing it behave alike —
+		// mapping it to the 5-hour variant instead would make presence of the
+		// key change behaviour, which is miserable to debug from a bug report.
+		StrategyLeastUsed: StrategyLeastUsedWeekly,
 	} {
 		if got := ParseStrategy(in); got != want {
 			t.Errorf("ParseStrategy(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The split's whole content: the two least-used modes must order the same
+// accounts differently when the windows disagree. A fixture where they agree
+// would pass with the window plumbing removed entirely.
+func TestLeastUsedRanksOnTheStrategysWindow(t *testing.T) {
+	// a has burned its week but its 5-hour bucket just reset; b is the mirror.
+	// Neither is spent, so both stay candidates and only the ranking decides.
+	usage := map[string]Usage{
+		"a": {FiveHourPct: 10, SevenDayPct: 80, FetchedAt: testNow, FiveHourReset: testNow.Add(time.Hour)},
+		"b": {FiveHourPct: 80, SevenDayPct: 10, FetchedAt: testNow, FiveHourReset: testNow.Add(time.Hour)},
+	}
+	for _, tc := range []struct {
+		strategy string
+		want     string
+	}{
+		{StrategyLeastUsed5H, "a"},
+		{StrategyLeastUsedWeekly, "b"},
+		{StrategyLeastUsed, "b"}, // legacy alias follows the new default
+		{"", "b"},                // unset likewise
+	} {
+		got, ok := Select(SelectOpts{Accounts: accts("a", "b"), Usage: usage, Strategy: tc.strategy, Now: testNow})
+		if !ok || got.Email != tc.want {
+			t.Errorf("Select(%q) = %q (ok=%v), want %q", tc.strategy, got.Email, ok, tc.want)
+		}
+	}
+}
+
+// Weekly is the default because the two windows fail on different timescales: a
+// 5-hour bucket refills this afternoon, a weekly one is gone for days. Ranking
+// on the fast window lets every account's slow window drain in lockstep, which
+// is the state that takes the whole fleet down at once.
+func TestWeeklyIsTheDefaultStrategy(t *testing.T) {
+	if got := ParseStrategy(""); got != StrategyLeastUsedWeekly {
+		t.Errorf("default strategy = %q, want %q", got, StrategyLeastUsedWeekly)
+	}
+	if Strategies[0] != StrategyLeastUsedWeekly {
+		t.Errorf("Strategies[0] = %q, want the default first", Strategies[0])
+	}
+	// The alias must never be offered as a choice — it is a value ParseStrategy
+	// accepts, not one a user should be able to land on by cycling.
+	for _, s := range Strategies {
+		if s == StrategyLeastUsed {
+			t.Error("the legacy alias is offered in the strategy picker")
+		}
+	}
+}
+
+// Labels are what the Settings cycler and the accounts dialog both render, so
+// they have to be distinct — two modes sharing a label is a picker that looks
+// broken.
+func TestStrategyLabelsAreDistinct(t *testing.T) {
+	seen := map[string]string{}
+	for _, s := range Strategies {
+		l := StrategyLabel(s)
+		if l == "" {
+			t.Errorf("strategy %q has no label", s)
+		}
+		if prev, dup := seen[l]; dup {
+			t.Errorf("strategies %q and %q share the label %q", prev, s, l)
+		}
+		seen[l] = s
 	}
 }
 

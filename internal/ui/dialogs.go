@@ -83,6 +83,10 @@ type (
 		delta int
 	}
 	accountSetDefaultMsg struct{ email string }
+	// accountStrategyMsg changes how new sessions are assigned an account. The
+	// dialog picks the next value itself so its own row repaints on the same
+	// frame as the keypress; the handler persists it.
+	accountStrategyMsg struct{ strategy string }
 )
 
 // NewSessionDialog handles the new session creation flow with directory autocomplete.

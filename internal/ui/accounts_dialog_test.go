@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 )
@@ -26,7 +27,7 @@ func TestRefreshClearsTheInFlightState(t *testing.T) {
 	// Without a size, lipgloss.Place clips View() to nothing and every
 	// assertion on its text passes vacuously.
 	d.SetSize(120, 40)
-	d.Show(nil, nil, "", false)
+	d.Show(nil, nil, "", claudeaccount.StrategyLeastUsedWeekly)
 	d.SetBusy("Waiting for the login…")
 
 	d.Refresh(dlgAccounts("a@x.com"), nil, "")
@@ -44,7 +45,7 @@ func TestAddedDoesNotPromptWhenNamed(t *testing.T) {
 	// Without a size, lipgloss.Place clips View() to nothing and every
 	// assertion on its text passes vacuously.
 	d.SetSize(120, 40)
-	d.Show(nil, nil, "", false)
+	d.Show(nil, nil, "", claudeaccount.StrategyLeastUsedWeekly)
 	d.SetBusy("Waiting for the login…")
 	d.Refresh(dlgAccounts("real@x.com"), nil, "")
 
@@ -82,7 +83,7 @@ func TestDialogNeverWraps(t *testing.T) {
 			}, "")
 		}},
 		{"manual default", func(d *AccountsDialog) {
-			d.Show([]claudeaccount.Account{long, fp}, nil, long.Email, true)
+			d.Show([]claudeaccount.Account{long, fp}, nil, long.Email, claudeaccount.StrategyManual)
 		}},
 		{"waiting for login", func(d *AccountsDialog) {
 			d.Refresh([]claudeaccount.Account{long}, nil, "")
@@ -109,7 +110,7 @@ func TestDialogNeverWraps(t *testing.T) {
 		for _, termW := range []int{50, 80, 140} {
 			d := NewAccountsDialog()
 			d.SetSize(termW, 40)
-			d.Show(nil, nil, "", false)
+			d.Show(nil, nil, "", claudeaccount.StrategyLeastUsedWeekly)
 			m.setup(d)
 
 			boxW := min(accountsDialogWidth, max(40, termW-4))
@@ -145,7 +146,7 @@ func TestDialogNeverWraps(t *testing.T) {
 func TestQuotaRowShowsTheNumberAndNamesTheGap(t *testing.T) {
 	d := NewAccountsDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, "", false)
+	d.Show(nil, nil, "", claudeaccount.StrategyLeastUsedWeekly)
 
 	fp := claudeaccount.Account{Email: "work@x.com", Order: 0}
 	ok := claudeaccount.Account{Email: "real@x.com", Order: 1}
@@ -184,5 +185,109 @@ func TestRemovedAccountLabelNamesTheFallback(t *testing.T) {
 	// An empty key is the same destination, reached without a removal.
 	if got := h.accountLabel(""); got != "your logged-in account" {
 		t.Errorf("unset account label = %q", got)
+	}
+}
+
+// The strategy is stated above the list because it governs the list — and
+// because it is what makes the ★ legible. Without it, a marker that appears
+// only under one mode reads as a property of the account, not of the mode.
+func TestAccountsDialogShowsTheStrategy(t *testing.T) {
+	d := NewAccountsDialog()
+	d.SetSize(120, 40)
+	d.Show(accountsFixture(), nil, "", claudeaccount.StrategyLeastUsedWeekly)
+
+	if got := d.View(); !strings.Contains(got, "Least used · weekly") {
+		t.Errorf("the dialog does not name the strategy in force:\n%s", got)
+	}
+	if got := d.View(); !strings.Contains(got, "s strategy") {
+		t.Error("the footer does not advertise the key that changes it")
+	}
+}
+
+// s cycles forward through every offered mode and wraps, and the dialog updates
+// its own copy on the same frame so the row repaints with the keypress rather
+// than a round-trip later.
+func TestAccountsDialogCyclesStrategy(t *testing.T) {
+	d := NewAccountsDialog()
+	d.SetSize(120, 40)
+	d.Show(accountsFixture(), nil, "", claudeaccount.Strategies[0])
+
+	for i := 1; i <= len(claudeaccount.Strategies); i++ {
+		want := claudeaccount.Strategies[i%len(claudeaccount.Strategies)]
+		var cmd tea.Cmd
+		d, cmd = d.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
+		if cmd == nil {
+			t.Fatalf("step %d: s produced no message", i)
+		}
+		msg, ok := cmd().(accountStrategyMsg)
+		if !ok {
+			t.Fatalf("step %d: got %T, want accountStrategyMsg", i, cmd())
+		}
+		if msg.strategy != want {
+			t.Errorf("step %d: cycled to %q, want %q", i, msg.strategy, want)
+		}
+		if d.strategy != want {
+			t.Errorf("step %d: dialog shows %q but emitted %q — the row lags the keypress", i, d.strategy, want)
+		}
+	}
+}
+
+// ⏎ default and the ★ are advertised only under the manual strategy, since
+// that is the only mode that reads the pin.
+func TestAccountsDialogDefaultHintFollowsStrategy(t *testing.T) {
+	d := NewAccountsDialog()
+	d.SetSize(120, 40)
+
+	d.Show(accountsFixture(), nil, "", claudeaccount.StrategyLeastUsedWeekly)
+	if strings.Contains(strings.Join(d.footer(60), " "), "default") {
+		t.Error("offered ⏎ default under a strategy that ignores it")
+	}
+
+	d.Show(accountsFixture(), nil, "", claudeaccount.StrategyManual)
+	if !strings.Contains(strings.Join(d.footer(60), " "), "default") {
+		t.Error("hid ⏎ default under the one strategy that reads it")
+	}
+}
+
+// Manual with nothing pinned is a mode that silently does nothing — Select
+// falls through to the automatic modes — so the dialog has to know to ask for
+// the second keystroke.
+func TestManualNeedsDefaultDetectsAnUnpinnedManual(t *testing.T) {
+	d := NewAccountsDialog()
+	accts := accountsFixture()
+
+	d.Show(accts, nil, "", claudeaccount.StrategyManual)
+	if !d.manualNeedsDefault() {
+		t.Error("manual with no pin did not ask for one")
+	}
+	d.Show(accts, nil, accts[0].Email, claudeaccount.StrategyManual)
+	if d.manualNeedsDefault() {
+		t.Error("asked for a pin that is already set")
+	}
+	// A pin naming an account that has since been removed is not a pin.
+	d.Show(accts, nil, "gone@example.com", claudeaccount.StrategyManual)
+	if !d.manualNeedsDefault() {
+		t.Error("a pin naming no configured account counted as pinned")
+	}
+	d.Show(accts, nil, "", claudeaccount.StrategyLeastUsedWeekly)
+	if d.manualNeedsDefault() {
+		t.Error("asked for a pin under an automatic strategy")
+	}
+}
+
+// The paste-a-token login path was removed with the config-dir rewrite; the
+// footer hint outlived it, advertising a key that did nothing.
+func TestAccountsFooterAdvertisesNoDeadKeys(t *testing.T) {
+	d := NewAccountsDialog()
+	d.Show(accountsFixture(), nil, "", claudeaccount.StrategyLeastUsedWeekly)
+	if strings.Contains(strings.Join(d.footer(80), " "), "paste") {
+		t.Error("the footer still advertises the removed paste flow")
+	}
+}
+
+func accountsFixture() []claudeaccount.Account {
+	return []claudeaccount.Account{
+		{Email: "first@x.com", ConfigDir: "/d/1"},
+		{Email: "second@x.com", ConfigDir: "/d/2"},
 	}
 }
