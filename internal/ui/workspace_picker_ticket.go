@@ -147,7 +147,7 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 				d.ticketNote = m.query + " — no such issue"
 			}
 		case errors.Is(m.err, linear.ErrNotConfigured), errors.Is(m.err, linear.ErrNotAuthenticated):
-			d.ticketNote = "linear: not logged in — run `linear auth`"
+			d.ticketNote = "linear: not authenticated — run `linear auth login`"
 			d.ticketsOff = true // it will keep failing; stop forking subprocesses
 		case errors.Is(m.err, linear.ErrNotInstalled):
 			d.ticketsOff = true
