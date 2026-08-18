@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-08-18
+
+### Added
+
+- **Per-repo account rules.** Press `.` on a repo group and pick **Allowed Accounts…** to choose which Claude subscriptions may run there — client work on the work subscription, side projects on your own. Previously only editable by hand in `config.json`.
+
 ## [2.26.0] - 2026-08-17
 
 ### Highlights
@@ -515,7 +521,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.26.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.27.0...HEAD
+[2.27.0]: https://github.com/brizzai/fleet/releases/tag/v2.27.0
 [2.26.0]: https://github.com/brizzai/fleet/releases/tag/v2.26.0
 [2.25.0]: https://github.com/brizzai/fleet/releases/tag/v2.25.0
 [2.24.1]: https://github.com/brizzai/fleet/releases/tag/v2.24.1
