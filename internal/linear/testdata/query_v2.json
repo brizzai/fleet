@@ -1,0 +1,92 @@
+{
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "identifier": "ENG-101",
+      "title": "Filter bar renders cramped on narrow viewports",
+      "url": "https://linear.app/example/issue/ENG-101/filter-bar-renders-cramped-on-narrow-viewports",
+      "state": {
+        "id": "11111111-0000-4000-8000-000000000001",
+        "name": "In Progress",
+        "color": "#f2c94c",
+        "type": "started"
+      },
+      "assignee": {
+        "id": "22222222-0000-4000-8000-000000000001",
+        "name": "Example User",
+        "displayName": "example"
+      },
+      "priority": 2,
+      "priorityLabel": "High",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-02T00:00:00.000Z",
+      "cycle": null,
+      "estimate": null,
+      "inverseRelations": null,
+      "labels": null,
+      "project": null,
+      "projectMilestone": null,
+      "team": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "identifier": "ENG-102",
+      "title": "Collapse state resets when navigating back",
+      "url": "https://linear.app/example/issue/ENG-102/collapse-state-resets-when-navigating-back",
+      "state": {
+        "id": "11111111-0000-4000-8000-000000000002",
+        "name": "Todo",
+        "color": "#f2c94c",
+        "type": "unstarted"
+      },
+      "assignee": {
+        "id": "22222222-0000-4000-8000-000000000001",
+        "name": "Example User",
+        "displayName": "example"
+      },
+      "priority": 2,
+      "priorityLabel": "High",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-02T00:00:00.000Z",
+      "cycle": null,
+      "estimate": null,
+      "inverseRelations": null,
+      "labels": null,
+      "project": null,
+      "projectMilestone": null,
+      "team": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "identifier": "ENG-103",
+      "title": "Scroll jank when the drawer opens",
+      "url": "https://linear.app/example/issue/ENG-103/scroll-jank-when-the-drawer-opens",
+      "state": {
+        "id": "11111111-0000-4000-8000-000000000003",
+        "name": "Backlog",
+        "color": "#f2c94c",
+        "type": "backlog"
+      },
+      "assignee": {
+        "id": "22222222-0000-4000-8000-000000000001",
+        "name": "Example User",
+        "displayName": "example"
+      },
+      "priority": 2,
+      "priorityLabel": "High",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-02T00:00:00.000Z",
+      "cycle": null,
+      "estimate": null,
+      "inverseRelations": null,
+      "labels": null,
+      "project": null,
+      "projectMilestone": null,
+      "team": null
+    }
+  ],
+  "pageInfo": {
+    "hasNextPage": false,
+    "endCursor": null
+  }
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/hooks"
+	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -30,6 +32,11 @@ const worktreeUsage = "Usage: fleet worktree <branch> [flags]"
 // errMissingBranch is returned when no branch was given. runWorktree prints the
 // usage line alongside it, so the message itself stays a plain error string.
 var errMissingBranch = errors.New("missing branch name")
+
+// ticketIDRe validates a Linear identifier shape before anything is created.
+// Deliberately checked here rather than deferred: a typo'd ticket should fail
+// while the worktree still doesn't exist.
+var ticketIDRe = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}-\d{1,7}$`)
 
 // worktreeOpts holds the parsed `fleet worktree` invocation. Base and agent are
 // left empty when unset; their defaults depend on the repo (default branch) and
@@ -44,6 +51,13 @@ type worktreeOpts struct {
 	// prompt is the raw flag value, which may still be "-" for stdin. Reading
 	// stdin is I/O, and parsing stays pure — runWorktree resolves it.
 	prompt string
+	// ticket is a Linear issue identifier. It names the branch when no branch
+	// is given, and materializes the issue (with its screenshots) into the new
+	// worktree so the agent opens having been pointed at it.
+	ticket string
+	// noTicketStart opts out of the one mutation fleet makes: moving the issue
+	// to its team's first started state.
+	noTicketStart bool
 }
 
 // worktreeFlagSet builds the `fleet worktree` flag set, binding into o.
@@ -64,6 +78,9 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.BoolVar(&o.noSession, "no-session", false, "create the worktree only, print its path, and start no session")
 	fs.StringVar(&o.prompt, "prompt", "", "first message for the agent, which it starts working on (use - to read stdin)")
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
+	fs.StringVar(&o.ticket, "ticket", "", "Linear issue to materialize into the worktree, e.g. BRZ-3182 (names the branch when none is given)")
+	fs.StringVar(&o.ticket, "t", "", "shorthand for -ticket")
+	fs.BoolVar(&o.noTicketStart, "no-ticket-start", false, "don't move the Linear issue to its team's first started state")
 	return fs
 }
 
@@ -97,28 +114,40 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 		rest = remaining[1:]
 	}
 
-	if len(positional) == 0 {
+	// Which flags were actually given. fs.Visit is the only thing separating
+	// `-ticket ''` from `-ticket` not given: both leave the value empty.
+	var promptSet, ticketSet bool
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "prompt", "p":
+			promptSet = true
+		case "ticket", "t":
+			ticketSet = true
+		}
+	})
+	o.ticket = strings.ToUpper(strings.TrimSpace(o.ticket))
+
+	// Checked before the missing-branch case: `-ticket "$(lookup)"` that
+	// produced nothing would otherwise report "missing branch name", which
+	// describes a symptom of the real problem rather than the problem.
+	if ticketSet && o.ticket == "" {
+		return o, fmt.Errorf("-ticket was empty")
+	}
+	if len(positional) == 0 && o.ticket == "" {
 		return o, errMissingBranch
 	}
 	if len(positional) > 1 {
 		return o, fmt.Errorf("unexpected argument %q — expected a single branch name", positional[1])
 	}
-	o.branch = strings.TrimSpace(positional[0])
-
-	if msg := workspace.ValidateBranchName(o.branch); msg != "" {
-		return o, fmt.Errorf("%s", msg)
+	if len(positional) == 1 {
+		o.branch = strings.TrimSpace(positional[0])
+		if msg := workspace.ValidateBranchName(o.branch); msg != "" {
+			return o, fmt.Errorf("%s", msg)
+		}
 	}
 	// An explicitly empty prompt is almost always a command substitution that
 	// failed — `-p "$(gh issue view 999)"` on a missing issue. Silently starting
-	// a session with no prompt would look like the flag isn't wired up, so say
-	// so. fs.Visit is what separates "-p ''" from "-p not given": both leave the
-	// value empty.
-	promptSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "prompt" || f.Name == "p" {
-			promptSet = true
-		}
-	})
+	// a session with no prompt would look like the flag isn't wired up, so say so.
 	if promptSet {
 		if strings.TrimSpace(o.prompt) == "" {
 			return o, fmt.Errorf("-prompt was empty")
@@ -128,6 +157,25 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 		}
 	}
 	o.prompt = strings.TrimSpace(o.prompt)
+
+	if ticketSet {
+		if !ticketIDRe.MatchString(o.ticket) {
+			return o, fmt.Errorf("not a Linear issue identifier: %q — expected something like BRZ-3182", o.ticket)
+		}
+		// Both set the agent's first message, and they say opposite things:
+		// -prompt means "start working on this", -ticket means "read this and
+		// do not start". Concatenating them yields an agent that does neither.
+		if promptSet {
+			return o, fmt.Errorf("-prompt and -ticket both set the agent's first message, and they " +
+				"say opposite things (-ticket tells the agent not to start working yet) — pick one")
+		}
+	} else if o.noTicketStart {
+		return o, fmt.Errorf("-no-ticket-start has no effect without -ticket")
+	}
+	// Note -ticket IS allowed with -no-session, unlike -prompt: a prompt with no
+	// session is meaningless, but a materialized, git-excluded ticket directory
+	// is useful on its own.
+
 	// agent.Parse falls back to Claude for anything it doesn't recognize, so a
 	// typo would silently launch the wrong agent. Reject it here instead.
 	if o.agentName != "" {
@@ -297,6 +345,37 @@ func runWorktree(args []string) {
 		}
 	}
 
+	// Phase A: when -ticket named no branch, the fetch is required to name one,
+	// so it may fail hard — and it does so while nothing has been created yet,
+	// the same line `-p -` already draws. With an explicit branch this is
+	// skipped and any later ticket failure is soft.
+	var ticket *linear.Ticket
+	if opts.ticket != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		t, ferr := linear.Fetch(ctx, repoPath, opts.ticket)
+		cancel()
+		switch {
+		case ferr != nil && opts.branch == "":
+			fmt.Fprintf(os.Stderr, "Couldn't read %s: %v\n", opts.ticket, ferr)
+			os.Exit(1)
+		case ferr != nil:
+			fmt.Fprintf(os.Stderr, "Couldn't read %s: %v — creating the worktree anyway.\n", opts.ticket, ferr)
+		default:
+			ticket = &t
+			fmt.Fprintf(os.Stderr, "Fetched %s — %s\n", t.Identifier, t.Title)
+			if opts.branch == "" {
+				opts.branch = linear.BranchNameFor(t.Identifier, t.Title)
+				if msg := workspace.ValidateBranchName(opts.branch); msg != "" {
+					fmt.Fprintf(os.Stderr, "Derived branch %q is not valid: %s\n", opts.branch, msg)
+					os.Exit(1)
+				}
+			}
+		}
+		if opts.branch == "" {
+			opts.branch = strings.ToLower(opts.ticket)
+		}
+	}
+
 	name := workspace.SanitizeBranchName(opts.branch)
 	provider := workspace.ResolveProvider(repoPath)
 	if !provider.CanCreate() {
@@ -344,6 +423,31 @@ func runWorktree(args []string) {
 		copyClaudeSettings(repoPath, info.Path)
 	}
 	workspace.CopyConfiguredFiles(repoPath, info.Path)
+
+	// Phase B: past this point the worktree exists, so nothing may exit
+	// non-zero — same contract as the two file copies above.
+	if ticket != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		res, merr := linear.Materialize(ctx, linear.Opts{
+			RepoDir:      repoPath,
+			WorktreePath: info.Path,
+			Identifier:   ticket.Identifier,
+			Ticket:       *ticket,
+			MoveState:    cfg.IsLinearTicketStartEnabled() && !opts.noTicketStart,
+		})
+		cancel()
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "Couldn't materialize %s: %v\n", ticket.Identifier, merr)
+		} else {
+			fmt.Fprintf(os.Stderr, "Wrote %s (%s)%s\n", res.RelDir, describeTicketFiles(res), fallbackNote(res))
+			if res.StateMoved != "" {
+				fmt.Fprintf(os.Stderr, "Moved %s to its team's started state\n", res.Identifier)
+			}
+			if prompt == "" {
+				prompt = res.Prompt
+			}
+		}
+	}
 
 	// --no-session prints the path and nothing else, so the command composes:
 	// cd "$(fleet worktree my-branch --no-session)"
@@ -511,4 +615,23 @@ func accountAllowed(email string, allowed []string) bool {
 		return true
 	}
 	return slices.Contains(allowed, email)
+}
+
+// describeTicketFiles summarizes what landed on disk, so the echo-back is
+// specific rather than a bare "wrote it".
+func describeTicketFiles(r linear.Result) string {
+	if r.Images == 0 {
+		return "ticket.md, no images"
+	}
+	return fmt.Sprintf("ticket.md + %d image(s)", r.Images)
+}
+
+// fallbackNote names the degraded path when fleet had to fetch the screenshots
+// itself. Worth saying out loud: it means the installed `linear` is old enough
+// that its own downloader is broken, and every ticket pays the slow path.
+func fallbackNote(r linear.Result) string {
+	if !r.UsedFallback {
+		return ""
+	}
+	return " — fetched directly; upgrade with `brew upgrade schpet/tap/linear`"
 }

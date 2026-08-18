@@ -88,9 +88,13 @@ const (
 	EventBugReportSubmitted      = "bug_report_submitted"
 
 	// Subsystem failures (counters).
-	EventTmuxCommandFailure = "tmux_command_failure"
-	EventGitCommandFailure  = "git_command_failure"
-	EventGhCommandFailure   = "gh_command_failure"
+	EventTmuxCommandFailure   = "tmux_command_failure"
+	EventGitCommandFailure    = "git_command_failure"
+	EventGhCommandFailure     = "gh_command_failure"
+	EventLinearCommandFailure = "linear_command_failure"
+
+	// Linear tickets materialized into a worktree.
+	EventLinearTicketMaterialized = "linear_ticket_materialized"
 
 	// Onboarding funnel (one-shot per install).
 	EventOnboardingFirstLaunch         = "onboarding_first_launch"

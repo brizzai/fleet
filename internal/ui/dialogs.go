@@ -28,6 +28,12 @@ type sessionCreateMsg struct {
 	// account is the Claude account (email) to authenticate as. Empty means
 	// "let the configured strategy pick", resolved in handleSessionCreate.
 	account string
+	// prompt is the agent's first message, handed to Session.InitialPrompt so
+	// the pane opens already working on it. Set by the Linear-ticket paths
+	// (which point the agent at a materialized ticket and tell it to read
+	// rather than start). Empty for every other creation path, which is the
+	// long-standing behaviour.
+	prompt string
 }
 
 // forkSessionMsg is sent when the user forks an existing session.

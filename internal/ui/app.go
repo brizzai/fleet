@@ -32,6 +32,7 @@ import (
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
+	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/naming"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/proc"
@@ -1474,7 +1475,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return true
 			})
 		}
-		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch)
+		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.linearTeam)
 		return h, nil
 
 	case workspaceSelectedMsg:
@@ -1544,18 +1545,29 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		branch := msg.branch
 		baseBranch := msg.baseBranch
 		copyClaudeSettings := h.cfg.IsCopyClaudeSettingsEnabled() && !provider.IsCustom()
+		ticket := msg.ticket
+		moveState := h.cfg.IsLinearTicketStartEnabled()
 		return h, tea.Batch(func() tea.Msg {
 			info, err := provider.Create(repoPath, name, branch, baseBranch)
+			var tres *linear.Result
+			var terr error
 			if err == nil && info != nil && info.Path != "" {
 				if copyClaudeSettings {
 					copyClaudeSettingsFile(repoPath, info.Path)
 				}
 				workspace.CopyConfiguredFiles(repoPath, info.Path)
+				// Third file step, same posture as the two above: advisory
+				// only. Once the worktree exists the session always starts, so
+				// a Linear outage costs the prompt, never the worktree.
+				tres, terr = materializeTicket(repoPath, info.Path, ticket, moveState)
 			} else if err == nil && info != nil && info.Path == "" {
 				debuglog.Logger.Debug("workspace create returned empty path — skipping file copies",
 					"repo", repoPath, "name", name)
 			}
-			return workspaceCreateResultMsg{info: info, err: err, pendingID: pendingID, repoPath: repoPath}
+			return workspaceCreateResultMsg{
+				info: info, err: err, pendingID: pendingID, repoPath: repoPath,
+				ticket: tres, ticketErr: terr,
+			}
 		}, spinnerTickCmd)
 
 	case workspaceCreateResultMsg:
@@ -1596,11 +1608,31 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.clearPendingFork()
 			return h, h.dispatchForkToWorktree(ctx, msg.info.Path, msg.info.Name)
 		}
+		if line := ticketStatusLine(msg.ticket, msg.ticketErr); line != "" {
+			h.setInfo(line)
+		}
+		prompt := ""
+		if msg.ticket != nil {
+			prompt = msg.ticket.Prompt
+		}
 		return h.handleSessionCreate(sessionCreateMsg{
 			path:          msg.info.Path,
 			title:         msg.info.Name,
 			workspaceName: msg.info.Name,
+			prompt:        prompt,
 		})
+
+	case ticketReadyMsg:
+		// Inference finished. The session starts either way — a Linear failure
+		// costs the seeded prompt, never the pane.
+		if line := ticketStatusLine(msg.res, msg.err); line != "" {
+			h.setInfo(line)
+		}
+		create := msg.create
+		if msg.res != nil {
+			create.prompt = msg.res.Prompt
+		}
+		return h, h.startSessionCmd(create)
 
 	case deleteCleanupDoneMsg:
 		for i, pd := range h.finalizingDeletes {
@@ -3187,6 +3219,16 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 			h.setInfo(conflict.Message(msg.account))
 		}
 	}
+	// A branch that names a Linear issue gets the ticket read for it. The fast
+	// path (a worktree already materialized) is one stat and returns inline;
+	// only a first-time fetch defers the launch, and even then a failure starts
+	// the session anyway.
+	if prompt, cmd := h.ticketPromptFor(msg); cmd != nil {
+		h.setInfo("Fetching the Linear ticket for this branch…")
+		return h, cmd
+	} else if prompt != "" {
+		msg.prompt = prompt
+	}
 	return h, h.startSessionCmd(msg)
 }
 
@@ -3535,6 +3577,9 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	if msg.resumeClaudeID != "" {
 		s.ClaudeSessionID = msg.resumeClaudeID
 	}
+	// One-shot: Session.Start clears it via consumeInitialPromptLocked, and it
+	// is never persisted, so a restart doesn't re-ask the original question.
+	s.InitialPrompt = msg.prompt
 	return func() tea.Msg {
 		if err := s.Start(); err != nil {
 			debuglog.Logger.Error("session Start() failed", "title", msg.title, "path", msg.path, "err", err)
@@ -6956,7 +7001,18 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		}
 		workspaces, err := provider.List(repoPath)
 		defaultBranch := git.GetDefaultBranch(repoPath)
-		return workspaceListMsg{workspaces: workspaces, provider: provider, repoPath: repoPath, defaultBranch: defaultBranch, originKey: originKey, err: err}
+		// Resolved here, on the worker goroutine, so the dialog never probes the
+		// filesystem or PATH from Update(). Empty when the repo has no
+		// .linear.toml or `linear` isn't installed, which makes every ticket
+		// surface in the dialog inert.
+		linearTeam := ""
+		if linear.Available() {
+			linearTeam, _ = linear.TeamKey(repoPath)
+		}
+		return workspaceListMsg{
+			workspaces: workspaces, provider: provider, repoPath: repoPath,
+			defaultBranch: defaultBranch, originKey: originKey, linearTeam: linearTeam, err: err,
+		}
 	}
 }
 
