@@ -1246,6 +1246,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// That exists because those handlers resolve their subject from the cursor,
 		// which an async rebuild can move; this write is keyed by an origin the
 		// message carries, so there is no cursor left to race.
+		//
+		// Checked here rather than inside SetAllowedAccounts, because "empty" is
+		// only expressible on the raw key: OriginExpandKey always prefixes
+		// "origin:", so a guard on its result can never fire, and an empty origin
+		// would sail past it as the bare key "origin:" — persisted, and reported
+		// back to the user as a saved rule.
+		if msg.originKey == "" {
+			debuglog.Logger.Error("allowed accounts: refusing to save a rule with no origin")
+			return h, nil
+		}
 		if err := h.cfg.SetAllowedAccounts(OriginExpandKey(msg.originKey), msg.emails); err != nil {
 			h.setError(fmt.Errorf("could not save account rules: %w", err))
 			return h, nil
@@ -7970,16 +7980,30 @@ func (h *Home) originContextMenu() (string, []ContextMenuItem) {
 	// Each clause carries its own note: a constant one would tell a user with no
 	// accounts configured that they have "only one", which is a false claim about
 	// their setup sitting next to the dialog that would disprove it.
+	//
+	// The origin clause runs first because the restricted lookup below needs the
+	// key it checks for.
 	allowed := ContextMenuItem{ID: "allowed_accounts", Label: "Allowed Accounts…"}
+	restricted := len(h.cfg.GetAllowedAccounts(OriginExpandKey(item.OriginKey))) > 0
 	switch {
-	case h.accounts.Len() == 0: // nil-safe
-		allowed.Note = "no accounts configured"
-	case h.accounts.Len() == 1:
-		// Restricting an origin to the only account there is says nothing, and
-		// would quietly become a rule the moment a second account was added.
-		allowed.Note = "only one account"
 	case item.OriginKey == "":
 		allowed.Note = "no origin"
+	case h.accounts.Len() == 0: // nil-safe
+		// No trap to escape here: resolveAccount short-circuits to the ambient
+		// login before it ever consults an allowlist, so nothing is refused.
+		allowed.Note = "no accounts configured"
+	case h.accounts.Len() == 1 && !restricted:
+		// Restricting an origin to the only account there is says nothing, and
+		// would quietly become a rule the moment a second account was added.
+		//
+		// Gated on !restricted because this guard has to let a rule *out* as well
+		// as keep one from forming. Removing an account never prunes the
+		// allowlists naming it, so dropping to one account can leave an origin
+		// pointing at an account that no longer exists — which resolveAccount
+		// answers by refusing every new session there. Dimming the row then would
+		// leave hand-editing config.json as the only escape, which is the exact
+		// thing this dialog exists to stop being necessary.
+		allowed.Note = "only one account"
 	default:
 		allowed.Enabled = true
 	}
@@ -8004,7 +8028,15 @@ func (h *Home) openAllowedAccounts() {
 		return
 	}
 	item := h.flatItems[h.cursor]
-	if !item.IsOriginHeader || item.OriginKey == "" || h.accounts.Len() < 2 {
+	if !item.IsOriginHeader || item.OriginKey == "" || h.accounts.Len() == 0 {
+		return
+	}
+	// Mirrors originContextMenu's guard exactly, so a lit row can never dead-click
+	// and a dimmed one can never be reached another way: one account is too few to
+	// write a rule with, but not too few to clear a stale one that is currently
+	// refusing every session at this origin.
+	stored := h.cfg.GetAllowedAccounts(OriginExpandKey(item.OriginKey))
+	if h.accounts.Len() == 1 && len(stored) == 0 {
 		return
 	}
 
@@ -8015,8 +8047,7 @@ func (h *Home) openAllowedAccounts() {
 	}
 
 	h.allowedAccounts.SetAnchor(h.contextMenuAnchor())
-	h.allowedAccounts.Show(item.OriginKey, item.OriginLabel, rows,
-		h.cfg.GetAllowedAccounts(OriginExpandKey(item.OriginKey)))
+	h.allowedAccounts.Show(item.OriginKey, item.OriginLabel, rows, stored)
 }
 
 // allowedSummary phrases a saved policy the way the user chose it. An empty list

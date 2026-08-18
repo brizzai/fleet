@@ -272,6 +272,85 @@ func TestOriginMenuGuardNamesTheFailingClause(t *testing.T) {
 	}
 }
 
+// The guard has to let a rule *out* as well as keep one from forming.
+//
+// Removing an account never prunes the allowlists naming it, so removing your
+// way down to one account can leave an origin pointing at an account that no
+// longer exists — which resolveAccount answers by refusing every new session
+// there. Dimming the row on "only one account" then left hand-editing
+// config.json as the only escape, which is the exact thing this dialog exists to
+// stop being necessary.
+func TestOneAccountCanStillClearAStaleRestriction(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	h := allowedHome(t, map[string]claudeaccount.Usage{})
+	// Removed down to one account, with the allowlist still naming the other.
+	h.accounts = &claudeaccount.Store{}
+	h.accounts.Upsert(claudeaccount.Account{Email: "first@x.com", ConfigDir: "/d/1"})
+	h.cfg.AllowedAccounts = map[string][]string{
+		OriginExpandKey("github.com/acme/api"): {"second@x.com"},
+	}
+
+	// The trap this test exists for: sessions are refused right now.
+	if _, blocked := h.resolveAccount("claude", "/tmp/move-e2e"); blocked == "" {
+		t.Fatal("precondition failed — the stale allowlist is not refusing sessions")
+	}
+
+	_, items := h.originContextMenu()
+	var item *ContextMenuItem
+	for i := range items {
+		if items[i].ID == "allowed_accounts" {
+			item = &items[i]
+		}
+	}
+	if item == nil || !item.Enabled {
+		t.Fatalf("the only row that can clear the restriction is dimmed (%+v)", item)
+	}
+
+	h.openAllowedAccounts()
+	if !h.allowedAccounts.IsVisible() {
+		t.Fatal("the menu row was lit but the dialog refused to open — a dead click")
+	}
+
+	// The escape: tick all, which stores no restriction at all.
+	press(t, h, "a")
+	msg := press(t, h, "enter")
+	set, ok := msg.(allowedAccountsSetMsg)
+	if !ok {
+		t.Fatalf("enter produced %T, want allowedAccountsSetMsg", msg)
+	}
+	h.Update(set)
+
+	if _, blocked := h.resolveAccount("claude", "/tmp/move-e2e"); blocked != "" {
+		t.Errorf("sessions are still refused after clearing the restriction: %q", blocked)
+	}
+}
+
+// The other half of that guard: with one account and no restriction there is
+// nothing to clear, so the row stays dimmed rather than opening a dialog whose
+// only possible outcome is the state it already has.
+func TestOneAccountWithNoRestrictionStaysDimmed(t *testing.T) {
+	h := allowedHome(t, map[string]claudeaccount.Usage{})
+	h.accounts = &claudeaccount.Store{}
+	h.accounts.Upsert(claudeaccount.Account{Email: "first@x.com", ConfigDir: "/d/1"})
+
+	_, items := h.originContextMenu()
+	for _, it := range items {
+		if it.ID == "allowed_accounts" {
+			if it.Enabled {
+				t.Error("offered to write a rule naming the only account there is")
+			}
+			if it.Note != "only one account" {
+				t.Errorf("note = %q, want %q", it.Note, "only one account")
+			}
+		}
+	}
+	// And the opener agrees, so the dimmed row cannot be reached another way.
+	h.openAllowedAccounts()
+	if h.allowedAccounts.IsVisible() {
+		t.Error("the opener disagreed with the menu guard")
+	}
+}
+
 // The dialog is origin-scoped, so it must refuse to open from anywhere the title
 // would name an origin the user is not standing on.
 func TestAllowedAccountsOnlyOpensOnAnOriginHeader(t *testing.T) {

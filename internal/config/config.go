@@ -189,9 +189,6 @@ func (c *Config) GetAllowedAccounts(originKey string) []string {
 // nothing on screen to say why. Deleting also lets omitempty drop the whole map
 // back out of the file once the last restriction goes.
 func (c *Config) SetAllowedAccounts(originKey string, emails []string) error {
-	if originKey == "" {
-		return nil
-	}
 	if len(emails) == 0 {
 		delete(c.AllowedAccounts, originKey)
 		if len(c.AllowedAccounts) == 0 {
