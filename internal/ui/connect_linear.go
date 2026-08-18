@@ -325,9 +325,15 @@ func (d *ConnectLinearDialog) View() string {
 		b.WriteString("\n")
 
 	default:
+		// The browser row names WHICH workspace it will connect, because that
+		// is the one thing about it a user cannot control from here and will
+		// otherwise get wrong: Linear's consent screen targets whatever
+		// workspace the browser is currently in, so signing in from the wrong
+		// one yields a credential that works perfectly and can see none of
+		// your issues.
 		rows := []struct{ label, detail string }{
-			{"Sign in with Linear", "opens your browser"},
-			{"Paste an API key", "works over SSH"},
+			{"Sign in with Linear", "connects the workspace your browser is in"},
+			{"Paste an API key", "works over SSH; scoped to that key"},
 		}
 		for i, r := range rows {
 			marker := "  "

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
@@ -121,5 +122,27 @@ func TestWrongWorkspaceIsNamedNotSilent(t *testing.T) {
 	d.applyTickets(worktreeTicketsMsg{gen: 9, query: "zzzz", tickets: nil})
 	if d.ticketNote != "" {
 		t.Errorf("an ordinary no-match must stay silent, got %q", d.ticketNote)
+	}
+}
+
+// TestWorkspaceMismatchNoteFitsOnOneLine keeps the note inside the box.
+//
+// The first version ran to 62 columns under a ~48-column inner width, so it
+// wrapped and truncated to "Ctrl+K → Conn…" — an instruction cut in half is
+// worse than no instruction.
+func TestWorkspaceMismatchNoteFitsOnOneLine(t *testing.T) {
+	d := NewWorktreeDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, nil, "/repo", "master", []string{"BRZ"})
+	linear.SetWorkspaceForTest(linear.Workspace{Name: "fleet", TeamKeys: []string{"FLE"}})
+	t.Cleanup(func() { linear.SetWorkspaceForTest(linear.Workspace{}) })
+
+	note, wrong := d.workspaceMismatchNote()
+	if !wrong {
+		t.Fatal("expected a mismatch")
+	}
+	if w := ansi.StringWidth(note); w > d.innerWidth() {
+		t.Errorf("note is %d columns wide but the box is %d — it will wrap and truncate:\n  %q",
+			w, d.innerWidth(), note)
 	}
 }

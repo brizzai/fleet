@@ -227,8 +227,10 @@ func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
 	if name == "" {
 		name = "that workspace"
 	}
-	return fmt.Sprintf("connected to %s, which has no %s team — Ctrl+K → Connect Linear",
-		name, strings.Join(d.linearTeams, "/")), true
+	// Kept short deliberately: this renders on one line under a narrow input,
+	// and the first version wrapped and truncated mid-word into "Ctrl+K →
+	// Conn…", which is worse than useless.
+	return fmt.Sprintf("%s has no %s team — reconnect: Ctrl+K", name, strings.Join(d.linearTeams, "/")), true
 }
 
 // pickTicket fills the field from a highlighted row and collapses back to the
