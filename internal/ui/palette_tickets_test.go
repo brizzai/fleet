@@ -358,3 +358,57 @@ func TestPriorityColumnOnlyInTheTicketsTab(t *testing.T) {
 		t.Errorf("ticket names must start right after the badge, like every other kind: %q", ticketLine)
 	}
 }
+
+// TestMixedTabCarriesStateAndPriorityOnTheRight covers what a ticket loses
+// outside its own tab.
+//
+// The tickets tab gives the state a header and the priority a column of its
+// own. A mixed list has neither, so without putting both in the right column a
+// ticket row there shows nothing but its title.
+func TestMixedTabCarriesStateAndPriorityOnTheRight(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabAll)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
+		{Identifier: "BRZ-3013", Title: "TS sdk consider pushing spanprocessor", StateName: "Todo", StateType: "unstarted", Priority: 1},
+		{Identifier: "BRZ-2365", Title: "Tighten the backend scope", StateName: "Backlog", StateType: "backlog", Priority: 0},
+	}))
+	h.commandPalette.filterInput.SetValue("spanprocessor")
+	h.commandPalette.rebuildFiltered()
+
+	got := renderedPalette(t, h)
+	if !strings.Contains(got, "Todo  !!") {
+		t.Errorf("a ticket in the mixed tab must carry its state AND priority:\n%s", got)
+	}
+}
+
+// TestMixedTabHasNoStateHeaders: a "Todo" header sitting above a run of
+// commands would describe rows it has nothing to do with.
+func TestMixedTabHasNoStateHeaders(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(nil, nil, PaletteTabAll)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
+		{Identifier: "BRZ-3013", Title: "TS sdk", StateName: "Todo", StateType: "unstarted", Priority: 1},
+		{Identifier: "BRZ-2365", Title: "Tighten scope", StateName: "Backlog", StateType: "backlog"},
+	}))
+
+	got := renderedPalette(t, h)
+	for _, line := range strings.Split(got, "\n") {
+		trimmed := strings.TrimSpace(strings.Trim(line, "│"))
+		if trimmed == "Todo  2" || trimmed == "Todo  1" || trimmed == "Backlog  1" {
+			t.Errorf("the mixed tab must not group by Linear state: %q\n%s", line, got)
+		}
+	}
+	// Sanity: the tickets ARE present, so the assertion above is not vacuous.
+	if !strings.Contains(got, "BRZ-3013") {
+		t.Fatalf("precondition: tickets should be listed:\n%s", got)
+	}
+
+	// And in the tickets tab the headers must be back.
+	h.commandPalette.activeTab = PaletteTabTickets
+	h.commandPalette.rebuildFiltered()
+	if !strings.Contains(renderedPalette(t, h), "Todo  1") {
+		t.Error("the tickets tab must group by state")
+	}
+}

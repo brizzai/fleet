@@ -254,10 +254,18 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 			if _, ok := recentRank[it.ID]; ok {
 				recents = append(recents, scoredItem{PaletteItem: it, recent: true})
 			} else {
-				// Sections only when nothing is typed. Grouping a fuzzy result
-				// is noise: the matches are already ordered by score, and
-				// headers would fragment ten rows into six sections.
-				rest = append(rest, scoredItem{PaletteItem: it, section: it.Group})
+				// Sections only in the tickets tab, and only when nothing is
+				// typed. In the mixed tab a state header would sit above a
+				// run of commands it does not describe; and grouping a fuzzy
+				// result is noise, since matches are already ordered by score
+				// and headers would fragment ten rows into six sections.
+				sec := ""
+				if d.activeTab == PaletteTabTickets {
+					sec = it.Group
+				} else {
+					it.Detail = ticketRightColumn(it)
+				}
+				rest = append(rest, scoredItem{PaletteItem: it, section: sec})
 			}
 		}
 		sortRecents(recents, recentRank)
@@ -279,7 +287,10 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 		for _, m := range matches {
 			it := tabItems[m.Index]
 			if it.Group != "" {
-				it.Detail = joinDetail(it.Group, it.Detail)
+				// No headers while filtering, so the state comes back onto the
+				// row — with the priority beside it, since the tickets tab's
+				// priority column is not rendered here either.
+				it.Detail = ticketRightColumn(it)
 			}
 			d.filtered = append(d.filtered, scoredItem{
 				PaletteItem:    it,
@@ -683,13 +694,34 @@ func truncRunes(s string, maxRunes int) string {
 
 func runeLen(s string) int { return len([]rune(s)) }
 
-// joinDetail combines a group label with a row detail for the filtered view,
-// where there are no headers to carry the group.
-func joinDetail(group, detail string) string {
-	if detail == "" {
-		return group
+// ticketRightColumn is what a ticket shows on the right anywhere OUTSIDE the
+// tickets tab: its state, plus its priority.
+//
+// Both facts have a dedicated column in the tickets tab — a header for the
+// state, a lead column for the priority — and neither of those exists in a
+// mixed list, so without this a ticket row loses them entirely.
+func ticketRightColumn(it PaletteItem) string {
+	out := it.Group
+	if mark := plainPriorityMark(it.Priority); mark != "" {
+		if out != "" {
+			out += "  "
+		}
+		out += mark
 	}
-	return group + " · " + detail
+	return out
+}
+
+// plainPriorityMark is renderPriorityLead without styling or padding, for
+// contexts where the mark is embedded in a string that gets truncated and
+// fuzzy-highlighted by rune offset.
+func plainPriorityMark(priority int) string {
+	switch priority {
+	case 1:
+		return "!!"
+	case 2:
+		return "!"
+	}
+	return ""
 }
 
 func (d *CommandPaletteDialog) dialogWidth() int {
