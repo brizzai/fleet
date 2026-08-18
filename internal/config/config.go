@@ -179,6 +179,34 @@ func (c *Config) GetAllowedAccounts(originKey string) []string {
 	return c.AllowedAccounts[originKey]
 }
 
+// SetAllowedAccounts records which accounts may run under originKey and
+// persists it.
+//
+// An empty list deletes the entry rather than storing one. Absent already means
+// unrestricted, and that is exactly what "every account is allowed" is — so
+// writing out an exhaustive list would be a different policy wearing the same
+// face: the next account added would be silently locked out of this origin, with
+// nothing on screen to say why. Deleting also lets omitempty drop the whole map
+// back out of the file once the last restriction goes.
+func (c *Config) SetAllowedAccounts(originKey string, emails []string) error {
+	if len(emails) == 0 {
+		delete(c.AllowedAccounts, originKey)
+		if len(c.AllowedAccounts) == 0 {
+			c.AllowedAccounts = nil
+		}
+	} else {
+		if c.AllowedAccounts == nil {
+			c.AllowedAccounts = make(map[string][]string, 1)
+		}
+		c.AllowedAccounts[originKey] = emails
+	}
+	if err := c.Save(); err != nil {
+		debuglog.Logger.Error("config: save allowed accounts", "origin", originKey, "err", err)
+		return err
+	}
+	return nil
+}
+
 // GetReleaseNotesSeenVersion returns the newest release version the user has
 // viewed in the What's New reel ("" if never).
 func (c *Config) GetReleaseNotesSeenVersion() string {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -409,5 +410,41 @@ func TestSaveNoUnknownKeysIsByteIdenticalToStructMarshal(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Errorf("output diverged from struct marshal:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// SetAllowedAccounts deletes rather than stores when the list empties, so an
+// origin returns to genuinely unrestricted instead of carrying a list that
+// happens to name everyone today. Storing the full set would read the same now
+// and silently lock out the next account added.
+func TestSetAllowedAccountsDeletesOnEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := &Config{}
+
+	if err := c.SetAllowedAccounts("origin:github.com/acme/api", []string{"a@x.com"}); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if got := c.GetAllowedAccounts("origin:github.com/acme/api"); len(got) != 1 {
+		t.Fatalf("GetAllowedAccounts = %v, want one entry", got)
+	}
+
+	if err := c.SetAllowedAccounts("origin:github.com/acme/api", nil); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got := c.GetAllowedAccounts("origin:github.com/acme/api"); len(got) != 0 {
+		t.Errorf("GetAllowedAccounts = %v, want unrestricted", got)
+	}
+	// Nil, not an empty map: omitempty has to drop the key from the file once the
+	// last restriction goes, or every config carries a dead "allowed_accounts".
+	if c.AllowedAccounts != nil {
+		t.Errorf("AllowedAccounts = %v, want nil once the last origin clears", c.AllowedAccounts)
+	}
+
+	data, err := os.ReadFile(DefaultConfigPath())
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if strings.Contains(string(data), "allowed_accounts") {
+		t.Errorf("saved config still carries allowed_accounts:\n%s", data)
 	}
 }

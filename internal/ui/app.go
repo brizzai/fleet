@@ -249,6 +249,7 @@ type Home struct {
 	contextMenu           *ContextMenuDialog
 	snoozeDialog          *SnoozeDialog
 	accountPicker         *AccountPickerDialog
+	allowedAccounts       *AllowedAccountsDialog
 	// The row the open context menu was built for. Its entries resolve their
 	// subject from h.cursor, which an async rebuild can move — see contextMenuTarget.
 	contextMenuTarget   contextMenuTarget
@@ -562,6 +563,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		contextMenu:            NewContextMenuDialog(),
 		snoozeDialog:           NewSnoozeDialog(),
 		accountPicker:          NewAccountPickerDialog(),
+		allowedAccounts:        NewAllowedAccountsDialog(),
 		sessionCreateDialog:    NewSessionCreateDialog(),
 		consentDialog:          NewConsentDialog(),
 		onboardingDialog:       NewOnboardingDialog(cfg),
@@ -825,6 +827,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.contextMenu.SetSize(msg.Width, msg.Height)
 		h.snoozeDialog.SetSize(msg.Width, msg.Height)
 		h.accountPicker.SetSize(msg.Width, msg.Height)
+		h.allowedAccounts.SetSize(msg.Width, msg.Height)
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.accountsDialog.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
@@ -842,6 +845,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.accountPicker.IsVisible() {
 			h.accountPicker.SetAnchor(h.contextMenuAnchor())
+		}
+		if h.allowedAccounts.IsVisible() {
+			h.allowedAccounts.SetAnchor(h.contextMenuAnchor())
 		}
 		return h, nil
 
@@ -1234,6 +1240,29 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		return h, h.moveSelectedToAccount(msg.email)
+
+	case allowedAccountsSetMsg:
+		// Deliberately not the focusContextMenuTarget dance the pickers above do.
+		// That exists because those handlers resolve their subject from the cursor,
+		// which an async rebuild can move; this write is keyed by an origin the
+		// message carries, so there is no cursor left to race.
+		//
+		// Checked here rather than inside SetAllowedAccounts, because "empty" is
+		// only expressible on the raw key: OriginExpandKey always prefixes
+		// "origin:", so a guard on its result can never fire, and an empty origin
+		// would sail past it as the bare key "origin:" — persisted, and reported
+		// back to the user as a saved rule.
+		if msg.originKey == "" {
+			debuglog.Logger.Error("allowed accounts: refusing to save a rule with no origin")
+			return h, nil
+		}
+		if err := h.cfg.SetAllowedAccounts(OriginExpandKey(msg.originKey), msg.emails); err != nil {
+			h.setError(fmt.Errorf("could not save account rules: %w", err))
+			return h, nil
+		}
+		h.actionLog.Add("allowed accounts", fmt.Sprintf("%s → %s", msg.originKey, allowedSummary(msg.emails)), true)
+		h.setInfo(fmt.Sprintf("%s — %s", labelForOrigin(msg.originKey), allowedSummary(msg.emails)))
+		return h, nil
 
 	case contextMenuMsg:
 		// Put the cursor back on the row the menu was opened for before dispatching —
@@ -2020,6 +2049,11 @@ func (h *Home) View() tea.View {
 		x, y := h.accountPicker.Position(lipgloss.Width(av), lipgloss.Height(av))
 		base = overlayAt(av, base, x, y)
 	}
+	// Allowed-accounts editor: same row-anchored dropdown treatment.
+	if lv := h.allowedAccounts.View(); lv != "" {
+		x, y := h.allowedAccounts.Position(lipgloss.Width(lv), lipgloss.Height(lv))
+		base = overlayAt(lv, base, x, y)
+	}
 	// Snooze picker: same row-anchored dropdown treatment as the context menu.
 	if sv := h.snoozeDialog.View(); sv != "" {
 		x, y := h.snoozeDialog.Position(lipgloss.Width(sv), lipgloss.Height(sv))
@@ -2099,6 +2133,7 @@ func (h *Home) modalOpen() bool {
 		h.contextMenu.IsVisible() ||
 		h.snoozeDialog.IsVisible() ||
 		h.accountPicker.IsVisible() ||
+		h.allowedAccounts.IsVisible() ||
 		h.launchpadActive()
 }
 
@@ -2441,6 +2476,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.accountPicker.IsVisible():
 		dialog, cmd := h.accountPicker.Update(msg)
 		h.accountPicker = dialog
+		return cmd, true
+	case h.allowedAccounts.IsVisible():
+		dialog, cmd := h.allowedAccounts.Update(cmdMsg)
+		h.allowedAccounts = dialog
 		return cmd, true
 	case h.snoozeDialog.IsVisible():
 		dialog, cmd := h.snoozeDialog.Update(msg)
@@ -7938,13 +7977,89 @@ func (h *Home) originContextMenu() (string, []ContextMenuItem) {
 		expand = "Collapse"
 	}
 
+	// Each clause carries its own note: a constant one would tell a user with no
+	// accounts configured that they have "only one", which is a false claim about
+	// their setup sitting next to the dialog that would disprove it.
+	//
+	// The origin clause runs first because the restricted lookup below needs the
+	// key it checks for.
+	allowed := ContextMenuItem{ID: "allowed_accounts", Label: "Allowed Accounts…"}
+	restricted := len(h.cfg.GetAllowedAccounts(OriginExpandKey(item.OriginKey))) > 0
+	switch {
+	case item.OriginKey == "":
+		allowed.Note = "no origin"
+	case h.accounts.Len() == 0: // nil-safe
+		// No trap to escape here: resolveAccount short-circuits to the ambient
+		// login before it ever consults an allowlist, so nothing is refused.
+		allowed.Note = "no accounts configured"
+	case h.accounts.Len() == 1 && !restricted:
+		// Restricting an origin to the only account there is says nothing, and
+		// would quietly become a rule the moment a second account was added.
+		//
+		// Gated on !restricted because this guard has to let a rule *out* as well
+		// as keep one from forming. Removing an account never prunes the
+		// allowlists naming it, so dropping to one account can leave an origin
+		// pointing at an account that no longer exists — which resolveAccount
+		// answers by refusing every new session there. Dimming the row then would
+		// leave hand-editing config.json as the only escape, which is the exact
+		// thing this dialog exists to stop being necessary.
+		allowed.Note = "only one account"
+	default:
+		allowed.Enabled = true
+	}
+
 	items := []ContextMenuItem{
 		{ID: "toggle_group", Label: expand, Shortcut: "⏎", Enabled: true},
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
+		allowed,
 		h.snoozeMenuItem(),
 		{ID: "delete_at_cursor", Label: "Forget Origin Group", Shortcut: "d", Key: "d", Enabled: true},
 	}
 	return "origin: " + item.OriginLabel, items
+}
+
+// openAllowedAccounts edits the account policy for the origin under the cursor.
+//
+// Origin-scoped and nothing else: the config key is per-origin, so offering this
+// from a session or worktree row would put an origin-wide rule behind a control
+// that looks like it acts on the row you are standing on.
+func (h *Home) openAllowedAccounts() {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return
+	}
+	item := h.flatItems[h.cursor]
+	if !item.IsOriginHeader || item.OriginKey == "" || h.accounts.Len() == 0 {
+		return
+	}
+	// Mirrors originContextMenu's guard exactly, so a lit row can never dead-click
+	// and a dimmed one can never be reached another way: one account is too few to
+	// write a rule with, but not too few to clear a stale one that is currently
+	// refusing every session at this origin.
+	stored := h.cfg.GetAllowedAccounts(OriginExpandKey(item.OriginKey))
+	if h.accounts.Len() == 1 && len(stored) == 0 {
+		return
+	}
+
+	usage := h.accountUsageSnapshot()
+	rows := make([]allowedAccountRow, 0, h.accounts.Len())
+	for _, a := range h.accounts.List() {
+		rows = append(rows, allowedAccountRow{email: a.Email, label: a.Name(), usage: usage[a.Email]})
+	}
+
+	h.allowedAccounts.SetAnchor(h.contextMenuAnchor())
+	h.allowedAccounts.Show(item.OriginKey, item.OriginLabel, rows, stored)
+}
+
+// allowedSummary phrases a saved policy the way the user chose it. An empty list
+// is the absence of a restriction, never "0 accounts".
+func allowedSummary(emails []string) string {
+	if len(emails) == 0 {
+		return "all accounts allowed"
+	}
+	if len(emails) == 1 {
+		return "1 account allowed"
+	}
+	return fmt.Sprintf("%d accounts allowed", len(emails))
 }
 
 // buildPaletteItems returns all palette rows: built-in commands plus every
@@ -8193,6 +8308,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.confirmRestartSelected()
 	case "move_account":
 		h.openAccountPicker()
+		return h, nil
+	case "allowed_accounts":
+		h.openAllowedAccounts()
 		return h, nil
 	case "suspend_session":
 		return h, h.suspendSelected()
