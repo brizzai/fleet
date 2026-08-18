@@ -21,14 +21,14 @@ func connectDialog(t *testing.T) *ConnectLinearDialog {
 	return d
 }
 
-func press(d *ConnectLinearDialog, key string) *ConnectLinearDialog {
-	out, _ := d.Update(tea.KeyPressMsg{Code: keyCodeFor(key), Text: key})
+func pressConnect(d *ConnectLinearDialog, key string) *ConnectLinearDialog {
+	out, _ := d.Update(tea.KeyPressMsg{Code: connectKeyCode(key), Text: key})
 	return out
 }
 
-// keyCodeFor maps the handful of keys these tests send. Named keys carry no
+// connectKeyCode maps the handful of keys these tests send. Named keys carry no
 // Text, which is exactly how the dialog distinguishes them.
-func keyCodeFor(key string) rune {
+func connectKeyCode(key string) rune {
 	switch key {
 	case "down":
 		return tea.KeyDown
@@ -52,7 +52,7 @@ func TestConnectCaretAndHighlightNeverCoexist(t *testing.T) {
 		t.Error("the key field must not hold the caret while the method rows own the highlight")
 	}
 
-	d = press(d, "down")
+	d = pressConnect(d, "down")
 	if d.focus != connectRowPaste {
 		t.Fatalf("focus = %d, want the paste row", d.focus)
 	}
@@ -60,7 +60,7 @@ func TestConnectCaretAndHighlightNeverCoexist(t *testing.T) {
 		t.Error("moving the highlight must not focus the field — the field is a later stage")
 	}
 
-	d = press(d, "enter")
+	d = pressConnect(d, "enter")
 	if d.stage != connectPasting {
 		t.Fatalf("stage = %v, want connectPasting", d.stage)
 	}
@@ -70,7 +70,7 @@ func TestConnectCaretAndHighlightNeverCoexist(t *testing.T) {
 
 	// esc walks back a stage rather than closing, so a mistyped choice costs one
 	// key, not the whole dialog.
-	d = press(d, "esc")
+	d = pressConnect(d, "esc")
 	if d.stage != connectChoosing {
 		t.Errorf("esc from the field should return to the chooser, got stage %v", d.stage)
 	}
