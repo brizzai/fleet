@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.0] - 2026-08-18
+
+### Added
+
+- **Strategy without leaving the dialog.** Press `s` in `Ctrl+K` → Manage Claude Accounts to change how new sessions pick an account. It used to be buried in Settings, which the app told you to go find.
+
+### Changed
+
+- **Accounts now balance by week.** New sessions pick the account with the most *weekly* headroom instead of 5-hour — a spent weekly cap is gone for days, while a 5-hour one refills this afternoon. Pick `Least used · 5-hour` in the accounts dialog to keep the old behaviour.
+
 ## [2.27.0] - 2026-08-18
 
 ### Added
@@ -521,7 +531,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.27.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.28.0...HEAD
+[2.28.0]: https://github.com/brizzai/fleet/releases/tag/v2.28.0
 [2.27.0]: https://github.com/brizzai/fleet/releases/tag/v2.27.0
 [2.26.0]: https://github.com/brizzai/fleet/releases/tag/v2.26.0
 [2.25.0]: https://github.com/brizzai/fleet/releases/tag/v2.25.0
