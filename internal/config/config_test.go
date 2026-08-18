@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/brizzai/fleet/internal/claudeaccount"
 )
 
 func TestIsAutoNameEnabled(t *testing.T) {
@@ -446,5 +448,37 @@ func TestSetAllowedAccountsDeletesOnEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(data), "allowed_accounts") {
 		t.Errorf("saved config still carries allowed_accounts:\n%s", data)
+	}
+}
+
+// The bug this closes: this getter switched on its own copy of the strategy
+// list, so when the least-used mode split in two it flattened both back to the
+// legacy alias. One whole mode became unreachable — it never survived a
+// round-trip, so the picker could not leave it and Select never saw it.
+//
+// Every strategy must come back exactly as stored.
+func TestGetAccountStrategyRoundTripsEveryStrategy(t *testing.T) {
+	for _, s := range claudeaccount.Strategies {
+		c := &Config{AccountStrategy: s}
+		if got := c.GetAccountStrategy(); got != s {
+			t.Errorf("stored %q, GetAccountStrategy() = %q — the value did not survive", s, got)
+		}
+	}
+}
+
+// The two inputs that are not members: an unset config and the pre-split alias
+// both resolve to the default, and hand-edited casing still resolves.
+func TestGetAccountStrategyResolvesAliasAndCasing(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                              claudeaccount.StrategyLeastUsedWeekly,
+		claudeaccount.StrategyLeastUsed: claudeaccount.StrategyLeastUsedWeekly,
+		"nonsense":                      claudeaccount.StrategyLeastUsedWeekly,
+		" Least_Used_5H ":               claudeaccount.StrategyLeastUsed5H,
+		"MANUAL":                        claudeaccount.StrategyManual,
+	} {
+		c := &Config{AccountStrategy: in}
+		if got := c.GetAccountStrategy(); got != want {
+			t.Errorf("GetAccountStrategy(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
