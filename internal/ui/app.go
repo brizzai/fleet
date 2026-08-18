@@ -451,6 +451,11 @@ type Home struct {
 	accountUsage   atomic.Pointer[map[string]claudeaccount.Usage]
 	accountsDialog *AccountsDialog
 	connectLinear  *ConnectLinearDialog
+
+	// pendingTicketID is set when a ticket was picked from the palette and the
+	// worktree dialog is being opened for it. Consumed when that dialog shows,
+	// so it can never leak into the next unrelated `w`.
+	pendingTicketID string
 	// accountWorkerOnce guards the quota poller — see startAccountWorker.
 	accountWorkerOnce sync.Once
 	// accountLoginCancel stops the in-flight login watcher, if any. Written from
@@ -1532,6 +1537,14 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.linearTeams)
+		if id := h.pendingTicketID; id != "" {
+			// Consumed here and nowhere else, so a ticket picked once cannot
+			// leak into the next unrelated `w`.
+			h.pendingTicketID = ""
+			if cmd := h.worktreeDialog.PrefillTicket(id); cmd != nil {
+				return h, cmd
+			}
+		}
 		return h, nil
 
 	case workspaceSelectedMsg:
@@ -1677,6 +1690,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			workspaceName: msg.info.Name,
 			prompt:        prompt,
 		})
+
+	case paletteTicketsMsg:
+		// Routed here for the same reason the worktree dialog's messages are:
+		// routeToModal only carries key and paste messages, so a tea.Cmd result
+		// reaches a dialog only if Update forwards it.
+		if msg.err != nil {
+			debuglog.Logger.Debug("linear: could not list assigned issues", "error", msg.err)
+			h.commandPalette.SetTickets(nil)
+			return h, nil
+		}
+		h.commandPalette.SetTickets(h.ticketPaletteItems(msg.tickets))
+		return h, nil
 
 	case worktreeTicketTickMsg, worktreeTicketsMsg:
 		// Routed here, not through routeToModal: that is only reached from
@@ -3012,7 +3037,17 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.commandPalette.Show(h.buildPaletteItems(), h.recentPaletteIDs)
 		h.cfg.NoteFeatureUsed(tipCmdPaletteID, tipLearnedThreshold) // retire the discovery tip once they know it
 		analytics.Track(analytics.EventCommandPalette, nil)
-		return h, nil
+		return h, h.maybeLoadPaletteTickets()
+	case "t":
+		// Straight to the tickets tab: `t` means "show me my tickets", not
+		// "show me everything and let me cycle".
+		if !linear.Available() {
+			h.setInfo("Linear isn't connected — Ctrl+K → Connect Linear")
+			return h, nil
+		}
+		h.commandPalette.ShowOnTab(h.buildPaletteItems(), h.recentPaletteIDs, PaletteTabTickets)
+		analytics.Track(analytics.EventCommandPalette, nil)
+		return h, h.maybeLoadPaletteTickets()
 	case "S":
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
@@ -8189,6 +8224,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
 		{Kind: PaletteKindCommand, ID: "connect_linear", Name: "Connect Linear"},
+		{Kind: PaletteKindCommand, ID: "my_tickets", Name: "My Linear Tickets", Shortcut: "t"},
 		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -8281,6 +8317,8 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 func (h *Home) dispatchPaletteSelection(msg commandPaletteMsg) (tea.Model, tea.Cmd) {
 	h.pushRecentPaletteID(msg.id)
 	switch msg.kind {
+	case PaletteKindTicket:
+		return h.openTicketFromPalette(msg.id)
 	case PaletteKindRepo, PaletteKindWorktree:
 		h.actionLog.Add("palette jump", msg.id, true)
 		return h.jumpToRepoHeader(msg.id)
@@ -8390,6 +8428,13 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
+	case "my_tickets":
+		if !linear.Available() {
+			h.setInfo("Linear isn't connected — Ctrl+K → Connect Linear")
+			return h, nil
+		}
+		h.commandPalette.ShowOnTab(h.buildPaletteItems(), h.recentPaletteIDs, PaletteTabTickets)
+		return h, h.maybeLoadPaletteTickets()
 	case "connect_linear":
 		h.actionLog.Add("connect linear", "", true)
 		// Opening the dialog is the feature the tip teaches, so this is where

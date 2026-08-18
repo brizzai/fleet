@@ -233,6 +233,24 @@ const searchQuery = `query Search($term: String!, $first: Int!) {
   }
 }`
 
+// assignedIssuesQuery is the "my tickets" list.
+//
+// Filtered server-side to open work: a finished ticket is not something you are
+// about to start, and dropping them there rather than here keeps the payload
+// small. Ordered by updatedAt so the tail of a long Todo list is at least in a
+// useful order before the client regroups it.
+const assignedIssuesQuery = `query Mine($first: Int!) {
+  viewer {
+    assignedIssues(
+      first: $first
+      filter: { state: { type: { nin: ["completed", "canceled"] } } }
+      orderBy: updatedAt
+    ) {
+      nodes { identifier title url state { name type position } }
+    }
+  }
+}`
+
 const workspaceQuery = `query Workspace {
   organization { name urlKey }
   teams(first: 250) { nodes { key name } }
@@ -253,9 +271,26 @@ type issueLite struct {
 	Title      string `json:"title"`
 	URL        string `json:"url"`
 	State      *struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
+		Name     string  `json:"name"`
+		Type     string  `json:"type"`
+		Position float64 `json:"position"`
 	} `json:"state"`
+}
+
+func (i *issueLite) stateType() string {
+	if i == nil || i.State == nil {
+		return ""
+	}
+	return i.State.Type
+}
+
+// statePosition returns the state's order within its team. A missing state
+// sorts last rather than first, so an unusable payload cannot lead the list.
+func (i *issueLite) statePosition() float64 {
+	if i == nil || i.State == nil {
+		return 1 << 30
+	}
+	return i.State.Position
 }
 
 func (i *issueLite) ticket() Ticket {
@@ -264,7 +299,7 @@ func (i *issueLite) ticket() Ticket {
 	}
 	t := Ticket{Identifier: i.Identifier, Title: i.Title, URL: i.URL}
 	if i.State != nil {
-		t.StateName = i.State.Name
+		t.StateName, t.StateType = i.State.Name, i.State.Type
 	}
 	return t
 }
@@ -437,6 +472,67 @@ func MoveToStarted(ctx context.Context, issue *issueFull) (string, error) {
 		return u.State.Name, nil
 	}
 	return state.Name, nil
+}
+
+// stateTypeRank orders Linear's state categories by how close the work is to
+// your hands. Ranking on the TYPE rather than the name is what makes this work
+// on a team that renamed its states.
+func stateTypeRank(t string) int {
+	switch t {
+	case "started":
+		return 0
+	case "unstarted": // Linear's "Todo"
+		return 1
+	case "triage":
+		return 2
+	case "backlog":
+		return 3
+	}
+	return 4
+}
+
+// AssignedIssues returns your open assigned issues, most actionable first.
+//
+// Sorted client-side rather than by the API because the useful order is by
+// state category, and Linear can only order by one field. Within a category the
+// server's updatedAt order is preserved, so the top of each group is what you
+// touched last.
+func AssignedIssues(ctx context.Context, limit int) ([]Ticket, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var out struct {
+		Viewer struct {
+			AssignedIssues struct {
+				Nodes []issueLite `json:"nodes"`
+			} `json:"assignedIssues"`
+		} `json:"viewer"`
+	}
+	if err := execute(ctx, metaTimeout, assignedIssuesQuery, map[string]any{"first": limit}, &out); err != nil {
+		return nil, err
+	}
+
+	// Sort the raw nodes, not the projection: position is what separates two
+	// states of the same type, and it is the difference between "In Progress"
+	// and "In Review" leading the list. A work queue wants the one you are
+	// actually in the middle of.
+	nodes := out.Viewer.AssignedIssues.Nodes
+	sort.SliceStable(nodes, func(a, b int) bool {
+		ra, rb := stateTypeRank(nodes[a].stateType()), stateTypeRank(nodes[b].stateType())
+		if ra != rb {
+			return ra < rb
+		}
+		return nodes[a].statePosition() < nodes[b].statePosition()
+	})
+
+	tickets := make([]Ticket, 0, len(nodes))
+	for i := range nodes {
+		if nodes[i].Identifier == "" {
+			continue
+		}
+		tickets = append(tickets, nodes[i].ticket())
+	}
+	return tickets, nil
 }
 
 // ---------------------------------------------------------------------------

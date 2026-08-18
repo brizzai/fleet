@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -482,4 +483,56 @@ func resetCredentialForTest() {
 	credState.warmed.Store(false)
 	credState.present.Store(false)
 	credState.mu.Unlock()
+}
+
+// TestAssignedIssuesOrderPutsWorkInHand pins the ordering of the tickets tab.
+//
+// Ranking on state TYPE is what makes it work on a team that renamed its
+// states. Position is what separates two states of the SAME type, and it is the
+// difference between "In Progress" and "In Review" leading the list — a work
+// queue wants the thing you are in the middle of, not the thing you already
+// handed off.
+func TestAssignedIssuesOrderPutsWorkInHand(t *testing.T) {
+	mk := func(id, name, typ string, pos float64) issueLite {
+		n := issueLite{Identifier: id, Title: id}
+		n.State = &struct {
+			Name     string  `json:"name"`
+			Type     string  `json:"type"`
+			Position float64 `json:"position"`
+		}{Name: name, Type: typ, Position: pos}
+		return n
+	}
+	nodes := []issueLite{
+		mk("BRZ-4", "Backlog", "backlog", 0),
+		mk("BRZ-3", "Todo", "unstarted", 1),
+		mk("BRZ-2", "In Review", "started", 1002),
+		mk("BRZ-1", "In Dev", "started", 2),
+	}
+	sort.SliceStable(nodes, func(a, b int) bool {
+		ra, rb := stateTypeRank(nodes[a].stateType()), stateTypeRank(nodes[b].stateType())
+		if ra != rb {
+			return ra < rb
+		}
+		return nodes[a].statePosition() < nodes[b].statePosition()
+	})
+
+	var got []string
+	for _, n := range nodes {
+		got = append(got, n.Identifier)
+	}
+	want := []string{"BRZ-1", "BRZ-2", "BRZ-3", "BRZ-4"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v (started by position, then todo, then backlog)", got, want)
+		}
+	}
+
+	// A payload with no state must sort last rather than lead.
+	nodes = append(nodes, issueLite{Identifier: "BRZ-9"})
+	sort.SliceStable(nodes, func(a, b int) bool {
+		return stateTypeRank(nodes[a].stateType()) < stateTypeRank(nodes[b].stateType())
+	})
+	if nodes[len(nodes)-1].Identifier != "BRZ-9" {
+		t.Errorf("a stateless issue should sort last, got order ending in %s", nodes[len(nodes)-1].Identifier)
+	}
 }

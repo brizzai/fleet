@@ -233,6 +233,22 @@ func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
 	return fmt.Sprintf("%s has no %s team — reconnect: Ctrl+K", name, strings.Join(d.linearTeams, "/")), true
 }
 
+// PrefillTicket seeds the New branch field with an identifier and starts its
+// lookup, for a ticket chosen somewhere else (the palette's tickets tab).
+//
+// It goes through the same debounce and generation guard as typing, so the
+// resolved title arrives by exactly the path a typed identifier would — there
+// is no second way for a ticket to become a branch name.
+func (d *WorktreeDialog) PrefillTicket(identifier string) tea.Cmd {
+	if identifier == "" || !d.visible {
+		return nil
+	}
+	d.newBranchInput.SetValue(identifier)
+	d.newBranchInput.SetCursor(len([]rune(identifier)))
+	d.setSelection(focusNewBranch, ticketOnInput)
+	return d.onFieldChanged(identifier)
+}
+
 // pickTicket fills the field from a highlighted row and collapses back to the
 // resolved state, so both ways of naming a ticket end up identical.
 func (d *WorktreeDialog) pickTicket(t linear.Ticket) {

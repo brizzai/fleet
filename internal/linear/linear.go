@@ -89,6 +89,11 @@ type Ticket struct {
 	Title      string
 	URL        string
 	StateName  string
+	// StateType is Linear's own category for the state — "started",
+	// "unstarted", "backlog", "triage". Carried alongside the name because the
+	// name is whatever a team called it ("In Dev", "Doing") and cannot be
+	// ordered or compared, while the type can.
+	StateType string
 }
 
 // Ok reports whether the payload carried enough to be worth acting on.

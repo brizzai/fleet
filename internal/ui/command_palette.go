@@ -26,6 +26,7 @@ const (
 	PaletteKindCommand PaletteItemKind = iota
 	PaletteKindRepo
 	PaletteKindWorktree
+	PaletteKindTicket
 )
 
 // commandPaletteMsg is sent when the user selects an item from the palette.
@@ -51,6 +52,7 @@ const (
 	PaletteTabAll PaletteTab = iota
 	PaletteTabActions
 	PaletteTabPlaces
+	PaletteTabTickets
 )
 
 var paletteTabOrder = []struct {
@@ -60,6 +62,7 @@ var paletteTabOrder = []struct {
 	{PaletteTabAll, "all"},
 	{PaletteTabActions, "actions"},
 	{PaletteTabPlaces, "repos/worktrees"},
+	{PaletteTabTickets, "tickets"},
 }
 
 // CommandPaletteDialog shows a fuzzy-filterable list of palette items.
@@ -73,6 +76,11 @@ type CommandPaletteDialog struct {
 	scrollOff     int
 	activeTab     PaletteTab
 	filterInput   textinput.Model
+
+	// ticketsLoaded distinguishes an empty ticket tab that is still fetching
+	// from one that genuinely has nothing — the difference between "wait" and
+	// "you're done", which an empty list alone cannot say.
+	ticketsLoaded bool
 }
 
 type scoredItem struct {
@@ -103,6 +111,7 @@ func (d *CommandPaletteDialog) Show(items []PaletteItem, recent []string) {
 	d.visible = true
 	d.items = items
 	d.recent = recent
+	d.ticketsLoaded = false
 	d.cursor = 0
 	d.scrollOff = 0
 	d.activeTab = PaletteTabAll
@@ -111,6 +120,39 @@ func (d *CommandPaletteDialog) Show(items []PaletteItem, recent []string) {
 	d.rebuildFiltered()
 }
 
+// ShowOnTab opens the palette focused on one tab, for a key that means a
+// specific thing ("t" is "show me my tickets", not "show me everything").
+func (d *CommandPaletteDialog) ShowOnTab(items []PaletteItem, recent []string, tab PaletteTab) {
+	d.Show(items, recent)
+	d.activeTab = tab
+	d.rebuildFiltered()
+}
+
+// SetTickets replaces the ticket rows once they arrive.
+//
+// Tickets are the only palette rows that need a network call, so unlike every
+// other kind they cannot be built when the palette opens. Replacing rather than
+// appending keeps a second load from doubling the list, and the cursor is
+// clamped by rebuildFiltered.
+func (d *CommandPaletteDialog) SetTickets(tickets []PaletteItem) {
+	if !d.visible {
+		return
+	}
+	kept := d.items[:0:0]
+	for _, it := range d.items {
+		if it.Kind != PaletteKindTicket {
+			kept = append(kept, it)
+		}
+	}
+	d.items = append(kept, tickets...)
+	d.ticketsLoaded = true
+	d.rebuildFiltered()
+}
+
+// TicketsLoaded reports whether a ticket load has completed for this opening,
+// so the view can tell "still fetching" from "you have none".
+func (d *CommandPaletteDialog) TicketsLoaded() bool { return d.ticketsLoaded }
+
 // itemMatchesTab reports whether an item is included by the active tab.
 func itemMatchesTab(it PaletteItem, tab PaletteTab) bool {
 	switch tab {
@@ -118,6 +160,8 @@ func itemMatchesTab(it PaletteItem, tab PaletteTab) bool {
 		return it.Kind == PaletteKindCommand
 	case PaletteTabPlaces:
 		return it.Kind == PaletteKindRepo || it.Kind == PaletteKindWorktree
+	case PaletteTabTickets:
+		return it.Kind == PaletteKindTicket
 	default:
 		return true
 	}
@@ -400,7 +444,7 @@ func (d *CommandPaletteDialog) View() string {
 func (d *CommandPaletteDialog) renderTabs() string {
 	query := strings.TrimSpace(d.filterInput.Value())
 	counts := map[PaletteTab]int{}
-	for _, tab := range []PaletteTab{PaletteTabAll, PaletteTabActions, PaletteTabPlaces} {
+	for _, tab := range []PaletteTab{PaletteTabAll, PaletteTabActions, PaletteTabPlaces, PaletteTabTickets} {
 		haystacks := make([]string, 0, len(d.items))
 		for _, it := range d.items {
 			if !itemMatchesTab(it, tab) {
