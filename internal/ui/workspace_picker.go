@@ -109,12 +109,12 @@ type WorktreeDialog struct {
 
 // NewWorktreeDialog creates a new worktree dialog.
 func NewWorktreeDialog() *WorktreeDialog {
-	base := textinput.New()
+	base := NewTextInput()
 	base.Placeholder = "master"
 	base.CharLimit = 128
 	base.SetWidth(40)
 
-	branch := textinput.New()
+	branch := NewTextInput()
 	branch.Placeholder = "feature/my-feature"
 	branch.CharLimit = 128
 	branch.SetWidth(40)
@@ -461,7 +461,7 @@ func (d *WorktreeDialog) View() string {
 func (d *WorktreeDialog) renderWorktreeRow(ws *workspace.WorkspaceInfo, selected bool) string {
 	prefix := "  "
 	if selected {
-		prefix = SessionSelectionPrefix.Render("▸ ")
+		prefix = SelectionMarker(true).Render("▸ ")
 	}
 
 	// Name.
@@ -487,7 +487,7 @@ func (d *WorktreeDialog) renderWorktreeRow(ws *workspace.WorkspaceInfo, selected
 		if count > 0 {
 			line += fmt.Sprintf("  %d", count)
 		}
-		return prefix + SessionTitleSelStyle.Render(line)
+		return prefix + SelectionPill(true).Render(line)
 	}
 
 	nameStyled := lipgloss.NewStyle().Foreground(ColorText).Render(fmt.Sprintf("%-20s", name))

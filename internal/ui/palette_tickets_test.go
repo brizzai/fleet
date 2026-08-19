@@ -320,8 +320,9 @@ func TestPriorityIsVisibleBecauseItIsSorted(t *testing.T) {
 //
 // The priority mark started life baked into Name, which meant the mixed tab
 // gained a lead column no other kind had — every ticket title sat four columns
-// right of every command and worktree, and the list read as broken. It is a
-// column of its own now, rendered only where every row is a ticket.
+// right of every command and worktree, and the list read as broken. The LEAD
+// column is now rendered only where every row is a ticket; the mark itself
+// still reaches the mixed tab, on the right, where it costs no alignment.
 func TestPriorityColumnOnlyInTheTicketsTab(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(120, 40)
@@ -351,8 +352,13 @@ func TestPriorityColumnOnlyInTheTicketsTab(t *testing.T) {
 	if ticketLine == "" {
 		t.Fatalf("expected the ticket to match 'magic':\n%s", got)
 	}
-	if strings.Contains(ticketLine, "!") {
-		t.Errorf("the mixed tab must not carry the priority column: %q", ticketLine)
+	// The mark may appear on the RIGHT — TestMixedTabCarriesStateAndPriorityOnTheRight
+	// covers why: outside the tickets tab there is no header for the state and no
+	// lead column for the priority, so a ticket row would otherwise show its title
+	// and nothing else. What must not come back is the LEAD column, which is what
+	// broke the alignment. So the assertion is positional, not "is a ! present".
+	if plain := ansi.Strip(ticketLine); strings.Index(plain, "!") < strings.Index(plain, "BRZ-2124") {
+		t.Errorf("the mixed tab must not carry a priority LEAD column: %q", ticketLine)
 	}
 	if !strings.Contains(ticketLine, "tkt  BRZ-2124") {
 		t.Errorf("ticket names must start right after the badge, like every other kind: %q", ticketLine)

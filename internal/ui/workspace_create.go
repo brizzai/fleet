@@ -88,13 +88,13 @@ type CreateWorkspaceDialog struct {
 
 // NewCreateWorkspaceDialog creates a new create workspace dialog.
 func NewCreateWorkspaceDialog() *CreateWorkspaceDialog {
-	ni := textinput.New()
+	ni := NewTextInput()
 	ni.Placeholder = "workspace name"
 	ni.CharLimit = 64
 	ni.SetWidth(40)
 	ni.Focus()
 
-	bi := textinput.New()
+	bi := NewTextInput()
 	bi.Placeholder = "branch name"
 	bi.CharLimit = 128
 	bi.SetWidth(40)

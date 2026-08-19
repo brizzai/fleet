@@ -117,11 +117,8 @@ const paletteMaxVisible = 14
 
 // NewCommandPaletteDialog creates a new command palette dialog.
 func NewCommandPaletteDialog() *CommandPaletteDialog {
-	fi := textinput.New()
+	fi := NewTextInput()
 	fi.Placeholder = "search commands, repos, worktrees, tickets..."
-	// The dialog draws its own dim prompt, so the input must not draw a second
-	// one — that is what rendered as "> >".
-	fi.Prompt = ""
 	fi.CharLimit = 64
 	fi.SetWidth(40)
 
@@ -387,7 +384,7 @@ func (d *CommandPaletteDialog) View() string {
 	b.WriteString("\n\n")
 
 	// Search input.
-	b.WriteString("  " + DimStyle.Render(">") + " " + d.filterInput.View())
+	b.WriteString("  " + d.filterInput.View())
 	b.WriteString("\n\n")
 
 	if len(d.filtered) == 0 {
@@ -484,7 +481,7 @@ func (d *CommandPaletteDialog) View() string {
 
 			prefix := "  "
 			if selected {
-				prefix = SessionSelectionPrefix.Render("▸ ")
+				prefix = SelectionMarker(true).Render("▸ ")
 			}
 
 			// The badge column answers a different question per context, so it
@@ -508,7 +505,7 @@ func (d *CommandPaletteDialog) View() string {
 			namePad := strings.Repeat(" ", nameCol-runeLen(rawName))
 			var name string
 			if selected {
-				name = PaletteSelectedStyle.Render(rawName + namePad)
+				name = SelectionBand().Render(rawName + namePad)
 			} else {
 				name = highlightMatches(rawName, nameIdx) + namePad
 			}
@@ -529,7 +526,7 @@ func (d *CommandPaletteDialog) View() string {
 			if selected {
 				// Carry the fill across the gap and the right column, padded to
 				// the row, so the selection is one continuous band.
-				b.WriteString(PaletteSelectedDimStyle.Render("  " + pad(right, rightBudget)))
+				b.WriteString(SelectionBandSecondary().Render("  " + pad(right, rightBudget)))
 				b.WriteString("\n")
 				continue
 			}
@@ -582,19 +579,24 @@ func (d *CommandPaletteDialog) renderTabs() string {
 		}
 	}
 
-	activeStyle := lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent).Bold(true).Padding(0, 1)
-	inactiveStyle := lipgloss.NewStyle().Foreground(ColorTextDim).Padding(0, 1)
-
+	// The tab bar is a MODE, not focus and not the list cursor: Tab cycles it,
+	// typing goes to the input, arrows go to the list. It drew itself as a
+	// filled accent chip — the heaviest treatment fleet has, and the same one
+	// the selected row uses — which made the least important of the three
+	// things lit on screen the loudest, and left no way to tell them apart.
+	// ModeOn spends accent and an underline instead of a fill; the fill now
+	// belongs to the selected row alone. See docs/design-system.md.
 	parts := make([]string, 0, len(paletteTabOrder))
 	for _, t := range paletteTabOrder {
 		label := fmt.Sprintf("%s %d", t.Label, counts[t.Tab])
 		if t.Tab == d.activeTab {
-			parts = append(parts, activeStyle.Render(label))
+			parts = append(parts, ModeOn().Render(label))
 		} else {
-			parts = append(parts, inactiveStyle.Render(label))
+			parts = append(parts, ModeOff().Render(label))
 		}
 	}
-	return "  " + strings.Join(parts, " ")
+	// Three spaces, because the chips' padding used to do the separating.
+	return "  " + strings.Join(parts, "   ")
 }
 
 const paletteBadgeWidth = 4

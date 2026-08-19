@@ -312,7 +312,7 @@ func (d *WorktreeDialog) renderTicketBlock(innerW int) string {
 		row := fmt.Sprintf("%-9s %s", t.Identifier, t.Title)
 		row = ansi.Truncate(row, maxInt(innerW-4, 12), "…")
 		if selected {
-			b.WriteString(SessionSelectionPrefix.Render("▸ ") + selTitle().Render(row))
+			b.WriteString(SelectionMarker(true).Render("▸ ") + selTitle().Render(row))
 		} else {
 			b.WriteString("  " + DimStyle.Render(row))
 		}

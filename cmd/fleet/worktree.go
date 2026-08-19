@@ -312,7 +312,7 @@ func runWorktree(args []string) {
 			// scripted `fleet worktree` never opens that: it can otherwise land on
 			// a nearly spent account with nothing to indicate the strategy didn't
 			// apply.
-			if cfg.GetAccountStrategy() == claudeaccount.StrategyLeastUsed && accounts.Len() > 1 {
+			if claudeaccount.RanksByUsage(cfg.GetAccountStrategy()) && accounts.Len() > 1 {
 				fmt.Fprintf(os.Stderr, "Note: quota isn't available outside the TUI, so configured order chose %s.\n", account)
 				debuglog.Logger.Info("account select: no quota available from the CLI, configured order decided",
 					"chosen", account, "strategy", cfg.GetAccountStrategy())

@@ -532,7 +532,7 @@ type Home struct {
 func NewHome(storage *session.StateDB, cfg *config.Config, version string, identity analytics.Identity) *Home {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	fi := textinput.New()
+	fi := NewTextInput()
 	fi.Placeholder = "filter..."
 	fi.CharLimit = 64
 	fi.SetWidth(20)
@@ -1049,11 +1049,28 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, h.persistAccounts("")
 
+	case accountStrategyMsg:
+		h.cfg.AccountStrategy = claudeaccount.ParseStrategy(msg.strategy)
+		if err := h.cfg.Save(); err != nil {
+			h.setError(fmt.Errorf("could not save account strategy: %w", err))
+			return h, nil
+		}
+		h.actionLog.Add("account strategy", h.cfg.AccountStrategy, true)
+		// Manual with nothing pinned is a mode that silently does nothing —
+		// Select falls through to the automatic modes — so the toast asks for the
+		// second keystroke rather than reporting success and leaving it there.
+		if h.accountsDialog.manualNeedsDefault() {
+			h.setInfo("Strategy: Manual — press ⏎ on an account to pin it")
+		} else {
+			h.setInfo("Strategy: " + claudeaccount.StrategyLabel(h.cfg.AccountStrategy))
+		}
+		return h, nil
+
 	case accountSetDefaultMsg:
 		// Only the manual strategy consults this, so setting it under an
 		// automatic strategy would be a control that visibly does nothing.
 		if h.cfg.GetAccountStrategy() != claudeaccount.StrategyManual {
-			h.setInfo("Set the account strategy to Manual in Settings to pin an account")
+			h.setInfo("Press s to switch to the Manual strategy before pinning an account")
 			return h, nil
 		}
 		h.cfg.DefaultAccount = msg.email

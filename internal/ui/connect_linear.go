@@ -79,7 +79,7 @@ type ConnectLinearDialog struct {
 }
 
 func NewConnectLinearDialog() *ConnectLinearDialog {
-	ti := textinput.New()
+	ti := NewTextInput()
 	ti.Placeholder = "lin_api_…"
 	ti.CharLimit = 200
 	ti.SetWidth(44)

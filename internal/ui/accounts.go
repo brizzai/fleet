@@ -49,7 +49,10 @@ type AccountsDialog struct {
 	// defaultAccount mirrors the manual-strategy default so the list can mark
 	// it; changing it here writes through to config.
 	defaultAccount string
-	manualStrategy bool
+	// strategy is the live account_strategy, held whole rather than as a
+	// manual-or-not flag: the dialog now renders which one is in force and
+	// cycles it, and both need the value the config actually holds.
+	strategy string
 
 	err    string
 	notice string
@@ -57,7 +60,7 @@ type AccountsDialog struct {
 
 // NewAccountsDialog creates the dialog.
 func NewAccountsDialog() *AccountsDialog {
-	ti := textinput.New()
+	ti := NewTextInput()
 	ti.CharLimit = 200
 	ti.SetWidth(46)
 	return &AccountsDialog{input: ti}
@@ -80,14 +83,20 @@ func (d *AccountsDialog) beginInput(mode accountsMode, value, placeholder string
 	d.input.Focus()
 }
 
+// manual reports whether the pinned-account strategy is in force, which is the
+// only mode where the ★ marker and the ⏎ binding mean anything.
+func (d *AccountsDialog) manual() bool {
+	return claudeaccount.ParseStrategy(d.strategy) == claudeaccount.StrategyManual
+}
+
 // Show opens the dialog over the current account set.
-func (d *AccountsDialog) Show(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, defaultAccount string, manual bool) {
+func (d *AccountsDialog) Show(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, defaultAccount, strategy string) {
 	d.visible = true
 	d.mode = accountsList
 	d.accounts = accounts
 	d.usage = usage
 	d.defaultAccount = defaultAccount
-	d.manualStrategy = manual
+	d.strategy = claudeaccount.ParseStrategy(strategy)
 	d.err = ""
 	d.notice = ""
 	if d.cursor >= len(accounts) {
@@ -252,6 +261,13 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 			d.cursor--
 			return d, func() tea.Msg { return accountReorderMsg{email: email, delta: -1} }
 		}
+	case "s":
+		// Cycles forward only. With four modes a wrap costs at most three
+		// presses, and the dialog's other bindings are all single-purpose keys
+		// (a/r/d) rather than a ←→ vocabulary the user would have to learn here.
+		next := cycleString(claudeaccount.ParseStrategy(d.strategy), claudeaccount.Strategies, 1)
+		d.strategy = next
+		return d, func() tea.Msg { return accountStrategyMsg{strategy: next} }
 	case "enter":
 		if email := d.selectedEmail(); email != "" {
 			return d, func() tea.Msg { return accountSetDefaultMsg{email: email} }
@@ -340,6 +356,11 @@ func (d *AccountsDialog) View() string {
 		b.WriteString(dimStyle.Render("Waiting for the browser login to finish…") + "\n")
 
 	default:
+		// The strategy governs the list below it, so it is stated above the list
+		// rather than left in Settings. It is also what makes the ★ legible:
+		// without it, a marker that appears only under one mode reads as a
+		// property of the account rather than of the mode.
+		b.WriteString(d.strategyRow(inner) + "\n\n")
 		if len(d.accounts) == 0 {
 			for _, l := range wrapTo(inner, "No accounts yet — fleet uses whichever account you're logged into. Add a second to spread work across both.") {
 				b.WriteString(dimStyle.Render(l) + "\n")
@@ -398,6 +419,42 @@ func (d *AccountsDialog) selectedName() string {
 	return a.Name()
 }
 
+// strategyRow renders the assignment mode with its key hint right-aligned,
+// laid out across the dialog's INNER width.
+//
+// Padding is computed on the raw text and applied before styling — padding a
+// styled string counts the ANSI bytes and the columns come out ragged.
+func (d *AccountsDialog) strategyRow(width int) string {
+	const hint = "s change"
+	label := "Strategy: " + claudeaccount.StrategyLabel(d.strategy)
+	pad := max(2, width-lipgloss.Width(label)-lipgloss.Width(hint))
+	if lipgloss.Width(label)+pad+lipgloss.Width(hint) > width {
+		// Too narrow for both: the value outranks the hint, which the footer
+		// also carries.
+		return lipgloss.NewStyle().Foreground(ColorAccent).Render(ansi.Truncate(label, width, "…"))
+	}
+	return lipgloss.NewStyle().Foreground(ColorAccent).Render(label) +
+		strings.Repeat(" ", pad) +
+		lipgloss.NewStyle().Foreground(ColorTextDim).Render(hint)
+}
+
+// manualNeedsDefault reports whether the manual strategy is on with nothing
+// pinned — the one state where the dialog has to ask for a second keystroke.
+//
+// Select falls through to the automatic modes when the pin names no configured
+// account, so this is not broken, it is silently not doing what the mode says.
+func (d *AccountsDialog) manualNeedsDefault() bool {
+	if !d.manual() || len(d.accounts) == 0 {
+		return false
+	}
+	for _, a := range d.accounts {
+		if a.Email == d.defaultAccount {
+			return false
+		}
+	}
+	return true
+}
+
 // footer returns the key hints, packed into lines that fit width.
 func (d *AccountsDialog) footer(width int) []string {
 	var hints []string
@@ -409,10 +466,12 @@ func (d *AccountsDialog) footer(width int) []string {
 	case accountsConfirmRm:
 		hints = []string{"y remove", "n cancel"}
 	default:
-		hints = []string{"a add", "p paste", "r rename", "d remove", "J/K order"}
+		// No "p paste": the paste-a-token login path was removed with the
+		// config-dir rewrite, and the hint outlived it — pressing p did nothing.
+		hints = []string{"a add", "r rename", "d remove", "J/K order", "s strategy"}
 		// Enter only means something under the manual strategy, so it is not
 		// advertised when the strategy would ignore it.
-		if d.manualStrategy {
+		if d.manual() {
 			hints = append(hints, "⏎ default")
 		}
 		hints = append(hints, "esc close")
@@ -485,7 +544,7 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 		cursorCol = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("▸")
 	}
 	starCol := "  "
-	if d.manualStrategy && a.Email == d.defaultAccount {
+	if d.manual() && a.Email == d.defaultAccount {
 		starCol = lipgloss.NewStyle().Foreground(ColorAccent).Render("★") + " "
 	}
 	const leadCells = 3
@@ -617,7 +676,7 @@ func (h *Home) openAccountsDialog() tea.Cmd {
 		h.accounts.List(),
 		h.accountUsageSnapshot(),
 		h.cfg.DefaultAccount,
-		h.cfg.GetAccountStrategy() == claudeaccount.StrategyManual,
+		h.cfg.GetAccountStrategy(),
 	)
 	return nil
 }

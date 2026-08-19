@@ -31,7 +31,7 @@ var (
 	densitySet          = []string{"normal", "compact"}
 	enterModeSet        = []string{"attach", "split"}
 	defaultAgentSet     = []string{"claude", "codex", "opencode"}
-	accountStrategySet  = []string{claudeaccount.StrategyLeastUsed, claudeaccount.StrategyWaterfall, claudeaccount.StrategyManual}
+	accountStrategySet  = claudeaccount.Strategies
 	telemetryModeSet    = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
 	suspendModeSet      = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
 )
@@ -374,10 +374,10 @@ func (d *SettingsDialog) renderRail() string {
 		var style lipgloss.Style
 		switch {
 		case selected && d.focus == focusCategories:
-			style = lipgloss.NewStyle().Bold(true).Foreground(ColorBg).Background(ColorAccent)
+			style = SelectionPill(true)
 			label = " " + label
 		case selected:
-			style = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+			style = SelectionPill(false)
 			label = " " + label
 		default:
 			style = lipgloss.NewStyle().Foreground(ColorTextDim)
@@ -707,16 +707,9 @@ func buildSettingsCategories() []settingsCategory {
 				// Claude Accounts); with one account every mode picks it.
 				label: "Claude account",
 				value: func(c *config.Config) string {
-					switch c.GetAccountStrategy() {
-					case claudeaccount.StrategyWaterfall:
-						return "Waterfall"
-					case claudeaccount.StrategyManual:
-						return "Manual"
-					default:
-						return "Least used"
-					}
+					return claudeaccount.StrategyLabel(c.GetAccountStrategy())
 				},
-				valueW: func() int { return maxStrW([]string{"Least used", "Waterfall", "Manual"}) },
+				valueW: func() int { return maxStrW(claudeaccount.StrategyLabels()) },
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.AccountStrategy = cycleString(d.cfg.GetAccountStrategy(), accountStrategySet, dir)
 				},
