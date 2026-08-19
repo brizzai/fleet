@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.0] - 2026-08-19
+
+### Highlights
+
+- **Tickets become worktrees** — Type `BRZ-3182` in the `w` dialog, or search by words, and fleet names the branch from the ticket and writes it and its screenshots into the worktree.
+**Agent starts briefed** — The session opens already told to read the ticket and not start yet, so you review before it works.
+**Your tickets on `t`** — Each row shows whether it already has a worktree and what that session is doing.
+**Two ways to connect** — `Ctrl+K` → "Connect Linear" signs you in through the browser, or takes a pasted API key if you work over SSH.
+
+### Added
+
+- **Tickets become worktrees** — Type `BRZ-3182` in the `w` dialog, or search by words, and fleet names the branch from the ticket and writes it and its screenshots into the worktree.
+**Agent starts briefed** — The session opens already told to read the ticket and not start yet, so you review before it works.
+**Your tickets on `t`** — Each row shows whether it already has a worktree and what that session is doing.
+**Two ways to connect** — `Ctrl+K` → "Connect Linear" signs you in through the browser, or takes a pasted API key if you work over SSH.
+
 ## [2.29.0] - 2026-08-19
 
 ### Improved
@@ -543,7 +559,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.29.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.30.0...HEAD
+[2.30.0]: https://github.com/brizzai/fleet/releases/tag/v2.30.0
 [2.29.0]: https://github.com/brizzai/fleet/releases/tag/v2.29.0
 [2.28.0]: https://github.com/brizzai/fleet/releases/tag/v2.28.0
 [2.27.0]: https://github.com/brizzai/fleet/releases/tag/v2.27.0
