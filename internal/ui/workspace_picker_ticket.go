@@ -171,13 +171,21 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 	}
 
 	if m.byID {
-		// An identifier resolves IN PLACE. The highlight does not jump to a
-		// row — a picker that moves its own selection is the ambiguity coming
-		// back through the window.
+		// An identifier resolves IN PLACE — the field becomes the branch name,
+		// and the highlight does NOT jump to a row, because a picker that moves
+		// its own selection is the ambiguity coming back through the window.
+		//
+		// Rewriting the field is the whole point, and it used to be missing:
+		// only d.resolved was set, so typing BRZ-3217 fetched the ticket,
+		// materialized it, named the session after it — and then created a
+		// worktree literally called BRZ-3217. pickTicket promises in its own
+		// comment that "both ways of naming a ticket end up identical"; this is
+		// the half that made that true.
 		d.tickets = nil
 		if len(m.tickets) > 0 && m.tickets[0].Ok() {
 			t := m.tickets[0]
 			d.resolved = &t
+			d.applyResolvedBranchName(t)
 		}
 		if d.focus == focusNewBranch {
 			d.setSelection(focusNewBranch, ticketOnInput)
@@ -259,6 +267,36 @@ func (d *WorktreeDialog) PrefillTicket(identifier string) tea.Cmd {
 	d.newBranchInput.SetCursor(len([]rune(identifier)))
 	d.setSelection(focusNewBranch, ticketOnInput)
 	return d.onFieldChanged(identifier)
+}
+
+// applyResolvedBranchName rewrites the field to the ticket's branch name, but
+// only while the field still holds nothing but that identifier.
+//
+// That guard is the difference between a helpful rewrite and a destructive one.
+// The generation counter already drops a reply that a later keystroke
+// invalidated, but it cannot see the case this protects against: you pause on
+// BRZ-321 while typing your way to BRZ-3217, the pause earns a round trip,
+// BRZ-321 happens to exist, and the reply is perfectly current. Without this
+// check the field would become brz-321-<slug> under your cursor and the rest of
+// what you typed would land on the end of it.
+//
+// Re-checking the SHAPE rather than comparing to the query string also means an
+// identifier the user has already extended by hand — brz-3217-my-variant — is
+// left alone, which is the same thing onFieldChanged protects when it keeps the
+// resolution across an edited tail.
+func (d *WorktreeDialog) applyResolvedBranchName(t linear.Ticket) {
+	text := strings.TrimSpace(d.newBranchInput.Value())
+	id, ok := linear.LooksLikeIdentifier(text, d.linearTeams)
+	if !ok || !strings.EqualFold(id, t.Identifier) {
+		return
+	}
+	branch := linear.BranchNameFor(t.Identifier, t.Title)
+	if branch == "" || strings.EqualFold(branch, text) {
+		return
+	}
+	d.newBranchInput.SetValue(branch)
+	d.newBranchInput.SetCursor(len([]rune(branch)))
+	d.lastInput = branch // don't re-query the name we just wrote
 }
 
 // pickTicket fills the field from a highlighted row and collapses back to the

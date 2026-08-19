@@ -341,3 +341,73 @@ func TestWorktreeFooterNamesEnter(t *testing.T) {
 		t.Errorf("footer = %q, want it to name opening a worktree", got)
 	}
 }
+
+// TestTypedIdentifierBecomesTheBranchName is the bug this file's whole design
+// was already written for and did not do.
+//
+// Typing BRZ-3217 fetched the ticket, materialized it into the worktree and
+// named the session after it — and then created a git worktree literally called
+// BRZ-3217, because the by-id reply set d.resolved and never touched the field.
+// pickTicket promises in its own comment that "both ways of naming a ticket end
+// up identical"; only the arrow-down path kept that promise.
+func TestTypedIdentifierBecomesTheBranchName(t *testing.T) {
+	d := ticketDialog(t)
+	d.newBranchInput.SetValue("BRZ-3217")
+	d.onFieldChanged("BRZ-3217")
+
+	d.applyTickets(worktreeTicketsMsg{
+		gen: d.ticketGen, byID: true,
+		tickets: []linear.Ticket{{Identifier: "BRZ-3217", Title: "Fix the ingest guide"}},
+	})
+
+	want := linear.BranchNameFor("BRZ-3217", "Fix the ingest guide")
+	if got := d.newBranchInput.Value(); got != want {
+		t.Errorf("field should hold the branch name, not the bare identifier:\n got %q\nwant %q", got, want)
+	}
+	// The two paths must agree, which is the invariant that was broken.
+	picked := ticketDialog(t)
+	picked.pickTicket(linear.Ticket{Identifier: "BRZ-3217", Title: "Fix the ingest guide"})
+	if picked.newBranchInput.Value() != d.newBranchInput.Value() {
+		t.Errorf("typing and picking must produce the same branch: %q vs %q",
+			d.newBranchInput.Value(), picked.newBranchInput.Value())
+	}
+	// The cursor has to follow, or the next keystroke lands mid-word.
+	if d.newBranchInput.Position() != len([]rune(want)) {
+		t.Errorf("cursor should sit at the end of the rewritten name, got %d want %d",
+			d.newBranchInput.Position(), len([]rune(want)))
+	}
+}
+
+// TestResolvedRewriteOnlyTouchesABareIdentifier guards the destructive half.
+//
+// The generation counter drops a reply a later keystroke invalidated, but it
+// cannot see this: you pause on BRZ-321 on the way to BRZ-3217, the pause earns
+// a round trip, BRZ-321 exists, and the reply is perfectly current by the time
+// it lands. Rewriting then would put brz-321-<slug> under the cursor and the
+// rest of what you typed would land on the end of it.
+//
+// The same check protects a name the user has already extended by hand.
+func TestResolvedRewriteOnlyTouchesABareIdentifier(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+	}{
+		{"user typed past the resolved id", "BRZ-32170"},
+		{"user already extended the name", "brz-3217-my-own-variant"},
+		{"user typed a plain branch", "just-a-branch"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := ticketDialog(t)
+			d.newBranchInput.SetValue(c.field)
+			d.onFieldChanged(c.field)
+			d.applyTickets(worktreeTicketsMsg{
+				gen: d.ticketGen, byID: true,
+				tickets: []linear.Ticket{{Identifier: "BRZ-3217", Title: "Fix the ingest guide"}},
+			})
+			if got := d.newBranchInput.Value(); got != c.field {
+				t.Errorf("the field must not be rewritten under the user: got %q, want it left as %q", got, c.field)
+			}
+		})
+	}
+}
