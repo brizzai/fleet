@@ -188,7 +188,12 @@ jobs:
               # awk's paragraph mode (RS="") splits on blank lines, so a wrapped
               # single paragraph still becomes ONE bullet — which the naive fix
               # of prefixing every line would have broken instead.
+              # sed first: RS="" splits on EMPTY lines, and a line holding a
+              # stray space or tab is not empty — so a fragment with invisible
+              # whitespace between paragraphs would collapse back into one
+              # bullet, which is the exact bug being fixed here.
               BODY=$(awk 'BEGIN{skip=1} /^---$/{if(skip){skip=0; next} else {found=1; next}} found{print}' "$f" \
+                | sed -E 's/^[[:space:]]+$//' \
                 | awk 'BEGIN{RS=""} {gsub(/\n/, " "); print "- " $0}')
               if [ -n "$TYPE" ] && [ -n "$BODY" ]; then
                 ENTRIES[$TYPE]+="${BODY}"$'\n'
