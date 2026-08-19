@@ -176,11 +176,29 @@ jobs:
             for f in "${FRAGMENTS[@]}"; do
               TYPE=$(awk '/^type:/{print $2; exit}' "$f")
               HL=$(awk '/^highlight:/{print $2; exit}' "$f")
-              BODY=$(awk 'BEGIN{skip=1} /^---$/{if(skip){skip=0; next} else {found=1; next}} found{print}' "$f" | sed '/^$/d')
+              # One BULLET PER PARAGRAPH, not one bullet per file.
+              #
+              # This used to be `sed '/^$/d'` with a single "- " prefixed to the
+              # whole body, so a fragment holding several items — which is what
+              # CLAUDE.md asks for, one idea per bullet — collapsed into one
+              # bullet followed by unmarked continuation lines. It was corrected
+              # by hand in v2.29.0 (c5e87b7, "restore the list markers the
+              # roll-up dropped") and would have shipped wrong again in v2.30.0.
+              #
+              # awk's paragraph mode (RS="") splits on blank lines, so a wrapped
+              # single paragraph still becomes ONE bullet — which the naive fix
+              # of prefixing every line would have broken instead.
+              # sed first: RS="" splits on EMPTY lines, and a line holding a
+              # stray space or tab is not empty — so a fragment with invisible
+              # whitespace between paragraphs would collapse back into one
+              # bullet, which is the exact bug being fixed here.
+              BODY=$(awk 'BEGIN{skip=1} /^---$/{if(skip){skip=0; next} else {found=1; next}} found{print}' "$f" \
+                | sed -E 's/^[[:space:]]+$//' \
+                | awk 'BEGIN{RS=""} {gsub(/\n/, " "); print "- " $0}')
               if [ -n "$TYPE" ] && [ -n "$BODY" ]; then
-                ENTRIES[$TYPE]+="- ${BODY}"$'\n'
+                ENTRIES[$TYPE]+="${BODY}"$'\n'
                 if [ "$HL" = "true" ]; then
-                  HIGHLIGHTS+="- ${BODY}"$'\n'
+                  HIGHLIGHTS+="${BODY}"$'\n'
                 fi
               fi
             done
