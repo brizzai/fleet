@@ -64,6 +64,52 @@ func TestAccountHeaderHiddenWhenEvenTheTightestOverflows(t *testing.T) {
 	}
 }
 
+// Off is honoured by the renderer itself, not only by View()'s guard.
+//
+// accountChip branches on Grouped and falls through to Split for everything
+// else, so without an explicit check the function renders a full strip for a
+// user who asked for none — and the rule lives in one call site, where the next
+// caller (an Appearance preview, say) would not find it.
+func TestOffRendersNothing(t *testing.T) {
+	got := renderAccountUsageHeader(
+		hdrAccounts("a@x.com", "b@x.com"),
+		map[string]claudeaccount.Usage{"a@x.com": hdrUsage(10, 20), "b@x.com": hdrUsage(30, 40)},
+		config.AccountUsageOff, 200, hdrNow)
+	if got != "" {
+		t.Fatalf("Off still rendered a strip: %q", ansi.Strip(got))
+	}
+}
+
+// The two-account rule counts what actually renders, not what is configured.
+//
+// A second account that has never been polled is filtered out (no reading, not
+// logged out), so counting the configured accounts left a single chip on screen
+// — the exact "no comparison to make" case the doc says returns empty, and an
+// extra shape besides, since it would grow to two chips when the poll landed.
+func TestSecondAccountWithNoReadingHidesTheStrip(t *testing.T) {
+	got := renderAccountUsageHeader(
+		hdrAccounts("polled@x.com", "fresh@x.com"),
+		map[string]claudeaccount.Usage{
+			"polled@x.com": hdrUsage(10, 20),
+			// "fresh@x.com" was just added: no FetchedAt, and not logged out.
+		},
+		config.AccountUsageSplit, 200, hdrNow)
+	if got != "" {
+		t.Fatalf("rendered a lone chip for a two-account setup: %q", ansi.Strip(got))
+	}
+
+	// Once its first poll lands, both chips appear together.
+	full := renderAccountUsageHeader(
+		hdrAccounts("polled@x.com", "fresh@x.com"),
+		map[string]claudeaccount.Usage{
+			"polled@x.com": hdrUsage(10, 20), "fresh@x.com": hdrUsage(30, 40),
+		},
+		config.AccountUsageSplit, 200, hdrNow)
+	if !strings.Contains(full, "10%") || !strings.Contains(full, "30%") {
+		t.Errorf("both accounts should render once both are polled: %q", ansi.Strip(full))
+	}
+}
+
 func TestAccountHeaderHiddenBeforeFirstPoll(t *testing.T) {
 	// Placeholder percentages would be worse than nothing — they read as real.
 	got := hdrSplit(

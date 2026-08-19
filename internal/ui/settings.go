@@ -579,7 +579,7 @@ func buildSettingsCategories() []settingsCategory {
 					d.cfg.AccountUsageStyle = cycleString(d.cfg.GetAccountUsageStyle(), accountUsageStyleSet, dir)
 					// Supersede the legacy bool, the way the Telemetry row does.
 					// The style already wins on read, but leaving
-					// show_account_usage:false beside account_usage_style:"full"
+					// show_account_usage:false beside account_usage_style:"split"
 					// on disk is a contradiction in a file that gets pasted into
 					// bug reports.
 					d.cfg.ShowAccountUsage = nil

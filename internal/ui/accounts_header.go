@@ -40,14 +40,24 @@ const (
 // renderAccountUsageHeader draws the per-account quota readout, or "" when there
 // is nothing worth showing.
 //
-// Returns empty for a single account: with one subscription there is no choice
-// being made, so the number is trivia rather than information, and the header
-// row is better spent on nothing.
+// Returns empty unless at least *two* accounts have something to show: with one
+// figure on screen there is no comparison to make, so the number is trivia
+// rather than information, and the header row is better spent on nothing.
 //
-// style is one of config.AccountUsageSplit / AccountUsageGrouped. budget is the
-// columns available before the What's New badge; nothing wider than it is ever
-// returned.
+// style is one of config.AccountUsageSplit / AccountUsageGrouped /
+// AccountUsageOff. budget is the columns available before the What's New badge;
+// nothing wider than it is ever returned.
 func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, style string, budget int, now time.Time) string {
+	// Off is honoured here rather than only at the call site. accountChip
+	// branches on Grouped and falls through to Split for everything else, so
+	// without this the function renders a full strip for a user who asked for
+	// none — and the rule would live entirely in View()'s guard, where the next
+	// caller (an Appearance preview, say) would not find it.
+	if style == config.AccountUsageOff {
+		return ""
+	}
+	// Fast path only: the real guard is len(shown) below, since that is the set
+	// that actually renders.
 	if len(accounts) < 2 {
 		return ""
 	}
@@ -65,7 +75,13 @@ func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string
 		}
 		shown = append(shown, a)
 	}
-	if len(shown) == 0 {
+	// Counted *after* the filter, not before: a second account that has never
+	// been polled (the first ~180s after adding one, or indefinitely if its
+	// polls keep failing) drops out here, and one chip cannot answer the
+	// question the strip exists for — which account has headroom. It would also
+	// be an extra shape, appearing as one chip and growing to two when the poll
+	// lands, which is the reshaping this readout was rebuilt to stop.
+	if len(shown) < 2 {
 		return ""
 	}
 
