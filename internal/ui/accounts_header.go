@@ -7,217 +7,174 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/claudeaccount"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/charmbracelet/x/ansi"
 )
 
-// The readout alternates between the two windows rather than picking one. The
-// 5-hour bucket gates your next message; the weekly one gates your week, and
-// both are worth a glance. Showing them side by side would double the width in
-// a corner already shared with the What's New badge, so each takes a turn and
-// is named as a word so you always know which you are looking at.
+// The readout shows both quota windows, every frame, in a shape the user picks
+// once in Settings.
 //
-// The phase comes from the wall clock, not a ticker. The header re-renders on
-// the existing UI tick regardless, so deriving it from `now` costs no new
-// state, no goroutine, and no timer that could outlive what it animates.
+// It used to show one window at a time and swap every six seconds, and to pick
+// one of six densities by measuring what the breadcrumb left over — so the strip
+// changed on a timer *and* reshaped whenever the cursor moved to a longer
+// session title. A corner of the screen that animates on its own steals
+// attention it hasn't earned, and a number you have to wait for is worse than a
+// smaller number that is always there.
+//
+// So nothing here reads the clock except the countdowns, and the only thing the
+// available width still decides is whether the account names fit.
 const (
-	// accountBarCells is the width of the mini gauge. Short on purpose: this
-	// shares the header row with the What's New badge and must never crowd it.
-	accountBarCells = 6
-	// accountWindowRotateSecs is how long each window holds the corner: long
-	// enough to read, short enough that you don't wait for the other one.
-	accountWindowRotateSecs = 6
 	// accountReadoutGap is the clear space kept between the header's breadcrumb
 	// and the readout, so the two never read as one run of text.
 	accountReadoutGap = 2
 )
 
-// The window type, its word, and its percentage live in claudeaccount rather
-// than here: three surfaces name a window (this strip, the accounts dialog, the
-// heal toast) and they have to agree. Two copies of "5-hour"/"weekly" is how
-// they stop agreeing.
+// The window type and its percentage live in claudeaccount rather than here:
+// several surfaces name a window (this strip, the accounts dialog, the heal
+// toast) and they have to agree.
 const (
 	windowSevenDay = claudeaccount.WindowSevenDay
 	windowFiveHour = claudeaccount.WindowFiveHour
 )
 
-// windowAt derives the displayed window from the clock, so every surface that
-// renders in the same frame agrees without sharing state.
-func windowAt(now time.Time) claudeaccount.Window {
-	if (now.Unix()/accountWindowRotateSecs)%2 == 1 {
-		return windowFiveHour
+// renderAccountUsageHeader draws the per-account quota readout, or "" when there
+// is nothing worth showing.
+//
+// Returns empty unless at least *two* accounts have something to show: with one
+// figure on screen there is no comparison to make, so the number is trivia
+// rather than information, and the header row is better spent on nothing.
+//
+// style is one of config.AccountUsageSplit / AccountUsageGrouped /
+// AccountUsageOff. budget is the columns available before the What's New badge;
+// nothing wider than it is ever returned.
+func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, style string, budget int, now time.Time) string {
+	// Off is honoured here rather than only at the call site. accountChip
+	// branches on Grouped and falls through to Split for everything else, so
+	// without this the function renders a full strip for a user who asked for
+	// none — and the rule would live entirely in View()'s guard, where the next
+	// caller (an Appearance preview, say) would not find it.
+	if style == config.AccountUsageOff {
+		return ""
 	}
-	return windowSevenDay
-}
-
-// density is one way of rendering the readout, from richest to tightest.
-//
-// Fixed width thresholds were the obvious approach and are the wrong one: the
-// strip's width depends on how many accounts there are and how long their names
-// happen to be, so any threshold is right for one setup and wrong for the next.
-// Instead every density is rendered and the first that fits is used — the strip
-// is always as informative as the space genuinely allows, and adding a third
-// account degrades it gracefully instead of overflowing.
-type density struct {
-	labels    bool // account names
-	bar       int  // gauge cells; 0 drops the gauge entirely
-	resetWord bool // spell out "resets" rather than leaning on the separator
-	gap       bool // space between the percentage and the countdown
-}
-
-// densities run widest to narrowest. Each step gives up the least useful thing
-// left: the spelled-out word first (the window is already named, so a bare
-// duration can only be a countdown), then gauge precision, then the gauge, then
-// the names — which go last because they are the only thing position cannot
-// convey once there are more than two accounts.
-var densities = []density{
-	{labels: true, bar: accountBarCells, resetWord: true, gap: true},
-	{labels: true, bar: accountBarCells, gap: true},
-	{labels: true, bar: 4, gap: true},
-	{labels: true, bar: 4},
-	{labels: true},
-	{},
-}
-
-// renderAccountUsageHeader draws a compact per-account quota readout, or "" when
-// there is nothing worth showing.
-//
-// Returns empty for a single account: with one subscription there is no choice
-// being made, so the number is trivia rather than information, and the header
-// row is better spent on nothing.
-//
-// budget is the columns available before the What's New badge; nothing wider
-// than it is ever returned.
-func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, budget int, now time.Time) string {
+	// Fast path only: the real guard is len(shown) below, since that is the set
+	// that actually renders.
 	if len(accounts) < 2 {
 		return ""
 	}
 
-	win := windowAt(now)
 	shown := make([]claudeaccount.Account, 0, len(accounts))
 	for _, a := range accounts {
 		u := usage[a.Email]
 		// A logged-out account shows even with no reading to its name — it is
 		// the one state here that is not trivia. Skipping it (which the Known
 		// check would do, since an account with no login never returns numbers)
-		// leaves the corner looking like a healthy single-account setup while
-		// half the rotation is dead.
+		// leaves the corner looking like a healthy setup while half of it is
+		// dead.
 		if !u.LoggedOut && !u.Known() {
 			continue
 		}
 		shown = append(shown, a)
 	}
-	if len(shown) == 0 {
+	// Counted *after* the filter, not before: a second account that has never
+	// been polled (the first ~180s after adding one, or indefinitely if its
+	// polls keep failing) drops out here, and one chip cannot answer the
+	// question the strip exists for — which account has headroom. It would also
+	// be an extra shape, appearing as one chip and growing to two when the poll
+	// lands, which is the reshaping this readout was rebuilt to stop.
+	if len(shown) < 2 {
 		return ""
 	}
 
-	for _, d := range densities {
-		if out := renderReadout(shown, usage, win, d, now); lipgloss.Width(out) <= budget {
+	// Exactly one thing is given up before the strip disappears, and it is the
+	// account names — position identifies two accounts, and the numbers are the
+	// whole point. Deliberately never falls back to the *other* style: that
+	// would hand the shape back to the breadcrumb, which is what this change
+	// exists to stop.
+	for _, labels := range []bool{true, false} {
+		if out := renderReadout(shown, usage, style, labels, now); lipgloss.Width(out) <= budget {
 			return out
 		}
 	}
-	// Even the tightest form overflows: better nothing than a strip that pushes
+	// Even the nameless form overflows: better nothing than a strip that pushes
 	// the What's New badge off its corner.
 	return ""
 }
 
-// renderReadout lays the whole strip out at one density.
-func renderReadout(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, win claudeaccount.Window, d density, now time.Time) string {
-	dim := lipgloss.NewStyle().Foreground(ColorTextDim)
+// renderReadout lays the whole strip out.
+func renderReadout(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, style string, labels bool, now time.Time) string {
 	sep := lipgloss.NewStyle().Foreground(ColorBorder).Render(" │ ")
 
 	chips := make([]string, 0, len(accounts))
 	for _, a := range accounts {
-		chips = append(chips, accountChip(a, usage[a.Email], win, d, now))
+		chips = append(chips, accountChip(a, usage[a.Email], style, labels, now))
 	}
-
-	// The window is named once, in front, and as a word.
-	//
-	// It used to trail the strip as "7d", which put a bare duration next to the
-	// per-account countdowns — identical shape, opposite meaning ("resets in 5
-	// days" beside "these are the 7-day figures"). A word cannot be read as a
-	// countdown, and leading it makes it a heading over both accounts rather
-	// than something dangling off the last one.
-	return dim.Render(win.Name()) + sep + strings.Join(chips, sep)
+	return strings.Join(chips, sep)
 }
 
-// accountChip renders one account at the given density.
-func accountChip(a claudeaccount.Account, u claudeaccount.Usage, win claudeaccount.Window, d density, now time.Time) string {
+// accountChip renders one account: both windows, 5-hour first.
+//
+// Nothing names the windows any more — the strip used to lead with the word
+// "weekly" or "5-hour" because only one was on screen at a time. Now both are,
+// and **order** is what tells them apart, so the 5-hour figure comes first in
+// every style and every state. That ordering is a correctness property, not
+// formatting taste: the countdowns alone can't do it (a weekly window about to
+// roll over reads "3h" exactly like a 5-hour one).
+func accountChip(a claudeaccount.Account, u claudeaccount.Usage, style string, labels bool, now time.Time) string {
 	dim := lipgloss.NewStyle().Foreground(ColorTextDim)
 	red := lipgloss.NewStyle().Foreground(ColorRed)
 
 	label := ""
-	if d.labels {
+	if labels {
 		label = dim.Render(accountShortLabel(a)) + " "
 	}
 
-	// Logged out outranks spent, which outranks the percentage. Both displace
-	// the number rather than waiting their turn — a percentage is something to
-	// note, these are something to do. The wording distinguishes them because
-	// the actions differ: "spent" is a wait that resolves itself, "logged out"
-	// needs you to sign in again.
+	// The one state with no numbers to show, so it takes the whole chip. It
+	// outranks everything below: a percentage is something to note, a dead login
+	// is something to do, and unlike a spent window it does not resolve itself.
 	if u.LoggedOut {
 		return label + red.Render("✕ logged out")
 	}
-	// Timed from the window that is actually spent, not assumed to be the 5-hour
-	// one: an account at 99% weekly whose 5-hour bucket just reset is blocked for
-	// five days, and showing "back in 20 minutes" invites exactly the wrong move.
-	if spentWin, _, spent := u.SpentWindow(now); spent {
-		// Plain space, not the fused separator: there is no percentage here for
-		// the countdown to be joined to, so a dot would just be noise.
-		return label + red.Render("spent ") + resetIn(u, spentWin, now)
-	}
 
-	pct := u.Pct(win)
-	out := label
-	if d.bar > 0 {
-		out += renderQuotaBar(pct, d.bar) + " "
-	}
-	out += quotaStyle(pct).Render(fmt.Sprintf("%d%%", pct))
+	fiveHour := u.Pct(windowFiveHour)
+	sevenDay := u.Pct(windowSevenDay)
+	fiveReset := resetIn(u, windowFiveHour, now)
+	sevenReset := resetIn(u, windowSevenDay, now)
 
-	// The countdown is what makes the percentage actionable: 72% with an hour
-	// left is fine, 72% with four hours left is not.
-	if reset := resetIn(u, win, now); reset != "" {
-		if d.resetWord {
-			out += dim.Render(" resets ") + reset
-		} else {
-			out += dim.Render(d.join()) + reset
+	// A spent window is deliberately *not* special-cased into "spent 2h" the way
+	// it used to be. quotaStyle already paints anything at ExhaustedPct red — the
+	// same threshold Select stops handing the account out at — and the countdown
+	// is right there beside it, so "100%(2h)" carries everything the old wording
+	// did without the chip changing shape when the state changes. Shape that
+	// moves on its own is the thing being removed.
+	if style == config.AccountUsageGrouped {
+		out := label + quotaStyle(fiveHour).Render(fmt.Sprintf("%d%%", fiveHour)) +
+			dim.Render("/") + quotaStyle(sevenDay).Render(fmt.Sprintf("%d%%", sevenDay))
+		// All or nothing: pooled countdowns make a half group ("12%/34% (4d)")
+		// unreadable — nothing says which window the 4d belongs to. The split
+		// style has no such problem, since each parenthetical is attached to its
+		// own figure, so there they drop independently.
+		if fiveReset != "" && sevenReset != "" {
+			out += dim.Render(" (") + fiveReset + dim.Render("/") + sevenReset + dim.Render(")")
 		}
+		return out
+	}
+
+	return label +
+		windowFigure(fiveHour, fiveReset, dim) + " " +
+		windowFigure(sevenDay, sevenReset, dim)
+}
+
+// windowFigure renders one window as "34%(4d)", or bare when the reset is
+// unknown.
+func windowFigure(pct int, reset string, dim lipgloss.Style) string {
+	out := quotaStyle(pct).Render(fmt.Sprintf("%d%%", pct))
+	if reset != "" {
+		out += dim.Render("(") + reset + dim.Render(")")
 	}
 	return out
 }
 
-// join is the separator between a percentage and its countdown: fused at tight
-// densities so the pair reads as one fact ("40% used, 2h left") rather than two
-// competing numbers.
-func (d density) join() string {
-	if d.gap {
-		return " ·"
-	}
-	return "·"
-}
-
-// renderQuotaBar draws a filled/empty gauge coloured by headroom. The half-block
-// glyphs are from the same Geometric Shapes range as fleet's status dots, so
-// they stay aligned in the base monospace fonts the sidebar already targets.
-func renderQuotaBar(pct, cells int) string {
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	filled := pct * cells / 100
-	// Any nonzero usage should show at least one cell, or a busy account reads
-	// as untouched.
-	if filled == 0 && pct > 0 {
-		filled = 1
-	}
-	full := quotaStyle(pct).Render(strings.Repeat("▰", filled))
-	rest := lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("▱", cells-filled))
-	return full + rest
-}
-
-// resetIn renders how long until the shown window refills, as "42m", "3h" or
+// resetIn renders how long until the given window refills, as "42m", "3h" or
 // "5d". Relative rather than a clock time: the question is "how long do I
 // wait", and an absolute time makes the reader do the subtraction.
 //
