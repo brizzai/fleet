@@ -25,15 +25,16 @@ var (
 	editorPresets = sync.OnceValue(editor.Available)
 	tickPresets   = []int{1, 2, 3, 5, 10}
 	// Bounded by config.DrawerHeightMax (the UI's hard body cap) — taller can't render.
-	drawerHeightPresets = []int{6, 8, 10, 12, 14}
-	statusStyleSet      = []string{"icon", "bar"}
-	chevronStyleSet     = []string{"triangle", "plusminus"}
-	densitySet          = []string{"normal", "compact"}
-	enterModeSet        = []string{"attach", "split"}
-	defaultAgentSet     = []string{"claude", "codex", "opencode"}
-	accountStrategySet  = claudeaccount.Strategies
-	telemetryModeSet    = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
-	suspendModeSet      = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
+	drawerHeightPresets  = []int{6, 8, 10, 12, 14}
+	statusStyleSet       = []string{"icon", "bar"}
+	chevronStyleSet      = []string{"triangle", "plusminus"}
+	densitySet           = []string{"normal", "compact"}
+	enterModeSet         = []string{"attach", "split"}
+	defaultAgentSet      = []string{"claude", "codex", "opencode"}
+	accountStrategySet   = claudeaccount.Strategies
+	telemetryModeSet     = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
+	suspendModeSet       = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
+	accountUsageStyleSet = []string{config.AccountUsageSplit, config.AccountUsageGrouped, config.AccountUsageOff}
 )
 
 // settingsFocus tracks which pane (category rail or detail list) has the cursor.
@@ -555,11 +556,36 @@ func buildSettingsCategories() []settingsCategory {
 			withLabel("Slot badges", toggle(
 				(*config.Config).IsShowSlotBadges,
 				func(c *config.Config, v bool) { c.ShowSlotBadges = &v }, true)),
-			// Self-hides below two accounts, so this only matters once a second
-			// subscription is added.
-			withLabel("Account usage", toggle(
-				(*config.Config).IsShowAccountUsage,
-				func(c *config.Config, v bool) { c.ShowAccountUsage = &v }, true)),
+			{
+				// The top-right quota readout. Self-hides below two accounts, so
+				// this only matters once a second subscription is added.
+				// Split gives each window its own countdown ("12%(2h) 34%(4d)"),
+				// Grouped pools them ("12%/34% (2h/4d)"), Off hides the strip.
+				// The two are the same width — this is a grouping preference,
+				// not a density choice.
+				label: "Account usage",
+				value: func(c *config.Config) string {
+					switch c.GetAccountUsageStyle() {
+					case config.AccountUsageOff:
+						return "Off"
+					case config.AccountUsageGrouped:
+						return "Grouped"
+					default:
+						return "Split"
+					}
+				},
+				valueW: func() int { return maxStrW([]string{"Off", "Split", "Grouped"}) },
+				cycle: func(d *SettingsDialog, dir int) {
+					d.cfg.AccountUsageStyle = cycleString(d.cfg.GetAccountUsageStyle(), accountUsageStyleSet, dir)
+					// Supersede the legacy bool, the way the Telemetry row does.
+					// The style already wins on read, but leaving
+					// show_account_usage:false beside account_usage_style:"split"
+					// on disk is a contradiction in a file that gets pasted into
+					// bug reports.
+					d.cfg.ShowAccountUsage = nil
+					ApplyDisplayConfig(d.cfg)
+				},
+			},
 			{label: "GIT", subheader: true},
 			withLabel("PR badges", toggle(
 				(*config.Config).IsShowPRBadges,

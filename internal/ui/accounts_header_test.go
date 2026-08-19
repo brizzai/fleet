@@ -7,23 +7,11 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/claudeaccount"
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/charmbracelet/x/ansi"
 )
 
 var hdrNow = time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-
-// The readout alternates windows on a wall-clock phase, so tests pick the
-// phase they mean rather than depending on where hdrNow happens to land.
-func atWindow(w claudeaccount.Window) time.Time {
-	t := hdrNow
-	for i := 0; i < 2*accountWindowRotateSecs; i++ {
-		if windowAt(t) == w {
-			return t
-		}
-		t = t.Add(time.Second)
-	}
-	panic("no time found in the rotation for the requested window")
-}
 
 func hdrAccounts(emails ...string) []claudeaccount.Account {
 	out := make([]claudeaccount.Account, len(emails))
@@ -35,183 +23,295 @@ func hdrAccounts(emails ...string) []claudeaccount.Account {
 
 func hdrUsage(fiveHour, sevenDay int) claudeaccount.Usage {
 	return claudeaccount.Usage{
-		FiveHourPct:   fiveHour,
-		FiveHourReset: hdrNow.Add(90 * time.Minute),
+		FiveHourPct: fiveHour,
+		// Deliberately not a round 90m: that is exactly %.0f's rounding boundary
+		// (1.5h), so advancing the clock one second flips "2h" to "1h" and any
+		// stability check fails for a reason it isn't about.
+		FiveHourReset: hdrNow.Add(140 * time.Minute),
 		SevenDayPct:   sevenDay,
 		SevenDayReset: hdrNow.Add(5 * 24 * time.Hour),
 		FetchedAt:     hdrNow,
 	}
 }
 
+// hdrSplit renders the default style at a budget wide enough for everything.
+func hdrSplit(accounts []claudeaccount.Account, usage map[string]claudeaccount.Usage, now time.Time) string {
+	return renderAccountUsageHeader(accounts, usage, config.AccountUsageSplit, 200, now)
+}
+
 // With one subscription there is no choice being made, so the number is trivia
 // and the header row is better spent on nothing.
 func TestAccountHeaderHiddenForSingleAccount(t *testing.T) {
-	got := renderAccountUsageHeader(
+	got := hdrSplit(
 		hdrAccounts("a@x.com"),
 		map[string]claudeaccount.Usage{"a@x.com": hdrUsage(10, 20)},
-		120, hdrNow)
+		hdrNow)
 	if got != "" {
 		t.Fatalf("want empty for a single account, got %q", got)
 	}
 }
 
-// The readout adapts rather than disappearing, so it hides only when even the
-// tightest form would overflow — at which point drawing it would push the
+// The readout drops the names before it disappears, so it hides only when even
+// the nameless form would overflow — at which point drawing it would push the
 // What's New badge out of its corner.
 func TestAccountHeaderHiddenWhenEvenTheTightestOverflows(t *testing.T) {
 	got := renderAccountUsageHeader(
 		hdrAccounts("a@x.com", "b@x.com"),
 		map[string]claudeaccount.Usage{"a@x.com": hdrUsage(10, 20), "b@x.com": hdrUsage(30, 40)},
-		12, hdrNow)
+		config.AccountUsageSplit, 8, hdrNow)
 	if got != "" {
 		t.Fatalf("want empty when nothing fits, got %q", got)
 	}
 }
 
-func TestAccountHeaderHiddenBeforeFirstPoll(t *testing.T) {
-	// Placeholder percentages would be worse than nothing — they read as real.
+// Off is honoured by the renderer itself, not only by View()'s guard.
+//
+// accountChip branches on Grouped and falls through to Split for everything
+// else, so without an explicit check the function renders a full strip for a
+// user who asked for none — and the rule lives in one call site, where the next
+// caller (an Appearance preview, say) would not find it.
+func TestOffRendersNothing(t *testing.T) {
 	got := renderAccountUsageHeader(
 		hdrAccounts("a@x.com", "b@x.com"),
+		map[string]claudeaccount.Usage{"a@x.com": hdrUsage(10, 20), "b@x.com": hdrUsage(30, 40)},
+		config.AccountUsageOff, 200, hdrNow)
+	if got != "" {
+		t.Fatalf("Off still rendered a strip: %q", ansi.Strip(got))
+	}
+}
+
+// The two-account rule counts what actually renders, not what is configured.
+//
+// A second account that has never been polled is filtered out (no reading, not
+// logged out), so counting the configured accounts left a single chip on screen
+// — the exact "no comparison to make" case the doc says returns empty, and an
+// extra shape besides, since it would grow to two chips when the poll landed.
+func TestSecondAccountWithNoReadingHidesTheStrip(t *testing.T) {
+	got := renderAccountUsageHeader(
+		hdrAccounts("polled@x.com", "fresh@x.com"),
+		map[string]claudeaccount.Usage{
+			"polled@x.com": hdrUsage(10, 20),
+			// "fresh@x.com" was just added: no FetchedAt, and not logged out.
+		},
+		config.AccountUsageSplit, 200, hdrNow)
+	if got != "" {
+		t.Fatalf("rendered a lone chip for a two-account setup: %q", ansi.Strip(got))
+	}
+
+	// Once its first poll lands, both chips appear together.
+	full := renderAccountUsageHeader(
+		hdrAccounts("polled@x.com", "fresh@x.com"),
+		map[string]claudeaccount.Usage{
+			"polled@x.com": hdrUsage(10, 20), "fresh@x.com": hdrUsage(30, 40),
+		},
+		config.AccountUsageSplit, 200, hdrNow)
+	if !strings.Contains(full, "10%") || !strings.Contains(full, "30%") {
+		t.Errorf("both accounts should render once both are polled: %q", ansi.Strip(full))
+	}
+}
+
+func TestAccountHeaderHiddenBeforeFirstPoll(t *testing.T) {
+	// Placeholder percentages would be worse than nothing — they read as real.
+	got := hdrSplit(
+		hdrAccounts("a@x.com", "b@x.com"),
 		map[string]claudeaccount.Usage{},
-		120, hdrNow)
+		hdrNow)
 	if got != "" {
 		t.Fatalf("want empty with no readings, got %q", got)
 	}
 }
 
-// The readout alternates between the two windows, and each turn must show one
-// window's numbers only — mixing them would be worse than showing either.
-func TestAccountHeaderRotatesBetweenWindows(t *testing.T) {
-	usage := map[string]claudeaccount.Usage{
-		"yuval@x.com": hdrUsage(10, 34),
-		"work@x.com":  hdrUsage(20, 71),
-	}
-	accts := hdrAccounts("yuval@x.com", "work@x.com")
-
-	weekly := renderAccountUsageHeader(accts, usage, 140, atWindow(windowSevenDay))
-	for _, want := range []string{"34%", "71%", "weekly", "yuval", "work"} {
-		if !strings.Contains(weekly, want) {
-			t.Errorf("weekly turn missing %q: %q", want, weekly)
-		}
-	}
-	if strings.Contains(weekly, "10%") || strings.Contains(weekly, "20%") {
-		t.Errorf("weekly turn leaked the 5-hour figures: %q", weekly)
-	}
-
-	fiveHour := renderAccountUsageHeader(accts, usage, 140, atWindow(windowFiveHour))
-	for _, want := range []string{"10%", "20%", "5-hour"} {
-		if !strings.Contains(fiveHour, want) {
-			t.Errorf("5-hour turn missing %q: %q", want, fiveHour)
-		}
-	}
-	if strings.Contains(fiveHour, "34%") || strings.Contains(fiveHour, "71%") {
-		t.Errorf("5-hour turn leaked the weekly figures: %q", fiveHour)
-	}
-}
-
-// The phase has to actually change, or the rotation is a no-op that only looks
-// implemented.
-func TestWindowRotationAdvances(t *testing.T) {
-	base := atWindow(windowSevenDay)
-	if windowAt(base) == windowAt(base.Add(accountWindowRotateSecs*time.Second)) {
-		t.Fatal("window did not change after a full rotation period")
-	}
-	// And it must be stable *within* a period, or the header flickers.
-	if windowAt(base) != windowAt(base.Add(time.Second)) {
-		t.Error("window changed within a single rotation period")
-	}
-}
-
-func TestAccountHeaderSpentAccountShowsCountdownNotPercent(t *testing.T) {
-	// A spent 5-hour bucket is the one thing here you can act on, so it
-	// displaces the weekly figure rather than sitting beside it.
-	got := renderAccountUsageHeader(
-		hdrAccounts("a@x.com", "b@x.com"),
-		map[string]claudeaccount.Usage{
-			"a@x.com": {FiveHourPct: 100, FiveHourReset: hdrNow.Add(90 * time.Minute), SevenDayPct: 44, FetchedAt: hdrNow},
-			"b@x.com": hdrUsage(5, 12),
-		},
-		140, hdrNow)
-
-	if !strings.Contains(got, "spent") {
-		t.Errorf("spent account not marked: %q", got)
-	}
-	if !strings.Contains(got, "spent ") {
-		t.Errorf("want a relative countdown after \"spent\": %q", got)
-	}
-	if strings.Contains(got, "44%") {
-		t.Errorf("spent account still showed its weekly percentage: %q", got)
-	}
-}
-
-// A spent *weekly* bucket must be timed by the weekly clock.
+// The whole point of the change: nothing in the corner may move on its own.
 //
-// Exhausted covers both windows but this branch always printed FiveHourReset, so
-// an account at 99% weekly whose 5-hour bucket had just reset rendered a
-// twenty-minute countdown for an account blocked for five days. The same string
-// drives the account picker, where acting on it costs a real relaunch.
-func TestSpentWeeklyWindowIsTimedByTheWeeklyClock(t *testing.T) {
-	got := renderAccountUsageHeader(
-		hdrAccounts("a@x.com", "b@x.com"),
-		map[string]claudeaccount.Usage{
-			"a@x.com": {
-				FiveHourPct: 4, FiveHourReset: hdrNow.Add(20 * time.Minute),
-				SevenDayPct: 99, SevenDayReset: hdrNow.Add(5 * 24 * time.Hour),
-				FetchedAt: hdrNow,
-			},
-			"b@x.com": hdrUsage(5, 12),
-		},
-		140, hdrNow)
+// The readout used to swap windows every six seconds off the wall clock, so the
+// same inputs rendered differently second to second and a user watching a number
+// had to wait for the other one to come back around.
+func TestReadoutIsStableOverTime(t *testing.T) {
+	accts := hdrAccounts("yuval@x.com", "work@x.com")
+	usage := map[string]claudeaccount.Usage{
+		"yuval@x.com": hdrUsage(12, 34), "work@x.com": hdrUsage(20, 71),
+	}
 
-	// Stripped before matching: the countdown is styled, and an SGR escape is a
-	// run of digits ending in "m" — so a bare "20m" needle matches ";120m" inside
-	// a colour code, and whether it does depends on the palette another test
-	// happened to leave installed.
-	plain := ansi.Strip(got)
-	if !strings.Contains(plain, "spent") {
-		t.Fatalf("a 99%% weekly bucket did not read as spent: %q", plain)
-	}
-	if !strings.Contains(plain, "5d") {
-		t.Errorf("want the weekly horizon (5d), got: %q", plain)
-	}
-	if strings.Contains(plain, "20m") {
-		t.Errorf("timed the spent weekly window by the 5-hour clock: %q", plain)
+	for _, style := range []string{config.AccountUsageSplit, config.AccountUsageGrouped} {
+		base := renderAccountUsageHeader(accts, usage, style, 200, hdrNow)
+		if base == "" {
+			t.Fatalf("%s: nothing rendered at a 200-column budget", style)
+		}
+		// Same second, same minute, and across what used to be several full
+		// rotations of the old 6s phase.
+		for _, after := range []time.Duration{time.Second, 7 * time.Second, 61 * time.Second} {
+			if got := renderAccountUsageHeader(accts, usage, style, 200, hdrNow.Add(after)); got != base {
+				t.Errorf("%s: readout changed after %s with identical input:\n was %q\n now %q",
+					style, after, ansi.Strip(base), ansi.Strip(got))
+			}
+		}
+		// And every figure is present in the one frame, rather than taking turns.
+		for _, want := range []string{"12%", "34%", "20%", "71%"} {
+			if !strings.Contains(base, want) {
+				t.Errorf("%s: missing %q — both windows must render every frame: %q",
+					style, want, ansi.Strip(base))
+			}
+		}
 	}
 }
 
-// The strip gives things up in order as the budget shrinks, rather than
-// switching between two fixed layouts. Each step must actually be narrower than
-// the one before, or a density is dead weight.
-func TestReadoutGetsTighterAsTheBudgetShrinks(t *testing.T) {
+// Order is the only thing naming the windows now that neither is labelled, so
+// the 5-hour figure leads in every style. The countdowns cannot stand in for it:
+// a weekly window about to roll over reads "3h" exactly like a 5-hour one.
+func TestSplitStyleShowsBothWindowsInOrder(t *testing.T) {
+	got := ansi.Strip(hdrSplit(
+		hdrAccounts("yuval@x.com", "work@x.com"),
+		map[string]claudeaccount.Usage{
+			"yuval@x.com": hdrUsage(12, 34), "work@x.com": hdrUsage(20, 71),
+		},
+		hdrNow))
+
+	const want = "yuval 12%(2h) 34%(5d) │ work 20%(2h) 71%(5d)"
+	if got != want {
+		t.Fatalf("split style:\n got %q\nwant %q", got, want)
+	}
+	if strings.Index(got, "12%") > strings.Index(got, "34%") {
+		t.Errorf("weekly figure preceded the 5-hour one — nothing else names them: %q", got)
+	}
+}
+
+func TestGroupedStyleFusesThePair(t *testing.T) {
+	got := ansi.Strip(renderAccountUsageHeader(
+		hdrAccounts("yuval@x.com", "work@x.com"),
+		map[string]claudeaccount.Usage{
+			"yuval@x.com": hdrUsage(12, 34), "work@x.com": hdrUsage(20, 71),
+		},
+		config.AccountUsageGrouped, 200, hdrNow))
+
+	const want = "yuval 12%/34% (2h/5d) │ work 20%/71% (2h/5d)"
+	if got != want {
+		t.Fatalf("grouped style:\n got %q\nwant %q", got, want)
+	}
+	if strings.Index(got, "2h") > strings.Index(got, "5d") {
+		t.Errorf("countdowns are out of order with their figures: %q", got)
+	}
+}
+
+// In the fused form the two countdowns are pooled, so half a group is unreadable:
+// "12%/34% (5d)" gives no way to tell which window the 5d belongs to.
+func TestGroupedDropsAHalfKnownCountdownGroup(t *testing.T) {
+	half := hdrUsage(12, 34)
+	half.FiveHourReset = time.Time{} // never polled a reset for this window
+
+	got := ansi.Strip(renderAccountUsageHeader(
+		hdrAccounts("yuval@x.com", "work@x.com"),
+		map[string]claudeaccount.Usage{"yuval@x.com": half, "work@x.com": hdrUsage(20, 71)},
+		config.AccountUsageGrouped, 200, hdrNow))
+
+	chip, _, ok := strings.Cut(got, "│")
+	if !ok {
+		t.Fatalf("expected two chips: %q", got)
+	}
+	if strings.Contains(chip, "(") {
+		t.Errorf("half-known chip kept an ambiguous countdown group: %q", chip)
+	}
+	if !strings.Contains(chip, "12%/34%") {
+		t.Errorf("figures dropped along with the countdowns: %q", chip)
+	}
+	// The other account is unaffected — this is per-chip, not per-strip.
+	if !strings.Contains(got, "(2h/5d)") {
+		t.Errorf("a fully-known chip lost its countdowns too: %q", got)
+	}
+}
+
+// The split style attaches each parenthetical to its own figure, so there is no
+// ambiguity and a missing reset drops only that one.
+func TestSplitStyleDropsOnlyTheUnknownCountdown(t *testing.T) {
+	half := hdrUsage(12, 34)
+	half.FiveHourReset = time.Time{}
+
+	got := ansi.Strip(hdrSplit(
+		hdrAccounts("yuval@x.com", "work@x.com"),
+		map[string]claudeaccount.Usage{"yuval@x.com": half, "work@x.com": hdrUsage(20, 71)},
+		hdrNow))
+
+	if !strings.Contains(got, "yuval 12% 34%(5d)") {
+		t.Errorf("want the weekly countdown kept and only the 5-hour one dropped: %q", got)
+	}
+}
+
+// The two styles are the same width by construction: four tokens plus five
+// characters of glue either way (split spends them on two paren pairs and a
+// space, grouped on a slash, a space, a paren pair and a slash).
+//
+// Pinned because it is the reason neither is called "compact", and because it is
+// what lets the fit ladder be style-independent — if one style were narrower,
+// the budget would silently decide which grouping you saw, putting the shape
+// back under the breadcrumb's control.
+func TestBothStylesAreTheSameWidth(t *testing.T) {
+	accts := hdrAccounts("yuval@x.com", "work@x.com")
+	usage := map[string]claudeaccount.Usage{
+		"yuval@x.com": hdrUsage(12, 34), "work@x.com": hdrUsage(20, 71),
+	}
+	split := renderAccountUsageHeader(accts, usage, config.AccountUsageSplit, 200, hdrNow)
+	grouped := renderAccountUsageHeader(accts, usage, config.AccountUsageGrouped, 200, hdrNow)
+
+	if lipgloss.Width(split) != lipgloss.Width(grouped) {
+		t.Errorf("split is %d columns, grouped is %d — they are meant to be interchangeable",
+			lipgloss.Width(split), lipgloss.Width(grouped))
+	}
+	// Same width, but the setting must actually do something.
+	if ansi.Strip(split) == ansi.Strip(grouped) {
+		t.Errorf("both styles rendered identically: %q", ansi.Strip(split))
+	}
+}
+
+// Exactly one thing is given up before the strip disappears. The old six-step
+// density ladder is what made the corner reshape whenever the breadcrumb changed
+// length, so a wider ladder is a regression, not an improvement.
+func TestLadderHasExactlyTwoSteps(t *testing.T) {
 	accounts := hdrAccounts("yuval@x.com", "work@x.com")
 	usage := map[string]claudeaccount.Usage{
-		"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
+		"yuval@x.com": hdrUsage(12, 34), "work@x.com": hdrUsage(20, 71),
 	}
 
-	seen := map[int]bool{}
-	prev := 1 << 30
-	for budget := 200; budget >= 20; budget-- {
-		got := renderAccountUsageHeader(accounts, usage, budget, hdrNow)
-		if got == "" {
-			continue
+	for _, style := range []string{config.AccountUsageSplit, config.AccountUsageGrouped} {
+		widths := map[int]string{}
+		for budget := 200; budget >= 0; budget-- {
+			got := renderAccountUsageHeader(accounts, usage, style, budget, hdrNow)
+			if got == "" {
+				continue
+			}
+			w := lipgloss.Width(got)
+			if w > budget {
+				t.Fatalf("%s: budget %d produced %d columns: %q", style, budget, w, ansi.Strip(got))
+			}
+			widths[w] = got
+			// Whatever it gives up, the numbers are the point and must survive.
+			for _, want := range []string{"12%", "34%", "20%", "71%"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s: budget %d lost %q: %q", style, budget, want, ansi.Strip(got))
+				}
+			}
 		}
-		w := lipgloss.Width(got)
-		if w > budget {
-			t.Fatalf("budget %d produced %d columns: %q", budget, w, got)
+		if len(widths) != 2 {
+			t.Errorf("%s: %d distinct widths, want exactly 2 (with names, without)", style, len(widths))
 		}
-		if w > prev {
-			t.Fatalf("budget %d widened to %d columns from %d — the ladder must only tighten", budget, w, prev)
-		}
-		prev = w
-		seen[w] = true
-		// Whatever it gives up, the numbers are the point and must survive.
-		if !strings.Contains(got, "34%") || !strings.Contains(got, "71%") {
-			t.Errorf("budget %d lost a percentage: %q", budget, got)
+		for w, out := range widths {
+			named := strings.Contains(out, "yuval")
+			if w == maxKey(widths) && !named {
+				t.Errorf("%s: the widest form dropped the account names: %q", style, ansi.Strip(out))
+			}
+			if w != maxKey(widths) && named {
+				t.Errorf("%s: the narrow form kept the account names: %q", style, ansi.Strip(out))
+			}
 		}
 	}
-	if len(seen) < 4 {
-		t.Errorf("only %d distinct widths across the sweep; the density ladder is barely being used", len(seen))
+}
+
+func maxKey(m map[int]string) int {
+	max := 0
+	for k := range m {
+		if k > max {
+			max = k
+		}
 	}
+	return max
 }
 
 // The horizon is the whole reason the reset was added: "54% of a week" means
@@ -222,43 +322,100 @@ func TestCountdownOutlivesTheAccountNames(t *testing.T) {
 	usage := map[string]claudeaccount.Usage{
 		"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
 	}
-	tight := renderAccountUsageHeader(accounts, usage, 30, hdrNow)
+	tight := renderAccountUsageHeader(accounts, usage, config.AccountUsageGrouped, 34, hdrNow)
+	if tight == "" {
+		t.Fatal("nothing rendered at 34 columns")
+	}
 	if strings.Contains(tight, "yuval") {
-		t.Errorf("names survived at 30 columns: %q", tight)
+		t.Errorf("names survived at 34 columns: %q", ansi.Strip(tight))
 	}
 	if !strings.Contains(tight, "5d") {
-		t.Errorf("countdown dropped before the names did: %q", tight)
+		t.Errorf("countdown dropped before the names did: %q", ansi.Strip(tight))
 	}
 }
 
-// The window is named as a word so it can never be read as one of the
-// countdowns beside it — the two are the same shape and opposite meanings.
-func TestWindowIsNamedNotDurationShaped(t *testing.T) {
-	got := renderAccountUsageHeader(
+// A spent window no longer collapses the chip to "spent 2h". quotaStyle already
+// paints it red at the threshold Select stops handing the account out at, and
+// the countdown sits beside it — so the state is legible without the shape
+// changing, and the *other* window's figure survives instead of being hidden.
+func TestSpentWindowStaysInPlace(t *testing.T) {
+	got := ansi.Strip(hdrSplit(
 		hdrAccounts("a@x.com", "b@x.com"),
-		map[string]claudeaccount.Usage{"a@x.com": hdrUsage(10, 34), "b@x.com": hdrUsage(20, 71)},
-		200, atWindow(windowSevenDay))
-	if strings.Contains(got, "7d ") || strings.HasSuffix(got, "7d") {
-		t.Errorf("window rendered as a bare duration, indistinguishable from a countdown: %q", got)
+		map[string]claudeaccount.Usage{
+			"a@x.com": {
+				FiveHourPct: 4, FiveHourReset: hdrNow.Add(20 * time.Minute),
+				SevenDayPct: 99, SevenDayReset: hdrNow.Add(5 * 24 * time.Hour),
+				FetchedAt: hdrNow,
+			},
+			"b@x.com": hdrUsage(5, 12),
+		},
+		hdrNow))
+
+	if !strings.Contains(got, "a 4%(21m) 99%(5d)") {
+		t.Fatalf("spent weekly chip lost its shape: %q", got)
 	}
-	if !strings.Contains(got, "weekly") {
-		t.Errorf("window not named: %q", got)
+	// The trap the old code fell into: timing a spent *weekly* window by the
+	// 5-hour clock offered a twenty-minute wait for an account blocked five days.
+	// Each figure carrying its own countdown makes that structurally impossible,
+	// so this pins it.
+	if strings.Contains(got, "99%(21m)") {
+		t.Errorf("weekly figure timed by the 5-hour clock: %q", got)
+	}
+}
+
+// A spent window renders red, because red is what "you cannot use this now"
+// means everywhere else in fleet.
+func TestSpentWindowRendersRed(t *testing.T) {
+	got := hdrSplit(
+		hdrAccounts("a@x.com", "b@x.com"),
+		map[string]claudeaccount.Usage{
+			"a@x.com": hdrUsage(4, 99),
+			"b@x.com": hdrUsage(5, 12),
+		},
+		hdrNow)
+	red := lipgloss.NewStyle().Foreground(ColorRed).Render("99%")
+	if !strings.Contains(got, red) {
+		t.Errorf("a 99%% window did not render red: %q", got)
+	}
+}
+
+// A missing login is the one state here with no numbers to show, so it takes the
+// whole chip — and it shows even with no reading at all, since an account that
+// was never pollable is exactly the one you need to be told about.
+func TestLoggedOutStillShows(t *testing.T) {
+	for _, style := range []string{config.AccountUsageSplit, config.AccountUsageGrouped} {
+		got := ansi.Strip(renderAccountUsageHeader(
+			hdrAccounts("dead@x.com", "b@x.com"),
+			map[string]claudeaccount.Usage{
+				"dead@x.com": {LoggedOut: true}, // never polled: no FetchedAt
+				"b@x.com":    hdrUsage(5, 12),
+			},
+			style, 200, hdrNow))
+		if !strings.Contains(got, "✕ logged out") {
+			t.Errorf("%s: logged-out account not surfaced: %q", style, got)
+		}
+		if !strings.Contains(got, "5%") {
+			t.Errorf("%s: healthy account lost its numbers: %q", style, got)
+		}
 	}
 }
 
 // The readout shares the header row with the What's New badge, so it must stay
 // inside the width it is handed.
 func TestAccountHeaderFitsItsWidth(t *testing.T) {
-	for _, w := range []int{72, 90, 100, 140, 200} {
-		got := renderAccountUsageHeader(
-			hdrAccounts("averylongaccountname@example.com", "another-long-one@example.com"),
-			map[string]claudeaccount.Usage{
-				"averylongaccountname@example.com": hdrUsage(10, 34),
-				"another-long-one@example.com":     hdrUsage(20, 71),
-			},
-			w, hdrNow)
-		if lipgloss.Width(got) > w {
-			t.Errorf("width %d: readout is %d cells wide: %q", w, lipgloss.Width(got), got)
+	for _, style := range []string{config.AccountUsageSplit, config.AccountUsageGrouped} {
+		for _, w := range []int{72, 90, 100, 140, 200} {
+			got := renderAccountUsageHeader(
+				hdrAccounts("averylongaccountname@example.com", "another-long-one@example.com"),
+				map[string]claudeaccount.Usage{
+					"averylongaccountname@example.com": hdrUsage(10, 34),
+					"another-long-one@example.com":     hdrUsage(20, 71),
+				},
+				style, w, hdrNow)
+			if lipgloss.Width(got) > w {
+				t.Errorf("%s width %d: readout is %d cells wide: %q",
+					style, w, lipgloss.Width(got), ansi.Strip(got))
+			}
 		}
 	}
 }
@@ -268,19 +425,17 @@ func TestAccountHeaderFitsItsWidth(t *testing.T) {
 //
 // View() passed rightEdge — an x-coordinate — straight in as the width budget, so
 // on a 100-column terminal the strip was allowed ~99 columns, picked its widest
-// density (~74 for two labelled chips with gauges and countdowns), and was then
-// overlaid at x=25 straight over the breadcrumb, cutting it mid-word. The What's
-// New badge shares the pattern and gets away with it only because it is ~14
-// columns wide.
+// form, and was then overlaid at x=25 straight over the breadcrumb, cutting it
+// mid-word. The What's New badge shares the pattern and gets away with it only
+// because it is ~14 columns wide.
 func TestReadoutBudgetLeavesRoomForTheHeader(t *testing.T) {
 	const width = 100
+	accounts := hdrAccounts("yuval@x.com", "work@x.com")
+	usage := map[string]claudeaccount.Usage{
+		"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
+	}
 	// The widest thing the strip could render, and the one that used to fit.
-	widest := renderReadout(
-		hdrAccounts("yuval@x.com", "work@x.com"),
-		map[string]claudeaccount.Usage{
-			"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
-		},
-		windowFiveHour, densities[0], hdrNow)
+	widest := renderReadout(accounts, usage, config.AccountUsageSplit, true, hdrNow)
 
 	// A breadcrumb of realistic length: origin, checkout and a session title.
 	headerW := lipgloss.Width("❯_ fleet  ›  brizzai/fleet  ›  feat-multi-account  ›  close the gaps review found")
@@ -291,16 +446,10 @@ func TestReadoutBudgetLeavesRoomForTheHeader(t *testing.T) {
 			budget, lipgloss.Width(widest))
 	}
 
-	got := renderAccountUsageHeader(
-		hdrAccounts("yuval@x.com", "work@x.com"),
-		map[string]claudeaccount.Usage{
-			"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
-		},
-		budget, hdrNow)
-
+	got := renderAccountUsageHeader(accounts, usage, config.AccountUsageSplit, budget, hdrNow)
 	if lipgloss.Width(got) > budget {
 		t.Errorf("readout is %d cells for a %d-cell budget — it would overprint the breadcrumb: %q",
-			lipgloss.Width(got), budget, got)
+			lipgloss.Width(got), budget, ansi.Strip(got))
 	}
 }
 
@@ -312,25 +461,9 @@ func TestReadoutYieldsNothingWhenThereIsNoRoom(t *testing.T) {
 		map[string]claudeaccount.Usage{
 			"yuval@x.com": hdrUsage(10, 34), "work@x.com": hdrUsage(20, 71),
 		},
-		-6, hdrNow)
+		config.AccountUsageSplit, -6, hdrNow)
 	if got != "" {
 		t.Errorf("rendered %q with no room to render into", got)
-	}
-}
-
-func TestRenderQuotaBarEdges(t *testing.T) {
-	if got := lipgloss.Width(renderQuotaBar(0, accountBarCells)); got != accountBarCells {
-		t.Errorf("bar width at 0%% = %d, want %d", got, accountBarCells)
-	}
-	if got := lipgloss.Width(renderQuotaBar(100, accountBarCells)); got != accountBarCells {
-		t.Errorf("bar width at 100%% = %d, want %d", got, accountBarCells)
-	}
-	// Any nonzero usage must show a cell, or a busy account reads as untouched.
-	if !strings.Contains(renderQuotaBar(1, accountBarCells), "▰") {
-		t.Error("1% usage rendered as completely empty")
-	}
-	if strings.Contains(renderQuotaBar(0, accountBarCells), "▰") {
-		t.Error("0% usage rendered as partially filled")
 	}
 }
 

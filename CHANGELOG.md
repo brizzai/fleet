@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.29.0] - 2026-08-19
+
+### Improved
+
+- **Clearer palette focus** — In `Ctrl+K` the active tab no longer wears the same filled highlight as the row under your cursor, so one thing looks selected instead of three.
+- **One search prompt** — The palette's search box shows a single `>` instead of the doubled `> >`.
+- **Themed text fields** — Every input (palette search, rename, new branch, snooze duration) now takes its prompt, placeholder and cursor from your theme instead of a hardcoded grey that ignored it.
+
+### Changed
+
+- **Quota stops flickering** — The top-right account readout now shows both windows at once (`yuval 12%(2h) 34%(5d)`) instead of swapping between them every 6 seconds. Pick `Split`, `Grouped` (`12%/34% (2h/5d)`) or `Off` under **Account usage** in Settings (`S`).
+
 ## [2.28.0] - 2026-08-18
 
 ### Added
@@ -531,7 +543,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.28.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.29.0...HEAD
+[2.29.0]: https://github.com/brizzai/fleet/releases/tag/v2.29.0
 [2.28.0]: https://github.com/brizzai/fleet/releases/tag/v2.28.0
 [2.27.0]: https://github.com/brizzai/fleet/releases/tag/v2.27.0
 [2.26.0]: https://github.com/brizzai/fleet/releases/tag/v2.26.0
