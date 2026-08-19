@@ -33,6 +33,26 @@ const (
 	SuspendAggressive = "aggressive"
 )
 
+// Account-usage styles control the top-right per-account quota readout (see
+// GetAccountUsageStyle). Split gives each window its own countdown
+// ("12%(2h) 34%(4d)"); Grouped pools them ("12%/34% (2h/4d)"); Off hides the
+// strip. Default is Split.
+//
+// The two visible styles are the same width by construction — four tokens plus
+// five characters of glue either way — so this is a grouping preference, not a
+// density ladder. Naming one of them "compact" would promise a width saving
+// that does not exist.
+//
+// Deliberately a fixed shape rather than one the renderer picks: the readout
+// used to rotate between the two windows on a timer and re-fit itself against
+// whatever the breadcrumb left over, so a corner of the screen changed without
+// anyone touching it.
+const (
+	AccountUsageSplit   = "split"
+	AccountUsageGrouped = "grouped"
+	AccountUsageOff     = "off"
+)
+
 // Config holds user-configurable settings.
 type Config struct {
 	TickIntervalSec      int    `json:"tick_interval_sec,omitempty"`
@@ -85,8 +105,15 @@ type Config struct {
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
 	// surfaced in the Appearance category of the Settings dialog and drives a
 	// package-level render flag in the ui package (see ApplyDisplayConfig).
-	ShowAgentGlyphs    *bool  `json:"show_agent_glyphs,omitempty"`    // per-session ✻/◇ agent sigil
-	ShowAccountUsage   *bool  `json:"show_account_usage,omitempty"`   // top-right per-account weekly quota readout
+	ShowAgentGlyphs *bool `json:"show_agent_glyphs,omitempty"` // per-session ✻/◇ agent sigil
+	// ShowAccountUsage is the legacy on/off flag for the top-right quota
+	// readout, kept only for migration — new writes go to AccountUsageStyle.
+	// See GetAccountUsageStyle.
+	ShowAccountUsage *bool `json:"show_account_usage,omitempty"`
+	// AccountUsageStyle picks the shape of the top-right per-account quota
+	// readout: "split", "grouped", or "off". Read via GetAccountUsageStyle,
+	// which migrates the legacy ShowAccountUsage bool when this is unset.
+	AccountUsageStyle  string `json:"account_usage_style,omitempty"`
 	ShowStatusPills    *bool  `json:"show_status_pills,omitempty"`    // header "2● 1◐" status summary
 	ShowPRBadges       *bool  `json:"show_pr_badges,omitempty"`       // "#123 ✓" PR badge on checkout headers
 	ShowDirtyIndicator *bool  `json:"show_dirty_indicator,omitempty"` // "*" dirty-worktree marker
@@ -535,10 +562,34 @@ func boolDefaultTrue(p *bool) bool {
 // IsShowAgentGlyphs reports whether the per-session ✻/◇ agent sigil is shown (default: true).
 func (c *Config) IsShowAgentGlyphs() bool { return boolDefaultTrue(c.ShowAgentGlyphs) }
 
-// IsShowAccountUsage reports whether the top-right per-account weekly quota
-// readout is shown (default: true). It self-hides with fewer than two accounts,
-// so the default costs nothing for a single-subscription user.
-func (c *Config) IsShowAccountUsage() bool { return boolDefaultTrue(c.ShowAccountUsage) }
+// isValidAccountUsageStyle reports whether style is a documented readout style.
+func isValidAccountUsageStyle(style string) bool {
+	switch style {
+	case AccountUsageSplit, AccountUsageGrouped, AccountUsageOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetAccountUsageStyle returns the top-right quota readout's shape: "split",
+// "grouped", or "off". Defaults to Split — the strip self-hides below two
+// accounts, so the default costs a single-subscription user nothing.
+//
+// Precedence: a valid explicit style wins; otherwise the legacy
+// ShowAccountUsage bool is migrated, and only its "false" carries information
+// (someone who turned the strip off keeps it off — anything else was the
+// default, not a choice). An unrecognized style falls back to Split rather than
+// hiding: a typo should not silently remove a readout with no error anywhere.
+func (c *Config) GetAccountUsageStyle() string {
+	if isValidAccountUsageStyle(c.AccountUsageStyle) {
+		return c.AccountUsageStyle
+	}
+	if c.ShowAccountUsage != nil && !*c.ShowAccountUsage {
+		return AccountUsageOff
+	}
+	return AccountUsageSplit
+}
 
 // IsShowStatusPills reports whether header status-summary pills are shown (default: true).
 func (c *Config) IsShowStatusPills() bool { return boolDefaultTrue(c.ShowStatusPills) }

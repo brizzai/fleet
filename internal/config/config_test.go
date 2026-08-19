@@ -482,3 +482,44 @@ func TestGetAccountStrategyResolvesAliasAndCasing(t *testing.T) {
 		}
 	}
 }
+
+// The readout's shape used to be a plain on/off bool. Anyone who turned it off
+// must stay off across the upgrade; everyone else lands on the default. Only
+// "false" carries information — an unset bool and an explicit true both mean
+// "the default", not a choice about the new styles.
+func TestGetAccountUsageStyle(t *testing.T) {
+	ptr := func(b bool) *bool { return &b }
+
+	cases := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{"unset defaults to split", &Config{}, AccountUsageSplit},
+		{"explicit split", &Config{AccountUsageStyle: AccountUsageSplit}, AccountUsageSplit},
+		{"explicit grouped", &Config{AccountUsageStyle: AccountUsageGrouped}, AccountUsageGrouped},
+		{"explicit off", &Config{AccountUsageStyle: AccountUsageOff}, AccountUsageOff},
+		// A typo must not silently remove a readout with no error anywhere —
+		// unlike telemetry, where the conservative answer is to send less.
+		{"unrecognized style falls back to split", &Config{AccountUsageStyle: "bogus"}, AccountUsageSplit},
+		{"legacy false (user hid the strip) migrates to off", &Config{ShowAccountUsage: ptr(false)}, AccountUsageOff},
+		{"legacy true was just the default", &Config{ShowAccountUsage: ptr(true)}, AccountUsageSplit},
+		{
+			"explicit style overrides the legacy bool",
+			&Config{AccountUsageStyle: AccountUsageGrouped, ShowAccountUsage: ptr(false)},
+			AccountUsageGrouped,
+		},
+		{
+			"explicit off overrides a legacy true",
+			&Config{AccountUsageStyle: AccountUsageOff, ShowAccountUsage: ptr(true)},
+			AccountUsageOff,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.GetAccountUsageStyle(); got != tc.want {
+				t.Errorf("GetAccountUsageStyle() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

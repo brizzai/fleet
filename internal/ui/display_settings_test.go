@@ -206,3 +206,58 @@ func TestOnboardingDialog_ConfirmAndSkip(t *testing.T) {
 		t.Error("skip should still mark DisplayOnboardingSeen")
 	}
 }
+
+// The Account usage row is a three-value cycler, not a toggle: it has to walk
+// the whole ring in both directions, sync the render global live, and clear the
+// legacy bool it superseded.
+func TestSettingsDialog_AccountUsageCycler(t *testing.T) {
+	resetDisplayFlags(t)
+	defer resetDisplayFlags(t)
+
+	off := false
+	cfg := &config.Config{ShowAccountUsage: &off} // an upgrading user who had it hidden
+	d := NewSettingsDialog(cfg)
+	d.SetSize(140, 40)
+	d.Show()
+	d.focus = focusDetail
+
+	row := -1
+	for i, r := range d.curRows() {
+		if r.label == "Account usage" {
+			row = i
+		}
+	}
+	if row < 0 {
+		t.Fatal("Account usage row missing from the Appearance category")
+	}
+	d.rowCursor = row
+
+	if got := d.curRows()[row].value(cfg); got != "Off" {
+		t.Fatalf("legacy show_account_usage:false should read as Off, got %q", got)
+	}
+
+	// Forward through the whole ring and back to where it started.
+	want := []string{"Off", "Split", "Grouped"}
+	for step := 1; step <= 3; step++ {
+		d.cycleCurrent(1)
+		if got := d.curRows()[row].value(cfg); got != want[step%3] {
+			t.Errorf("step %d: value = %q, want %q", step, got, want[step%3])
+		}
+		if AccountUsageStyle != cfg.GetAccountUsageStyle() {
+			t.Errorf("step %d: render global %q out of sync with config %q",
+				step, AccountUsageStyle, cfg.GetAccountUsageStyle())
+		}
+	}
+	// Backwards too — a ring that only walks one way strands the last value
+	// behind two presses.
+	d.cycleCurrent(-1)
+	if got := d.curRows()[row].value(cfg); got != "Grouped" {
+		t.Errorf("cycling back: value = %q, want %q", got, "Grouped")
+	}
+
+	// The style wins on read either way, but leaving both keys on disk is a
+	// contradiction in a file that gets pasted into bug reports.
+	if cfg.ShowAccountUsage != nil {
+		t.Error("cycling did not clear the superseded legacy bool")
+	}
+}

@@ -458,15 +458,15 @@ const StatusBarChar = "┃"
 // (called in NewHome at startup and after any Appearance settings change). They
 // default to the "everything on" rendering so an unconfigured fleet is unchanged.
 var (
-	ShowAgentGlyphs    = true       // per-session ✻/◇ agent sigil
-	ShowStatusPills    = true       // header "2● 1◐" status summary
-	ShowPRBadges       = true       // "#123 ✓" PR badge on checkout headers
-	ShowDirtyIndicator = true       // "*" dirty-worktree marker
-	ShowSlotBadges     = true       // "[N]" hotkey slot badge
-	ShowHeaderCounts   = true       // session count on origin/checkout headers
-	ShowAccountUsage   = true       // top-right per-account weekly quota readout
-	ChevronStyle       = "triangle" // "triangle" (▾▸) or "plusminus" (−+)
-	SidebarDensity     = "normal"   // "normal" (gap between groups) or "compact"
+	ShowAgentGlyphs    = true                     // per-session ✻/◇ agent sigil
+	ShowStatusPills    = true                     // header "2● 1◐" status summary
+	ShowPRBadges       = true                     // "#123 ✓" PR badge on checkout headers
+	ShowDirtyIndicator = true                     // "*" dirty-worktree marker
+	ShowSlotBadges     = true                     // "[N]" hotkey slot badge
+	ShowHeaderCounts   = true                     // session count on origin/checkout headers
+	AccountUsageStyle  = config.AccountUsageSplit // top-right quota readout: "split"/"grouped"/"off"
+	ChevronStyle       = "triangle"               // "triangle" (▾▸) or "plusminus" (−+)
+	SidebarDensity     = "normal"                 // "normal" (gap between groups) or "compact"
 )
 
 // ApplyDisplayConfig syncs all sidebar display flags from config. Must be called
@@ -479,7 +479,7 @@ func ApplyDisplayConfig(cfg *config.Config) {
 	ShowDirtyIndicator = cfg.IsShowDirtyIndicator()
 	ShowSlotBadges = cfg.IsShowSlotBadges()
 	ShowHeaderCounts = cfg.IsShowHeaderCounts()
-	ShowAccountUsage = cfg.IsShowAccountUsage()
+	AccountUsageStyle = cfg.GetAccountUsageStyle()
 	ChevronStyle = cfg.GetChevronStyle()
 	SidebarDensity = cfg.GetSidebarDensity()
 }

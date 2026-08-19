@@ -2026,20 +2026,20 @@ func (h *Home) View() tea.View {
 		base = overlayAt(badge, base, rightEdge-badgeW, 0)
 		rightEdge -= badgeW + 2
 	}
-	if ShowAccountUsage && !h.modalOpen() {
+	if AccountUsageStyle != config.AccountUsageOff && !h.modalOpen() {
 		// The budget is the space left of rightEdge, not rightEdge itself.
-		// rightEdge is an x-coordinate: passing it as a width let the strip pick
-		// the widest density that fits the *whole screen* (~74 columns for two
-		// labelled chips) and then overlay it on top of the breadcrumb, cutting
-		// it mid-word. The badge gets away with the same pattern only because it
-		// is ~14 columns wide.
+		// rightEdge is an x-coordinate: passing it as a width let the strip
+		// believe it had the *whole screen* (~74 columns for two labelled chips)
+		// and then overlay itself on top of the breadcrumb, cutting it mid-word.
+		// The badge gets away with the same pattern only because it is ~14
+		// columns wide.
 		//
 		// Measured from what was actually drawn, so a long session title shrinks
 		// the strip rather than colliding with it. A budget that goes non-positive
-		// yields "" from the density loop, which is the right answer — no strip is
+		// yields "" from the fit loop, which is the right answer — no strip is
 		// better than a broken header.
 		budget := rightEdge - lipgloss.Width(h.renderHeader()) - accountReadoutGap
-		readout := renderAccountUsageHeader(h.accounts.List(), h.accountUsageSnapshot(), budget, time.Now())
+		readout := renderAccountUsageHeader(h.accounts.List(), h.accountUsageSnapshot(), AccountUsageStyle, budget, time.Now())
 		if readout != "" {
 			base = overlayAt(readout, base, rightEdge-lipgloss.Width(readout), 0)
 		}
