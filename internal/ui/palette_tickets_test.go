@@ -459,3 +459,96 @@ func TestMixedTabKeepsRepoAndWorktreeBranches(t *testing.T) {
 		}
 	}
 }
+
+// TestTicketsTabSpellsOutTheFleetJoin pins the one thing this view shows that
+// Linear cannot: that a worktree already exists for a ticket, and what the
+// session in it is doing.
+//
+// It used to be a bare coloured dot in the far-left badge column — two facts in
+// one glyph, with no legend and nothing beside it to give it meaning. The badge
+// column is also 4 wide because the MIXED tab puts "cmd "/"repo"/"wkt " in it,
+// so in this tab it contributed four dead columns of indent and a one-character
+// dot.
+func TestTicketsTabSpellsOutTheFleetJoin(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(100, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	items := h.ticketPaletteItems([]linear.Ticket{
+		{Identifier: "BRZ-1", Title: "has a worktree", StateName: "Todo", StateType: "unstarted", Priority: 1},
+		{Identifier: "BRZ-2", Title: "not in fleet", StateName: "Todo", StateType: "unstarted", Priority: 1},
+	})
+	items[0].HasSession, items[0].SessionStatus = true, session.StatusWaiting
+	h.commandPalette.SetTickets(items)
+	h.commandPalette.rebuildFiltered()
+
+	got := renderedPalette(t, h)
+	var withSession, without string
+	for _, line := range strings.Split(got, "\n") {
+		switch {
+		case strings.Contains(line, "BRZ-1 "):
+			withSession = line
+		case strings.Contains(line, "BRZ-2 "):
+			without = line
+		}
+	}
+	if !strings.Contains(withSession, "waiting") {
+		t.Errorf("a ticket with a worktree must say what its session is doing: %q", withSession)
+	}
+	if strings.Contains(without, "waiting") || strings.Contains(without, "idle") {
+		t.Errorf("a ticket with no worktree must say nothing: %q", without)
+	}
+
+	// The gauge must sit right after the cursor marker — no badge column left.
+	// Measured in COLUMNS, not bytes: ▰ and ▸ are three bytes each, so a byte
+	// index here would be nonsense.
+	plain := strings.TrimLeft(ansi.Strip(withSession), "│ ")
+	i := strings.Index(plain, "▰")
+	if i < 0 {
+		t.Fatalf("expected a gauge on the row: %q", plain)
+	}
+	if cols := runeLen(plain[:i]); cols > 2 {
+		t.Errorf("the gauge starts %d columns in — the badge column is back: %q", cols, plain)
+	}
+	j := strings.Index(plain, "BRZ-1")
+	if j < 0 {
+		t.Fatalf("expected an identifier on the row: %q", plain)
+	}
+	if cols := runeLen(plain[i:j]); cols > 4 {
+		t.Errorf("%d columns between the gauge and the identifier: %q", cols, plain)
+	}
+}
+
+// TestFilteredTicketsTabDoesNotDoubleThePriority guards a latent bug the right
+// column's rewrite exposed.
+//
+// While filtering, headers are dropped and the state folds back onto the row.
+// It did that through ticketRightColumn, which also appends the priority mark —
+// correct in the MIXED tab, where no lead column exists, and wrong in the
+// tickets tab, where the gauge is already rendering it two columns to the left.
+// The same gauge would appear twice on one row.
+func TestFilteredTicketsTabDoesNotDoubleThePriority(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started", Priority: 1},
+	}))
+	h.commandPalette.filterInput.SetValue("storage")
+	h.commandPalette.rebuildFiltered()
+
+	var row string
+	for _, line := range strings.Split(renderedPalette(t, h), "\n") {
+		if strings.Contains(line, "BRZ-2644") {
+			row = ansi.Strip(line)
+		}
+	}
+	if row == "" {
+		t.Fatal("expected the filtered ticket to render")
+	}
+	if n := strings.Count(row, "▰▰▰"); n != 1 {
+		t.Errorf("the priority gauge should appear exactly once, found %d: %q", n, row)
+	}
+	if !strings.Contains(row, "In Progress") {
+		t.Errorf("a filtered row must still carry its state: %q", row)
+	}
+}

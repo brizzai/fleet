@@ -530,23 +530,29 @@ func TitleStyleForStatus(status session.Status) lipgloss.Style {
 }
 
 // StatusLabel returns a styled status text.
-func StatusLabel(status session.Status) string {
+// StatusWord is the plain, unstyled name of a status — the single source for
+// the wording, so a caller that needs to MEASURE a label (column budgeting)
+// and one that needs to render it cannot drift apart.
+func StatusWord(status session.Status) string {
 	switch status {
 	case session.StatusRunning:
-		return StatusRunningStyle.Render("running")
+		return "running"
 	case session.StatusWaiting:
-		return StatusWaitingStyle.Render("waiting")
+		return "waiting"
 	case session.StatusFinished:
-		return StatusFinishedStyle.Render("finished")
+		return "finished"
 	case session.StatusIdle:
-		return StatusIdleStyle.Render("idle")
+		return "idle"
 	case session.StatusError:
-		return StatusErrorStyle.Render("error")
+		return "error"
 	case session.StatusStarting:
-		return StatusStartingStyle.Render("starting")
+		return "starting"
 	case session.StatusSuspended:
-		return StatusSuspendedStyle.Render("suspended")
-	default:
-		return string(status)
+		return "suspended"
 	}
+	return string(status)
+}
+
+func StatusLabel(status session.Status) string {
+	return StatusStyle(status).Render(StatusWord(status))
 }

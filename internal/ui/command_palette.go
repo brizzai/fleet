@@ -410,12 +410,19 @@ func (d *CommandPaletteDialog) View() string {
 			end = len(d.filtered)
 		}
 
-		// Column layout: [prefix 2][badge 4][sep 1][lead L][name N][gap 2][right]
-		leadCol := 0
+		// Column layout: [prefix 2][badge B][lead L][name N][gap 2][right]
+		//
+		// The badge is 4 wide because the mixed tab puts "cmd "/"repo"/"wkt " in
+		// it. In the tickets tab every row is a ticket, so it only ever held a
+		// one-character dot — four dead columns of indent between the marker and
+		// the gauge. It is gone there entirely; what it used to say now has room
+		// to say itself, on the right.
+		filtering := strings.TrimSpace(d.filterInput.Value()) != ""
+		leadCol, badgeCol := 0, paletteBadgeWidth+1
 		if d.activeTab == PaletteTabTickets {
-			leadCol = paletteLeadWidth
+			leadCol, badgeCol = paletteLeadWidth, 0
 		}
-		reserved := 2 + paletteBadgeWidth + 1 + leadCol + 2
+		reserved := 2 + badgeCol + leadCol + 2
 
 		// Measure BOTH columns and give the name whatever the right column
 		// genuinely needs left over, rather than capping it at a constant. A
@@ -431,6 +438,9 @@ func (d *CommandPaletteDialog) View() string {
 			r := runeLen(it.Detail)
 			if it.Shortcut != "" {
 				r += runeLen(it.Shortcut) + 1
+			}
+			if d.activeTab == PaletteTabTickets {
+				r = runeLen(ticketsTabRight(it.PaletteItem, filtering))
 			}
 			if r > rightCol {
 				rightCol = r
@@ -497,9 +507,9 @@ func (d *CommandPaletteDialog) View() string {
 			// every row is a ticket, so "tkt" would say nothing and the useful
 			// fact is whether the work exists here yet. In the mixed tab a
 			// blank reads as a missing badge, not as "not in fleet".
-			badge := renderKindBadge(it.Kind)
-			if it.Kind == PaletteKindTicket && d.activeTab == PaletteTabTickets {
-				badge = renderTicketBadge(it.PaletteItem)
+			badge := ""
+			if badgeCol > 0 {
+				badge = renderKindBadge(it.Kind) + " "
 			}
 
 			// Haystack is `Name + " " + Detail` (for places) or just `Name` (commands).
@@ -524,13 +534,22 @@ func (d *CommandPaletteDialog) View() string {
 				right = it.Detail
 				highlightRight = !selected && len(detailIdx) > 0
 			}
+			// In the tickets tab the right column is fleet's own annotation, not
+			// searchable text from the ticket, so it never takes the fuzzy
+			// highlight — the matched indexes belong to the Haystack, and
+			// painting them onto a different string lights up the wrong runes.
+			plainLabel := ""
+			if d.activeTab == PaletteTabTickets {
+				plainLabel = ticketsTabRight(it.PaletteItem, filtering)
+				right, highlightRight = plainLabel, false
+			}
 			right = truncRunes(right, rightBudget)
 
 			lead := ""
 			if leadCol > 0 {
 				lead = renderPriorityLead(it.Priority)
 			}
-			b.WriteString(prefix + badge + " " + lead + name)
+			b.WriteString(prefix + badge + lead + name)
 			if selected {
 				// Carry the fill across the gap and the right column, padded to
 				// the row, so the selection is one continuous band.
@@ -540,7 +559,11 @@ func (d *CommandPaletteDialog) View() string {
 			}
 			b.WriteString("  ")
 			if right != "" {
-				if highlightRight {
+				// Styled only when it survived the budget intact; a truncated
+				// label would not match what renderTicketSessionLabel builds.
+				if plainLabel != "" && right == plainLabel {
+					b.WriteString(renderTicketsTabRight(it.PaletteItem, filtering))
+				} else if highlightRight {
 					b.WriteString(highlightMatchesDim(right, detailIdx))
 				} else {
 					b.WriteString(DimStyle.Render(right))
@@ -626,23 +649,73 @@ func renderKindBadge(k PaletteItemKind) string {
 	return lipgloss.NewStyle().Foreground(col).Render(label)
 }
 
-// renderTicketBadge answers "is this already in fleet?" in the badge column.
+// ticketsTabRight is the whole right column in the tickets tab, as plain text.
 //
-// A ticket row's most useful fact is not that it is a ticket — the whole tab is
-// tickets — but whether work on it already exists here, and what that work is
-// doing. So the column carries the sidebar's own status vocabulary, and a
-// ticket with no worktree is deliberately BLANK rather than dimly marked:
-// absence should read as absence at a glance down the column.
-func renderTicketBadge(it PaletteItem) string {
-	if !it.HasSession {
-		return strings.Repeat(" ", paletteBadgeWidth)
+// It carries up to two facts, and which ones depend on whether a query is
+// typed. Unfiltered, the state is a group header, so the column holds only the
+// fleet join. Filtered, the headers are gone and the state has nowhere else to
+// live, so it comes back onto the row in front of the join.
+//
+// Deliberately it.Group and not ticketRightColumn: that one appends the priority
+// too, which is right in the MIXED tab where no lead column exists — and wrong
+// here, where the gauge is already rendering it two columns to the left.
+func ticketsTabRight(it PaletteItem, filtering bool) string {
+	label := ticketSessionLabel(it)
+	if !filtering || it.Group == "" {
+		return label
 	}
-	glyph, style := sessionBadgeGlyph(it.SessionStatus)
-	return style.Render(pad(glyph, paletteBadgeWidth))
+	if label == "" {
+		return it.Group
+	}
+	return it.Group + "  " + label
 }
 
-// sessionBadgeGlyph maps a session status onto the same dot and colour the
-// sidebar uses, so a status means the same thing everywhere in fleet.
+// ticketSessionLabel is the tickets tab's right column: what fleet knows about
+// this ticket that Linear does not — that a worktree already exists for it, and
+// what the session in it is doing. Empty when there is none.
+//
+// It used to be a bare coloured dot in the badge column on the far left. That
+// carried two facts at once (is it here, and what is it doing) in one glyph with
+// no legend and nothing beside it to give it meaning, and it read as decoration.
+// Spelling it out reverses an earlier "never repeat the dot as a word" call —
+// which was right when the two sat in different columns saying the same thing,
+// and is wrong here, where they sit together and form one label.
+//
+// The right column was empty in this tab, so this costs the titles nothing.
+//
+// Plain text, because this is also the string the column budget is measured
+// from; renderTicketSessionLabel styles the identical runes.
+func ticketSessionLabel(it PaletteItem) string {
+	if !it.HasSession {
+		return ""
+	}
+	glyph, _ := sessionBadgeGlyph(it.SessionStatus)
+	return glyph + " " + StatusWord(it.SessionStatus)
+}
+
+// renderTicketsTabRight is ticketsTabRight with colour: the state stays dim
+// structure, the join takes its status colour. Composed in parts rather than
+// styled as one string, so each half keeps its own meaning.
+func renderTicketsTabRight(it PaletteItem, filtering bool) string {
+	label := renderTicketSessionLabel(it)
+	if !filtering || it.Group == "" {
+		return label
+	}
+	if label == "" {
+		return DimStyle.Render(it.Group)
+	}
+	return DimStyle.Render(it.Group) + "  " + label
+}
+
+// renderTicketSessionLabel is ticketSessionLabel with the status colour.
+func renderTicketSessionLabel(it PaletteItem) string {
+	if !it.HasSession {
+		return ""
+	}
+	glyph, style := sessionBadgeGlyph(it.SessionStatus)
+	return style.Render(glyph) + " " + StatusStyle(it.SessionStatus).Render(StatusWord(it.SessionStatus))
+}
+
 func sessionBadgeGlyph(st session.Status) (string, lipgloss.Style) {
 	switch st {
 	case session.StatusError:
