@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -94,4 +95,70 @@ func runKeychainTTYChild(t *testing.T) {
 		t.Fatalf("read back %q (ok=%v), want the payload", got, ok)
 	}
 	fmt.Println("KEYCHAIN_TTY_OK")
+}
+
+// TestKeychainStoresRecordsPastThePasswordBufferLimit is the guard for a bug
+// that silently ate the credential of every OAuth user on every launch.
+//
+// `security add-generic-password -w` reads its value with readpassphrase(3),
+// whose buffer is _PASSWORD_LEN = 128 bytes. Past that it does not fail, warn or
+// return non-zero: it stores the first 128 bytes and exits 0. The record then
+// reads back as a JSON prefix that cannot parse, loadStored reports "no
+// credential", and the user reconnects on every launch with nothing anywhere
+// saying why.
+//
+// The split is what made it survive review: an API-key record is ~85 bytes and
+// fits, so the paste path worked perfectly while the browser path — access token
+// plus refresh token plus expiry plus workspace — lost everything, every time.
+// A round-trip test with a short value passes either way, which is exactly what
+// the original one did.
+//
+// 129 is the first byte over the cliff; the larger sizes cover multi-chunk
+// records, where an aliasing bug in the writer corrupted the first byte of every
+// chunk after the first while each write still reported success.
+func TestKeychainStoresRecordsPastThePasswordBufferLimit(t *testing.T) {
+	if !useKeychain() {
+		t.Skip("no macOS keychain here")
+	}
+	const svc = "fleet-linear-sizetest"
+	t.Cleanup(func() { clearKeychainChunks(svc) })
+
+	for _, n := range []int{1, 64, 128, 129, 200, 512, 1024} {
+		payload := []byte(strings.Repeat("x", n))
+		if err := writeSecretTo(svc, payload); err != nil {
+			t.Fatalf("len=%d: write failed: %v", n, err)
+		}
+		got, ok := readSecretFrom(svc)
+		if !ok {
+			t.Errorf("len=%d: record did not read back", n)
+			continue
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("len=%d: record came back changed — got %d bytes, want %d", n, len(got), n)
+		}
+	}
+}
+
+// TestKeychainShrinkingARecordLeavesNoTail covers the other half of chunking: a
+// long record replaced by a short one must not leave old chunks behind for the
+// reader to reassemble into something that never existed.
+func TestKeychainShrinkingARecordLeavesNoTail(t *testing.T) {
+	if !useKeychain() {
+		t.Skip("no macOS keychain here")
+	}
+	const svc = "fleet-linear-shrinktest"
+	t.Cleanup(func() { clearKeychainChunks(svc) })
+
+	long := []byte(strings.Repeat("y", 600))
+	if err := writeSecretTo(svc, long); err != nil {
+		t.Fatalf("write long: %v", err)
+	}
+	short := []byte("z")
+	if err := writeSecretTo(svc, short); err != nil {
+		t.Fatalf("write short: %v", err)
+	}
+	got, ok := readSecretFrom(svc)
+	if !ok || !bytes.Equal(got, short) {
+		t.Errorf("a shrunk record must read back as itself, got ok=%v len=%d", ok, len(got))
+	}
 }

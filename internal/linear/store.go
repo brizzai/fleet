@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -98,11 +99,7 @@ func readSecret() ([]byte, bool) { return readSecretFrom(keychainService) }
 func readSecretFrom(service string) ([]byte, bool) {
 	switch {
 	case useKeychain():
-		out, err := runQuiet(storeTimeout, nil, "security", "find-generic-password", "-w", "-s", service)
-		if err != nil {
-			return nil, false
-		}
-		return bytes.TrimSpace(out), true
+		return readKeychainChunks(service)
 	case useSecretTool():
 		out, err := runQuiet(storeTimeout, nil, "secret-tool", "lookup", "service", service)
 		if err != nil {
@@ -121,6 +118,139 @@ func readSecretFrom(service string) ([]byte, bool) {
 	return bytes.TrimSpace(data), true
 }
 
+// keychainChunkMax is how many bytes of secret go into one keychain item.
+//
+// `security add-generic-password -w` reads the value with readpassphrase(3),
+// whose buffer is _PASSWORD_LEN = 128 bytes. Past that it does not fail, warn,
+// or return non-zero — it stores the first 128 bytes and exits 0. The record
+// then reads back as a JSON prefix that cannot parse, loadStored reports "no
+// credential", and the user reconnects on every launch with nothing anywhere
+// saying why.
+//
+// It bit OAuth and not API keys, which is the worst possible split: an API-key
+// record is ~85 bytes and fits, so the paste path looked fine while the browser
+// path silently lost its credential every single time.
+//
+// 96 rather than 128 to leave headroom, since the limit is a property of a tool
+// we do not control and a value one byte under a silent cliff is not a margin.
+const keychainChunkMax = 96
+
+// chunkService names the item holding chunk i. Chunk 0 keeps the plain service
+// name so an existing single-item record is still found by the same key.
+func chunkService(service string, i int) string {
+	if i == 0 {
+		return service
+	}
+	return fmt.Sprintf("%s.%d", service, i)
+}
+
+// writeKeychainChunks stores data across as many keychain items as it takes.
+//
+// Chunk 0 carries a "<total>:" header so a torn write is DETECTED rather than
+// silently short — which is the entire failure this function exists to end. A
+// short read must report "no credential", never a truncated one.
+//
+// Old chunks are removed first, so a shorter record cannot leave a stale tail
+// behind for the reader to pick up.
+func writeKeychainChunks(service string, data []byte) error {
+	clearKeychainChunks(service)
+
+	body := append([]byte(fmt.Sprintf("%d:", len(data))), data...)
+	for i := 0; len(body) > 0; i++ {
+		n := keychainChunkMax
+		if n > len(body) {
+			n = len(body)
+		}
+		if err := writeOneKeychainItem(chunkService(service, i), body[:n]); err != nil {
+			return err
+		}
+		body = body[n:]
+	}
+	return nil
+}
+
+// writeOneKeychainItem writes a single item, never putting the value in argv.
+//
+// `security ... -w` with no value reads from stdin — twice, because it is
+// implementing an interactive "type it again" prompt and does not care that
+// stdin is a pipe. Setsid is what stops it opening /dev/tty instead.
+func writeOneKeychainItem(service string, data []byte) error {
+	// Built into a fresh buffer, never with append(data, …). data is a SLICE OF
+	// THE RECORD here, so appending to it writes into its spare capacity — which
+	// is the first byte of the next chunk. That corrupted every multi-chunk
+	// write while each individual call still returned success.
+	twice := make([]byte, 0, 2*len(data)+2)
+	twice = append(twice, data...)
+	twice = append(twice, '\n')
+	twice = append(twice, data...)
+	twice = append(twice, '\n')
+	if _, err := runQuiet(storeTimeout, twice, "security", "add-generic-password",
+		"-U", "-s", service, "-a", keychainAccount, "-w"); err != nil {
+		return fmt.Errorf("keychain write failed: %w", err)
+	}
+	return nil
+}
+
+// readKeychainChunks reassembles a chunked record, verifying the length header.
+//
+// A record whose parts do not add up is reported as absent. Reconnecting is a
+// mild annoyance; handing the caller half a credential is a confusing failure
+// somewhere further away.
+func readKeychainChunks(service string) ([]byte, bool) {
+	var body []byte
+	for i := 0; ; i++ {
+		out, err := runQuiet(storeTimeout, nil, "security", "find-generic-password", "-w", "-s", chunkService(service, i))
+		if err != nil {
+			break
+		}
+		body = append(body, bytes.TrimSpace(out)...)
+		if i > maxKeychainChunks {
+			return nil, false
+		}
+	}
+	if len(body) == 0 {
+		return nil, false
+	}
+	sep := bytes.IndexByte(body, ':')
+	if sep < 0 {
+		return nil, false
+	}
+	want, err := strconv.Atoi(string(body[:sep]))
+	if err != nil {
+		return nil, false
+	}
+	got := body[sep+1:]
+	if len(got) != want {
+		return nil, false
+	}
+	return got, true
+}
+
+// maxKeychainChunks stops a malformed store from looping forever. Far above any
+// real credential: 64 chunks is ~6KB.
+const maxKeychainChunks = 64
+
+// clearKeychainChunks deletes every item of a chunked record.
+func clearKeychainChunks(service string) {
+	for i := 0; i <= maxKeychainChunks; i++ {
+		_, err := runQuiet(storeTimeout, nil, "security", "delete-generic-password", "-s", chunkService(service, i))
+		if err == nil {
+			continue
+		}
+		// A missing item ends the record. Anything else is a real failure, and
+		// stopping on it is still right: continuing would spend a `security`
+		// call per remaining slot for a keychain that is not answering.
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() == errSecItemNotFound {
+			if i > 0 {
+				return
+			}
+			continue
+		}
+		return
+	}
+}
+
 // writeSecret stores the record without ever putting it in argv.
 //
 // That constraint is the whole reason this function is shaped the way it is:
@@ -136,13 +266,7 @@ func writeSecret(data []byte) error { return writeSecretTo(keychainService, data
 func writeSecretTo(service string, data []byte) error {
 	switch {
 	case useKeychain():
-		twice := append(append(append([]byte{}, data...), '\n'), append(data, '\n')...)
-		_, err := runQuiet(storeTimeout, twice, "security", "add-generic-password",
-			"-U", "-s", service, "-a", keychainAccount, "-w")
-		if err != nil {
-			return fmt.Errorf("keychain write failed: %w", err)
-		}
-		return nil
+		return writeKeychainChunks(service, data)
 	case useSecretTool():
 		_, err := runQuiet(storeTimeout, data, "secret-tool", "store",
 			"--label=fleet: Linear", "service", keychainService)
@@ -166,12 +290,14 @@ func writeSecretTo(service string, data []byte) error {
 func clearStored() error {
 	switch {
 	case useKeychain():
-		_, err := runQuiet(storeTimeout, nil, "security", "delete-generic-password", "-s", keychainService)
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == errSecItemNotFound {
-			return nil // already gone is the outcome the caller wanted
-		}
-		return err
+		// Every chunk, not just the first — a partial delete would leave a tail
+		// that the next read reassembles into a length-mismatched record.
+		//
+		// No error is returned: clearKeychainChunks already treats a missing
+		// chunk 0 as "already gone", which is the outcome the caller wanted, and
+		// there is nothing else a failure here would let them do.
+		clearKeychainChunks(keychainService)
+		return nil
 	case useSecretTool():
 		_, err := runQuiet(storeTimeout, nil, "secret-tool", "clear", "service", keychainService)
 		return err
