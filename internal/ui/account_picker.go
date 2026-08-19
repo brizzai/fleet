@@ -201,7 +201,7 @@ func (d *AccountPickerDialog) renderRow(i int, r accountPickerRow, width int) st
 		return "  " + DimStyle.Render(row)
 	}
 	if i == d.cursor {
-		return SessionSelectionPrefix.Render("▸ ") + selTitle().Render(row)
+		return SelectionMarker(true).Render("▸ ") + selTitle().Render(row)
 	}
 	return "  " + row
 }

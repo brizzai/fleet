@@ -276,7 +276,7 @@ func (d *AllowedAccountsDialog) renderRow(i int, r allowedAccountRow, width int)
 	row := name + strings.Repeat(" ", pad) + state
 
 	if i == d.cursor {
-		return SessionSelectionPrefix.Render("▸ ") + box + " " + selTitle().Render(row)
+		return SelectionMarker(true).Render("▸ ") + box + " " + selTitle().Render(row)
 	}
 	return "  " + box + " " + row
 }

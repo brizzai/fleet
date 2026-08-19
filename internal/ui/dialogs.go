@@ -103,7 +103,7 @@ type NewSessionDialog struct {
 
 // NewNewSessionDialog creates a new session dialog.
 func NewNewSessionDialog() *NewSessionDialog {
-	ti := textinput.New()
+	ti := NewTextInput()
 	ti.Placeholder = "~/code/my-project"
 	ti.CharLimit = 256
 	ti.SetWidth(40)
@@ -296,7 +296,7 @@ func (d *NewSessionDialog) View() string {
 		b.WriteString("\n")
 		for i, s := range d.suggestions {
 			if i == d.suggestionCursor {
-				b.WriteString(SessionSelectionPrefix.Render("▸ ") + SessionTitleSelStyle.Render(s))
+				b.WriteString(SelectionMarker(true).Render("▸ ") + SelectionPill(true).Render(s))
 			} else {
 				b.WriteString("  " + DimStyle.Render(s))
 			}
@@ -361,7 +361,7 @@ type RenameDialog struct {
 
 // NewRenameDialog creates a new rename dialog.
 func NewRenameDialog() *RenameDialog {
-	ti := textinput.New()
+	ti := NewTextInput()
 	ti.Placeholder = "session name"
 	ti.CharLimit = 64
 	ti.SetWidth(40)

@@ -46,75 +46,32 @@ var (
 
 // Pre-allocated styles.
 var (
-	TitleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(ColorAccent)
-
-	RepoHeaderStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(ColorAccent)
-
-	SessionItemStyle = lipgloss.NewStyle().
-				Foreground(ColorText)
-
-	SessionSelectedStyle = lipgloss.NewStyle().
-				Foreground(ColorAccent).
-				Bold(true)
-
-	PreviewHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(ColorText)
-
-	PreviewContentStyle = lipgloss.NewStyle().
-				Foreground(ColorTextDim)
-
-	HelpBarStyle = lipgloss.NewStyle().
-			Foreground(ColorTextDim)
-
-	ErrorStyle = lipgloss.NewStyle().
-			Foreground(ColorRed)
-
-	DimStyle = lipgloss.NewStyle().
-			Foreground(ColorTextDim)
+	TitleStyle           lipgloss.Style
+	RepoHeaderStyle      lipgloss.Style
+	SessionItemStyle     lipgloss.Style
+	SessionSelectedStyle lipgloss.Style
+	PreviewHeaderStyle   lipgloss.Style
+	PreviewContentStyle  lipgloss.Style
+	HelpBarStyle         lipgloss.Style
+	ErrorStyle           lipgloss.Style
+	DimStyle             lipgloss.Style
 
 	// AgentGlyphStyle is the muted tone for the per-session agent sigil (✻/⬡):
 	// quiet, monochrome, theme-safe — identity is carried by shape, not color,
 	// so the status dot keeps sole ownership of the status color.
-	AgentGlyphStyle = lipgloss.NewStyle().
-			Foreground(ColorTextDim)
-
-	PanelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorBorder)
-
-	DialogStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorAccent).
-			Padding(1, 2)
-
-	StatusRunningStyle   = lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
-	StatusWaitingStyle   = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
-	StatusFinishedStyle  = lipgloss.NewStyle().Foreground(ColorBlue).Bold(true)
-	StatusIdleStyle      = lipgloss.NewStyle().Foreground(ColorGray)
-	StatusErrorStyle     = lipgloss.NewStyle().Foreground(ColorRed).Bold(true)
-	StatusStartingStyle  = lipgloss.NewStyle().Foreground(ColorAccent)
-	StatusSuspendedStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+	AgentGlyphStyle      lipgloss.Style
+	PanelStyle           lipgloss.Style
+	DialogStyle          lipgloss.Style
+	StatusRunningStyle   lipgloss.Style
+	StatusWaitingStyle   lipgloss.Style
+	StatusFinishedStyle  lipgloss.Style
+	StatusIdleStyle      lipgloss.Style
+	StatusErrorStyle     lipgloss.Style
+	StatusStartingStyle  lipgloss.Style
+	StatusSuspendedStyle lipgloss.Style
 
 	// Tool badge style.
-	ToolClaudeStyle = lipgloss.NewStyle().Foreground(ColorOrange)
-
-	// Selection styles (inverted).
-	SessionSelectionPrefix = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	SessionTitleSelStyle   = lipgloss.NewStyle().Bold(true).Foreground(ColorBg).Background(ColorAccent)
-	SessionStatusSelStyle  = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
-	TreeConnectorSelStyle  = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
-	ToolBadgeSelStyle      = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
-
-	// Dimmed selection (used when the sidebar doesn't own the keyboard — e.g.
-	// the terminal drawer is focused). A muted bar instead of the bright accent
-	// pill, so the row still reads as "selected" but clearly inactive.
-	SessionTitleSelDimStyle  = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(ColorBorder)
-	SessionStatusSelDimStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
+	ToolClaudeStyle lipgloss.Style
 
 	// selectionDimmed makes the sidebar's selected-row pill render muted instead
 	// of accent — set by RenderSidebar when the sidebar doesn't own the keyboard
@@ -122,41 +79,46 @@ var (
 	selectionDimmed bool
 
 	// Panel title style (cyan/blue like agent-deck).
-	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
+	PanelTitleStyle lipgloss.Style
 
 	// Header bar style — no background fill so the top bar reads as part of
 	// the canvas, not a separate ribbon.
-	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
+	HeaderBarStyle lipgloss.Style
 
 	// Help bar key style — accent-color text, bold. No background fill;
 	// reads as a Posting-style "colored key + plain description" pair.
-	HelpKeyStyle = lipgloss.NewStyle().
-			Foreground(ColorAccent).
-			Bold(true)
-
-	HelpDescStyle = lipgloss.NewStyle().Foreground(ColorText)
-
-	HelpSepStyle = lipgloss.NewStyle().Foreground(ColorBorder)
+	HelpKeyStyle  lipgloss.Style
+	HelpDescStyle lipgloss.Style
+	HelpSepStyle  lipgloss.Style
 
 	// Git info styles.
-	BranchStyle    = lipgloss.NewStyle().Foreground(ColorBlue)
-	DirtyStyle     = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
-	PROpenStyle    = lipgloss.NewStyle().Foreground(ColorGreen)
-	PRFailStyle    = lipgloss.NewStyle().Foreground(ColorRed)
-	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
-	PRMergedStyle  = lipgloss.NewStyle().Foreground(ColorPurple)
-	PRDraftStyle   = lipgloss.NewStyle().Foreground(ColorTextDim)
+	BranchStyle    lipgloss.Style
+	DirtyStyle     lipgloss.Style
+	PROpenStyle    lipgloss.Style
+	PRFailStyle    lipgloss.Style
+	PRPendingStyle lipgloss.Style
+	PRMergedStyle  lipgloss.Style
+	PRDraftStyle   lipgloss.Style
 
 	// Slot badge style (RTS-style quick-access hotkey).
-	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
+	SlotBadgeStyle lipgloss.Style
 
 	// Dim variant of the slot badge — used in the clean-tree sidebar where
 	// the bright orange would fight the calm row layout.
-	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+	SlotBadgeDimStyle lipgloss.Style
 )
 
 // ApplyPalette reassigns all color vars and rebuilds all style vars from the given palette.
 // Must be called on the main goroutine (Bubble Tea Update/View).
+// init seeds the style table with the default palette. ApplyPalette is the
+// ONLY place a style in that table is constructed: the table used to carry a
+// full set of initializers as well, so every style was written twice, and one
+// written only once silently kept default-pink under every other theme.
+// Declaring the styles bare makes that failure impossible — a style ApplyPalette
+// forgets renders as nothing at all, in every theme including the default, on
+// the very first frame.
+func init() { ApplyPalette(PaletteFleetPink) }
+
 func ApplyPalette(p Palette) {
 	// 1. Reassign color vars.
 	ColorBg = p.Bg
@@ -197,14 +159,6 @@ func ApplyPalette(p Palette) {
 	StatusSuspendedStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
 
 	ToolClaudeStyle = lipgloss.NewStyle().Foreground(ColorOrange)
-
-	SessionSelectionPrefix = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	SessionTitleSelStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBg).Background(ColorAccent)
-	SessionStatusSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
-	TreeConnectorSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
-	ToolBadgeSelStyle = lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
-	SessionTitleSelDimStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(ColorBorder)
-	SessionStatusSelDimStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
 
 	PanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorBlue)
 	HeaderBarStyle = lipgloss.NewStyle().Padding(0, 1)
@@ -258,18 +212,12 @@ func RenderBorderedPanelInsets(content, title, titleRight, footerLeft, footerRig
 // selTitle returns the selected-row title style — muted when the sidebar is
 // unfocused (terminal drawer focused), accent otherwise.
 func selTitle() lipgloss.Style {
-	if selectionDimmed {
-		return SessionTitleSelDimStyle
-	}
-	return SessionTitleSelStyle
+	return SelectionPill(!selectionDimmed)
 }
 
 // selStatus returns the selected-row status/count style (muted when unfocused).
 func selStatus() lipgloss.Style {
-	if selectionDimmed {
-		return SessionStatusSelDimStyle
-	}
-	return SessionStatusSelStyle
+	return SelectionPillSecondary(!selectionDimmed)
 }
 
 // RenderBorderedPanelFull embeds a right-aligned inset into BOTH the top border

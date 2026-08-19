@@ -302,7 +302,10 @@ func (d *ReleaseNotesDialog) appendRelease(out *[]string, r releasenotes.Release
 	}
 	left := verStyle.Render("v" + r.Version)
 	if installed {
-		left += "  " + lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent).Bold(true).Padding(0, 1).Render("INSTALLED")
+		// Which release is in effect is a MODE, not the cursor and not focus, so
+		// it wears accent text rather than the inverted-accent fill the selected
+		// row owns — it used to out-shout the row you were standing on.
+		left += "  " + ModeOn().Render("INSTALLED")
 	}
 	if r.Prerelease {
 		left += "  " + lipgloss.NewStyle().Foreground(ColorYellow).Render("pre-release")

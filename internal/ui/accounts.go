@@ -60,7 +60,7 @@ type AccountsDialog struct {
 
 // NewAccountsDialog creates the dialog.
 func NewAccountsDialog() *AccountsDialog {
-	ti := textinput.New()
+	ti := NewTextInput()
 	ti.CharLimit = 200
 	ti.SetWidth(46)
 	return &AccountsDialog{input: ti}

@@ -90,6 +90,15 @@ internal/chrome/install.go       # NMH manifest auto-install to Chrome's NativeM
 chrome-extension/                # Chrome MV3 extension (service worker, manifest, icons)
 ```
 
+## Design System
+**Read `docs/design-system.md` before any UI work.** It is prescriptive, not advisory.
+
+The short version: **focus > selection > mode**, in that fixed order of visual weight, and a **mode never fills**. A background fill is the scarcest thing in the UI — spend it on the cursor and the caret. Roles live in `internal/ui/design.go` (`SelectionPill`/`SelectionBand`/`SelectionMarker`/`ModeOn`/`ModeOff`/`FocusCaret`/`PrimaryAction`/`NewTextInput`); build a style inline and you are inventing a fourth dialect. `Background(ColorAccent)` outside that file **fails the build** (`TestAccentFillIsConstructedInOneFile`), and so does a mode indicator that fills (`TestModeNeverFills`).
+
+The doc also settles the three questions that kept getting answered ad hoc: pill vs band (sized by the filled region, ~40 columns), which presentation tier a new surface takes (full-screen / centered overlay with `dimBackdrop` / row-anchored dropdown with none), and whether a tab is a mode or a selection (**does switching it move the keyboard?**).
+
+Styles in `styles.go` are declared **bare** and constructed **only** in `ApplyPalette` — an initializer alongside would be a second copy, and a style built in only one of the two silently keeps default-pink under every other theme.
+
 ## Conventions
 - Tmux session prefix: `fleet_` (agent sessions); drawer shells use a distinct `fleetsh_` prefix — intentionally not a prefix of `fleet_`, so shells never leak into agent-session enumeration (`tmux.ListSessions`)
 - Session ID format: `<8hex>-<unix_timestamp>`

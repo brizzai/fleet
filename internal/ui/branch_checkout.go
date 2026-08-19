@@ -50,7 +50,7 @@ const branchMaxVisible = 12
 
 // NewBranchCheckoutDialog creates a new branch checkout dialog.
 func NewBranchCheckoutDialog() *BranchCheckoutDialog {
-	fi := textinput.New()
+	fi := NewTextInput()
 	fi.Placeholder = "type to filter"
 	fi.CharLimit = 64
 	fi.SetWidth(30)
@@ -275,7 +275,7 @@ func (d *BranchCheckoutDialog) View() string {
 				prefix = lipgloss.NewStyle().Foreground(ColorGreen).Render("✓ ")
 			}
 			if selected {
-				prefix = SessionSelectionPrefix.Render("▸ ")
+				prefix = SelectionMarker(true).Render("▸ ")
 			}
 
 			name := branch.Name
@@ -291,7 +291,7 @@ func (d *BranchCheckoutDialog) View() string {
 				if branch.IsRemote {
 					line += " ↓"
 				}
-				b.WriteString(prefix + SessionTitleSelStyle.Render(line))
+				b.WriteString(prefix + SelectionPill(true).Render(line))
 			} else if branch.IsCurrent {
 				b.WriteString(prefix + lipgloss.NewStyle().Foreground(ColorGreen).Render(name) + DimStyle.Render(" (current)"))
 			} else if branch.IsRemote {

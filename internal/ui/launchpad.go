@@ -230,7 +230,7 @@ func renderLaunchpadOrigin(originKey string, count int) string {
 func (l *Launchpad) renderItem(it discovery.Recent, isCursor, isChecked bool, w int) string {
 	cursorMark := " "
 	if isCursor {
-		cursorMark = SessionSelectionPrefix.Render("❯")
+		cursorMark = SelectionMarker(true).Render("❯")
 	}
 	box := DimStyle.Render("○")
 	if isChecked {
@@ -280,7 +280,7 @@ func (l *Launchpad) footer(w int) string {
 	if n > 0 {
 		cta = fmt.Sprintf("Add %d & continue", n)
 	}
-	button := SessionTitleSelStyle.Render("  ⏎  " + cta + "  ")
+	button := PrimaryAction().Render("  ⏎  " + cta + "  ")
 
 	key := func(k string) string { return HelpKeyStyle.Render(k) }
 	dim := func(s string) string { return DimStyle.Render(s) }

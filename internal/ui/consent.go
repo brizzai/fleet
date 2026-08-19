@@ -124,11 +124,7 @@ func (d *ConsentDialog) View() string {
 		Foreground(ColorBg).
 		Background(ColorGreen).
 		Padding(0, 1)
-	noSelStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(ColorBg).
-		Background(ColorAccent).
-		Padding(0, 1)
+	noSelStyle := PrimaryAction().Padding(0, 1)
 
 	if d.cursor == 0 {
 		b.WriteString(yesSelStyle.Render(yesLabel))
