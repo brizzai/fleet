@@ -345,9 +345,26 @@ func (d *WorktreeDialog) renderTicketBlock(innerW int) string {
 		b.WriteString(DimStyle.Render("  ⋯ searching Linear…"))
 		b.WriteString("\n")
 	case d.resolved != nil:
-		line := "  " + d.resolved.Identifier
-		b.WriteString(PROpenStyle.Render(line))
-		b.WriteString(DimStyle.Render(" · " + ansi.Truncate(d.resolved.Title, maxInt(innerW-len(line)-3, 8), "…")))
+		// "named from", not a bare identifier. This line sits exactly where the
+		// selectable ticket rows sit, so on its own it read as a row you might
+		// still need to arrow onto — while in fact the work was already done and
+		// arrowing there would achieve nothing. The ✓ and the verb say it
+		// happened, which is also the only thing on screen that explains why the
+		// text in the field changed by itself a moment ago.
+		//
+		// True in every state this branch can be in, including the one where the
+		// user typed the tail themselves: d.resolved survives only while the
+		// field still leads with the identifier, so the branch really is named
+		// from that ticket however the name got there.
+		//
+		// ✓ is U+2713, East-Asian-Neutral, so it is always one column — the same
+		// check the priority gauge glyphs had to pass.
+		const label = "  ✓ named from "
+		head := label + d.resolved.Identifier
+		b.WriteString(PROpenStyle.Render("  ✓"))
+		b.WriteString(DimStyle.Render(" named from "))
+		b.WriteString(PROpenStyle.Render(d.resolved.Identifier))
+		b.WriteString(DimStyle.Render(" · " + ansi.Truncate(d.resolved.Title, maxInt(innerW-ansi.StringWidth(head)-3, 8), "…")))
 		b.WriteString("\n")
 	case d.ticketNote != "":
 		b.WriteString(DimStyle.Render("  " + ansi.Truncate(d.ticketNote, maxInt(innerW-2, 8), "…")))

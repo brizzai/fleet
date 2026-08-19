@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/charmbracelet/x/ansi"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -407,6 +408,44 @@ func TestResolvedRewriteOnlyTouchesABareIdentifier(t *testing.T) {
 			})
 			if got := d.newBranchInput.Value(); got != c.field {
 				t.Errorf("the field must not be rewritten under the user: got %q, want it left as %q", got, c.field)
+			}
+		})
+	}
+}
+
+// TestResolvedLineReadsAsAppliedNotOffered pins the wording that keeps the
+// confirmation line from impersonating a suggestion.
+//
+// It renders in the same place the selectable ticket rows do, so as a bare
+// "BRZ-3217 · title" it read as a row you might still have to arrow onto — when
+// in fact the naming had already happened and arrowing there does nothing. It
+// is also the only thing on screen that explains why the text in the field
+// changed by itself a moment earlier.
+func TestResolvedLineReadsAsAppliedNotOffered(t *testing.T) {
+	for _, c := range []struct{ name, field string }{
+		{"auto-rewritten from a bare id", "BRZ-3217"},
+		{"user typed the tail themselves", "brz-3217-my-own-variant"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := ticketDialog(t)
+			d.SetSize(90, 44)
+			d.newBranchInput.SetValue(c.field)
+			d.onFieldChanged(c.field)
+			d.applyTickets(worktreeTicketsMsg{
+				gen: d.ticketGen, byID: true,
+				tickets: []linear.Ticket{{Identifier: "BRZ-3217", Title: "Fix with external AI agent"}},
+			})
+
+			got := ansi.Strip(d.View())
+			if !strings.Contains(got, "✓ named from BRZ-3217") {
+				t.Errorf("the resolved line must say the naming already happened:\n%s", got)
+			}
+			// Nothing may offer an arrow-down that would achieve nothing.
+			if d.visibleTicketCount() != 0 {
+				t.Errorf("a resolved identifier must leave no selectable rows, got %d", d.visibleTicketCount())
+			}
+			if strings.Contains(got, "↓ tickets") {
+				t.Errorf("the footer must not invite ↓ when there is nothing to pick:\n%s", got)
 			}
 		})
 	}
