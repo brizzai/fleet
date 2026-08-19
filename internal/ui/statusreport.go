@@ -360,6 +360,10 @@ func (d *BugReportDialog) viewStatusForm() string {
 //     the boundary leaves fragments shorter than Redact's 16-character floor and
 //     files verbatim. Widening costs nothing — the loose pattern still only
 //     matches strings beginning `sk-ant-`, so ordinary prose is untouched.
+//   - Linear credentials. A pasted API key can reach a pane excerpt the same way
+//     an Anthropic one can, and fleet now holds one of its own — so it gets the
+//     same treatment at the same chokepoint rather than a promise that it will
+//     never appear.
 //   - Email addresses, local part and domain both. The multi-account work put
 //     account emails into config.json (default_account, allowed_accounts) and
 //     into the debug log on every launch and poll, and both blocks are published
@@ -372,6 +376,7 @@ func (d *BugReportDialog) viewStatusForm() string {
 // compare.
 func sanitizeForIssue(s string) string {
 	s = claudeaccount.RedactCaptured(s)
+	s = linearKeyPattern.ReplaceAllString(s, "<redacted-linear-key>")
 	s = emailPattern.ReplaceAllString(s, "<redacted-email>")
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -384,6 +389,14 @@ func sanitizeForIssue(s string) string {
 // the addresses fleet itself writes into config and logs, and over-matching is
 // the safe error in a redactor.
 var emailPattern = regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+`)
+
+// linearKeyPattern matches Linear's credential prefixes: lin_api_ for a personal
+// API key and lin_oauth_ for an access or refresh token. Deliberately loose on
+// length for the same reason RedactCaptured is — the biggest thing published
+// through here is a wrapped pane excerpt, where a credential split at the line
+// boundary leaves a short fragment that a minimum-length rule would file
+// verbatim. Nothing in ordinary prose starts with these prefixes.
+var linearKeyPattern = regexp.MustCompile(`lin_(?:api|oauth)_[A-Za-z0-9_-]+`)
 
 // shortSessionID trims an agent session id to its leading block for the issue
 // table. The only question asked of these ids is whether the one on disk is the

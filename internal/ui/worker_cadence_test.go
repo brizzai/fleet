@@ -511,3 +511,26 @@ func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
 			"that read and fall back to the round-robin", bound, mergePos, firstRead)
 	}
 }
+
+// TestTicketWorkStaysOffTheWorkers guards workerStallThreshold's budget.
+//
+// The comment on that constant budgets ~70s of a 90s ceiling per repo (≈40s git
+// plus two chained 15s gh calls). A `linear` call added to the per-repo fan-out
+// would eat the remaining margin and turn the stall watchdog into a source of
+// false goroutine dumps — and the instinct to "just refresh the ticket here"
+// will be strong, because that is where every other external lookup lives.
+//
+// It is safe to keep Linear out of the workers only because the design ships no
+// badge: there is no live ticket state on screen, so there is nothing to poll.
+// Every ticket fetch is event-driven and one-shot.
+func TestTicketWorkStaysOffTheWorkers(t *testing.T) {
+	for _, fn := range []string{"refreshAllGitAndPR", "gitWorkerCycle", "statusWorkerCycle"} {
+		if mentions(t, fn, "linear") {
+			t.Errorf("%s reaches into internal/linear — a network call there blows the "+
+				"~70s per-repo budget that workerStallThreshold (90s) is sized against", fn)
+		}
+		if mentions(t, fn, "materializeTicket") {
+			t.Errorf("%s materializes tickets; that work is event-driven and one-shot by design", fn)
+		}
+	}
+}

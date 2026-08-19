@@ -105,6 +105,30 @@ func TestBuildStatusReportBody_NeverLeaksAccountToken(t *testing.T) {
 	}
 }
 
+// TestBuildStatusReportBody_NeverLeaksLinearKey is the same guard for the
+// credential fleet holds for Linear. It is not hypothetical: the Connect dialog
+// asks the user to paste one, so it can land in a pane excerpt, and the debug
+// log is published wholesale when the content checkbox is on.
+func TestBuildStatusReportBody_NeverLeaksLinearKey(t *testing.T) {
+	const apiKey = "lin_api_AbCdEf0123456789GhIjKlMnOpQrStUvWx"
+	const oauth = "lin_oauth_9876543210ZyXwVuTsRqPoNmLkJiHgFe"
+
+	f := statusFormFixture()
+	f.snap.paneClean = "❯ paste your key:\n" + apiKey + "\n"
+	f.snap.debugTail = "time=... msg=\"linear connect\" token=" + oauth
+	r := &diagnostics.Report{Version: "v2.22.0", OS: "darwin", Arch: "arm64"}
+
+	for _, includeContent := range []bool{true, false} {
+		f.includeContent = includeContent
+		body := buildStatusReportBody("linear never connects", session.StatusWaiting, f, r)
+		for _, secret := range []string{apiKey, oauth} {
+			if strings.Contains(body, secret) {
+				t.Fatalf("issue body leaked a Linear credential (includeContent=%v):\n%s", includeContent, body)
+			}
+		}
+	}
+}
+
 func TestBuildStatusReportBody_AlwaysCarriesSignals(t *testing.T) {
 	f := statusFormFixture()
 	f.includeContent = false

@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/workspace"
 )
 
@@ -33,12 +34,23 @@ type (
 		name, branch, baseBranch string
 		repoPath                 string
 		provider                 workspace.Provider
+		// ticket is the Linear issue this branch name was derived from, nil
+		// when the user typed a name. Carried rather than re-fetched: the
+		// dialog already paid the round trip while the user was looking at the
+		// form, and a second fetch can fail differently.
+		ticket *linear.Ticket
 	}
 	workspaceCreateResultMsg struct {
 		info      *workspace.WorkspaceInfo
 		err       error
 		pendingID string
 		repoPath  string
+		// ticket describes what was materialized into the new worktree, nil
+		// when there was no ticket or nothing usable landed. ticketErr is
+		// advisory only — the session always starts (see the closure in
+		// app.go's workspaceCreateMsg handler).
+		ticket    *linear.Result
+		ticketErr error
 	}
 	// deleteCleanupDoneMsg fires when finalizeDelete's background cleanup
 	// (tmux kill, hook removal, optional workspace destroy) completes. The

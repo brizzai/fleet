@@ -53,6 +53,7 @@ var allKeyBindings = []KeyBinding{
 	// Global.
 	{Key: "`", BarKey: "`", BarDesc: "Term", Desc: "Toggle terminal drawer", Section: "global"},
 	{Key: "Ctrl+K", BarKey: "⌃K", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
+	{Key: "t", Desc: "My Linear tickets", Section: "global"},
 	{Key: "S", BarKey: "S", BarDesc: "Set", Desc: "Open settings", Section: "global"},
 	{Key: "Shift+W", Desc: "What's New / release notes", Section: "global"},
 	{Key: "X", Desc: "Dismiss on-screen tip", Section: "global"},

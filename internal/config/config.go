@@ -86,6 +86,15 @@ type Config struct {
 	// GetSessionSuspendMode. See internal/ui suspend sweep.
 	SessionSuspendMode string `json:"session_suspend_mode,omitempty"`
 
+	// LinearTicketStart controls the one mutation fleet ever makes against a
+	// ticket tracker: moving an issue to its team's first started state when a
+	// worktree is created from it. Default true — creating a worktree from a
+	// ticket is an unambiguous "I'm starting this", and without it the board
+	// stays stale until the first push. Deliberately its own switch rather than
+	// riding the read path: "fleet writes to my tracker" deserves its own
+	// consent. Read via IsLinearTicketStartEnabled.
+	LinearTicketStart *bool `json:"linear_ticket_start,omitempty"`
+
 	// AccountStrategy picks which Claude account a new session runs under. The
 	// values are claudeaccount.Strategies, resolved by claudeaccount.ParseStrategy
 	// via GetAccountStrategy — deliberately not restated here, since a stale copy
@@ -498,6 +507,17 @@ func (c *Config) IsConfirmBeforeRestartEnabled() bool {
 		return true
 	}
 	return *c.ConfirmBeforeRestart
+}
+
+// IsLinearTicketStartEnabled reports whether creating a worktree from a Linear
+// ticket also moves that ticket to its team's first started state (default: true).
+//
+// Only the create-from-ticket path consults this. A session opened later in a
+// worktree that already exists never re-writes the state: by then a human may
+// have moved the issue to In Review, and silently dragging it backwards is the
+// worst thing this feature could do.
+func (c *Config) IsLinearTicketStartEnabled() bool {
+	return boolDefaultTrue(c.LinearTicketStart)
 }
 
 // GetOriginDeleteRemovesWorktrees reports whether forgetting an origin row also

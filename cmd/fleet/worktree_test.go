@@ -194,3 +194,105 @@ func TestParseWorktreeArgs(t *testing.T) {
 		}
 	})
 }
+
+func TestParseWorktreeArgsTicket(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		wantErr string // substring; "" means it must parse
+		check   func(*testing.T, worktreeOpts)
+	}{
+		{
+			name: "ticket alone names the branch later",
+			args: []string{"-ticket", "BRZ-3182"},
+			check: func(t *testing.T, o worktreeOpts) {
+				if o.ticket != "BRZ-3182" || o.branch != "" {
+					t.Errorf("ticket=%q branch=%q", o.ticket, o.branch)
+				}
+			},
+		},
+		{
+			name:  "ticket is upper-cased",
+			args:  []string{"-t", "brz-3182"},
+			check: func(t *testing.T, o worktreeOpts) { mustEqual(t, o.ticket, "BRZ-3182") },
+		},
+		{
+			name:  "explicit branch wins",
+			args:  []string{"my-branch", "-ticket", "BRZ-1"},
+			check: func(t *testing.T, o worktreeOpts) { mustEqual(t, o.branch, "my-branch") },
+		},
+		{
+			// -ticket "$(lookup)" that produced nothing must not silently
+			// degrade into an ordinary worktree — same rule as -p ''.
+			name:    "explicitly empty ticket is rejected",
+			args:    []string{"-ticket", ""},
+			wantErr: "-ticket was empty",
+		},
+		{
+			name:    "non-identifier is rejected before anything is created",
+			args:    []string{"-ticket", "not-a-ticket"},
+			wantErr: "not a Linear issue identifier",
+		},
+		{
+			// They set the same field and say opposite things.
+			name:    "ticket and prompt conflict",
+			args:    []string{"-ticket", "BRZ-1", "-p", "do the thing"},
+			wantErr: "pick one",
+		},
+		{
+			// Unlike -prompt: a git-excluded ticket dir is useful without a session.
+			name:  "ticket with no-session is allowed",
+			args:  []string{"-ticket", "BRZ-1", "-no-session"},
+			check: func(t *testing.T, o worktreeOpts) { mustEqual(t, o.ticket, "BRZ-1") },
+		},
+		{
+			name:    "no-ticket-start alone is rejected",
+			args:    []string{"branch", "-no-ticket-start"},
+			wantErr: "has no effect without -ticket",
+		},
+		{
+			// A positional BETWEEN two flags — the shape the peeling loop in
+			// worktree.go exists for. Sharing args with the case above made this
+			// one test nothing its neighbour did not.
+			name: "flags parse on either side",
+			args: []string{"-ticket", "BRZ-1", "my-branch", "-no-session"},
+			check: func(t *testing.T, o worktreeOpts) {
+				mustEqual(t, o.ticket, "BRZ-1")
+				mustEqual(t, o.branch, "my-branch")
+				if !o.noSession {
+					t.Error("-no-session after the positional was dropped")
+				}
+			},
+		},
+		{
+			name:    "no branch and no ticket still errors",
+			args:    []string{},
+			wantErr: "missing branch name",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o, err := parseWorktreeArgs(c.args)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("err = %v, want it to contain %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if c.check != nil {
+				c.check(t, o)
+			}
+		})
+	}
+}
+
+func mustEqual(t *testing.T, got, want string) {
+	t.Helper()
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
