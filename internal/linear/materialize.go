@@ -200,8 +200,12 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 		// Already moved. Carry the record forward rather than re-asserting it:
 		// by now a human may have moved the issue on, and dragging it back to
 		// "started" is the worst thing this feature could do.
+		//
+		// The record travels; the REPORT does not. res.StateMoved is what the
+		// caller prints as "Moved %s to its team's started state", so setting it
+		// here would claim a write to someone's board that this run did not
+		// make. Only the mutation below may set it.
 		m.StateWrite, m.MovedTo = "done", prior.MovedTo
-		res.StateMoved = prior.MovedTo
 	case o.MoveState:
 		if name, err := MoveToStarted(ctx, issue); err != nil {
 			m.StateWrite = "failed"

@@ -3,6 +3,7 @@ package linear
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,4 +59,62 @@ func TestStateWriteSkippedRecordDoesNotBlock(t *testing.T) {
 			t.Errorf("%q must not read as done", state)
 		}
 	}
+}
+
+// TestPriorStateWriteIsNotReportedAsThisRunsMove separates the record from the
+// report.
+//
+// res.StateMoved is what cmd/fleet/worktree.go prints as "Moved %s to its team's
+// started state", and what ticketStatusLine shows in the TUI. Copying a prior
+// run's MovedTo into it made a re-materialization claim a write to someone's
+// board that never happened on that run — a false statement about a mutation,
+// which is the one thing this feature must never make. The record must still
+// travel, or the exactly-once guard forgets what it knew.
+//
+// Asserted against the source because the property IS about the source: only
+// the branch that performs the mutation may assign the reported field, and
+// Materialize cannot be driven here without a live API.
+func TestPriorStateWriteIsNotReportedAsThisRunsMove(t *testing.T) {
+	src, err := os.ReadFile("materialize.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	const marker = `case hadPrior && prior.StateWrite == "done":`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("the carry-forward branch is gone — this guard is stale, %s not found", marker)
+	}
+	rest := body[i+len(marker):]
+	j := strings.Index(rest, "case o.MoveState:")
+	if j < 0 {
+		t.Fatal("could not find the end of the carry-forward branch")
+	}
+	branch := stripLineComments(rest[:j])
+
+	if strings.Contains(branch, "res.StateMoved") {
+		t.Error("the carry-forward branch assigns res.StateMoved, which the caller " +
+			"prints as \"Moved ... to its team's started state\". This run performed no " +
+			"mutation; only the branch that calls MoveToStarted may set it.")
+	}
+	if !strings.Contains(branch, "m.MovedTo") {
+		t.Error("the carry-forward branch must still carry MovedTo into the new record, " +
+			"or the exactly-once guard loses what it knew")
+	}
+}
+
+// stripLineComments removes // comments so a source guard scans code, not prose.
+// The branch above is documented with a comment that names the very field it
+// must not assign, and without this the guard would fail on its own rationale.
+func stripLineComments(src string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(src, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
