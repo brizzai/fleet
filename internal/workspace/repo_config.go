@@ -46,7 +46,11 @@ type CopyFilesConfig struct {
 // without a .linear.toml) a repo behaves exactly as it did before Linear
 // existed, which is the property that lets a connected user keep unrelated
 // repos quiet. Team is the common single-team form; Teams is for a repo that
-// genuinely spans several. Both merge additively.
+// genuinely spans several.
+//
+// They do NOT merge the same way: a local `team` REPLACES the committed one,
+// while `teams` lists are appended and deduped. Personal team membership
+// overriding a repo default is the point; silently dropping half a list is not.
 //
 // .fleet.local.json is usually the better home for it — account policy and team
 // membership are personal, and .fleet.json is committed.

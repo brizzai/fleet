@@ -3,6 +3,7 @@ package linear
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,6 +64,7 @@ type meta struct {
 	FetchedAt  time.Time `json:"fetched_at"`
 	Images     int       `json:"images"`
 	StateWrite string    `json:"state_write"` // "done" | "skipped" | "failed"
+	MovedTo    string    `json:"moved_to,omitempty"`
 }
 
 // TicketDir returns where a ticket materializes inside a worktree.
@@ -136,7 +138,10 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	// team's workflow states so the optional state write needs no second query.
 	issue, err := fetchFull(ctx, id)
 	if err != nil {
-		if err == ErrNotFound {
+		// errors.Is, not ==: a wrapped sentinel would skip the negative pin and
+		// make inference re-ask Linear on every session start — the exact cost
+		// NegativelyPinned exists to avoid.
+		if errors.Is(err, ErrNotFound) {
 			pinNoTicket(o.WorktreePath, id)
 		}
 		return res, err
@@ -179,12 +184,30 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	}
 
 	m := meta{Identifier: res.Identifier, FetchedAt: time.Now(), Images: images, StateWrite: "skipped"}
-	if o.MoveState {
+
+	// meta.json is the durable record that keeps the one mutation exactly-once.
+	// inFlight above cannot do this job: it is an in-process concurrency guard,
+	// so it says nothing about a retry, a second fleet process, or a rerun after
+	// a crash between the mutation and the write below.
+	//
+	// Its reach is bounded, and honestly so: the record lives inside the ticket
+	// directory, so deleting that directory — the documented way to refresh —
+	// deliberately re-arms the write. That is the intended behaviour, not a gap.
+	// What this closes is every path where the directory survives.
+	prior, hadPrior := readMeta(dir)
+	switch {
+	case hadPrior && prior.StateWrite == "done":
+		// Already moved. Carry the record forward rather than re-asserting it:
+		// by now a human may have moved the issue on, and dragging it back to
+		// "started" is the worst thing this feature could do.
+		m.StateWrite, m.MovedTo = "done", prior.MovedTo
+		res.StateMoved = prior.MovedTo
+	case o.MoveState:
 		if name, err := MoveToStarted(ctx, issue); err != nil {
 			m.StateWrite = "failed"
 			debuglog.Logger.Warn("linear: could not move issue to started", "id", res.Identifier, "error", err)
 		} else if name != "" {
-			m.StateWrite = "done"
+			m.StateWrite, m.MovedTo = "done", name
 			res.StateMoved = name
 		}
 	}
@@ -349,6 +372,24 @@ func priorityName(p int) string {
 		return "low"
 	}
 	return ""
+}
+
+// readMeta returns a previously written record for this ticket directory.
+//
+// A missing or unreadable file reports "no record", which re-arms the state
+// write. That is the safe direction: the alternative — treating an unreadable
+// file as "already done" — would silently disable the mutation for good the
+// first time a disk hiccup truncated it.
+func readMeta(dir string) (meta, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, metaFile))
+	if err != nil {
+		return meta{}, false
+	}
+	var m meta
+	if err := json.Unmarshal(data, &m); err != nil {
+		return meta{}, false
+	}
+	return m, true
 }
 
 func writeMeta(dir string, m meta) {

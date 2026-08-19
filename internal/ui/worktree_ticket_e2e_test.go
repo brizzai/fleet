@@ -130,19 +130,41 @@ func TestWrongWorkspaceIsNamedNotSilent(t *testing.T) {
 // The first version ran to 62 columns under a ~48-column inner width, so it
 // wrapped and truncated to "Ctrl+K → Conn…" — an instruction cut in half is
 // worse than no instruction.
+//
+// Shortening the wording was only half the fix: ws.Name comes from the API with
+// no length limit, so the long case below reproduces the identical wrap unless
+// the variable itself is bounded. Pinning only the 5-char "fleet" let that
+// through, so both are pinned now — and the teams list is exercised long too,
+// since it is the other variable on the line.
 func TestWorkspaceMismatchNoteFitsOnOneLine(t *testing.T) {
-	d := NewWorktreeDialog()
-	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", []string{"BRZ"})
-	linear.SetWorkspaceForTest(linear.Workspace{Name: "fleet", TeamKeys: []string{"FLE"}})
-	t.Cleanup(func() { linear.SetWorkspaceForTest(linear.Workspace{}) })
-
-	note, wrong := d.workspaceMismatchNote()
-	if !wrong {
-		t.Fatal("expected a mismatch")
+	cases := []struct {
+		name  string
+		ws    string
+		teams []string
+	}{
+		{"short", "fleet", []string{"BRZ"}},
+		{"long workspace name", strings.Repeat("Wintermute Industries ", 6), []string{"BRZ"}},
+		{"long team list", "fleet", []string{"BRZ", "PRD", "OPS", "SEC", "INFRA"}},
 	}
-	if w := ansi.StringWidth(note); w > d.innerWidth() {
-		t.Errorf("note is %d columns wide but the box is %d — it will wrap and truncate:\n  %q",
-			w, d.innerWidth(), note)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := NewWorktreeDialog()
+			d.SetSize(120, 40)
+			d.Show(nil, nil, nil, "/repo", "master", c.teams)
+			linear.SetWorkspaceForTest(linear.Workspace{Name: c.ws, TeamKeys: []string{"FLE"}})
+			t.Cleanup(func() { linear.SetWorkspaceForTest(linear.Workspace{}) })
+
+			note, wrong := d.workspaceMismatchNote()
+			if !wrong {
+				t.Fatal("expected a mismatch")
+			}
+			if w := ansi.StringWidth(note); w > d.innerWidth() {
+				t.Errorf("note is %d columns wide but the box is %d — it will wrap and truncate:\n  %q",
+					w, d.innerWidth(), note)
+			}
+			if !strings.HasSuffix(note, "reconnect: Ctrl+K") {
+				t.Errorf("the instruction must survive whatever else is on the line: %q", note)
+			}
+		})
 	}
 }

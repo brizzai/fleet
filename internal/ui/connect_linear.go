@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -76,6 +77,24 @@ type ConnectLinearDialog struct {
 	persistErr error
 	workspace  linear.Workspace
 	via        string
+
+	// cancelSignIn aborts an in-flight browser sign-in. `esc` used to only hide
+	// the dialog, while linear.SignIn kept a loopback listener bound for up to
+	// five minutes on one of just three registered ports — so a user who
+	// escaped and retried could be refused with an error that says nothing
+	// about ports, and a browser flow completed after the escape still stored a
+	// credential. Cancelling is the difference between "I changed my mind" and
+	// "I changed my mind and it happened anyway".
+	cancelSignIn context.CancelFunc
+}
+
+// abortSignIn cancels any in-flight sign-in. Safe to call when none is running,
+// so both esc and Hide can call it unconditionally.
+func (d *ConnectLinearDialog) abortSignIn() {
+	if d.cancelSignIn != nil {
+		d.cancelSignIn()
+		d.cancelSignIn = nil
+	}
 }
 
 func NewConnectLinearDialog() *ConnectLinearDialog {
@@ -111,6 +130,10 @@ func (d *ConnectLinearDialog) Show() {
 func (d *ConnectLinearDialog) Hide() {
 	d.visible = false
 	d.input.Blur()
+	// Every way out of this dialog goes through Hide, so cancelling here covers
+	// esc, enter on the done screen, and any future exit — rather than leaving
+	// each one to remember.
+	d.abortSignIn()
 }
 
 // setFocus is the single writer of focus, so the caret can never be left
@@ -131,7 +154,25 @@ func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd
 		d.stage, d.workspace, d.via = connectDone, m.workspace, m.via
 		d.err, d.persistErr = nil, m.persistErr
 		return d, nil
+	case linearDisconnectedMsg:
+		// Disconnect clears the in-memory credential before it touches the
+		// store, so this session really is disconnected either way and the
+		// dialog is right to render the choosing screen. What a failure means is
+		// narrower and easier to miss: the credential is still on disk, so it
+		// comes back at the next launch. Say exactly that.
+		if m.err != nil {
+			d.err = fmt.Errorf("disconnected here, but the stored credential could not be removed "+
+				"— it will come back on the next launch: %w", m.err)
+		}
+		return d, nil
 	case linearConnectFailedMsg:
+		// A cancelled sign-in is not a failure — it is the user pressing esc,
+		// and the cmd only reports it because cancellation surfaces as an error
+		// from SignIn. Announcing "sign-in failed" for something they chose is
+		// the dialog arguing with them.
+		if errors.Is(m.err, context.Canceled) {
+			return d, nil
+		}
 		// Back to the field that produced it, so the fix is one keystroke away
 		// rather than one navigation away.
 		d.err = m.err
@@ -211,7 +252,10 @@ func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd
 				}
 				d.stage = connectWorking
 				d.err = nil
-				return d, signInToLinear()
+				ctx, cancel := context.WithTimeout(context.Background(), signInWindow)
+				d.abortSignIn() // a previous attempt must not outlive this one
+				d.cancelSignIn = cancel
+				return d, signInToLinear(ctx)
 			}
 			d.stage = connectPasting
 			d.err = nil
@@ -223,7 +267,13 @@ func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd
 }
 
 // linearDisconnectedMsg closes the loop after a disconnect.
-type linearDisconnectedMsg struct{}
+//
+// It carries the error because Disconnect can genuinely fail — a denied keychain
+// prompt is the ordinary case — and the failure used to be discarded. app.go then
+// reopened the dialog, which re-read the credential and showed "✓ connected"
+// again with nothing explaining why. Of the two ways to be wrong about a
+// credential, claiming it is gone when it is still on disk is the worse one.
+type linearDisconnectedMsg struct{ err error }
 
 // verifyAndStoreLinearKey proves a key works before anything is written.
 //
@@ -248,11 +298,16 @@ func verifyAndStoreLinearKey(key string) tea.Cmd {
 	}
 }
 
-func signInToLinear() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
+// signInWindow bounds a browser sign-in. Long enough to find the tab, log in
+// and approve; short enough that an abandoned attempt releases its registered
+// port without the user knowing to care.
+const signInWindow = 5 * time.Minute
 
+// signInToLinear runs the browser flow under a context the DIALOG owns, so esc
+// releases the loopback listener immediately instead of five minutes later, and
+// a flow the user walked away from cannot come back and store a credential.
+func signInToLinear(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
 		cred, err := linear.SignIn(ctx)
 		if err != nil {
 			return linearConnectFailedMsg{err: err}

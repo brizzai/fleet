@@ -59,11 +59,21 @@ func materializeTicket(worktreePath string, t *linear.Ticket, moveState bool) (*
 // ticketPromptFor resolves the first message for a session about to start in
 // path, when that path's branch names a Linear issue.
 //
-// Runs on the Update goroutine, so it does no I/O beyond a stat: the branch
-// comes from the git cache the worker already maintains, the identifier is a
-// regex, and the reuse check is one ReadDir plus one ReadFile. That last check
-// is the steady state — every session after the first in a ticket worktree hits
-// it, with no network at all.
+// Runs on the Update goroutine, so it does no I/O beyond local reads on a known
+// path: the branch comes from the git cache the worker already maintains, the
+// identifier is a regex, and the reuse check is one ReadDir plus one ReadFile.
+// That last check is the steady state — every session after the first in a
+// ticket worktree hits it, with no network at all.
+//
+// It used to call session.GetRepoRoot, twice, and that comment was false: on a
+// cache miss GetRepoRoot shells out to `git rev-parse` with an 8-second ceiling,
+// on the goroutine that paints every frame. LookupRepoRoot never shells out, and
+// a miss falls back to the path itself — which is the right answer for a
+// worktree and for a main repo, since `rev-parse --show-toplevel` returns the
+// checkout it is run in. Only a session created in a SUBDIRECTORY of a repo
+// resolves differently, and there the cost of the miss is that the repo's team
+// config is not found and ticket inference stays quiet — the same outcome as a
+// repo that names no team, which is the designed opt-out.
 //
 // Returns (prompt, nil) for the fast path, ("", cmd) when a fetch is needed, and
 // ("", nil) when there is nothing to do.
@@ -75,7 +85,10 @@ func (h *Home) ticketPromptFor(msg sessionCreateMsg) (string, tea.Cmd) {
 		return prompt, nil
 	}
 
-	repoRoot := session.GetRepoRoot(msg.path)
+	repoRoot, _ := session.LookupRepoRoot(msg.path)
+	if repoRoot == "" {
+		repoRoot = msg.path
+	}
 	// The per-repo team gate is what keeps false positives free: a branch named
 	// fix-123 in a repo that tracks no Linear team never costs a round trip.
 	teamKeys := linear.TeamKeys(msg.path)
@@ -93,7 +106,7 @@ func (h *Home) ticketPromptFor(msg sessionCreateMsg) (string, tea.Cmd) {
 	if id == "" {
 		// A worktree fleet made is named <repo>-<branch>, so the directory
 		// still carries the identifier when the git cache is cold.
-		id = linear.IdentifierFromBranch(pathTailAfterRepo(msg.path), teamKeys)
+		id = linear.IdentifierFromBranch(pathTailAfterRepo(msg.path, repoRoot), teamKeys)
 	}
 	if id == "" || linear.NegativelyPinned(msg.path, id) {
 		return "", nil
@@ -122,9 +135,12 @@ func (h *Home) ticketPromptFor(msg sessionCreateMsg) (string, tea.Cmd) {
 
 // pathTailAfterRepo returns the part of a fleet-made worktree directory name
 // that follows the repo name, e.g. /code/brizzai-brz-3182-fix → "brz-3182-fix".
-func pathTailAfterRepo(path string) string {
+// pathTailAfterRepo takes the resolved repoRoot rather than resolving it again:
+// the caller already has it, and the second lookup was a second chance to shell
+// out to git from the Update goroutine.
+func pathTailAfterRepo(path, repoRoot string) string {
 	base := filepath.Base(path)
-	root := filepath.Base(session.GetRepoRoot(path))
+	root := filepath.Base(repoRoot)
 	if root != "" && root != base && len(base) > len(root)+1 && strings.HasPrefix(base, root+"-") {
 		return base[len(root)+1:]
 	}

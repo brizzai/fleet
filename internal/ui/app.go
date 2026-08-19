@@ -1732,7 +1732,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, cmd
 	case linearDisconnectedMsg:
 		h.connectLinear.Show() // re-reads the (now empty) credential state
-		return h, nil
+		// Show() resets the dialog's error, so the failure is applied after it,
+		// not before. Forwarding is what makes a refused keychain delete visible
+		// at all: it used to be discarded outright, leaving the credential on
+		// disk to reappear at the next launch with nothing having said so.
+		dialog, cmd := h.connectLinear.Update(msg)
+		h.connectLinear = dialog
+		return h, cmd
 	case linearConnectedMsg:
 		dialog, cmd := h.connectLinear.Update(msg)
 		h.connectLinear = dialog
@@ -7152,10 +7158,10 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		}
 		workspaces, err := provider.List(repoPath)
 		defaultBranch := git.GetDefaultBranch(repoPath)
-		// Resolved here, on the worker goroutine, so the dialog never probes the
-		// filesystem or PATH from Update(). Empty when the repo has no
-		// .linear.toml or `linear` isn't installed, which makes every ticket
-		// surface in the dialog inert.
+		// Resolved here, on the worker goroutine, so the dialog never touches the
+		// filesystem from Update(). Empty when nothing is connected or the repo
+		// names no Linear team, which makes every ticket surface in the dialog
+		// inert — those are the two gates, and both must hold.
 		var linearTeams []string
 		if linear.Available() {
 			linearTeams = linear.TeamKeys(repoPath)

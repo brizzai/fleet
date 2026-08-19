@@ -35,6 +35,21 @@ func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 // a backstop for a request that never reaches the deadline machinery.
 var httpClient = &http.Client{Timeout: 90 * time.Second}
 
+// imageClient fetches issue attachments. It refuses to follow redirects at all,
+// because the request carries the Linear credential and a redirect target is a
+// URL that allowedImageURL never saw. Go's own protection stops at a domain
+// change and deliberately permits uploads.linear.app -> anything.linear.app.
+//
+// http.ErrUseLastResponse makes Do return the 3xx instead of an error, which
+// then fails the StatusOK check with the redirect's own status — a more honest
+// message than a synthetic one.
+var imageClient = &http.Client{
+	Timeout: 90 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // failures are one-shot rather than polled, so this throttle isn't stopping a
 // flood — it stops a user who creates ten worktrees against a broken credential
 // from emitting ten identical events. reason is a low-cardinality label, never
@@ -645,9 +660,17 @@ func fetchWorkspaceWith(ctx context.Context, cred Credential, useStored bool) (W
 	}
 	sort.Strings(ws.TeamKeys)
 
-	wsCache.mu.Lock()
-	wsCache.ws, wsCache.loaded = ws, true
-	wsCache.mu.Unlock()
+	// Only cache a reading taken with the STORED credential. VerifyCredential
+	// calls this with a candidate the user has just pasted and that nothing has
+	// persisted yet; if the store then refuses (a denied keychain prompt is the
+	// ordinary case, which is why persistErr exists at all), WorkspaceInfo would
+	// go on reporting a workspace no stored credential backs — and
+	// workspaceMismatchNote reads exactly that.
+	if useStored {
+		wsCache.mu.Lock()
+		wsCache.ws, wsCache.loaded = ws, true
+		wsCache.mu.Unlock()
+	}
 	return ws, nil
 }
 

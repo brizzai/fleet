@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"strings"
 	"testing"
 )
@@ -90,6 +91,38 @@ func TestWorktreeDialogAsyncMessagesAreRouted(t *testing.T) {
 			t.Errorf("WorktreeDialog.Update handles %s, but Home.Update has no case for it.\n"+
 				"routeToModal only carries key and paste messages, so this message is dropped "+
 				"and the feature it drives never runs — silently, and with every unit test still passing.", name)
+		}
+	}
+}
+
+// TestTicketInferenceNeverShellsOutFromUpdate keeps the ticket paths off the
+// blocking git call.
+//
+// session.GetRepoRoot runs `git rev-parse` with an 8-second ceiling on a cache
+// miss. ticketPromptFor and sessionsByTicket both run on the Bubble Tea Update
+// goroutine — the one that paints every frame — and both called it, one of them
+// twice, while ticketPromptFor's own comment claimed it did "no I/O beyond a
+// stat". A brand-new worktree is exactly the cache miss.
+//
+// Scoped to these two files on purpose. GetRepoRoot is used widely elsewhere in
+// this package and auditing all of it is a separate job; this pins the paths the
+// review covered so they cannot quietly regain the call.
+func TestTicketInferenceNeverShellsOutFromUpdate(t *testing.T) {
+	for _, file := range []string{"ticket.go", "palette_tickets.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			code := line
+			if idx := strings.Index(code, "//"); idx >= 0 {
+				code = code[:idx] // comments may name it; calls may not
+			}
+			if strings.Contains(code, "session.GetRepoRoot(") {
+				t.Errorf("%s:%d calls session.GetRepoRoot, which shells out to git "+
+					"(8s ceiling) on a cache miss — and this file runs on the Update "+
+					"goroutine. Use session.LookupRepoRoot and degrade on a miss.", file, i+1)
+			}
 		}
 	}
 }

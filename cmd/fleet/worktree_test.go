@@ -251,9 +251,18 @@ func TestParseWorktreeArgsTicket(t *testing.T) {
 			wantErr: "has no effect without -ticket",
 		},
 		{
-			name:  "flags parse on either side",
-			args:  []string{"-ticket", "BRZ-1", "-no-session"},
-			check: func(t *testing.T, o worktreeOpts) { mustEqual(t, o.ticket, "BRZ-1") },
+			// A positional BETWEEN two flags — the shape the peeling loop in
+			// worktree.go exists for. Sharing args with the case above made this
+			// one test nothing its neighbour did not.
+			name: "flags parse on either side",
+			args: []string{"-ticket", "BRZ-1", "my-branch", "-no-session"},
+			check: func(t *testing.T, o worktreeOpts) {
+				mustEqual(t, o.ticket, "BRZ-1")
+				mustEqual(t, o.branch, "my-branch")
+				if !o.noSession {
+					t.Error("-no-session after the positional was dropped")
+				}
+			},
 		},
 		{
 			name:    "no branch and no ticket still errors",

@@ -78,7 +78,13 @@ func (h *Home) sessionsByTicket(tickets []linear.Ticket) map[string]*session.Ses
 		if id == "" {
 			// The worktree directory still carries the identifier when the git
 			// cache is cold, same fallback branch inference uses.
-			id = linear.IdentifierFromBranch(pathTailAfterRepo(s.ProjectPath), teams)
+			root, ok := session.LookupRepoRoot(s.ProjectPath)
+			if !ok {
+				// Cache-only, because this runs when the palette opens — on the
+				// Update goroutine. A worktree is its own root anyway.
+				root = s.ProjectPath
+			}
+			id = linear.IdentifierFromBranch(pathTailAfterRepo(s.ProjectPath, root), teams)
 		}
 		if id == "" {
 			continue
@@ -94,7 +100,9 @@ func (h *Home) sessionsByTicket(tickets []linear.Ticket) map[string]*session.Ses
 
 // ticketSessionRank orders sessions by how much they want you, lowest first.
 func ticketSessionRank(s *session.Session) int {
-	switch s.Status {
+	// GetStatus, not the field: Status is written under s.mu by the worker,
+	// and this runs on the Update goroutine.
+	switch s.GetStatus() {
 	case session.StatusWaiting:
 		return 0
 	case session.StatusFinished:
@@ -145,7 +153,7 @@ func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 		}
 		if s := byTicket[t.Identifier]; s != nil {
 			it.HasSession = true
-			it.SessionStatus = s.Status
+			it.SessionStatus = s.GetStatus()
 			// Deliberately no status WORD. The dot already carries it, in the
 			// colour and shape the sidebar uses, and printing "suspended" at
 			// the far right said the same thing a second time — while eating

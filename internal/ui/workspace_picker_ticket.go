@@ -211,6 +211,11 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 // of your issues. Nothing else in the flow catches it — the team keys come from
 // a file, so the dialog lights up; the API answers happily; the results are
 // simply always empty.
+// maxWorkspaceNameInNote bounds the one variable-length part of the mismatch
+// note. Generous for a real workspace name, small enough that the instruction
+// at the end always survives.
+const maxWorkspaceNameInNote = 24
+
 func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
 	ws, known := linear.WorkspaceInfo()
 	if !known || len(d.linearTeams) == 0 || len(ws.TeamKeys) == 0 {
@@ -230,6 +235,13 @@ func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
 	// Kept short deliberately: this renders on one line under a narrow input,
 	// and the first version wrapped and truncated mid-word into "Ctrl+K →
 	// Conn…", which is worse than useless.
+	//
+	// Shortening the WORDING was only half of that fix. ws.Name comes from the
+	// Linear API with no length limit, so a long workspace name reproduces the
+	// same wrap — and the truncation lands on "reconnect: Ctrl+K", the only
+	// part that tells you what to do. Bounding the variable is what actually
+	// holds the line.
+	name = ansi.Truncate(name, maxWorkspaceNameInNote, "…")
 	return fmt.Sprintf("%s has no %s team — reconnect: Ctrl+K", name, strings.Join(d.linearTeams, "/")), true
 }
 

@@ -2542,6 +2542,19 @@ func SeedRepoRoot(projectPath, root string) {
 	repoRootCacheMu.Unlock()
 }
 
+// LookupRepoRoot returns a cached repo root without ever shelling out.
+//
+// GetRepoRoot runs `git rev-parse` on a miss, with an 8-second ceiling. That is
+// fine on the worker and forbidden on the Bubble Tea Update goroutine, where it
+// freezes the whole UI. Callers on Update use this and degrade when it misses;
+// callers that may block use GetRepoRoot, which also fills this cache for them.
+func LookupRepoRoot(projectPath string) (string, bool) {
+	repoRootCacheMu.RLock()
+	defer repoRootCacheMu.RUnlock()
+	root, ok := repoRootCache[projectPath]
+	return root, ok
+}
+
 // GetRepoRoot returns the git repo root for a path, or the path itself if not a git repo.
 func GetRepoRoot(projectPath string) string {
 	repoRootCacheMu.RLock()

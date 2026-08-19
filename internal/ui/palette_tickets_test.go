@@ -418,3 +418,33 @@ func TestMixedTabHasNoStateHeaders(t *testing.T) {
 		t.Error("the tickets tab must group by state")
 	}
 }
+
+// TestMixedTabKeepsRepoAndWorktreeBranches pins the blast radius of the
+// mixed-tab detail rewrite.
+//
+// ticketRightColumn puts a ticket's state and priority on the right, because
+// outside the tickets tab there is no header for one and no lead column for the
+// other. It ran for EVERY non-recent row, and it returns "" for a command, a
+// repo or a worktree — so it blanked Detail, which is exactly where repo and
+// worktree rows carry their branch name. Recent rows took the other branch of
+// the loop and kept theirs, so one list showed some branches and not others.
+//
+// The empty query matters: this only bites when nothing is typed, which is why
+// the screenshot that prompted the feature never showed it.
+func TestMixedTabKeepsRepoAndWorktreeBranches(t *testing.T) {
+	d := NewCommandPaletteDialog()
+	d.SetSize(110, 40)
+	d.Show([]PaletteItem{
+		{ID: "c1", Name: "Settings", Shortcut: "S", Kind: PaletteKindCommand},
+		{ID: "r1", Name: "stonks", Detail: "master", Kind: PaletteKindRepo, Haystack: "stonks master"},
+		{ID: "w1", Name: "stonks-esports", Detail: "esports", Kind: PaletteKindWorktree, Haystack: "stonks-esports esports"},
+	}, nil)
+
+	want := map[string]string{"stonks": "master", "stonks-esports": "esports"}
+	for _, it := range d.filtered {
+		if w, ok := want[it.Name]; ok && it.Detail != w {
+			t.Errorf("%s lost its branch in the all tab with no query: Detail=%q, want %q",
+				it.Name, it.Detail, w)
+		}
+	}
+}

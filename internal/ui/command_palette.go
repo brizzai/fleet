@@ -257,9 +257,17 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 				// result is noise, since matches are already ordered by score
 				// and headers would fragment ten rows into six sections.
 				sec := ""
-				if d.activeTab == PaletteTabTickets {
+				switch {
+				case d.activeTab == PaletteTabTickets:
 					sec = it.Group
-				} else {
+				case it.Kind == PaletteKindTicket:
+					// Gated on the KIND, not merely on "not the tickets tab".
+					// ticketRightColumn returns the state plus a priority mark,
+					// and both are empty for every other kind — so running it
+					// unconditionally blanked Detail on repo and worktree rows,
+					// which is where their branch name lives. Recent rows took
+					// the other branch of this loop and kept theirs, so the same
+					// list showed some branches and not others.
 					it.Detail = ticketRightColumn(it)
 				}
 				rest = append(rest, scoredItem{PaletteItem: it, section: sec})
