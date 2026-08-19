@@ -257,8 +257,8 @@ func (d *ContextMenuDialog) renderRow(i, labelW, keyW int) string {
 		return DimStyle.Render("  " + label + pad + "  " + keyPad + it.Shortcut)
 	}
 	if i == d.cursor {
-		return SessionSelectionPrefix.Render("▸ ") +
-			SessionTitleSelStyle.Render(label+pad) +
+		return SelectionMarker(true).Render("▸ ") +
+			SelectionPill(true).Render(label+pad) +
 			"  " + DimStyle.Render(keyPad+it.Shortcut)
 	}
 	return "  " + label + pad + "  " + DimStyle.Render(keyPad+it.Shortcut)

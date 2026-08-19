@@ -80,7 +80,7 @@ type BugReportDialog struct {
 
 // NewBugReportDialog creates a bug report dialog.
 func NewBugReportDialog() *BugReportDialog {
-	ti := textinput.New()
+	ti := NewTextInput()
 	ti.Placeholder = "Describe what happened..."
 	ti.CharLimit = 256
 	ti.SetWidth(48)

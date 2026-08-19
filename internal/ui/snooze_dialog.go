@@ -53,7 +53,7 @@ type SnoozeDialog struct {
 }
 
 func NewSnoozeDialog() *SnoozeDialog {
-	ti := textinput.New()
+	ti := NewTextInput()
 	ti.Placeholder = "e.g. 15m, 3h, 2d"
 	ti.CharLimit = 8
 	ti.SetWidth(18)

@@ -738,7 +738,7 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 	// Block cursor at the emulator's real (x, y). Only overlaid once fully open —
 	// the slide crops rows, so the row index would otherwise be off.
 	if h.drawerMode == drawerTyping && h.drawerProgress >= 0.999 && cursorY >= 0 && cursorY < len(body) {
-		cur := lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent)
+		cur := FocusCaret()
 		line := body[cursorY]
 		lw := lipgloss.Width(line)
 		if cursorX < 0 || cursorX >= lw {
@@ -780,7 +780,11 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 // vocabulary as the sidebar — so the focused shell reads at a glance.
 func (h *Home) drawerTitle(shells []*shell.Shell) string {
 	active := h.clampTab(len(shells))
-	selStyle := lipgloss.NewStyle().Foreground(ColorBg).Background(ColorAccent).Bold(true).Padding(0, 1)
+	// A tab is a MODE where focus lives elsewhere, and a SELECTION where
+	// switching it moves the keyboard. The drawer is always in typing mode when
+	// it is on screen, so picking a tab picks the shell your keystrokes go to —
+	// this is the sidebar's selected-row pill, not the palette's mode strip.
+	selStyle := SelectionPill(true).Padding(0, 1)
 	parts := []string{lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("Terminal")}
 	for i, sh := range shells {
 		name := truncCmd(sh.DisplayName(), drawerTabNameMax)

@@ -525,7 +525,7 @@ type Home struct {
 func NewHome(storage *session.StateDB, cfg *config.Config, version string, identity analytics.Identity) *Home {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	fi := textinput.New()
+	fi := NewTextInput()
 	fi.Placeholder = "filter..."
 	fi.CharLimit = 64
 	fi.SetWidth(20)

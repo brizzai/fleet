@@ -493,7 +493,7 @@ func renderOriginHeader(item SidebarItem, width int, selected bool) string {
 	}
 
 	if selected {
-		icon := SessionSelectionPrefix.Render(chevron)
+		icon := SelectionMarker(true).Render(chevron)
 		name := selTitle().Render(" " + item.OriginLabel + " ")
 		out := fmt.Sprintf("%s %s", icon, name)
 		if countStr != "" {
@@ -594,7 +594,7 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	}
 
 	if selected {
-		icon := SessionSelectionPrefix.Render(chevron)
+		icon := SelectionMarker(true).Render(chevron)
 		// Selection bg is one contiguous span over title + dirty + PR badge,
 		// so the highlighted row reads as a single pill instead of two boxes.
 		inner := " " + label + dirty
@@ -625,7 +625,7 @@ func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 		failMark = "  " + ErrorStyle.Render("✕ removal failed — d to retry")
 	}
 	if selected {
-		icon := SessionSelectionPrefix.Render(chevron)
+		icon := SelectionMarker(true).Render(chevron)
 		nameStyled := selTitle().Render(" " + name + " ")
 		return fmt.Sprintf("  %s %s", icon, nameStyled) + failMark
 	}

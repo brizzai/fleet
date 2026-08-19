@@ -374,10 +374,10 @@ func (d *SettingsDialog) renderRail() string {
 		var style lipgloss.Style
 		switch {
 		case selected && d.focus == focusCategories:
-			style = lipgloss.NewStyle().Bold(true).Foreground(ColorBg).Background(ColorAccent)
+			style = SelectionPill(true)
 			label = " " + label
 		case selected:
-			style = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+			style = SelectionPill(false)
 			label = " " + label
 		default:
 			style = lipgloss.NewStyle().Foreground(ColorTextDim)
