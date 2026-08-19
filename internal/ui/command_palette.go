@@ -659,25 +659,67 @@ func sessionBadgeGlyph(st session.Status) (string, lipgloss.Style) {
 	return "○", DimStyle
 }
 
-// paletteLeadWidth is the priority column: two glyphs plus a space.
-const paletteLeadWidth = 3
+// paletteLeadWidth is the priority column: a three-cell gauge plus its trailing
+// separator. Four, not three — the gauge fills every cell it is given, so a
+// three-wide column left nothing between it and the identifier and rendered
+// "▰▰▰BRZ-1". The old "!!" mark was two glyphs and got its separator for free
+// from the padding.
+const paletteLeadWidth = 4
 
-// renderPriorityLead marks urgent and high, and nothing else.
+// priorityGauge renders a priority as a three-cell bar: filled cells for rank,
+// hollow cells for the rest.
 //
-// Coloured, and that is a deliberate reversal: the first cut left this the same
-// colour as the title on the grounds that the status dot owns colour in this
-// list. With real data that rule was protecting a column only a handful of rows
-// ever fill, while leaving fifty rows uniformly flat. Red and orange sit in a
-// different column from the dot's green/blue/amber and mean a different kind of
-// urgency, so the two read as separate axes rather than as one confused one.
-func renderPriorityLead(priority int) string {
+// A gauge rather than a label, because this list is sorted on priority and a
+// sort key you have to READ row by row gives you nothing when you are scanning
+// fifty of them. ▰▰▱ ranks below ▰▰▰ at a glance; "P2" only ranks below "P1"
+// once you have read both. It is also the shape Linear's own UI uses, so it
+// matches where the data came from.
+//
+// U+25B0/25B1 are Geometric Shapes — the same block as the status dots — and
+// crucially they are East-Asian-Neutral, so they are always one column wide.
+// The obvious alternatives (■ □ · •) are Ambiguous width, which some terminals
+// render double and which would shear this whole column out of alignment.
+// Menlo, macOS Terminal's default, covers both; U+23FE and U+2B21 were rejected
+// elsewhere in fleet for failing exactly that check.
+//
+// No priority renders BLANK, not ▱▱▱. "Low" is a choice someone made and "none"
+// is the absence of one — different facts, and absence should read as absence
+// down the column, the same rule the ticket badge follows.
+func priorityGauge(priority int) string {
 	switch priority {
 	case 1:
-		return lipgloss.NewStyle().Foreground(ColorRed).Bold(true).Render(pad("!!", paletteLeadWidth))
+		return "▰▰▰"
 	case 2:
-		return lipgloss.NewStyle().Foreground(ColorOrange).Render(pad("!", paletteLeadWidth))
+		return "▰▰▱"
+	case 3:
+		return "▰▱▱"
+	case 4:
+		return "▱▱▱"
 	}
-	return strings.Repeat(" ", paletteLeadWidth)
+	return ""
+}
+
+// renderPriorityLead styles the gauge for the tickets tab's lead column.
+//
+// Colour stops after high, and the lower two carry rank by shape alone. Red and
+// orange sit in a different column from the status dot's green/blue/amber and
+// mean a different kind of urgency, so the two read as separate axes — but
+// colouring all four would tint nearly every row in a fifty-row list, and the
+// top two would stop standing out, which is the entire reason the list sorts on
+// this. Yellow was the obvious third step and is spoken for: it means "waiting"
+// in the sidebar, and one screen should not carry two meanings for it.
+func renderPriorityLead(priority int) string {
+	g := priorityGauge(priority)
+	if g == "" {
+		return strings.Repeat(" ", paletteLeadWidth)
+	}
+	switch priority {
+	case 1:
+		return lipgloss.NewStyle().Foreground(ColorRed).Bold(true).Render(pad(g, paletteLeadWidth))
+	case 2:
+		return lipgloss.NewStyle().Foreground(ColorOrange).Render(pad(g, paletteLeadWidth))
+	}
+	return DimStyle.Render(pad(g, paletteLeadWidth))
 }
 
 // pad right-pads to a rune width.
@@ -721,17 +763,11 @@ func ticketRightColumn(it PaletteItem) string {
 	return out
 }
 
-// plainPriorityMark is renderPriorityLead without styling or padding, for
-// contexts where the mark is embedded in a string that gets truncated and
-// fuzzy-highlighted by rune offset.
+// plainPriorityMark is the gauge without styling or padding, for contexts where
+// the mark is embedded in a string that gets truncated and fuzzy-highlighted by
+// rune offset — embedded ANSI there would light up the wrong characters.
 func plainPriorityMark(priority int) string {
-	switch priority {
-	case 1:
-		return "!!"
-	case 2:
-		return "!"
-	}
-	return ""
+	return priorityGauge(priority)
 }
 
 func (d *CommandPaletteDialog) dialogWidth() int {

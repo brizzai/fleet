@@ -289,15 +289,26 @@ func TestPriorityIsVisibleBecauseItIsSorted(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(rows["BRZ-1"], "!!") {
-		t.Errorf("urgent must be marked: %q", rows["BRZ-1"])
+	// Every set priority now carries a gauge, and the gauges must be DISTINCT —
+	// a ladder where two rungs render alike is not a ladder. Only "no priority"
+	// is blank, because absence should read as absence down the column.
+	want := map[string]string{"BRZ-1": "▰▰▰", "BRZ-2": "▰▰▱", "BRZ-3": "▰▱▱"}
+	for id, gauge := range want {
+		if !strings.Contains(rows[id], gauge) {
+			t.Errorf("%s must carry %q: %q", id, gauge, rows[id])
+		}
 	}
-	if !strings.Contains(rows["BRZ-2"], "!") || strings.Contains(rows["BRZ-2"], "!!") {
-		t.Errorf("high must be marked once: %q", rows["BRZ-2"])
+	if seen := map[string]bool{}; true {
+		for _, g := range want {
+			if seen[g] {
+				t.Errorf("two priorities render the same gauge %q", g)
+			}
+			seen[g] = true
+		}
 	}
-	for _, id := range []string{"BRZ-3", "BRZ-4"} {
-		if strings.Contains(rows[id], "!") {
-			t.Errorf("%s is medium/unset and must carry no mark: %q", id, rows[id])
+	for _, id := range []string{"BRZ-4"} {
+		if strings.ContainsAny(rows[id], "▰▱") {
+			t.Errorf("%s has no priority set and must carry no gauge: %q", id, rows[id])
 		}
 	}
 
@@ -332,8 +343,8 @@ func TestPriorityColumnOnlyInTheTicketsTab(t *testing.T) {
 	}))
 
 	// In the tickets tab the mark shows.
-	if got := renderedPalette(t, h); !strings.Contains(got, "!") {
-		t.Errorf("the tickets tab must show the priority mark:\n%s", got)
+	if got := renderedPalette(t, h); !strings.Contains(got, "▰▰▱") {
+		t.Errorf("the tickets tab must show the priority gauge:\n%s", got)
 	}
 
 	// In the mixed tab it must not, and ticket names must start in the same
@@ -357,7 +368,7 @@ func TestPriorityColumnOnlyInTheTicketsTab(t *testing.T) {
 	// lead column for the priority, so a ticket row would otherwise show its title
 	// and nothing else. What must not come back is the LEAD column, which is what
 	// broke the alignment. So the assertion is positional, not "is a ! present".
-	if plain := ansi.Strip(ticketLine); strings.Index(plain, "!") < strings.Index(plain, "BRZ-2124") {
+	if plain := ansi.Strip(ticketLine); strings.Index(plain, "▰") < strings.Index(plain, "BRZ-2124") {
 		t.Errorf("the mixed tab must not carry a priority LEAD column: %q", ticketLine)
 	}
 	if !strings.Contains(ticketLine, "tkt  BRZ-2124") {
@@ -383,7 +394,7 @@ func TestMixedTabCarriesStateAndPriorityOnTheRight(t *testing.T) {
 	h.commandPalette.rebuildFiltered()
 
 	got := renderedPalette(t, h)
-	if !strings.Contains(got, "Todo  !!") {
+	if !strings.Contains(got, "Todo  ▰▰▰") {
 		t.Errorf("a ticket in the mixed tab must carry its state AND priority:\n%s", got)
 	}
 }
