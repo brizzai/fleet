@@ -140,8 +140,18 @@ func TestTicketInferenceNeverShellsOutFromUpdate(t *testing.T) {
 //
 // The invariant now: sessionCreateMsg.prompt is whatever the caller set, and the
 // only caller that sets it is the worktree-creation path (plus `fleet worktree
-// --ticket`/`-p`, which build the Session directly). Nothing between the message
-// and the launch may write to that field.
+// --ticket`/`-p`, which build the Session directly). handleSessionCreate, which
+// sits between the message and the launch, may not write to that field.
+//
+// The walk is scoped to that one function rather than to all of app.go.
+// sessionCreateMsg already declares a `prompt` field, so the name is live in
+// this package: a file-wide walk fails any future `x.prompt = …` — a dialog, a
+// form — with an error message about Linear tickets, which is a misleading
+// failure aimed at an innocent change. Scoping loses nothing, because the other
+// way to set a prompt is a composite literal (`sessionCreateMsg{prompt: …}`,
+// how the worktree path legitimately does it at app.go), which is not an
+// AssignStmt and was never caught in any file. A rename is loud, not silent:
+// the lookup fails the test rather than walking nothing.
 func TestManualSessionCreationSeedsNoPrompt(t *testing.T) {
 	if mentions(t, "handleSessionCreate", "linear") {
 		t.Error("handleSessionCreate reaches into internal/linear — the only ticket " +
@@ -154,7 +164,17 @@ func TestManualSessionCreationSeedsNoPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse app.go: %v", err)
 	}
-	ast.Inspect(f, func(n ast.Node) bool {
+	var fn *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "handleSessionCreate" {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("handleSessionCreate not found in app.go — renamed? this guard is now vacuous")
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok {
 			return true
@@ -164,10 +184,11 @@ func TestManualSessionCreationSeedsNoPrompt(t *testing.T) {
 			if !ok || sel.Sel.Name != "prompt" {
 				continue
 			}
-			t.Errorf("app.go:%d assigns to a .prompt field. A first message may only be "+
-				"set where the sessionCreateMsg is built (the worktree-creation path); "+
-				"writing it on the way to the launch is how every manually created "+
-				"session inherited a ticket's prompt.", fset.Position(assign.Pos()).Line)
+			t.Errorf("app.go:%d assigns to a .prompt field inside handleSessionCreate. "+
+				"A first message may only be set where the sessionCreateMsg is built "+
+				"(the worktree-creation path); writing it on the way to the launch is "+
+				"how every manually created session inherited a ticket's prompt.",
+				fset.Position(assign.Pos()).Line)
 		}
 		return true
 	})

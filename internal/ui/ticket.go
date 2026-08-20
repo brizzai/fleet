@@ -64,10 +64,23 @@ func pathTailAfterRepo(path, repoRoot string) string {
 func ticketStatusLine(res *linear.Result, err error) string {
 	switch {
 	case err != nil:
-		// Both are resting states, not failures: a branch that names no real
-		// issue, and a fleet that was never connected to Linear. Neither is
-		// worth a line on the session the user just started.
-		if errors.Is(err, linear.ErrNotFound) || errors.Is(err, linear.ErrNotConnected) {
+		// ErrNotFound used to be swallowed beside ErrNotConnected, because
+		// inference guessed an identifier out of a branch name and "no such
+		// issue" was the ordinary answer for a branch that named none.
+		// Inference is gone: the only caller left is worktree creation, where
+		// the user picked this ticket in the `w` dialog and Materialize
+		// re-fetched it. "Not found" there means it was deleted, or their
+		// access to it changed, in the seconds since — a real event, and
+		// swallowing it leaves a worktree that opens with no prompt and no
+		// explanation. Worded rather than %v-formatted: the sentinel reads
+		// "linear: issue not found", which renders as "Linear: linear: …".
+		if errors.Is(err, linear.ErrNotFound) {
+			return "Linear: issue not found — worktree created without the ticket"
+		}
+		// Still a resting state, and barely reachable from this caller anyway:
+		// the dialog's own fetch had to succeed for there to be a ticket to
+		// materialize at all.
+		if errors.Is(err, linear.ErrNotConnected) {
 			return ""
 		}
 		return fmt.Sprintf("Linear: %v — starting without the ticket", err)
