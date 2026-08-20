@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.2] - 2026-08-20
+
+### Fixed
+
+- **Shift+Enter inserts a newline.** In a fleet session `Shift+Enter` now breaks the line instead of submitting your message, on terminals that report modified keys the xterm way (iTerm2 as-is; kitty needs a one-line binding). Set `FLEET_NO_EXTENDED_KEYS` to opt out.
+
 ## [2.30.1] - 2026-08-20
 
 ### Fixed
@@ -568,7 +574,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.30.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.30.2...HEAD
+[2.30.2]: https://github.com/brizzai/fleet/releases/tag/v2.30.2
 [2.30.1]: https://github.com/brizzai/fleet/releases/tag/v2.30.1
 [2.30.0]: https://github.com/brizzai/fleet/releases/tag/v2.30.0
 [2.29.0]: https://github.com/brizzai/fleet/releases/tag/v2.29.0
