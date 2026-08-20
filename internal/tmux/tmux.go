@@ -85,6 +85,14 @@ func IsTmuxAvailable() error {
 // can only be newer than the memoized answer, and a stale too-old answer
 // merely skips passthrough instead of aborting the batch.
 func serverVersion() (major, minor int, ok bool) {
+	major, minor, _, ok = serverVersionParts()
+	return major, minor, ok
+}
+
+// serverVersionParts is serverVersion plus the patch suffix ("a" in "3.5a",
+// "-rc2" in "3.4-rc2"), which extendedKeysSafe needs: 3.5 and 3.5a differ only
+// there, and one of them ships a broken extended-keys parser.
+func serverVersionParts() (major, minor int, suffix string, ok bool) {
 	versionOnce.Do(func() {
 		out, err := exec.Command("tmux", "display-message", "-p", "#{version}").Output()
 		if err != nil {
@@ -93,45 +101,53 @@ func serverVersion() (major, minor int, ok bool) {
 				return // leave the zero values: ok=false
 			}
 		}
-		versionMajor, versionMinor, versionOK = parseTmuxVersion(string(out))
+		versionMajor, versionMinor, versionSuffix, versionOK = parseTmuxVersionParts(string(out))
 	})
-	return versionMajor, versionMinor, versionOK
+	return versionMajor, versionMinor, versionSuffix, versionOK
 }
 
 var (
-	versionOnce  sync.Once
-	versionMajor int
-	versionMinor int
-	versionOK    bool
+	versionOnce   sync.Once
+	versionMajor  int
+	versionMinor  int
+	versionSuffix string
+	versionOK     bool
 )
 
 // parseTmuxVersion parses a tmux version string — `tmux -V` output ("tmux
 // 3.4") or the bare `#{version}` format variable ("3.4") — split from the
 // exec so the spiky inputs (patch letters, dev builds) are testable.
 func parseTmuxVersion(out string) (major, minor int, ok bool) {
+	major, minor, _, ok = parseTmuxVersionParts(out)
+	return major, minor, ok
+}
+
+// parseTmuxVersionParts is parseTmuxVersion plus whatever trailed the minor
+// number — "a" for "3.5a", "-rc2" for "3.4-rc2", "" for a plain release.
+func parseTmuxVersionParts(out string) (major, minor int, suffix string, ok bool) {
 	v := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "tmux"))
 	numMajor, rest, found := strings.Cut(v, ".")
 	if !found {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
 	var err error
 	major, err = strconv.Atoi(strings.TrimSpace(numMajor))
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
 	// Minor may carry a patch-letter or rc suffix: "3a" -> 3, "4-rc2" -> 4.
 	digits := rest
 	for i, r := range rest {
 		if r < '0' || r > '9' {
-			digits = rest[:i]
+			digits, suffix = rest[:i], rest[i:]
 			break
 		}
 	}
 	minor, err = strconv.Atoi(digits)
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
-	return major, minor, true
+	return major, minor, suffix, true
 }
 
 // supportsAllowPassthrough reports whether the installed tmux understands the
@@ -248,6 +264,106 @@ func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool fu
 	return ""
 }
 
+// EnsureExtendedKeys turns on tmux extended-keys reporting so modified keys —
+// most visibly Shift+Enter — reach the agent inside the pane instead of
+// collapsing to a bare Enter. With extended-keys off (tmux's default) Shift+Enter
+// and plain Enter are the same byte (\r), so Claude Code can't tell them apart and
+// submits the message instead of inserting a newline.
+//
+// Both halves matter: `extended-keys on` makes tmux forward the extended encoding
+// to an app that asked for it (Claude asks), and advertising `extkeys` in
+// terminal-features tells tmux the outer terminal can carry those sequences —
+// which tmux otherwise only believes for the handful of terminals it can name off
+// XTVERSION (iTerm2, XTerm, mintty; notably not Ghostty on any shipping release).
+// The pane receives `\x1b[27;2;13~`, not CSI-u `\x1b[13;2u`: extended-keys-format
+// defaults to `xterm` and is left alone deliberately — Claude accepts both, and
+// it's one more shared-server option fleet has no business owning.
+// extended-keys and terminal-features are server options (global to the tmux
+// server fleet shares, as it runs no dedicated socket); we set extended-keys to
+// on unless it's already on/always, and append the extkeys feature only when
+// absent (no duplicate entries). Note this also overrides an explicit
+// `extended-keys off`: tmux `show-options -sv` returns the effective value, not
+// empty-when-unset, so we can't distinguish a deliberate off from the default.
+// Set FLEET_NO_EXTENDED_KEYS to opt out entirely — e.g. a terminal whose
+// Shift+Enter you've bound differently, a remote tmux you don't want
+// reconfigured, or a server where you've deliberately set extended-keys off.
+//
+// Note: the outer terminal must itself honor xterm's modifyOtherKeys mode 2, so
+// enabling extended-keys here is necessary but not sufficient. iTerm2 does it
+// unconfigured. kitty never will — it declines modifyOtherKeys by design and tmux
+// ignores kitty's own \x1b[>1u request — so kitty needs a manual
+// `map shift+enter send_text all \x1b[13;2u`. Claude's /terminal-setup is not the
+// answer for these: per Anthropic's docs it targets VS Code/Cursor/Alacritty/Zed.
+//
+// Skipped on the tmux versions whose extended-keys parser is known broken — see
+// extendedKeysSafe. Re-checks the live server each call rather than caching,
+// like EnsureCopyCommand: cheap (two show-options), and a server created fresh
+// after a restart still gets configured. Called from Start (server guaranteed
+// up) + the startup bootstrap. Best-effort; a no-server attempt just returns.
+func EnsureExtendedKeys() {
+	if envIsTruthy("FLEET_NO_EXTENDED_KEYS") {
+		return
+	}
+	if !extendedKeysSafe(serverVersionParts()) {
+		return
+	}
+	out, err := exec.Command("tmux", "show-options", "-sv", "extended-keys").Output()
+	if err != nil {
+		return // No server yet (or tmux error) — retry on a later call.
+	}
+	// Set on unless already on/always. This also overrides an explicit off (see
+	// the doc comment); FLEET_NO_EXTENDED_KEYS is the opt-out.
+	if v := strings.TrimSpace(string(out)); v != "on" && v != "always" {
+		_ = exec.Command("tmux", "set-option", "-s", "extended-keys", "on").Run()
+	}
+	// Advertise extkeys for xterm-like outer terminals, once. Match the exact
+	// `xterm*:extkeys` entry, not a bare `extkeys` substring: a user may already
+	// carry extkeys for a different pattern (e.g. `screen*:extkeys`), and we still
+	// need to add the xterm entry. terminal-features is additive, so this also
+	// guards against piling up the same entry across calls.
+	feat, err := exec.Command("tmux", "show-options", "-sv", "terminal-features").Output()
+	if err == nil && !strings.Contains(string(feat), "xterm*:extkeys") {
+		_ = exec.Command("tmux", "set-option", "-sa", "terminal-features", "xterm*:extkeys").Run()
+	}
+}
+
+// extendedKeysSafe reports whether this tmux can be asked for extended keys
+// without shipping a known upstream key-parsing bug along with the feature.
+// Two releases can't:
+//
+//   - exactly 3.5: Alt+Backspace emits invalid bytes (\x1b\xf4\x8e\x86\x94) and
+//     Shift-modified keys are mis-encoded — tmux#4146, tmux#4156, both fixed in
+//     3.5a, which is the only thing separating the two versions.
+//   - 3.6, 3.6a, 3.6b: a fast key burst trips the assume-paste path, which
+//     writes the outer terminal's raw bytes through verbatim, so literal
+//     ^[[27;5;102~ lands in the pane — tmux#5031, fixed in 3.7. Ubuntu 26.04
+//     ships 3.6a.
+//
+// Both live in the code that parses extended keys *arriving from the outer
+// terminal*, which is unreachable while extended-keys is off — tmux's default.
+// So these are bugs fleet would be handing users, not ones they already have.
+// Skipping rather than warning is deliberate: extended-keys is a server option,
+// so the damage would land in the user's own tmux windows, not just fleet's
+// panes, and nothing there would point back at fleet.
+//
+// An unparseable version (dev build) is treated as new enough, matching
+// allowPassthroughSupported. tmux older than 3.2 has no extended-keys option at
+// all; it needs no gate here because EnsureExtendedKeys's show-options probe
+// already errors out and returns.
+func extendedKeysSafe(major, minor int, suffix string, ok bool) bool {
+	if !ok || major != 3 {
+		return true
+	}
+	switch minor {
+	case 5:
+		// A patch letter means 3.5a or later. An rc suffix does not.
+		return len(suffix) == 1 && suffix[0] >= 'a' && suffix[0] <= 'z'
+	case 6:
+		return false
+	}
+	return true
+}
+
 // envIsTruthy reports whether the named env var is set to a common truthy value.
 func envIsTruthy(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
@@ -354,6 +470,9 @@ func (s *Session) Start(command string, env ...string) error {
 
 	// Route copy-mode selections to the macOS clipboard (server exists now).
 	EnsureCopyCommand()
+	// Forward extended keys (Shift+Enter et al.) into the pane instead of
+	// collapsing them to plain Enter.
+	EnsureExtendedKeys()
 
 	// Batch set options.
 	// remain-on-exit keeps the dead pane around so the crash dump can read
