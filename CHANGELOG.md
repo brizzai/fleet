@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.1] - 2026-08-20
+
+### Fixed
+
+- **Fresh sessions start fresh** — A session you add by hand with `a`/`n`/`A` no longer inherits the Linear ticket prompt from the worktree it sits in. Only the session created alongside the worktree is briefed on the ticket.
+
 ## [2.30.0] - 2026-08-19
 
 ### Highlights
@@ -562,7 +568,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.30.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.30.1...HEAD
+[2.30.1]: https://github.com/brizzai/fleet/releases/tag/v2.30.1
 [2.30.0]: https://github.com/brizzai/fleet/releases/tag/v2.30.0
 [2.29.0]: https://github.com/brizzai/fleet/releases/tag/v2.29.0
 [2.28.0]: https://github.com/brizzai/fleet/releases/tag/v2.28.0
