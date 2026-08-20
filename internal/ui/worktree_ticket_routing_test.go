@@ -99,10 +99,10 @@ func TestWorktreeDialogAsyncMessagesAreRouted(t *testing.T) {
 // blocking git call.
 //
 // session.GetRepoRoot runs `git rev-parse` with an 8-second ceiling on a cache
-// miss. ticketPromptFor and sessionsByTicket both run on the Bubble Tea Update
-// goroutine — the one that paints every frame — and both called it, one of them
-// twice, while ticketPromptFor's own comment claimed it did "no I/O beyond a
-// stat". A brand-new worktree is exactly the cache miss.
+// miss. sessionsByTicket runs on the Bubble Tea Update goroutine — the one that
+// paints every frame — and called it once per session, while the ticket paths'
+// own comments claimed they did "no I/O beyond a stat". A brand-new worktree is
+// exactly the cache miss.
 //
 // Scoped to these two files on purpose. GetRepoRoot is used widely elsewhere in
 // this package and auditing all of it is a separate job; this pins the paths the
@@ -125,4 +125,50 @@ func TestTicketInferenceNeverShellsOutFromUpdate(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestManualSessionCreationSeedsNoPrompt pins the one-shot rule: a seeded first
+// message is the gesture of starting a worktree from a ticket, not a property of
+// the directory that worktree happens to be.
+//
+// handleSessionCreate used to run ticketPromptFor on EVERY creation — inferring
+// an identifier from the branch, and, before that, reusing the prompt.txt
+// already sitting in .fleet/ticket/<ID>/. The reuse branch never looked at the
+// branch at all, so a checkout that once held a ticket re-asked the original
+// task on every session added by hand afterwards, forever, including long after
+// the checkout had moved on to master.
+//
+// The invariant now: sessionCreateMsg.prompt is whatever the caller set, and the
+// only caller that sets it is the worktree-creation path (plus `fleet worktree
+// --ticket`/`-p`, which build the Session directly). Nothing between the message
+// and the launch may write to that field.
+func TestManualSessionCreationSeedsNoPrompt(t *testing.T) {
+	if mentions(t, "handleSessionCreate", "linear") {
+		t.Error("handleSessionCreate reaches into internal/linear — the only ticket " +
+			"fetch left is at worktree creation, and putting one back here re-seeds " +
+			"the prompt into every manually added session")
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "app.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse app.go: %v", err)
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			sel, ok := lhs.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "prompt" {
+				continue
+			}
+			t.Errorf("app.go:%d assigns to a .prompt field. A first message may only be "+
+				"set where the sessionCreateMsg is built (the worktree-creation path); "+
+				"writing it on the way to the launch is how every manually created "+
+				"session inherited a ticket's prompt.", fset.Position(assign.Pos()).Line)
+		}
+		return true
+	})
 }

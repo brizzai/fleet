@@ -1751,18 +1751,6 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		dialog, cmd := h.connectLinear.Update(msg)
 		h.connectLinear = dialog
 		return h, cmd
-	case ticketReadyMsg:
-		// Inference finished. The session starts either way — a Linear failure
-		// costs the seeded prompt, never the pane.
-		if line := ticketStatusLine(msg.res, msg.err); line != "" {
-			h.setInfo(line)
-		}
-		create := msg.create
-		if msg.res != nil {
-			create.prompt = msg.res.Prompt
-		}
-		return h, h.startSessionCmd(create)
-
 	case deleteCleanupDoneMsg:
 		for i, pd := range h.finalizingDeletes {
 			if pd.Session.ID == msg.sessionID {
@@ -3376,16 +3364,11 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 			h.setInfo(conflict.Message(msg.account))
 		}
 	}
-	// A branch that names a Linear issue gets the ticket read for it. The fast
-	// path (a worktree already materialized) is one stat and returns inline;
-	// only a first-time fetch defers the launch, and even then a failure starts
-	// the session anyway.
-	if prompt, cmd := h.ticketPromptFor(msg); cmd != nil {
-		h.setInfo("Fetching the Linear ticket for this branch…")
-		return h, cmd
-	} else if prompt != "" {
-		msg.prompt = prompt
-	}
+	// msg.prompt is whatever the caller set and nothing more. Deliberately no
+	// inference here: a seeded first message is the worktree-creation gesture
+	// ("start on this ticket"), and a session added by hand to a checkout that
+	// already holds a materialized ticket is not that gesture — it re-asked the
+	// original task, forever, on every session after the first.
 	return h, h.startSessionCmd(msg)
 }
 

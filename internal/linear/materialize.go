@@ -3,7 +3,6 @@ package linear
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,13 +19,12 @@ import (
 // JetBrains Fleet owns .fleet/ in project roots and a repo may legitimately
 // commit .fleet/settings.json.
 const (
-	fleetDir    = ".fleet"
-	ticketDir   = "ticket"
-	imagesDir   = "images"
-	ticketFile  = "ticket.md"
-	promptFile  = "prompt.txt"
-	metaFile    = "meta.json"
-	noTicketPin = ".no-ticket"
+	fleetDir   = ".fleet"
+	ticketDir  = "ticket"
+	imagesDir  = "images"
+	ticketFile = "ticket.md"
+	promptFile = "prompt.txt"
+	metaFile   = "meta.json"
 )
 
 // Result describes what a Materialize call put on disk.
@@ -72,46 +70,6 @@ func TicketDir(worktreePath, id string) string {
 	return filepath.Join(worktreePath, fleetDir, ticketDir, strings.ToUpper(id))
 }
 
-// ExistingPrompt returns a previously materialized prompt for this worktree.
-//
-// This is the fast path and the steady state: every session after the first in
-// a ticket worktree hits it, at the cost of one ReadDir and one ReadFile, with
-// no network. The filesystem is the ledger — it survives
-// restarts, survives losing state.db, and a user who deletes the directory gets
-// a re-fetch, which is the natural "refresh this ticket" gesture.
-func ExistingPrompt(worktreePath string) (string, bool) {
-	base := filepath.Join(worktreePath, fleetDir, ticketDir)
-	entries, err := os.ReadDir(base)
-	if err != nil {
-		return "", false
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(base, e.Name(), promptFile))
-		if err == nil && len(data) > 0 {
-			return string(data), true
-		}
-	}
-	return "", false
-}
-
-// NegativelyPinned reports whether this worktree's branch was already resolved
-// to "no such issue", so inference does not re-ask on every session start.
-func NegativelyPinned(worktreePath, id string) bool {
-	data, err := os.ReadFile(filepath.Join(worktreePath, fleetDir, ticketDir, noTicketPin))
-	return err == nil && strings.EqualFold(strings.TrimSpace(string(data)), id)
-}
-
-func pinNoTicket(worktreePath, id string) {
-	dir := filepath.Join(worktreePath, fleetDir, ticketDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return
-	}
-	_ = os.WriteFile(filepath.Join(dir, noTicketPin), []byte(id), 0644)
-}
-
 // Materialize fetches a ticket and writes it, with its screenshots, into the
 // worktree.
 //
@@ -138,12 +96,6 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	// team's workflow states so the optional state write needs no second query.
 	issue, err := fetchFull(ctx, id)
 	if err != nil {
-		// errors.Is, not ==: a wrapped sentinel would skip the negative pin and
-		// make inference re-ask Linear on every session start — the exact cost
-		// NegativelyPinned exists to avoid.
-		if errors.Is(err, ErrNotFound) {
-			pinNoTicket(o.WorktreePath, id)
-		}
 		return res, err
 	}
 

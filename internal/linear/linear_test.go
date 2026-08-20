@@ -443,38 +443,6 @@ func TestAuthHeaderFormDiffersByKind(t *testing.T) {
 	}
 }
 
-func TestExistingPromptIsTheReuseLedger(t *testing.T) {
-	wt := t.TempDir()
-	if _, ok := ExistingPrompt(wt); ok {
-		t.Error("empty worktree should have no prompt")
-	}
-	dir := TicketDir(wt, "BRZ-3182")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, promptFile), []byte("seeded"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	got, ok := ExistingPrompt(wt)
-	if !ok || got != "seeded" {
-		t.Errorf("ExistingPrompt = (%q, %v), want (seeded, true)", got, ok)
-	}
-}
-
-func TestNegativePinStopsRefetch(t *testing.T) {
-	wt := t.TempDir()
-	if NegativelyPinned(wt, "FIX-123") {
-		t.Error("nothing pinned yet")
-	}
-	pinNoTicket(wt, "FIX-123")
-	if !NegativelyPinned(wt, "FIX-123") {
-		t.Error("a branch that resolved to no-such-issue must cost one subprocess ever, not one per session")
-	}
-	if NegativelyPinned(wt, "BRZ-1") {
-		t.Error("the pin must be identifier-specific")
-	}
-}
-
 // resetCredentialForTest drops the cached credential so a test can re-resolve.
 func resetCredentialForTest() {
 	credState.mu.Lock()
