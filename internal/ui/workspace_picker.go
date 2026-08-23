@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -11,6 +11,7 @@ import (
 	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/workspace"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Messages for workspace/worktree flow.
@@ -184,6 +185,17 @@ func (d *WorktreeDialog) IsVisible() bool { return d.visible }
 func (d *WorktreeDialog) SetSize(w, h int) {
 	d.width = w
 	d.height = h
+
+	// The inputs follow the box rather than a fixed 40 columns, so a long branch
+	// name is readable instead of scrolling inside a field a third of the width
+	// of the dialog holding it. NewTextInput owns its prompt (design-system.md
+	// §7), so the writable column is the content width less that prompt.
+	iw := d.innerWidth() - 2
+	if iw < 20 {
+		iw = 20
+	}
+	d.baseBranchInput.SetWidth(iw)
+	d.newBranchInput.SetWidth(iw)
 }
 
 // setSelection is the ONLY place that moves the highlight.
@@ -438,9 +450,10 @@ func (d *WorktreeDialog) View() string {
 		b.WriteString("\n")
 		b.WriteString(DimStyle.Render("Existing worktrees:"))
 		b.WriteString("\n")
+		nameW, branchW, countW := d.worktreeColumnWidths()
 		for i, ws := range d.workspaces {
 			selected := d.focus == focusWorktreeList && i == d.cursor
-			b.WriteString(d.renderWorktreeRow(&ws, selected))
+			b.WriteString(d.renderWorktreeRow(&ws, selected, nameW, branchW, countW))
 			b.WriteString("\n")
 		}
 	}
@@ -458,60 +471,139 @@ func (d *WorktreeDialog) View() string {
 	return d.wrapDialog(b.String())
 }
 
-func (d *WorktreeDialog) renderWorktreeRow(ws *workspace.WorkspaceInfo, selected bool) string {
+// worktreeColumns sizes the name and branch columns from the widest values
+// actually present, within the space the two of them share.
+//
+// The previous fixed 20/16 split ellipsised every row in a real repo while the
+// terminal had room to spare, and starved whichever column happened to hold the
+// longer strings. Deriving the widths means a list of short names is never
+// truncated at all, and a list of long ones degrades evenly.
+func worktreeColumns(wss []workspace.WorkspaceInfo, avail int) (nameW, branchW int) {
+	for i := range wss {
+		if w := lipgloss.Width(wss[i].Name); w > nameW {
+			nameW = w
+		}
+		if w := lipgloss.Width(wss[i].Branch); w > branchW {
+			branchW = w
+		}
+	}
+	if nameW+branchW <= avail {
+		return nameW, branchW
+	}
+
+	// Over budget: split in proportion to what each column asked for, with a
+	// floor so the narrower one is not cut to nothing to spare the other.
+	const floor = 12
+	if avail < 2*floor {
+		nameW = avail / 2
+		return nameW, avail - nameW
+	}
+	nameW = avail * nameW / (nameW + branchW)
+	if nameW < floor {
+		nameW = floor
+	}
+	if avail-nameW < floor {
+		nameW = avail - floor
+	}
+	return nameW, avail - nameW
+}
+
+// fitCell truncates to width and pads out to it, by display columns.
+//
+// ansi.Truncate rather than a byte slice (design-system.md §7): a worktree name
+// is arbitrary user text, and slicing bytes cuts at a fraction of the intended
+// columns and can split a rune in half.
+func fitCell(sw string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	sw = ansi.Truncate(sw, width, "…")
+	if pad := width - lipgloss.Width(sw); pad > 0 {
+		sw += strings.Repeat(" ", pad)
+	}
+	return sw
+}
+
+// worktreeRowGap is the space between each pair of columns in a worktree row.
+const worktreeRowGap = 2
+
+// worktreeColumnWidths sizes the three columns of the worktree list against the
+// dialog's content width. Split out from View so the arithmetic is testable on
+// its own: a row that overruns innerWidth wraps onto a second line inside the
+// box, which shows up as a stray count on its own row rather than as anything
+// measurable on the rendered width.
+func (d *WorktreeDialog) worktreeColumnWidths() (nameW, branchW, countW int) {
+	for i := range d.workspaces {
+		if c := d.sessionCounts[d.workspaces[i].Path]; c > 0 {
+			if w := len(strconv.Itoa(c)); w > countW {
+				countW = w
+			}
+		}
+	}
+	// The name and branch columns share what is left after the selection marker,
+	// the two gaps between the three columns, and the count.
+	avail := d.innerWidth() - len("▸ ") - 2*worktreeRowGap - countW
+	nameW, branchW = worktreeColumns(d.workspaces, avail)
+	return nameW, branchW, countW
+}
+
+func (d *WorktreeDialog) renderWorktreeRow(ws *workspace.WorkspaceInfo, selected bool, nameW, branchW, countW int) string {
 	prefix := "  "
 	if selected {
 		prefix = SelectionMarker(true).Render("▸ ")
 	}
 
-	// Name.
-	name := ws.Name
-	if len(name) > 20 {
-		name = name[:20]
-	}
+	// Padded raw, then styled — padding a styled string counts the ANSI bytes
+	// and the columns come out ragged (design-system.md §7).
+	name := fitCell(ws.Name, nameW)
+	branch := fitCell(ws.Branch, branchW)
 
-	// Branch.
-	branch := ws.Branch
-	if len(branch) > 16 {
-		branch = branch[:13] + "..."
+	count := ""
+	if c := d.sessionCounts[ws.Path]; c > 0 {
+		count = strconv.Itoa(c)
 	}
-
-	// Session count.
-	count := d.sessionCounts[ws.Path]
+	if pad := countW - lipgloss.Width(count); pad > 0 {
+		count = strings.Repeat(" ", pad) + count // right-aligned, so digits line up
+	}
 
 	if selected {
-		line := fmt.Sprintf("%-20s", name)
-		if branch != "" {
-			line += "  " + branch
-		}
-		if count > 0 {
-			line += fmt.Sprintf("  %d", count)
-		}
-		return prefix + SelectionPill(true).Render(line)
+		// SelectionPill, not SelectionBand, despite the filled region running past
+		// SelectionFillWidthGuide once the columns are sized to their content.
+		// The guide is a call-site judgement, and what is filled here is the row's
+		// content rather than the full inner width of the dialog — and this list
+		// shares focus with two text inputs, where SelectionBand has no blurred
+		// weight to offer by design.
+		return prefix + SelectionPill(true).Render(strings.TrimRight(name+"  "+branch+"  "+count, " "))
 	}
 
-	nameStyled := lipgloss.NewStyle().Foreground(ColorText).Render(fmt.Sprintf("%-20s", name))
-	var parts []string
-	parts = append(parts, prefix+nameStyled)
-	if branch != "" {
-		parts = append(parts, BranchStyle.Render(branch))
+	line := prefix + lipgloss.NewStyle().Foreground(ColorText).Render(name)
+	if strings.TrimSpace(branch) != "" {
+		line += "  " + BranchStyle.Render(branch)
 	}
-	if count > 0 {
-		parts = append(parts, DimStyle.Render(fmt.Sprintf("%d", count)))
+	if strings.TrimSpace(count) != "" {
+		line += "  " + DimStyle.Render(count)
 	}
-	return strings.Join(parts, "  ")
+	return strings.TrimRight(line, " ")
 }
 
-// innerWidth is the content column inside the dialog box: wrapDialog's clamped
-// width less DialogStyle's Padding(1, 2) on each side.
+// innerWidth is the writable content column inside the dialog box. In Lip Gloss
+// v2, Style.Width sets the TOTAL frame width (border + padding included), so
+// subtract both: 2 (rounded border) + 4 (DialogStyle's Padding(1, 2), 2 each
+// side). Subtracting only the padding left rows 2 cells too wide and wrapped the
+// longest ones — the same off-by-two the command palette already fixed, latent
+// here until worktree rows started being sized against this.
 func (d *WorktreeDialog) innerWidth() int {
-	return d.dialogWidth() - 4
+	return d.dialogWidth() - 6
 }
 
 func (d *WorktreeDialog) dialogWidth() int {
 	w := d.width - 4
-	if w > 64 {
-		w = 64
+	// Same ceiling as the command palette, and for the same reason: wide enough
+	// that a worktree name and its branch are readable rather than a pair of
+	// ellipses, still an overlay rather than a takeover. At 64 every row in a
+	// real repo was truncated with half the terminal unused.
+	if w > 96 {
+		w = 96
 	}
 	if w < 30 {
 		w = 30

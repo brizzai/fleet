@@ -574,3 +574,163 @@ func TestWarnTranscriptThrottles(t *testing.T) {
 		t.Error("warning omitted the transcript path")
 	}
 }
+
+// TestReadClaudeSessionNameIncrementalMatchesFullScan pins the memoised,
+// resume-from-offset read against the whole-file walk it replaced. The scan is
+// only sound because Claude's JSONL is append-only, so every case here is a
+// way that assumption can bend: growth, custom-vs-ai precedence spanning two
+// reads, a line still being written, and a file replaced under the same name.
+func TestReadClaudeSessionNameIncrementalMatchesFullScan(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+
+	projectPath := "/test/incremental-project"
+	claudeSessionID := "test-session-incremental"
+	projectDir := filepath.Join(homeDir, ".claude", "projects", "-test-incremental-project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(projectDir) })
+
+	jsonlPath := filepath.Join(projectDir, claudeSessionID+".jsonl")
+	t.Cleanup(func() {
+		titleScanMu.Lock()
+		delete(titleScans, jsonlPath)
+		titleScanMu.Unlock()
+	})
+
+	appendLine := func(t *testing.T, s string) {
+		t.Helper()
+		f, err := os.OpenFile(jsonlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			t.Fatalf("open for append: %v", err)
+		}
+		if _, err := f.WriteString(s); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		f.Close()
+	}
+
+	// fullScan drops the memo so the next read walks the whole file, which is
+	// the behaviour the incremental path has to stay identical to.
+	fullScan := func() string {
+		titleScanMu.Lock()
+		delete(titleScans, jsonlPath)
+		titleScanMu.Unlock()
+		return ReadClaudeSessionName(claudeSessionID, projectPath)
+	}
+
+	check := func(t *testing.T, step, want string) {
+		t.Helper()
+		got := ReadClaudeSessionName(claudeSessionID, projectPath)
+		if got != want {
+			t.Errorf("%s: incremental read = %q, want %q", step, got, want)
+		}
+		if full := fullScan(); full != got {
+			t.Errorf("%s: incremental read = %q but full scan = %q", step, got, full)
+		}
+	}
+
+	steps := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"untitled", `{"type":"message","content":"hello"}` + "\n", ""},
+		{"first ai-title", `{"type":"ai-title","aiTitle":"first-draft"}` + "\n", "first draft"},
+		{"ai-title drifts", `{"type":"ai-title","aiTitle":"second-draft"}` + "\n", "second draft"},
+		// The rename lands in a later read than the ai-titles it outranks, so
+		// precedence has to survive in the memo rather than in one walk's locals.
+		{"rename wins", `{"type":"custom-title","customTitle":"Renamed"}` + "\n", "Renamed"},
+		{"rename outlives later ai-title", `{"type":"ai-title","aiTitle":"later-ai"}` + "\n", "Renamed"},
+	}
+	for _, step := range steps {
+		appendLine(t, step.line)
+		check(t, step.name, step.want)
+	}
+
+	t.Run("line still being written is re-read once complete", func(t *testing.T) {
+		// Half an entry, as a concurrent Claude write would leave it. Reading here
+		// must not consume it, or its completion would never be seen.
+		appendLine(t, `{"type":"custom-title","customTi`)
+		check(t, "partial line", "Renamed")
+
+		appendLine(t, `tle":"Completed"}`+"\n")
+		check(t, "completed line", "Completed")
+	})
+
+	t.Run("replaced file longer than the original resets the memo", func(t *testing.T) {
+		// The dangerous shape: a replacement at least as long as the old file
+		// looks like growth to any size check, so the scan would seek into
+		// unrelated bytes and the previous file's custom-title would survive.
+		// Nothing appended later could ever clear it.
+		longer := strings.Repeat(`{"type":"message","content":"padding padding padding"}`+"\n", 40) +
+			`{"type":"ai-title","aiTitle":"replaced-longer"}` + "\n"
+		st, err := os.Stat(jsonlPath)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if int64(len(longer)) <= st.Size() {
+			t.Fatalf("test is not exercising the grew-in-place case: %d <= %d", len(longer), st.Size())
+		}
+		if err := os.WriteFile(jsonlPath, []byte(longer), 0644); err != nil {
+			t.Fatalf("replace: %v", err)
+		}
+		check(t, "replaced longer", "replaced longer")
+	})
+
+	t.Run("replaced file resets the memo", func(t *testing.T) {
+		// A shorter file under the same name: the memoised offset now points past
+		// the end, and the remembered titles describe content that is gone.
+		if err := os.WriteFile(jsonlPath, []byte(`{"type":"ai-title","aiTitle":"fresh-start"}`+"\n"), 0644); err != nil {
+			t.Fatalf("truncate: %v", err)
+		}
+		check(t, "after truncation", "fresh start")
+	})
+}
+
+// TestScanTranscriptFromEarlyStopKeepsPartialLine pins the contract in
+// scanTranscriptFrom's doc comment: a trailing chunk with no newline is a line
+// still being written, so stopping on it must not consume it. Nothing today both
+// stops early and resumes, which is exactly why this is worth a test — the next
+// caller that does would otherwise silently skip the half-written line.
+func TestScanTranscriptFromEarlyStopKeepsPartialLine(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("stopping on a complete line consumes it", func(t *testing.T) {
+		path := filepath.Join(dir, "complete.jsonl")
+		if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		off, err := scanTranscriptFrom(path, 0, func(line string) bool { return line != "alpha" })
+		if err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if want := int64(len("alpha\n")); off != want {
+			t.Errorf("offset = %d, want %d (the newline-terminated line is consumed)", off, want)
+		}
+	})
+
+	t.Run("stopping on a partial trailing line does not consume it", func(t *testing.T) {
+		path := filepath.Join(dir, "partial.jsonl")
+		if err := os.WriteFile(path, []byte("alpha\nbet"), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		var seen []string
+		off, err := scanTranscriptFrom(path, 0, func(line string) bool {
+			seen = append(seen, line)
+			return line != "bet"
+		})
+		if err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if len(seen) != 2 || seen[1] != "bet" {
+			t.Fatalf("fn should still see the partial line, saw %q", seen)
+		}
+		if want := int64(len("alpha\n")); off != want {
+			t.Errorf("offset = %d, want %d (the partial line must be re-read)", off, want)
+		}
+	})
+}

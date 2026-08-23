@@ -27,6 +27,11 @@ const (
 	// generous; the cap exists so an unresponsive tmux server can't hang the
 	// status worker (called once per session per tick).
 	listPanesTimeout = 2 * time.Second
+	// hasSessionTimeout caps the `tmux has-session` fallback in Exists. It only
+	// runs on a session-cache miss, but that is exactly when the server is
+	// likely to be busy — and an unbounded fork here blocked the Bubble Tea
+	// Update goroutine for 500ms+, which reads as the whole UI freezing.
+	hasSessionTimeout = 2 * time.Second
 )
 
 // Session represents a tmux session managed by fleet.
@@ -760,20 +765,65 @@ func (s *Session) PaneDeadInfo() (dead bool, exitStatus, exitSignal string, ok b
 	return parts[0] == "1", parts[1], parts[2], true
 }
 
-// Exists checks if the tmux session is alive.
-func (s *Session) Exists() bool {
-	// Try cache first.
+// ExistsCached answers Exists from the shared session cache alone, never
+// shelling out. known is false when the cache is cold or has aged past
+// sessionCacheTTL, leaving it to the caller to decide what an unknown means.
+//
+// Callers on the Bubble Tea Update goroutine must use this rather than Exists:
+// RefreshSessionCache runs on the status worker, so anything that blocks that
+// worker lets the cache go stale, and Exists would then fork tmux inline on
+// every tick. That is the shape of the previewTick stalls in the perfwatch
+// dumps — a busy worker turning a map lookup into a half-second freeze.
+func (s *Session) ExistsCached() (exists, known bool) {
 	sessionCacheMu.RLock()
-	if sessionCacheData != nil && time.Since(sessionCacheTime) < sessionCacheTTL {
-		_, exists := sessionCacheData[s.Name]
-		sessionCacheMu.RUnlock()
+	defer sessionCacheMu.RUnlock()
+	if sessionCacheData == nil || time.Since(sessionCacheTime) >= sessionCacheTTL {
+		return false, false
+	}
+	_, ok := sessionCacheData[s.Name]
+	return ok, true
+}
+
+// existsStale answers from the session cache ignoring its TTL. Only for the
+// timeout path in Exists, where a stale-but-real answer beats a fabricated one.
+func (s *Session) existsStale() (exists, known bool) {
+	sessionCacheMu.RLock()
+	defer sessionCacheMu.RUnlock()
+	if sessionCacheData == nil {
+		return false, false
+	}
+	_, ok := sessionCacheData[s.Name]
+	return ok, true
+}
+
+// Exists checks if the tmux session is alive, falling back to a bounded
+// `tmux has-session` when the cache can't answer.
+//
+// Only a probe that actually completed may report absence. Every caller reads
+// false as "the session is gone" and acts on it — restartSession rebuilds
+// instead of respawning, `fleet send` refuses a live session, finalizeDelete
+// skips its Kill and leaks the tmux session — and a timeout is not evidence of
+// any of that. It is evidence of a busy server, which is precisely the state
+// this timeout exists to survive, so a timed-out probe answers from the cache
+// however stale it has become, and says so: a silent false negative here would
+// be undiagnosable from the outside.
+func (s *Session) Exists() bool {
+	if exists, known := s.ExistsCached(); known {
 		return exists
 	}
-	sessionCacheMu.RUnlock()
 
-	// Fallback to tmux has-session.
-	cmd := exec.Command("tmux", "has-session", "-t", s.Name)
-	return cmd.Run() == nil
+	ctx, cancel := context.WithTimeout(context.Background(), hasSessionTimeout)
+	defer cancel()
+	err := exec.CommandContext(ctx, "tmux", "has-session", "-t", s.Name).Run()
+	if ctx.Err() == nil {
+		return err == nil
+	}
+
+	exists, known := s.existsStale()
+	debuglog.Logger.Warn("tmux has-session timed out; not treating it as absence",
+		"session", s.Name, "timeout", hasSessionTimeout,
+		"answered_from_stale_cache", known, "exists", exists)
+	return exists
 }
 
 // SendKeys sends keystrokes to the tmux pane.

@@ -501,6 +501,18 @@ func (s *Session) IsAlive() bool {
 	return s.tmuxSession.Exists()
 }
 
+// IsAliveCached is IsAlive without the tmux shell-out: known is false when the
+// session cache can't answer. Callers running on the Bubble Tea Update
+// goroutine must use this — IsAlive forks `tmux has-session` on a cache miss,
+// and the cache goes stale exactly when the status worker is blocked, so the
+// per-tick guards were freezing the UI for half a second at a time.
+func (s *Session) IsAliveCached() (alive, known bool) {
+	if s.paneCapturer != nil {
+		return !s.paneCapturer.IsPaneDead(), true
+	}
+	return s.tmuxSession.ExistsCached()
+}
+
 // GetTmuxSession returns the underlying tmux session handle.
 func (s *Session) GetTmuxSession() *tmux.Session {
 	return s.tmuxSession
