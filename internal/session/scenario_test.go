@@ -1119,9 +1119,15 @@ func TestScenarioProseAboutFooterDoesNotPinWaiting(t *testing.T) {
 		t.Skipf("fixture %s not available", fixture)
 	}
 
-	// The real footer, for contrast: same two hints, but as fields of the "·" list.
-	// A genuine dialog must still hold the session at waiting.
-	realFooter := "Which approach?\n\n❯ 1. Rewrite\n  2. Patch\n\n" +
+	// The real footer, for contrast: the same two hints, but as fields of the "·"
+	// list. Carries no "❯ N." cursor line and no second numbered option, so the
+	// numbered-menu check above cannot fire and the footer is the only thing that
+	// can identify it — the checkbox-focus state, and the shape the single-question
+	// preview variant lands in when its panel pushes the cursor out of the window.
+	// The hook is deliberately left on "finished" here: a "waiting" hook would set
+	// the status on its own and the assertion would hold even with the footer check
+	// deleted.
+	realFooter := "Round 3: Architecture\n☒ Stack  ☐ Process model  ☐ V1 scope\n\n" +
 		"Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n"
 
 	runScenario(t, Scenario{
@@ -1129,12 +1135,12 @@ func TestScenarioProseAboutFooterDoesNotPinWaiting(t *testing.T) {
 		Events: []ScenarioEvent{
 			{At: 0, Hook: "finished", Pane: "@fixture:" + fixture},
 			{At: 30 * time.Second, Pane: "@fixture:" + fixture}, // still parked; must not drift to waiting
-			{At: 60 * time.Second, Hook: "waiting", Pane: realFooter},
+			{At: 60 * time.Second, Pane: realFooter},
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusFinished},                // before fix: waiting
 			{At: 30 * time.Second, Expected: StatusFinished}, // before fix: waiting
-			{At: 60 * time.Second, Expected: StatusWaiting},  // a real dialog still registers
+			{At: 60 * time.Second, Expected: StatusWaiting},  // genuine footer overrides the finished hook
 		},
 	})
 }
