@@ -5320,7 +5320,16 @@ func (h *Home) getControlClient() *tmux.ControlClient {
 
 func (h *Home) enterFocusMode() tea.Cmd {
 	s := h.selectedSession()
-	if s == nil || !s.IsAlive() {
+	if s == nil {
+		h.setError(fmt.Errorf("cannot focus: session not running"))
+		return nil
+	}
+	// Cache-only, like focusTick and handleFocusKey: all three callers are
+	// keypress-driven, so resolving an unknown would fork tmux on the Update
+	// goroutine. A known-dead session still refuses, so the cached path — which
+	// is nearly every press — behaves exactly as before; only an unknown enters
+	// optimistically, and the next known-dead reading ejects.
+	if alive, known := s.IsAliveCached(); known && !alive {
 		h.setError(fmt.Errorf("cannot focus: session not running"))
 		return nil
 	}

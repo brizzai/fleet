@@ -665,8 +665,29 @@ func (s *Session) ExistsCached() (exists, known bool) {
 	return ok, true
 }
 
+// existsStale answers from the session cache ignoring its TTL. Only for the
+// timeout path in Exists, where a stale-but-real answer beats a fabricated one.
+func (s *Session) existsStale() (exists, known bool) {
+	sessionCacheMu.RLock()
+	defer sessionCacheMu.RUnlock()
+	if sessionCacheData == nil {
+		return false, false
+	}
+	_, ok := sessionCacheData[s.Name]
+	return ok, true
+}
+
 // Exists checks if the tmux session is alive, falling back to a bounded
 // `tmux has-session` when the cache can't answer.
+//
+// Only a probe that actually completed may report absence. Every caller reads
+// false as "the session is gone" and acts on it — restartSession rebuilds
+// instead of respawning, `fleet send` refuses a live session, finalizeDelete
+// skips its Kill and leaks the tmux session — and a timeout is not evidence of
+// any of that. It is evidence of a busy server, which is precisely the state
+// this timeout exists to survive, so a timed-out probe answers from the cache
+// however stale it has become, and says so: a silent false negative here would
+// be undiagnosable from the outside.
 func (s *Session) Exists() bool {
 	if exists, known := s.ExistsCached(); known {
 		return exists
@@ -674,7 +695,16 @@ func (s *Session) Exists() bool {
 
 	ctx, cancel := context.WithTimeout(context.Background(), hasSessionTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "tmux", "has-session", "-t", s.Name).Run() == nil
+	err := exec.CommandContext(ctx, "tmux", "has-session", "-t", s.Name).Run()
+	if ctx.Err() == nil {
+		return err == nil
+	}
+
+	exists, known := s.existsStale()
+	debuglog.Logger.Warn("tmux has-session timed out; not treating it as absence",
+		"session", s.Name, "timeout", hasSessionTimeout,
+		"answered_from_stale_cache", known, "exists", exists)
+	return exists
 }
 
 // SendKeys sends keystrokes to the tmux pane.
