@@ -114,6 +114,26 @@ func TestDetectStatus(t *testing.T) {
 		{"idle pattern", "⏵⏵\n", StatusFinished},
 		{"spinner char mid-line not matched", "⏺ The test checks that ⠋ is gone\n❯\n", StatusFinished},
 		{"busy pattern in scrollback not matched", "1. Busy patterns → Running (`ctrl+c to interrupt`, `esc to interrupt`)\nmore text\nmore text\nmore text\nmore text\nmore text\n❯\n", StatusFinished},
+		// Footer position guard (PR #269 review): a session discussing permission
+		// prompts prints a numbered menu and the words "Esc to cancel" in ordinary
+		// prose. Both are real conversation content sitting above the input box, so
+		// the footer is nowhere near the bottom and must not complete the menu.
+		{"menu quoted in prose not matched", "The dialog renders options like:\n  ❯ 1. Yes\n  2. No, tell Claude what to do differently\n\nThe footer (n to add notes + Esc to cancel) identifies it.\n\n✻ Worked for 59s\n\n❯ \n⏵⏵\n", StatusFinished},
+		{"exitplanmode footer quoted in prose not matched", "We discussed the plan menu:\n  ❯ 1. Yes, and use auto mode\n  2. No, refine\n\nIts footer says shift+tab to approve with this feedback.\n\n✻ Worked for 12s\n\n❯ \n⏵⏵\n", StatusFinished},
+		{"askuserquestion footer quoted verbatim in prose not matched", "⏺ The footer we match renders as:\n\n  Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n\n  That is the whole hint list.\n\n✻ Worked for 12s\n\n❯ \n⏵⏵\n", StatusFinished},
+		// The same footer text, actually at the bottom, still registers.
+		{"askuserquestion footer at bottom matched", "Round 3: Architecture\n☒ Stack  ☐ Process model\n\nEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n", StatusWaiting},
+		// Delimiter widening (PR #269 review): the footer is this variant's sole
+		// signal, so a rendering change must not silently stop firing.
+		{"footer separated by wide gaps matched", "Which approach?\n\nEnter to select   n to add notes   Esc to cancel\n", StatusWaiting},
+		// Documented bound, not an oversight: the check is per-line, so a footer that
+		// WRAPS onto two lines (narrow pane) is not matched. Widening the delimiter
+		// cannot fix that — the hints are no longer on one line to be separated.
+		// Pinned so the limit is a known quantity rather than a surprise.
+		{"footer hints split across lines not matched (wrap bound)", "Which approach?\n\nn to add notes\nEsc to cancel\n", ""},
+		// Single spaces are inside a hint, not between hints — widening must not
+		// shred "n to add notes" into words and match on fragments.
+		{"single-spaced prose not matched", "the footer has n to add notes and Esc to cancel in it\n❯\n⏵⏵\n", StatusFinished},
 		{"no match", "random output text\nmore text\n", ""},
 	}
 

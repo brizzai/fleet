@@ -1144,3 +1144,39 @@ func TestScenarioProseAboutFooterDoesNotPinWaiting(t *testing.T) {
 		},
 	})
 }
+
+func TestScenarioProseQuotingAMenuDoesNotPinWaiting(t *testing.T) {
+	// Regression (PR #269 review): the sibling of the prose-footer bug above.
+	// isAskUserQuestionFooter matches its hints as whole fields, but the numbered-menu
+	// check one block up still substring-matched its own footer anywhere in the bottom
+	// 15 lines. A session doing status-detection work prints both halves as ordinary
+	// conversation — a quoted menu and the words "Esc to cancel" — so the same finished
+	// session was pinned to waiting through applyHookFinished's pane override.
+	//
+	// Fix: a footer only counts within footerN (3) of the bottom. Measured across every
+	// pane_waiting_* fixture the real footer sits at index 0-2; prose about one sits
+	// above the input box and mode bar the TUI always renders below it.
+	menuProse := "⏺ The permission dialog renders options like:\n\n" +
+		"  ❯ 1. Yes\n  2. No, tell Claude what to do differently\n\n" +
+		"  The footer (n to add notes + Esc to cancel) is what identifies it.\n\n" +
+		"✻ Worked for 59s\n\n❯ \n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+
+	// The same menu, actually live: options and footer at the bottom, no chrome under
+	// them. Guards against "fixing" this by disabling the menu check outright.
+	liveMenu := "Read(~/code/foo/bar.ts)\n\nDo you want to proceed?\n\n" +
+		"❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend\n"
+
+	runScenario(t, Scenario{
+		Name: "hook=finished + prose quoting a menu → finished, not waiting",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", Pane: menuProse},
+			{At: 30 * time.Second, Pane: menuProse},
+			{At: 60 * time.Second, Pane: liveMenu},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},                // before fix: waiting
+			{At: 30 * time.Second, Expected: StatusFinished}, // before fix: waiting
+			{At: 60 * time.Second, Expected: StatusWaiting},  // a real menu still overrides the finished hook
+		},
+	})
+}
