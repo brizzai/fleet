@@ -2254,16 +2254,30 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 	}
 
 	// Structural check: AskUserQuestion tool dialog.
-	// The footer "Tab to switch questions" only appears in this tool's UI —
-	// no other Claude prompt has tabs between questions. Pair with "Esc to cancel"
-	// to avoid matching conversation text that mentions tabs.
+	// Two hints appear only in this tool's footer: "Tab to switch questions" and
+	// "n to add notes". Either one paired with "Esc to cancel" on the same line
+	// identifies the dialog; the pairing is what keeps conversation text mentioning
+	// tabs or notes from matching.
+	//
+	// "n to add notes" is what covers the SINGLE-question variant, which omits the Tab
+	// hint because there is nothing to switch to. That variant can also fall outside the
+	// menu check's bottomN window above: when the dialog renders a side-by-side preview
+	// panel beside the options, the panel is ~20 lines tall and pushes the "❯ N." cursor
+	// line past the window while the options and footer stay inside it. Nothing else
+	// structurally confirms the prompt, so the session read as running while it was
+	// blocked — and flapped as the user arrowed between options whose panels differ in
+	// height, sliding the cursor line in and out of the window.
+	//
 	// The cursor `❯` and numbered options here are unstable as the user navigates
 	// (Tab moves focus to checkbox-style question rows where `❯` disappears),
 	// so the menu structural check above misses these states. The footer is
 	// rendered identically on every tick regardless of which question has focus.
 	for i := 0; i < bottomN; i++ {
 		lower := strings.ToLower(recentLines[i])
-		if strings.Contains(lower, "tab to switch questions") && strings.Contains(lower, "esc to cancel") {
+		if !strings.Contains(lower, "esc to cancel") {
+			continue
+		}
+		if strings.Contains(lower, "tab to switch questions") || strings.Contains(lower, "n to add notes") {
 			log.Debug("detectStatus: matched askuserquestion footer")
 			return StatusWaiting
 		}

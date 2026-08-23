@@ -1,0 +1,54 @@
+  ⎿  Read 1 file (ctrl+o to expand)
+
+⏺ Two of the three log lines are truncated mid-token, so the tail is unreadable.
+  Let me check how long they actually are before proposing a fix.
+
+  Ran 2 shell commands 
+
+⏺ Measured across the sample: 412 of 1,208 lines exceed the column budget, and 37 of
+  those are more than half padding by character count.
+
+  Here is what the renderer can reach, best to worst:
+
+  ┌───────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────┐
+  │               Source              │                                           Value                                           │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
+  │ line_template.sample (shown now)  │ log: request failed: {<str>:{<str>:[{<str>:<str>,…                                          │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
+  │ record message (raw)              │ log: request failed: {"detail":[{"msg":"request failed",…                                  │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
+  │ record summary                    │ timeout on the batch endpoint                                                              │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────┤
+  │ record description (generated)    │ already shown at the top of the panel — repeating it is pointless                          │
+  └───────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────┘
+
+  The padding is not incidental: sample is padded because it is stored on the record and served that way. Raw text lives per-record instead.
+
+[2m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+ [1m☐ Degenerate line[0m 
+
+How should the renderer handle a sample that is mostly padding?
+
+[36m❯ 1. Trim at the payload[39m          ┌──────────────────────────────────────────────────┐
+[36m    boundary (Recommended)[39m        │ BEFORE                                            │
+  2. Fall back to the record     │ ┌──────────────────────────────────────────┐     │
+    summary                       │ │ log: request failed: {<str>:{<str>: │ │
+  3. Use the raw message from     │ │ [{<str>:<str>,<str>:[{<str>:1,<str>:33}],   │  │
+    records                       │ │ <str>:[<str>],<str>:{<str>:500,<str>:<st    │  │
+  4. Trim, and keep the           │ └──────────────────────────────────────────┘     │
+    payload behind a toggle       │                                                  │
+                                  │ AFTER                                             │
+                                  │ ┌──────────────────────────────────────────┐     │
+                                  │ │ log: request failed                        │  │
+                                  │ │                    View in context ↗   │  │
+                                  │ └──────────────────────────────────────────┘     │
+                                  │                                                  │
+                                  │ 🔧 batch_endpoint  12 of 37 records · 32%       │
+                                  └──────────────────────────────────────────────────┘
+
+                                  [2mNotes: press n to add notes[39m
+
+[2m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+  [2mChat about this[39m
+
+[2mEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel[39m

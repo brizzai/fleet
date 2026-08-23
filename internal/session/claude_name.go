@@ -646,19 +646,59 @@ func lastTranscriptTimestamp(path string) time.Time {
 }
 
 // lastLeadTranscriptTimestamp returns the timestamp of the last lead-conversation
-// (non-sidechain) entry in the transcript at path, or the zero time if it's
-// missing/unreadable or has no such entries. Sub-agent (sidechain) entries are
-// skipped so a still-running sub-agent can't mask a finished lead turn. Used as the
+// entry in the transcript at path, or the zero time if it's missing/unreadable or has
+// no such entries. Sub-agent (sidechain) entries are skipped so a still-running
+// sub-agent can't mask a finished lead turn, and bookkeeping entries are skipped so
+// only the lead actually advancing counts (see leadConversationTypes). Used as the
 // out-of-pane tiebreaker for the between-bursts frame where the pane is
 // indistinguishable from finished (see conversationActivePastHook).
 func lastLeadTranscriptTimestamp(path string) time.Time {
 	return scanTranscriptTimestamp(path, true, true)
 }
 
-// scanTranscriptTimestamp walks the JSONL transcript at path and returns the first
-// (last=false) or last (last=true) entry timestamp it can parse. When excludeSidechain
-// is set, sub-agent (isSidechain:true) entries are skipped.
-func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time.Time {
+// leadConversationTypes are the JSONL entry types that prove the LEAD turn advanced:
+// the agent spoke or called a tool ("assistant"), or a tool result or user message landed
+// ("user"). Only these count for conversationActivePastHook. Everything else in a
+// transcript is bookkeeping that fires while the lead is parked, and reading it as
+// progress flips a genuinely blocked session to running:
+//
+//   - "queue-operation" is something arriving AT a blocked lead — a message the user
+//     typed while a prompt is on screen, or a background agent's task-notification being
+//     enqueued. It fires *because* the lead is parked. A notification enqueued 4.9s after
+//     a PermissionRequest hook was enough to flip an unanswered AskUserQuestion dialog to
+//     running, and to keep it there for the whole 120s window.
+//   - "system" (subtypes "stop_hook_summary", "turn_duration") is written as a turn ENDS.
+//   - "file-history-delta" is an edit snapshot, always paired with the "assistant"
+//     tool_use that caused it, so it carries no signal of its own.
+//   - "attachment" reads like part of the conversation and is not. Measured across the 39
+//     most recent local transcripts (8,474 attachments): 6,988 are "total_tokens_reminder",
+//     390 "task_reminder", and 174 "queued_command" — a message typed at a PARKED lead,
+//     structurally the same class as "queue-operation" above. Including it bought nothing
+//     to pay for that: it pushed the last-entry time past "assistant"/"user" in 3 of those
+//     39 transcripts, by at most 3 milliseconds.
+//
+// An allowlist rather than a denylist because Claude Code grows bookkeeping types far
+// more often than conversation types, so an unknown type is far likelier to be noise than
+// progress — and a resumed lead must emit "assistant" or "user", so there is no
+// resumption these two miss.
+var leadConversationTypes = map[string]bool{
+	"assistant": true,
+	"user":      true,
+}
+
+// scanTranscriptTimestamp walks the JSONL transcript at path and returns the earliest
+// (last=false) or latest (last=true) entry timestamp it can parse. When leadOnly is set,
+// sub-agent (isSidechain:true) entries and bookkeeping entries are skipped, leaving only
+// the lead conversation (see leadConversationTypes).
+//
+// "latest" means the MAXIMUM, not the last line: transcripts are not written in timestamp
+// order. A message typed while the lead is parked is stamped when it is QUEUED and
+// appended when the lead RESUMES, so it lands out of order carrying a past timestamp —
+// measured backwards by up to 162s among "assistant"/"user" alone, in 28 of the 39 most
+// recent local transcripts. Overwriting on every match let one such entry understate how
+// far the conversation had got, which is the direction that demotes a live lead to
+// finished on exactly the between-bursts frame conversationActivePastHook exists to cover.
+func scanTranscriptTimestamp(path string, last bool, leadOnly bool) time.Time {
 	if path == "" {
 		return time.Time{}
 	}
@@ -670,11 +710,12 @@ func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time
 		var entry struct {
 			Timestamp   string `json:"timestamp"`
 			IsSidechain bool   `json:"isSidechain"`
+			Type        string `json:"type"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
 			return true
 		}
-		if excludeSidechain && entry.IsSidechain {
+		if leadOnly && (entry.IsSidechain || !leadConversationTypes[entry.Type]) {
 			return true
 		}
 		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
@@ -683,8 +724,14 @@ func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time
 		if err != nil {
 			return true
 		}
-		result = ts
-		return last // first match wins when we only want the earliest entry
+		if !last {
+			result = ts
+			return false // first match wins when we only want the earliest entry
+		}
+		if ts.After(result) {
+			result = ts
+		}
+		return true
 	})
 	return result
 }
