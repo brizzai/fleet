@@ -1780,8 +1780,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, h.previewTick() // focus mode has its own faster tick
 		}
 		cmds := []tea.Cmd{h.previewTick()}
-		if sel := h.selectedSession(); sel != nil && sel.IsAlive() {
-			cmds = append(cmds, h.fetchPreview(sel))
+		// Cache-only liveness. IsAlive forks `tmux has-session` on a cache miss,
+		// and this runs every 500ms on the Update goroutine — when the status
+		// worker is busy the cache goes stale and that fork became the single
+		// largest stall class in the perfwatch dumps. An unknown answer fetches
+		// anyway: fetchPreview is a tea.Cmd, so it costs nothing here, and
+		// skipping would blank a live session's preview.
+		if sel := h.selectedSession(); sel != nil {
+			if alive, known := sel.IsAliveCached(); !known || alive {
+				cmds = append(cmds, h.fetchPreview(sel))
+			}
 		}
 		return h, tea.Batch(cmds...)
 
@@ -1790,7 +1798,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		s := h.selectedSession()
-		if s == nil || !s.IsAlive() {
+		if s == nil {
+			h.focusMode = false
+			h.sidebarDirty = true
+			return h, nil
+		}
+		// Only a *known* dead session drops focus mode. focusTick is 100ms, so
+		// resolving a cache miss here would fork tmux ten times a second on the
+		// Update goroutine; and ejecting the user because the cache happened to
+		// be stale is the worse of the two ways to be wrong.
+		if alive, known := s.IsAliveCached(); known && !alive {
 			h.focusMode = false
 			h.sidebarDirty = true
 			return h, nil
@@ -5321,7 +5338,14 @@ func (h *Home) focusTick() tea.Cmd {
 
 func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := h.selectedSession()
-	if s == nil || !s.IsAlive() {
+	if s == nil {
+		h.focusMode = false
+		h.sidebarDirty = true
+		return h, nil
+	}
+	// Per-keystroke, so this is typing latency: same cache-only rule as
+	// focusTick, and the same reason not to eject on an unknown.
+	if alive, known := s.IsAliveCached(); known && !alive {
 		h.focusMode = false
 		h.sidebarDirty = true
 		return h, nil
@@ -7186,7 +7210,14 @@ func (h *Home) fetchPreview(s *session.Session) tea.Cmd {
 // currently selected session, or nil if no live session is selected.
 func (h *Home) fetchPreviewForSelected() tea.Cmd {
 	sel := h.selectedSession()
-	if sel == nil || !sel.IsAlive() {
+	if sel == nil {
+		return nil
+	}
+	// Cache-only, and optimistic on a miss: every j/k lands here, so resolving an
+	// unknown would fork `tmux has-session` on the Update goroutine once per
+	// arrow key. The returned Cmd does its work off this goroutine anyway, and a
+	// preview fetched for a session that turns out to be dead costs nothing.
+	if alive, known := sel.IsAliveCached(); known && !alive {
 		return nil
 	}
 	return h.fetchPreview(sel)

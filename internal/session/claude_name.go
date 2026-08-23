@@ -77,8 +77,35 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 	}
 	jsonlPath := filepath.Join(projectDir, claudeSessionID+".jsonl")
 
-	var lastCustom, lastAI string
-	_ = forEachTranscriptLine(jsonlPath, func(line string) bool {
+	titleScanMu.Lock()
+	defer titleScanMu.Unlock()
+
+	st, err := os.Stat(jsonlPath)
+	if err != nil {
+		// Same rule the walk below applies to a failed open: a missing transcript
+		// is routine, anything else returns a zero value indistinguishable from
+		// "this session has no title" and must not pass in silence.
+		if !errors.Is(err, os.ErrNotExist) {
+			warnTranscript("transcript: stat failed", jsonlPath, "err", err)
+		}
+		return ""
+	}
+
+	sc := titleScans[jsonlPath]
+	switch {
+	case sc == nil || st.Size() < sc.offset:
+		// Unseen, or the file shrank — a truncation or a reused session id means
+		// the memoised titles describe content that is no longer there.
+		sc = &titleScan{}
+		titleScans[jsonlPath] = sc
+	case st.Size() == sc.size && st.ModTime().Equal(sc.mtime):
+		// Untouched since the last read, so the memo is the whole answer and the
+		// file is never opened. This is the common case: the worker rechecks every
+		// session every 30s, and most transcripts are idle.
+		return sc.title()
+	}
+
+	offset, scanErr := scanTranscriptFrom(jsonlPath, sc.offset, func(line string) bool {
 		// Quick check before JSON parsing. Matches both "custom-title" and
 		// "ai-title"; the Type check below filters any incidental hits.
 		if !strings.Contains(line, "-title") {
@@ -96,21 +123,59 @@ func ReadClaudeSessionName(claudeSessionID, projectPath string) string {
 		switch entry.Type {
 		case "custom-title":
 			if entry.CustomTitle != "" {
-				lastCustom = entry.CustomTitle
+				sc.custom = entry.CustomTitle
 			}
 		case "ai-title":
 			if entry.AITitle != "" {
-				lastAI = entry.AITitle
+				sc.ai = entry.AITitle
 			}
 		}
 		return true
 	})
 
-	if lastCustom != "" {
-		return lastCustom
+	sc.offset = offset
+	if scanErr == nil {
+		sc.size, sc.mtime = st.Size(), st.ModTime()
+	} else {
+		// A failed read leaves the tail unseen. Clearing the stat keys forces the
+		// next call past the untouched-file shortcut so it retries from offset,
+		// rather than serving a memo that is missing entries it never reached.
+		sc.size, sc.mtime = 0, time.Time{}
 	}
-	return deslugify(lastAI)
+	return sc.title()
 }
+
+// titleScan memoises one transcript's last-seen title entries and how far the
+// walk got. Claude's JSONL is append-only and its titles sit near the end of a
+// file that reaches tens of MB, so re-reading the whole thing every 30s per
+// session (agentNameRecheckInterval) was blocking the status worker for long
+// enough that the tmux session cache went stale underneath the UI — which is
+// what turned the Update goroutine's liveness checks into visible freezes.
+// Resuming from offset costs only the bytes appended since.
+type titleScan struct {
+	size   int64
+	mtime  time.Time
+	offset int64
+	custom string
+	ai     string
+}
+
+// title applies the same precedence the full walk did: an explicit /rename wins
+// wherever it appeared, otherwise the latest ai-title.
+func (t *titleScan) title() string {
+	if t.custom != "" {
+		return t.custom
+	}
+	return deslugify(t.ai)
+}
+
+// titleScans is keyed by transcript path. Guarded by titleScanMu, which is held
+// across the read: the only caller is the status worker's sequential per-session
+// pass, so there is no concurrency to preserve here.
+var (
+	titleScanMu sync.Mutex
+	titleScans  = map[string]*titleScan{}
+)
 
 // slugSeparators replaces a slug's word separators with spaces. Case is left
 // untouched on purpose.
@@ -402,6 +467,19 @@ const transcriptLineCap = 8 << 20 // 8MB
 // Callers that only need a best-effort answer discard the returned error; the
 // helper has already logged anything beyond a routine missing file.
 func forEachTranscriptLine(path string, fn func(line string) bool) error {
+	_, err := scanTranscriptFrom(path, 0, fn)
+	return err
+}
+
+// scanTranscriptFrom is forEachTranscriptLine starting at a byte offset. It
+// returns the offset just past the last *complete* line it consumed, so a
+// caller can resume there when the file grows.
+//
+// A trailing chunk with no newline is a line still being written: fn sees it
+// (matching the whole-file walk, where a caller reading the last entry must not
+// miss one mid-write), but it is not counted as consumed — otherwise a resuming
+// caller would skip past a line it only ever saw half of.
+func scanTranscriptFrom(path string, from int64, fn func(line string) bool) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		// A missing transcript is routine — the session may not have written one
@@ -411,15 +489,24 @@ func forEachTranscriptLine(path string, fn func(line string) bool) error {
 		if !errors.Is(err, os.ErrNotExist) {
 			warnTranscript("transcript: open failed", path, "err", err)
 		}
-		return err
+		return from, err
 	}
 	defer f.Close()
+
+	if from > 0 {
+		if _, err := f.Seek(from, io.SeekStart); err != nil {
+			warnTranscript("transcript: seek failed, rescanning whole file", path, "err", err)
+			return 0, err
+		}
+	}
 
 	r := bufio.NewReaderSize(f, 64*1024)
 	var buf []byte
 	overCap := false
+	consumed, pending := from, int64(0)
 	for {
 		chunk, err := r.ReadSlice('\n')
+		pending += int64(len(chunk))
 		if errors.Is(err, bufio.ErrBufferFull) {
 			// Mid-line: accumulate until the cap, then drop the rest of this line.
 			if !overCap {
@@ -441,20 +528,22 @@ func forEachTranscriptLine(path string, fn func(line string) bool) error {
 		if !overCap {
 			buf = append(buf, chunk...)
 			if line := strings.TrimRight(string(buf), "\r\n"); line != "" && !fn(line) {
-				return nil
+				return consumed + pending, nil
 			}
 		}
 		buf, overCap = buf[:0], false
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return nil
+				return consumed, nil
 			}
 			// Partial walk. Whatever the caller returns is derived from a prefix of
 			// the file, which is precisely the failure this helper exists to end —
 			// so say so rather than letting a stale answer look authoritative.
 			warnTranscript("transcript: read failed, result is partial", path, "err", err)
-			return err
+			return consumed, err
 		}
+		consumed += pending
+		pending = 0
 	}
 }
 

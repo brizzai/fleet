@@ -574,3 +574,99 @@ func TestWarnTranscriptThrottles(t *testing.T) {
 		t.Error("warning omitted the transcript path")
 	}
 }
+
+// TestReadClaudeSessionNameIncrementalMatchesFullScan pins the memoised,
+// resume-from-offset read against the whole-file walk it replaced. The scan is
+// only sound because Claude's JSONL is append-only, so every case here is a
+// way that assumption can bend: growth, custom-vs-ai precedence spanning two
+// reads, a line still being written, and a file replaced under the same name.
+func TestReadClaudeSessionNameIncrementalMatchesFullScan(t *testing.T) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+
+	projectPath := "/test/incremental-project"
+	claudeSessionID := "test-session-incremental"
+	projectDir := filepath.Join(homeDir, ".claude", "projects", "-test-incremental-project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(projectDir) })
+
+	jsonlPath := filepath.Join(projectDir, claudeSessionID+".jsonl")
+	t.Cleanup(func() {
+		titleScanMu.Lock()
+		delete(titleScans, jsonlPath)
+		titleScanMu.Unlock()
+	})
+
+	appendLine := func(t *testing.T, s string) {
+		t.Helper()
+		f, err := os.OpenFile(jsonlPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			t.Fatalf("open for append: %v", err)
+		}
+		if _, err := f.WriteString(s); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		f.Close()
+	}
+
+	// fullScan drops the memo so the next read walks the whole file, which is
+	// the behaviour the incremental path has to stay identical to.
+	fullScan := func() string {
+		titleScanMu.Lock()
+		delete(titleScans, jsonlPath)
+		titleScanMu.Unlock()
+		return ReadClaudeSessionName(claudeSessionID, projectPath)
+	}
+
+	check := func(t *testing.T, step, want string) {
+		t.Helper()
+		got := ReadClaudeSessionName(claudeSessionID, projectPath)
+		if got != want {
+			t.Errorf("%s: incremental read = %q, want %q", step, got, want)
+		}
+		if full := fullScan(); full != got {
+			t.Errorf("%s: incremental read = %q but full scan = %q", step, got, full)
+		}
+	}
+
+	steps := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"untitled", `{"type":"message","content":"hello"}` + "\n", ""},
+		{"first ai-title", `{"type":"ai-title","aiTitle":"first-draft"}` + "\n", "first draft"},
+		{"ai-title drifts", `{"type":"ai-title","aiTitle":"second-draft"}` + "\n", "second draft"},
+		// The rename lands in a later read than the ai-titles it outranks, so
+		// precedence has to survive in the memo rather than in one walk's locals.
+		{"rename wins", `{"type":"custom-title","customTitle":"Renamed"}` + "\n", "Renamed"},
+		{"rename outlives later ai-title", `{"type":"ai-title","aiTitle":"later-ai"}` + "\n", "Renamed"},
+	}
+	for _, step := range steps {
+		appendLine(t, step.line)
+		check(t, step.name, step.want)
+	}
+
+	t.Run("line still being written is re-read once complete", func(t *testing.T) {
+		// Half an entry, as a concurrent Claude write would leave it. Reading here
+		// must not consume it, or its completion would never be seen.
+		appendLine(t, `{"type":"custom-title","customTi`)
+		check(t, "partial line", "Renamed")
+
+		appendLine(t, `tle":"Completed"}`+"\n")
+		check(t, "completed line", "Completed")
+	})
+
+	t.Run("replaced file resets the memo", func(t *testing.T) {
+		// A shorter file under the same name: the memoised offset now points past
+		// the end, and the remembered titles describe content that is gone.
+		if err := os.WriteFile(jsonlPath, []byte(`{"type":"ai-title","aiTitle":"fresh-start"}`+"\n"), 0644); err != nil {
+			t.Fatalf("truncate: %v", err)
+		}
+		check(t, "after truncation", "fresh start")
+	})
+}
