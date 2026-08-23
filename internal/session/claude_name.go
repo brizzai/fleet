@@ -657,11 +657,10 @@ func lastLeadTranscriptTimestamp(path string) time.Time {
 }
 
 // leadConversationTypes are the JSONL entry types that prove the LEAD turn advanced:
-// the agent spoke or called a tool ("assistant"), a tool result or user message landed
-// ("user"), or the attachment that follows one did ("attachment"). Only these count for
-// conversationActivePastHook. Everything else in a transcript is bookkeeping that fires
-// while the lead is parked, and reading it as progress flips a genuinely blocked session
-// to running:
+// the agent spoke or called a tool ("assistant"), or a tool result or user message landed
+// ("user"). Only these count for conversationActivePastHook. Everything else in a
+// transcript is bookkeeping that fires while the lead is parked, and reading it as
+// progress flips a genuinely blocked session to running:
 //
 //   - "queue-operation" is something arriving AT a blocked lead — a message the user
 //     typed while a prompt is on screen, or a background agent's task-notification being
@@ -671,21 +670,34 @@ func lastLeadTranscriptTimestamp(path string) time.Time {
 //   - "system" (subtypes "stop_hook_summary", "turn_duration") is written as a turn ENDS.
 //   - "file-history-delta" is an edit snapshot, always paired with the "assistant"
 //     tool_use that caused it, so it carries no signal of its own.
+//   - "attachment" reads like part of the conversation and is not. Measured across the 39
+//     most recent local transcripts (8,474 attachments): 6,988 are "total_tokens_reminder",
+//     390 "task_reminder", and 174 "queued_command" — a message typed at a PARKED lead,
+//     structurally the same class as "queue-operation" above. Including it bought nothing
+//     to pay for that: it pushed the last-entry time past "assistant"/"user" in 3 of those
+//     39 transcripts, by at most 3 milliseconds.
 //
 // An allowlist rather than a denylist because Claude Code grows bookkeeping types far
 // more often than conversation types, so an unknown type is far likelier to be noise than
 // progress — and a resumed lead must emit "assistant" or "user", so there is no
-// resumption these miss.
+// resumption these two miss.
 var leadConversationTypes = map[string]bool{
-	"assistant":  true,
-	"user":       true,
-	"attachment": true,
+	"assistant": true,
+	"user":      true,
 }
 
-// scanTranscriptTimestamp walks the JSONL transcript at path and returns the first
-// (last=false) or last (last=true) entry timestamp it can parse. When leadOnly is set,
+// scanTranscriptTimestamp walks the JSONL transcript at path and returns the earliest
+// (last=false) or latest (last=true) entry timestamp it can parse. When leadOnly is set,
 // sub-agent (isSidechain:true) entries and bookkeeping entries are skipped, leaving only
 // the lead conversation (see leadConversationTypes).
+//
+// "latest" means the MAXIMUM, not the last line: transcripts are not written in timestamp
+// order. A message typed while the lead is parked is stamped when it is QUEUED and
+// appended when the lead RESUMES, so it lands out of order carrying a past timestamp —
+// measured backwards by up to 162s among "assistant"/"user" alone, in 28 of the 39 most
+// recent local transcripts. Overwriting on every match let one such entry understate how
+// far the conversation had got, which is the direction that demotes a live lead to
+// finished on exactly the between-bursts frame conversationActivePastHook exists to cover.
 func scanTranscriptTimestamp(path string, last bool, leadOnly bool) time.Time {
 	if path == "" {
 		return time.Time{}
@@ -712,8 +724,14 @@ func scanTranscriptTimestamp(path string, last bool, leadOnly bool) time.Time {
 		if err != nil {
 			return true
 		}
-		result = ts
-		return last // first match wins when we only want the earliest entry
+		if !last {
+			result = ts
+			return false // first match wins when we only want the earliest entry
+		}
+		if ts.After(result) {
+			result = ts
+		}
+		return true
 	})
 	return result
 }

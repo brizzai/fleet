@@ -321,7 +321,6 @@ func TestConversationActivePastHookIgnoresQueuedWork(t *testing.T) {
 	lead := []string{
 		`{"type":"assistant","timestamp":"` + stamp(-61*time.Second) + `"}`,
 		`{"type":"user","timestamp":"` + stamp(-58*time.Second) + `"}`,
-		`{"type":"attachment","timestamp":"` + stamp(-57*time.Second) + `"}`,
 	}
 	// Past the hook by more than conversationActiveSkew, and recent enough to be inside
 	// conversationActiveWindow — exactly the frame that flipped the live session.
@@ -345,6 +344,14 @@ func TestConversationActivePastHookIgnoresQueuedWork(t *testing.T) {
 		{
 			name: "still-running sub-agent is not progress",
 			tail: `{"type":"assistant","isSidechain":true,"timestamp":"` + pastHook + `"}`,
+			want: false,
+		},
+		{
+			// "attachment" reads like conversation but is overwhelmingly bookkeeping,
+			// and "queued_command" is a message typed at a PARKED lead — the same class
+			// as the queue-operation above, arriving through a different type.
+			name: "queued_command attachment is not progress",
+			tail: `{"type":"attachment","attachment":{"type":"queued_command"},"timestamp":"` + pastHook + `"}`,
 			want: false,
 		},
 		{

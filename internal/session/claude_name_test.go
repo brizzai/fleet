@@ -443,8 +443,12 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "t.jsonl")
 		content := strings.Join([]string{
+			`{"type":"assistant","timestamp":"2026-08-23T14:17:52.532Z"}`,
 			`{"type":"user","timestamp":"2026-08-23T14:17:55.651Z"}`,
-			`{"type":"attachment","timestamp":"2026-08-23T14:17:55.667Z"}`,
+			// Reads like conversation and is not: 82% of attachments are
+			// "total_tokens_reminder", and "queued_command" is a message typed at a
+			// PARKED lead — the same class as "queue-operation" below.
+			`{"type":"attachment","attachment":{"type":"queued_command"},"timestamp":"2026-08-23T14:17:55.667Z"}`,
 			// Something arriving AT a parked lead, not the lead advancing.
 			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-23T14:18:57.857Z"}`,
 			// Written as a turn ENDS.
@@ -457,7 +461,7 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := lastLeadTranscriptTimestamp(path)
-		want, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:17:55.667Z")
+		want, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:17:55.651Z")
 		if !got.Equal(want) {
 			t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (bookkeeping entries should be skipped)", got, want)
 		}
@@ -467,6 +471,38 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 		wantAll, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:19:20.000Z")
 		if !gotAll.Equal(wantAll) {
 			t.Errorf("lastTranscriptTimestamp = %v, want %v (must NOT filter by type)", gotAll, wantAll)
+		}
+	})
+
+	// Transcripts are not written in timestamp order. A message typed while the lead is
+	// parked is stamped when it is QUEUED and appended when the lead RESUMES, so it lands
+	// out of order carrying a past timestamp — measured backwards by up to 162s among
+	// "assistant"/"user" alone, in 28 of 39 local transcripts. Taking the LAST matching
+	// line instead of the maximum understated how far the conversation had got, which is
+	// the direction that demotes a live lead to finished.
+	t.Run("takes the maximum, not the last line", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.jsonl")
+		content := strings.Join([]string{
+			`{"type":"user","timestamp":"2026-08-23T14:30:10.000Z"}`,
+			`{"type":"assistant","timestamp":"2026-08-23T14:30:26.239Z"}`,
+			// Queued 6s before the entry above, flushed after it.
+			`{"type":"user","timestamp":"2026-08-23T14:30:20.076Z"}`,
+		}, "\n") + "\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		want, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:30:26.239Z")
+		if got := lastLeadTranscriptTimestamp(path); !got.Equal(want) {
+			t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (out-of-order entry must not pull it backwards)", got, want)
+		}
+		if got := lastTranscriptTimestamp(path); !got.Equal(want) {
+			t.Errorf("lastTranscriptTimestamp = %v, want %v", got, want)
+		}
+		// The earliest-entry scan still stops at the first match, unchanged.
+		wantFirst, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:30:10.000Z")
+		if got := firstTranscriptTimestamp(path); !got.Equal(wantFirst) {
+			t.Errorf("firstTranscriptTimestamp = %v, want %v", got, wantFirst)
 		}
 	})
 
