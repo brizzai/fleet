@@ -434,6 +434,42 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 		}
 	})
 
+	// A bookkeeping entry appended AFTER the last real lead entry must not move the
+	// timestamp: conversationActivePastHook reads it as "the lead resumed", and these
+	// fire precisely when it did not. "queue-operation" is the one that broke a live
+	// session — a background agent's task-notification enqueued 4.9s after a
+	// PermissionRequest hook flipped an unanswered AskUserQuestion dialog to running.
+	t.Run("skips bookkeeping entries after the last lead entry", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "t.jsonl")
+		content := strings.Join([]string{
+			`{"type":"user","timestamp":"2026-08-23T14:17:55.651Z"}`,
+			`{"type":"attachment","timestamp":"2026-08-23T14:17:55.667Z"}`,
+			// Something arriving AT a parked lead, not the lead advancing.
+			`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-23T14:18:57.857Z"}`,
+			// Written as a turn ENDS.
+			`{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-23T14:19:10.000Z"}`,
+			`{"type":"system","subtype":"turn_duration","timestamp":"2026-08-23T14:19:10.002Z"}`,
+			// Paired with the assistant tool_use that caused it; no signal of its own.
+			`{"type":"file-history-delta","timestamp":"2026-08-23T14:19:20.000Z"}`,
+		}, "\n") + "\n"
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := lastLeadTranscriptTimestamp(path)
+		want, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:17:55.667Z")
+		if !got.Equal(want) {
+			t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (bookkeeping entries should be skipped)", got, want)
+		}
+		// lastTranscriptTimestamp is the rotation-detection signal, where ANY write
+		// proves the file is live — it must keep seeing all of them.
+		gotAll := lastTranscriptTimestamp(path)
+		wantAll, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:19:20.000Z")
+		if !gotAll.Equal(wantAll) {
+			t.Errorf("lastTranscriptTimestamp = %v, want %v (must NOT filter by type)", gotAll, wantAll)
+		}
+	})
+
 	t.Run("only sidechain entries returns zero", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "t.jsonl")

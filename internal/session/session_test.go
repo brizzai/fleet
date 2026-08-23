@@ -2,11 +2,15 @@ package session
 
 import (
 	"log/slog"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/debuglog"
 )
 
 func TestStripANSI(t *testing.T) {
@@ -284,5 +288,101 @@ func TestInitialPromptIsOneShot(t *testing.T) {
 		if strings.HasPrefix(e, "FLEET_INITIAL_PROMPT=") {
 			t.Errorf("relaunch env still carries the prompt: %q", e)
 		}
+	}
+}
+
+// TestConversationActivePastHookIgnoresQueuedWork covers the bug where a session
+// blocked on an unanswered AskUserQuestion dialog reported Running.
+//
+// Two signals had to fail together to get there, and this is the second one. The pane
+// went silent (a side-by-side preview panel pushed the "❯ N." cursor line past
+// detectWaiting's window — see the pane_waiting_askuserquestion_single_preview golden),
+// which handed the deciding vote to the transcript tiebreaker. The transcript's newest
+// entry was:
+//
+//	{"type":"queue-operation","operation":"enqueue", … "Agent \"…\" finished" …}
+//
+// a background agent's task-notification being enqueued 4.9s after the PermissionRequest
+// hook. It fires *because* the lead is parked, so counting it as progress inverted the
+// tiebreaker's own premise — "the LEAD-only transcript stays static while the lead is
+// truly blocked" — and pinned the session to running for the whole 120s window.
+func TestConversationActivePastHookIgnoresQueuedWork(t *testing.T) {
+	debuglog.Init()
+
+	// Anchor on wall-clock: the tiebreaker also requires the last entry to be recent
+	// (conversationActiveWindow), so fixed dates would fail on age alone and the test
+	// would pass for the wrong reason.
+	now := time.Now().UTC()
+	hookAt := now.Add(-45 * time.Second)
+	stamp := func(d time.Duration) string {
+		return hookAt.Add(d).Format(time.RFC3339Nano)
+	}
+	// Real lead work, a full minute BEFORE the hook — the lead has not moved since.
+	lead := []string{
+		`{"type":"assistant","timestamp":"` + stamp(-61*time.Second) + `"}`,
+		`{"type":"user","timestamp":"` + stamp(-58*time.Second) + `"}`,
+		`{"type":"attachment","timestamp":"` + stamp(-57*time.Second) + `"}`,
+	}
+	// Past the hook by more than conversationActiveSkew, and recent enough to be inside
+	// conversationActiveWindow — exactly the frame that flipped the live session.
+	pastHook := stamp(5 * time.Second)
+
+	cases := []struct {
+		name string
+		tail string
+		want bool
+	}{
+		{
+			name: "queued task-notification is not progress",
+			tail: `{"type":"queue-operation","operation":"enqueue","timestamp":"` + pastHook + `","content":"<task-notification>Agent finished</task-notification>"}`,
+			want: false,
+		},
+		{
+			name: "turn-end bookkeeping is not progress",
+			tail: `{"type":"system","subtype":"stop_hook_summary","timestamp":"` + pastHook + `"}`,
+			want: false,
+		},
+		{
+			name: "still-running sub-agent is not progress",
+			tail: `{"type":"assistant","isSidechain":true,"timestamp":"` + pastHook + `"}`,
+			want: false,
+		},
+		{
+			// Positive control. Without it every assertion above would also pass on a
+			// scanner that had stopped finding anything at all.
+			name: "a resumed lead turn IS progress",
+			tail: `{"type":"assistant","timestamp":"` + pastHook + `"}`,
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			project := t.TempDir()
+			const claudeID = "a9045325-69ee-4103-9cd5-d7cf07c8c9a8"
+
+			dir := filepath.Join(home, ".claude", "projects", ClaudeProjectDirName(project))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := strings.Join(append(append([]string{}, lead...), tc.tail), "\n") + "\n"
+			path := filepath.Join(dir, claudeID+".jsonl")
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			s := &Session{
+				ID:              "test-conv-active",
+				Agent:           agent.Claude,
+				ClaudeSessionID: claudeID,
+				ProjectPath:     project,
+				hookUpdatedAt:   hookAt,
+			}
+			if got := s.conversationActivePastHook(); got != tc.want {
+				t.Errorf("conversationActivePastHook() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

@@ -646,19 +646,47 @@ func lastTranscriptTimestamp(path string) time.Time {
 }
 
 // lastLeadTranscriptTimestamp returns the timestamp of the last lead-conversation
-// (non-sidechain) entry in the transcript at path, or the zero time if it's
-// missing/unreadable or has no such entries. Sub-agent (sidechain) entries are
-// skipped so a still-running sub-agent can't mask a finished lead turn. Used as the
+// entry in the transcript at path, or the zero time if it's missing/unreadable or has
+// no such entries. Sub-agent (sidechain) entries are skipped so a still-running
+// sub-agent can't mask a finished lead turn, and bookkeeping entries are skipped so
+// only the lead actually advancing counts (see leadConversationTypes). Used as the
 // out-of-pane tiebreaker for the between-bursts frame where the pane is
 // indistinguishable from finished (see conversationActivePastHook).
 func lastLeadTranscriptTimestamp(path string) time.Time {
 	return scanTranscriptTimestamp(path, true, true)
 }
 
+// leadConversationTypes are the JSONL entry types that prove the LEAD turn advanced:
+// the agent spoke or called a tool ("assistant"), a tool result or user message landed
+// ("user"), or the attachment that follows one did ("attachment"). Only these count for
+// conversationActivePastHook. Everything else in a transcript is bookkeeping that fires
+// while the lead is parked, and reading it as progress flips a genuinely blocked session
+// to running:
+//
+//   - "queue-operation" is something arriving AT a blocked lead — a message the user
+//     typed while a prompt is on screen, or a background agent's task-notification being
+//     enqueued. It fires *because* the lead is parked. A notification enqueued 4.9s after
+//     a PermissionRequest hook was enough to flip an unanswered AskUserQuestion dialog to
+//     running, and to keep it there for the whole 120s window.
+//   - "system" (subtypes "stop_hook_summary", "turn_duration") is written as a turn ENDS.
+//   - "file-history-delta" is an edit snapshot, always paired with the "assistant"
+//     tool_use that caused it, so it carries no signal of its own.
+//
+// An allowlist rather than a denylist because Claude Code grows bookkeeping types far
+// more often than conversation types, so an unknown type is far likelier to be noise than
+// progress — and a resumed lead must emit "assistant" or "user", so there is no
+// resumption these miss.
+var leadConversationTypes = map[string]bool{
+	"assistant":  true,
+	"user":       true,
+	"attachment": true,
+}
+
 // scanTranscriptTimestamp walks the JSONL transcript at path and returns the first
-// (last=false) or last (last=true) entry timestamp it can parse. When excludeSidechain
-// is set, sub-agent (isSidechain:true) entries are skipped.
-func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time.Time {
+// (last=false) or last (last=true) entry timestamp it can parse. When leadOnly is set,
+// sub-agent (isSidechain:true) entries and bookkeeping entries are skipped, leaving only
+// the lead conversation (see leadConversationTypes).
+func scanTranscriptTimestamp(path string, last bool, leadOnly bool) time.Time {
 	if path == "" {
 		return time.Time{}
 	}
@@ -670,11 +698,12 @@ func scanTranscriptTimestamp(path string, last bool, excludeSidechain bool) time
 		var entry struct {
 			Timestamp   string `json:"timestamp"`
 			IsSidechain bool   `json:"isSidechain"`
+			Type        string `json:"type"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
 			return true
 		}
-		if excludeSidechain && entry.IsSidechain {
+		if leadOnly && (entry.IsSidechain || !leadConversationTypes[entry.Type]) {
 			return true
 		}
 		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
