@@ -2228,7 +2228,13 @@ func (h *Home) View() tea.View {
 func (h *Home) chrome(content string) tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// MouseModeNone, deliberately: nothing in the TUI handles a mouse event, and
+	// reporting is not free. v2's eventLoop re-renders after *every* message, so
+	// with cell-motion on, one trackpad scroll over the window became ~300 ignored
+	// MouseWheelMsg/sec, each buying a full View() — measured at 220% CPU for as
+	// long as the finger moved, with nothing on screen changing. Off also hands
+	// drag-select and scrollback back to the terminal.
+	v.MouseMode = tea.MouseModeNone
 	return v
 }
 
