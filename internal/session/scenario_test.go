@@ -1097,3 +1097,44 @@ func TestScenarioStaleWaitingLatchRecoversToWaiting(t *testing.T) {
 		},
 	})
 }
+
+func TestScenarioProseAboutFooterDoesNotPinWaiting(t *testing.T) {
+	// Regression: a session whose own conversation describes the AskUserQuestion
+	// footer read as waiting forever after it had finished.
+	//
+	// detectWaiting matched "n to add notes" and "esc to cancel" as substrings of a
+	// single line, so an agent summary reading "detectWaiting accepts the
+	// single-question AskUserQuestion footer (n to add notes + Esc to cancel), so a
+	// dialog whose …" satisfied both. The sentence sat 11 lines from the bottom —
+	// inside detectWaiting's 15-line window — so paneStatus=Waiting, and
+	// applyHookFinished's pane override turned a correct finished hook into waiting
+	// on every tick ("hook says finished but pane shows waiting, overriding"). Only
+	// scrolling the sentence out of the window cleared it.
+	//
+	// Fix: the hints must be whole fields of the footer's "·"-separated hint list
+	// (isAskUserQuestionFooter), which prose has no reason to produce.
+	// Captured from snapshot 2026-08-23T18-11-15_fix-1-and-2-with-tests.
+	fixture := "pane_finished_prose_mentions_askuserquestion_footer.txt"
+	if _, err := os.Stat(filepath.Join("testdata", fixture)); err != nil {
+		t.Skipf("fixture %s not available", fixture)
+	}
+
+	// The real footer, for contrast: same two hints, but as fields of the "·" list.
+	// A genuine dialog must still hold the session at waiting.
+	realFooter := "Which approach?\n\n❯ 1. Rewrite\n  2. Patch\n\n" +
+		"Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n"
+
+	runScenario(t, Scenario{
+		Name: "hook=finished + prose describing the footer → finished, not waiting",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", Pane: "@fixture:" + fixture},
+			{At: 30 * time.Second, Pane: "@fixture:" + fixture}, // still parked; must not drift to waiting
+			{At: 60 * time.Second, Hook: "waiting", Pane: realFooter},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},                // before fix: waiting
+			{At: 30 * time.Second, Expected: StatusFinished}, // before fix: waiting
+			{At: 60 * time.Second, Expected: StatusWaiting},  // a real dialog still registers
+		},
+	})
+}

@@ -1,0 +1,57 @@
+
+[38;5;231m⏺[39m [1mExecution Summary[0m
+
+  [1mFixed (2 issues)[0m
+
+  - [38;5;153minternal/session/claude_name.go[39m — [38;5;153mscanTranscriptTimestamp[39m keeps the [1mmaximum[0m when [38;5;153mlast[39m is set, instead of overwriting on every match. Thread resolved.
+  - [38;5;153minternal/session/claude_name.go[39m — [38;5;153mattachment[39m [1mremoved[0m from [38;5;153mleadConversationTypes[39m; the incorrect rationale replaced with the measurement that justifies the exclusion. Thread resolved.
+
+  [1mSkipped / Replied only[0m
+
+  None.
+
+  [1mReady to Commit[0m
+
+  Already committed and pushed as [38;5;153mf76844d[39m:
+  - [38;5;153minternal/session/claude_name.go[39m
+  - [38;5;153minternal/session/claude_name_test.go[39m
+  - [38;5;153minternal/session/session_test.go[39m
+
+  Resolves 2 review threads — PR #267 now has 0 unresolved.
+
+  [1mWhat the verification turned up[0m, since both claims were broader than sampled:
+
+  - Timestamp inversions hit [1m38/39[0m transcripts among the allowlisted types (largest 1661s), and still [1m28/39[0m after the [38;5;153mattachment[39m removal (largest 162s). Same root cause for both threads: a message typed at a parked lead is stamped at [3mqueue[0m time and appended at [3mresume[0m time.
+  - [38;5;153mattachment[39m census over 8,474 entries: 6,988 [38;5;153mtotal_tokens_reminder[39m, 390 [38;5;153mtask_reminder[39m, 174 [38;5;153mqueued_command[39m. The number that decided removal over subtype-narrowing — it extended the last-entry time past [38;5;153massistant[39m/[38;5;153muser[39m in [1m3 of 39[0m transcripts, by at most [1m3ms[0m.
+
+  I recorded one honest qualification in the reply to thread #1: today's exposure is latent, not live — [38;5;153mlast != max[39m at the [3mfile tail[0m in 0/39 files, because a flushed queued entry is immediately followed by the real entries. The fix still stands on direction-of-error and ordering-independence, not on an observed
+  misread.
+
+  New tests fail without their fixes (verified by reverting). [38;5;153mmake lint[39m clean. [38;5;153mTestCredentialResolutionOrder[39m still fails on master too — pre-existing, reads your real Linear keychain entry.
+
+[38;5;246m✻[39m [38;5;246mCrunched for 2m 53s[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mmerge it[39m
+[49m
+  [38;5;246mRan [1m5[0m[38;5;246m shell commands [39m
+
+[38;5;231m⏺[39m Merged. [1mPR #267[0m squash-merged into [38;5;153mmaster[39m as [38;5;153m3a61647[39m, remote and local branches deleted, you're back on [38;5;153mmaster[39m in sync with origin.
+
+  All six checks passed before merge (test, check, lint, vulncheck, CodeRabbit), both review threads resolved.
+
+  What shipped:
+  - [38;5;153mdetectWaiting[39m accepts the single-question [38;5;153mAskUserQuestion[39m footer ([38;5;153mn to add notes[39m + [38;5;153mEsc to cancel[39m), so a dialog whose preview panel pushes the cursor line out of the 15-line window is still seen.
+  - [38;5;153mleadConversationTypes[39m allowlist ([38;5;153massistant[39m/[38;5;153muser[39m) — [38;5;153mqueue-operation[39m, [38;5;153msystem[39m, [38;5;153mfile-history-delta[39m, and [38;5;153mattachment[39m no longer count as the lead advancing.
+  - [38;5;153mscanTranscriptTimestamp[39m keeps the maximum rather than the last matching line.
+  - Golden fixture + three test groups, each verified failing without its fix.
+  - Changelog fragment in [38;5;153mchangelog/unreleased/[39m, not flagged as a highlight.
+
+  The untracked [38;5;153m.github/hooks/[39m is still sitting there, untouched — it predates this work.
+
+[38;5;246m✻[39m [38;5;246mWorked for 59s[39m
+
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ [2m/ship[0m
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [36m󰧑 Opus 5 (1M context)[38;5;246m [90m│[38;5;246m [32m██░░░░░░░░[38;5;246m [90m│[38;5;246m [32m23%[38;5;246m [90m│[38;5;246m [35m󰍛 230.0k/1000k[38;5;246m [90m│[38;5;246m [33m master[38;5;246m [90m│[38;5;246m [1m[37m  brizz-code[0m                                                                                                                                                                                                                                   [38;5;114m]8;id=1thuzbh;https://claude.ai/code/session_01LJJZE3XYFxMqDazpWawrGU?from=cli\/rc[39m]8;;\
+  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · ← for agents[39m
