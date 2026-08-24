@@ -2213,6 +2213,17 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 	if bottomN > len(recentLines) {
 		bottomN = len(recentLines)
 	}
+	// A footer is chrome pinned to the bottom of the dialog, so it only counts
+	// when it is actually at the bottom. Measured across every pane_waiting_*
+	// fixture, the footer sits at index 0-2 from the bottom (max 2, the permission
+	// menu with dock rows under it). Prose *about* a footer sits wherever the
+	// conversation left it, under the input box and mode bar the TUI always
+	// renders below — index 5 and 6 in the two panes that prompted this guard.
+	// Same shape as the dock-row check's bottom-3 position guard.
+	//
+	// Deliberately narrower than bottomN, which the *options* scan still needs:
+	// the single-question preview variant puts its "❯ N." cursor line at index 19.
+	footerN := min(3, len(recentLines))
 
 	// Structural check: numbered permission menu.
 	// Requires three cues: a cursor-on-numbered-option line ("❯ N."), at least
@@ -2221,7 +2232,10 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 	// The footer ("Esc to cancel" for a standard permission menu, or "approve
 	// with this feedback" for the ExitPlanMode plan-approval menu — which has no
 	// "Esc to cancel") only appears in Claude's interactive prompts, preventing
-	// false-positives from user-typed numbered lists.
+	// false-positives from user-typed numbered lists. It is matched only within
+	// footerN of the bottom: a session discussing permission prompts prints both a
+	// numbered menu and the words "Esc to cancel" in ordinary prose, and matching
+	// that anywhere in bottomN pinned a finished session to waiting.
 	hasCursorOnOption := false
 	hasOtherOption := false
 	hasMenuFooter := false
@@ -2232,9 +2246,11 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 		} else if isNumberedMenuOption(trimmed) {
 			hasOtherOption = true
 		}
-		lower := strings.ToLower(trimmed)
-		if strings.Contains(lower, "esc to cancel") || strings.Contains(lower, "approve with this feedback") {
-			hasMenuFooter = true
+		if i < footerN {
+			lower := strings.ToLower(trimmed)
+			if strings.Contains(lower, "esc to cancel") || strings.Contains(lower, "approve with this feedback") {
+				hasMenuFooter = true
+			}
 		}
 	}
 	if hasCursorOnOption && hasOtherOption && hasMenuFooter {
@@ -2255,9 +2271,10 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 
 	// Structural check: AskUserQuestion tool dialog.
 	// Two hints appear only in this tool's footer: "Tab to switch questions" and
-	// "n to add notes". Either one paired with "Esc to cancel" on the same line
-	// identifies the dialog; the pairing is what keeps conversation text mentioning
-	// tabs or notes from matching.
+	// "n to add notes". Either one paired with "Esc to cancel" as whole fields of
+	// the footer's "·"-separated hint list identifies the dialog; matching fields
+	// rather than substrings is what keeps conversation text mentioning tabs or
+	// notes from matching (see isAskUserQuestionFooter).
 	//
 	// "n to add notes" is what covers the SINGLE-question variant, which omits the Tab
 	// hint because there is nothing to switch to. That variant can also fall outside the
@@ -2272,12 +2289,8 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 	// (Tab moves focus to checkbox-style question rows where `❯` disappears),
 	// so the menu structural check above misses these states. The footer is
 	// rendered identically on every tick regardless of which question has focus.
-	for i := 0; i < bottomN; i++ {
-		lower := strings.ToLower(recentLines[i])
-		if !strings.Contains(lower, "esc to cancel") {
-			continue
-		}
-		if strings.Contains(lower, "tab to switch questions") || strings.Contains(lower, "n to add notes") {
+	for i := 0; i < footerN; i++ {
+		if isAskUserQuestionFooter(recentLines[i]) {
 			log.Debug("detectStatus: matched askuserquestion footer")
 			return StatusWaiting
 		}
@@ -2294,6 +2307,79 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 	}
 
 	return ""
+}
+
+// isAskUserQuestionFooter reports whether line is the AskUserQuestion dialog's
+// key-hint footer. The footer is a "·"-separated list of hints, so the hints are
+// matched as whole fields of that list rather than as substrings of the line.
+//
+// Substring matching was a false-positive generator, because the hint wording is
+// ordinary English that a session discussing status detection prints verbatim: an
+// agent summary reading "detectWaiting accepts the single-question AskUserQuestion
+// footer (n to add notes + Esc to cancel)" carried both hints on one line, pinned a
+// finished session to waiting through applyHookFinished's pane override, and did so
+// on every tick for as long as the sentence stayed in the bottom 15 lines. Requiring
+// whole fields keeps prose out: a sentence mentioning the hints has no "·" between
+// them, so the hints are never fields of their own.
+//
+// "Esc to cancel" is required, plus either sibling hint. "n to add notes" is what
+// covers the SINGLE-question variant, which omits the Tab hint (see above).
+func isAskUserQuestionFooter(line string) bool {
+	var hasCancel, hasHint bool
+	for _, field := range footerFields(line) {
+		switch field {
+		case "esc to cancel":
+			hasCancel = true
+		case "n to add notes", "tab to switch questions":
+			hasHint = true
+		}
+	}
+	return hasCancel && hasHint
+}
+
+// footerFields splits a hint-list line into its individual hints, lowercased and
+// trimmed. Fields are separated by "·" or by a run of two or more spaces; a line
+// with neither is one field, so a hint rendered alone on its own line still counts.
+//
+// Claude renders the footer with "·" today and that is the only separator any
+// captured pane shows. The extra accepted forms are not speculation for its own
+// sake — this footer is the SOLE signal for the single-question preview variant
+// (its "❯ N." cursor line is out of the options window), and the failure direction
+// is the silent one: a false not-waiting means fleet never tells you the session is
+// blocked, where a false waiting is immediately obvious on screen. Padding and line
+// boundaries are what a hint list is separated by; prose separates its words with
+// words, so widening to them costs nothing in false positives.
+func footerFields(line string) []string {
+	var out []string
+	for _, part := range strings.Split(line, "·") {
+		for _, field := range splitOnWideGaps(part) {
+			if f := strings.ToLower(strings.TrimSpace(field)); f != "" {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
+}
+
+// splitOnWideGaps splits s on runs of two or more spaces. A single space is left
+// alone — it is the space *inside* a hint ("n to add notes"), not between hints.
+func splitOnWideGaps(s string) []string {
+	var out []string
+	start, run := 0, -1
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && s[i] == ' ' {
+			if run < 0 {
+				run = i
+			}
+			continue
+		}
+		if run >= 0 && i-run >= 2 {
+			out = append(out, s[start:run])
+			start = i
+		}
+		run = -1
+	}
+	return append(out, s[start:])
 }
 
 // isNumberedMenuOption reports whether s starts with "<digits>.".

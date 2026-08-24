@@ -1097,3 +1097,86 @@ func TestScenarioStaleWaitingLatchRecoversToWaiting(t *testing.T) {
 		},
 	})
 }
+
+func TestScenarioProseAboutFooterDoesNotPinWaiting(t *testing.T) {
+	// Regression: a session whose own conversation describes the AskUserQuestion
+	// footer read as waiting forever after it had finished.
+	//
+	// detectWaiting matched "n to add notes" and "esc to cancel" as substrings of a
+	// single line, so an agent summary reading "detectWaiting accepts the
+	// single-question AskUserQuestion footer (n to add notes + Esc to cancel), so a
+	// dialog whose …" satisfied both. The sentence sat 11 lines from the bottom —
+	// inside detectWaiting's 15-line window — so paneStatus=Waiting, and
+	// applyHookFinished's pane override turned a correct finished hook into waiting
+	// on every tick ("hook says finished but pane shows waiting, overriding"). Only
+	// scrolling the sentence out of the window cleared it.
+	//
+	// Fix: the hints must be whole fields of the footer's "·"-separated hint list
+	// (isAskUserQuestionFooter), which prose has no reason to produce.
+	// Captured from snapshot 2026-08-23T18-11-15_fix-1-and-2-with-tests.
+	fixture := "pane_finished_prose_mentions_askuserquestion_footer.txt"
+	if _, err := os.Stat(filepath.Join("testdata", fixture)); err != nil {
+		t.Skipf("fixture %s not available", fixture)
+	}
+
+	// The real footer, for contrast: the same two hints, but as fields of the "·"
+	// list. Carries no "❯ N." cursor line and no second numbered option, so the
+	// numbered-menu check above cannot fire and the footer is the only thing that
+	// can identify it — the checkbox-focus state, and the shape the single-question
+	// preview variant lands in when its panel pushes the cursor out of the window.
+	// The hook is deliberately left on "finished" here: a "waiting" hook would set
+	// the status on its own and the assertion would hold even with the footer check
+	// deleted.
+	realFooter := "Round 3: Architecture\n☒ Stack  ☐ Process model  ☐ V1 scope\n\n" +
+		"Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel\n"
+
+	runScenario(t, Scenario{
+		Name: "hook=finished + prose describing the footer → finished, not waiting",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", Pane: "@fixture:" + fixture},
+			{At: 30 * time.Second, Pane: "@fixture:" + fixture}, // still parked; must not drift to waiting
+			{At: 60 * time.Second, Pane: realFooter},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},                // before fix: waiting
+			{At: 30 * time.Second, Expected: StatusFinished}, // before fix: waiting
+			{At: 60 * time.Second, Expected: StatusWaiting},  // genuine footer overrides the finished hook
+		},
+	})
+}
+
+func TestScenarioProseQuotingAMenuDoesNotPinWaiting(t *testing.T) {
+	// Regression (PR #269 review): the sibling of the prose-footer bug above.
+	// isAskUserQuestionFooter matches its hints as whole fields, but the numbered-menu
+	// check one block up still substring-matched its own footer anywhere in the bottom
+	// 15 lines. A session doing status-detection work prints both halves as ordinary
+	// conversation — a quoted menu and the words "Esc to cancel" — so the same finished
+	// session was pinned to waiting through applyHookFinished's pane override.
+	//
+	// Fix: a footer only counts within footerN (3) of the bottom. Measured across every
+	// pane_waiting_* fixture the real footer sits at index 0-2; prose about one sits
+	// above the input box and mode bar the TUI always renders below it.
+	menuProse := "⏺ The permission dialog renders options like:\n\n" +
+		"  ❯ 1. Yes\n  2. No, tell Claude what to do differently\n\n" +
+		"  The footer (n to add notes + Esc to cancel) is what identifies it.\n\n" +
+		"✻ Worked for 59s\n\n❯ \n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+
+	// The same menu, actually live: options and footer at the bottom, no chrome under
+	// them. Guards against "fixing" this by disabling the menu check outright.
+	liveMenu := "Read(~/code/foo/bar.ts)\n\nDo you want to proceed?\n\n" +
+		"❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend\n"
+
+	runScenario(t, Scenario{
+		Name: "hook=finished + prose quoting a menu → finished, not waiting",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "finished", Pane: menuProse},
+			{At: 30 * time.Second, Pane: menuProse},
+			{At: 60 * time.Second, Pane: liveMenu},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusFinished},                // before fix: waiting
+			{At: 30 * time.Second, Expected: StatusFinished}, // before fix: waiting
+			{At: 60 * time.Second, Expected: StatusWaiting},  // a real menu still overrides the finished hook
+		},
+	})
+}
