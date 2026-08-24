@@ -1180,3 +1180,35 @@ func TestScenarioProseQuotingAMenuDoesNotPinWaiting(t *testing.T) {
 		},
 	})
 }
+
+func TestScenarioNBSPPromptClearsStaleWaiting(t *testing.T) {
+	// Regression: the consequence of the NBSP prompt separator, which is what made
+	// the parsing slip matter rather than being cosmetic.
+	//
+	// The user gets a permission prompt, presses Esc, and starts typing a different
+	// instruction without submitting. Escaping fires NO hook, so the waiting hook is
+	// stale and the pane is the only thing that can clear it — applyHookWaiting's
+	// paneStatus == StatusFinished branch exists for exactly this.
+	//
+	// Claude renders the gap after "❯" as U+00A0, so with text in the box the prompt
+	// scan missed, and in default mode (no "⏵⏵" mode bar to fall back on) detectStatus
+	// returned no signal at all. The override never fired and the session sat on
+	// waiting for as long as the text stayed in the box.
+	const nbsp = " "
+
+	menu := "Read(~/code/foo/bar.ts)\n\nDo you want to proceed?\n\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend\n"
+	// Post-Esc, default permission mode: an input box with typed text and no mode bar.
+	typed := "⏺ Reading config…\n\n──────────\n❯" + nbsp + "actually do it differently\n──────────\n"
+
+	runScenario(t, Scenario{
+		Name: "hook=waiting + escaped prompt + typed text → pane clears it to finished",
+		Events: []ScenarioEvent{
+			{At: 0, Hook: "waiting", Pane: menu},
+			{At: 10 * time.Second, Pane: typed}, // Esc pressed, user starts typing; no hook fires
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusWaiting},
+			{At: 10 * time.Second, Expected: StatusFinished}, // before fix: stuck on waiting
+		},
+	})
+}
