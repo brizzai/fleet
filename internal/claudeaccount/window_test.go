@@ -61,3 +61,38 @@ func TestSpentWindowIsQuietWhenNothingIsSpent(t *testing.T) {
 		t.Error("a healthy account reported a spent window")
 	}
 }
+
+// The poll is throttled to MinPollInterval, so a reading taken before a window
+// rolled over keeps describing a bucket that no longer exists — and it is wrong
+// in the one direction that shows: a spent account reads spent for another three
+// minutes, with its countdown already at zero, which is exactly when its owner is
+// watching. StaleAfterReset is what lets the poller break its own throttle there.
+func TestStaleAfterResetOnlyForAWindowThatJustRolledOver(t *testing.T) {
+	now := time.Date(2026, 8, 24, 13, 14, 0, 0, time.UTC)
+	polled := now.Add(-2 * time.Minute)
+
+	cases := []struct {
+		name string
+		u    Usage
+		want bool
+	}{
+		{"five-hour rolled over since the last poll",
+			Usage{FiveHourPct: 100, FiveHourReset: now.Add(-time.Minute), AttemptedAt: polled}, true},
+		{"weekly rolled over since the last poll",
+			Usage{SevenDayPct: 100, SevenDayReset: now.Add(-time.Minute), AttemptedAt: polled}, true},
+		{"reset still ahead",
+			Usage{FiveHourPct: 100, FiveHourReset: now.Add(time.Minute), AttemptedAt: polled}, false},
+		{"no reset known",
+			Usage{FiveHourPct: 100, AttemptedAt: polled}, false},
+		// The back-off case: a poll that fails at the boundary moves AttemptedAt
+		// past the reset. Without the lower bound this stays true forever and the
+		// account retries every tick against an endpoint that just refused.
+		{"a failed poll already covered the boundary",
+			Usage{FiveHourPct: 100, FiveHourReset: now.Add(-2 * time.Minute), AttemptedAt: now.Add(-time.Minute)}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.u.StaleAfterReset(now); got != tc.want {
+			t.Errorf("%s: StaleAfterReset = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

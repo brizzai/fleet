@@ -123,6 +123,30 @@ func (u Usage) SpentWindow(now time.Time) (Window, time.Time, bool) {
 	return WindowFiveHour, time.Time{}, false
 }
 
+// StaleAfterReset reports whether a window refilled between the last poll
+// attempt and now, which makes the percentages here describe a bucket that no
+// longer exists.
+//
+// It is the one condition worth breaking MinPollInterval for. The reading is
+// not merely old, it is about the wrong window, and it is stale in the
+// direction that matters: an account that has just come back keeps reading
+// spent for another three minutes, exactly while its owner is watching the
+// countdown run out.
+//
+// Bounded below by AttemptedAt rather than simply "the reset is in the past":
+// a poll that fails at the boundary moves AttemptedAt past the reset, so the
+// account backs off at the normal cadence instead of retrying every tick
+// against an endpoint that just refused.
+func (u Usage) StaleAfterReset(now time.Time) bool {
+	return refilledBetween(u.FiveHourReset, u.AttemptedAt, now) ||
+		refilledBetween(u.SevenDayReset, u.AttemptedAt, now)
+}
+
+// refilledBetween reports whether a known reset falls in (since, now].
+func refilledBetween(reset, since, now time.Time) bool {
+	return !reset.IsZero() && reset.After(since) && !reset.After(now)
+}
+
 // Window is one of the two quota buckets Anthropic reports.
 type Window int
 

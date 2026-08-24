@@ -188,7 +188,18 @@ func resetIn(u claudeaccount.Usage, win claudeaccount.Window, now time.Time) str
 	}
 	d := at.Sub(now)
 	if d <= 0 {
-		return ""
+		// The wait is over, and saying so is the whole point of this
+		// parenthetical. Deliberately not "": that drops the countdown at the
+		// exact moment the user is watching it, leaving a stale red "100%" with
+		// nothing beside it to say the window came back — the one state where
+		// the horizon matters most, reporting nothing. It is also the chip
+		// changing shape on a timer, which is what this readout was rebuilt to
+		// stop.
+		//
+		// Not a resting state: a passed reset breaks the poll's own throttle
+		// (Usage.StaleAfterReset), so the figure beside it is re-read within a
+		// tick and this shows only in the seconds between the two.
+		return quotaResetStyle.Render("now")
 	}
 	switch {
 	case d < time.Hour:

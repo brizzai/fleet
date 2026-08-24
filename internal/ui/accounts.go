@@ -872,7 +872,14 @@ func (h *Home) maybePollAccountUsage() {
 		// Paced on AttemptedAt, not FetchedAt: a failing account must back off
 		// at the same slow cadence as a healthy one rather than retrying every
 		// cycle, and FetchedAt no longer advances on failure.
-		if had && now.Sub(prev.AttemptedAt) < claudeaccount.MinPollInterval {
+		//
+		// A window crossing its own reset is the one thing that outranks the
+		// throttle: the numbers stop describing the bucket they were read from,
+		// so the readout keeps showing a spent account for up to three minutes
+		// after it came back — with the countdown at zero, which is the moment
+		// its owner is actually looking at it.
+		if had && now.Sub(prev.AttemptedAt) < claudeaccount.MinPollInterval &&
+			!prev.StaleAfterReset(now) {
 			continue
 		}
 

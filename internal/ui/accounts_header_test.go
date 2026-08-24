@@ -235,6 +235,30 @@ func TestSplitStyleDropsOnlyTheUnknownCountdown(t *testing.T) {
 	}
 }
 
+// The moment a spent window's reset arrives is the moment its owner is watching
+// the strip, and it used to be the moment the strip stopped answering: the
+// countdown fell to nothing and left a red 100% with no horizon beside it. A
+// *known* reset that has passed reads "now"; only an unknown one drops, which
+// the two tests above cover.
+func TestPassedResetKeepsACountdown(t *testing.T) {
+	rolled := hdrUsage(100, 34)
+	rolled.FiveHourReset = hdrNow.Add(-30 * time.Second)
+
+	usage := map[string]claudeaccount.Usage{"yuval@x.com": rolled, "work@x.com": hdrUsage(20, 71)}
+	accts := hdrAccounts("yuval@x.com", "work@x.com")
+
+	got := ansi.Strip(hdrSplit(accts, usage, hdrNow))
+	if !strings.Contains(got, "yuval 100%(now) 34%(5d)") {
+		t.Errorf("split style dropped the countdown at the reset: %q", got)
+	}
+	// Grouped pools the two, so "now" has to keep the group whole rather than
+	// taking it down with it.
+	grouped := ansi.Strip(renderAccountUsageHeader(accts, usage, config.AccountUsageGrouped, 200, hdrNow))
+	if !strings.Contains(grouped, "yuval 100%/34% (now/5d)") {
+		t.Errorf("grouped style dropped the whole countdown group at the reset: %q", grouped)
+	}
+}
+
 // The two styles are the same width by construction: four tokens plus five
 // characters of glue either way (split spends them on two paren pairs and a
 // space, grouped on a slash, a space, a paren pair and a slash).
