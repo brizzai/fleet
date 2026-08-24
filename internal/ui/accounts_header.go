@@ -175,8 +175,12 @@ func windowFigure(pct int, reset string, dim lipgloss.Style) string {
 }
 
 // resetIn renders how long until the given window refills, as "42m", "3h" or
-// "5d". Relative rather than a clock time: the question is "how long do I
+// "5d" — or "now" once the reset has arrived and the reading is known to
+// predate it. Relative rather than a clock time: the question is "how long do I
 // wait", and an absolute time makes the reader do the subtraction.
+//
+// Empty when there is nothing trustworthy to say: no reset known, the poll is
+// failing, or the reading was taken after the reset it names.
 //
 // Per window, because they differ — and because a weekly figure without its
 // horizon is the thing that prompted all of this. 54% of a week means nothing
@@ -196,10 +200,30 @@ func resetIn(u claudeaccount.Usage, win claudeaccount.Window, now time.Time) str
 		// changing shape on a timer, which is what this readout was rebuilt to
 		// stop.
 		//
-		// Not a resting state: a passed reset breaks the poll's own throttle
-		// (Usage.StaleAfterReset), so the figure beside it is re-read within a
-		// tick and this shows only in the seconds between the two.
-		return quotaResetStyle.Render("now")
+		// Both conditions bound that claim, because "now" says a fresh figure is
+		// a tick away and neither the clock nor the reset time can promise it:
+		//
+		// Err == nil — the last poll succeeded. A passed reset breaks the poll's
+		// own throttle (Usage.StaleAfterReset), but only AttemptedAt bounds that
+		// break, and a *failing* poll advances AttemptedAt while keeping the old
+		// reset. So across an outage spanning a reset nothing re-polls, and
+		// without this the strip reads "34%(now) 71%(now)" for the whole outage
+		// — announcing a refill beside figures hours old.
+		//
+		// at.After(FetchedAt) — the reset arrived after the reading was taken,
+		// so this figure really is the pre-reset one. A poll that *succeeds* and
+		// returns an already-past reset (a 5-hour block is anchored to its first
+		// message, so a lapsed one can report its old resets_at for hours) is
+		// answering about a window it has already left behind; "now" would then
+		// mean "just refilled" for as long as that lasts.
+		//
+		// Either way the fallback is "", which is exactly what this rendered
+		// before the countdown existed: a bare figure, stale and saying so by
+		// carrying no horizon at all.
+		if u.Err == nil && at.After(u.FetchedAt) {
+			return quotaResetStyle.Render("now")
+		}
+		return ""
 	}
 	switch {
 	case d < time.Hour:
