@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -232,6 +233,71 @@ func TestSplitStyleDropsOnlyTheUnknownCountdown(t *testing.T) {
 
 	if !strings.Contains(got, "yuval 12% 34%(5d)") {
 		t.Errorf("want the weekly countdown kept and only the 5-hour one dropped: %q", got)
+	}
+}
+
+// justRolledOver is a reading taken while the 5-hour window was still spent,
+// whose reset has since arrived — the state the strip used to answer with
+// nothing at all.
+func justRolledOver() claudeaccount.Usage {
+	u := hdrUsage(100, 34)
+	u.FetchedAt = hdrNow.Add(-5 * time.Minute)
+	u.AttemptedAt = u.FetchedAt
+	u.FiveHourReset = hdrNow.Add(-30 * time.Second)
+	return u
+}
+
+// The moment a spent window's reset arrives is the moment its owner is watching
+// the strip, and it used to be the moment the strip stopped answering: the
+// countdown fell to nothing and left a red 100% with no horizon beside it.
+func TestPassedResetKeepsACountdown(t *testing.T) {
+	usage := map[string]claudeaccount.Usage{"yuval@x.com": justRolledOver(), "work@x.com": hdrUsage(20, 71)}
+	accts := hdrAccounts("yuval@x.com", "work@x.com")
+
+	got := ansi.Strip(hdrSplit(accts, usage, hdrNow))
+	if !strings.Contains(got, "yuval 100%(now) 34%(5d)") {
+		t.Errorf("split style dropped the countdown at the reset: %q", got)
+	}
+	// Grouped pools the two, so "now" has to keep the group whole rather than
+	// taking it down with it.
+	grouped := ansi.Strip(renderAccountUsageHeader(accts, usage, config.AccountUsageGrouped, 200, hdrNow))
+	if !strings.Contains(grouped, "yuval 100%/34% (now/5d)") {
+		t.Errorf("grouped style dropped the whole countdown group at the reset: %q", grouped)
+	}
+}
+
+// "now" is a claim that a fresh figure is one tick behind it, and only two
+// things can promise that. Neither the wall clock nor the reset time can, so
+// both states below fall back to the bare figure this rendered before the
+// countdown existed — rather than announcing a refill next to numbers that are
+// hours old.
+func TestNowIsSuppressedWhenItCannotBeTransient(t *testing.T) {
+	// A poll failing across a reset: the throttle break is bounded by
+	// AttemptedAt, which a failed poll advances past the reset, so nothing
+	// re-polls and the figure beside "now" would sit there for the whole outage.
+	outage := justRolledOver()
+	outage.Err = errors.New("dial tcp: lookup api.anthropic.com: no such host")
+	outage.AttemptedAt = hdrNow.Add(-time.Second)
+
+	// A poll that *succeeds* and returns an already-past reset: it is answering
+	// about a window it has left behind, so the reading does not predate its own
+	// reset and there is no refill to announce.
+	lapsed := hdrUsage(100, 34)
+	lapsed.FiveHourReset = hdrNow.Add(-2 * time.Hour)
+	lapsed.FetchedAt = hdrNow.Add(-10 * time.Second)
+	lapsed.AttemptedAt = lapsed.FetchedAt
+
+	for name, u := range map[string]claudeaccount.Usage{"failing poll": outage, "reading postdates its reset": lapsed} {
+		got := ansi.Strip(hdrSplit(
+			hdrAccounts("yuval@x.com", "work@x.com"),
+			map[string]claudeaccount.Usage{"yuval@x.com": u, "work@x.com": hdrUsage(20, 71)},
+			hdrNow))
+		if strings.Contains(got, "now") {
+			t.Errorf("%s: claimed a refill it cannot back up: %q", name, got)
+		}
+		if !strings.Contains(got, "yuval 100% 34%(5d)") {
+			t.Errorf("%s: want the bare pre-countdown rendering: %q", name, got)
+		}
 	}
 }
 
