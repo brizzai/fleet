@@ -134,6 +134,17 @@ func TestDetectStatus(t *testing.T) {
 		// Single spaces are inside a hint, not between hints — widening must not
 		// shred "n to add notes" into words and match on fragments.
 		{"single-spaced prose not matched", "the footer has n to add notes and Esc to cancel in it\n❯\n⏵⏵\n", StatusFinished},
+		// NBSP prompt separator: Claude renders the gap after "❯" as U+00A0, so a
+		// literal " " missed every prompt with text typed into the box. TrimSpace
+		// strips a *trailing* NBSP, which is why the empty box always looked fine.
+		// No mode bar in these — that "⏵⏵" idle pattern is what masked the bug.
+		{"nbsp prompt with typed text", "⏺ Done.\n\n❯\u00a0fix the parser\n", StatusFinished},
+		{"nbsp prompt empty", "⏺ Done.\n\n❯\u00a0\n", StatusFinished},
+		{"normal-space prompt with typed text", "⏺ Done.\n\n❯ fix the parser\n", StatusFinished},
+		{"nbsp prompt with slash command", "⏺ Done.\n\n❯\u00a0/ship\n", StatusFinished},
+		// The numbered-option skip must survive the widened separator: a menu cursor
+		// is waiting, not an idle prompt, whichever space it uses.
+		{"nbsp menu cursor still skipped not finished", "output\n❯\u00a01. Yes\nsome trailing text\n", ""},
 		{"no match", "random output text\nmore text\n", ""},
 	}
 

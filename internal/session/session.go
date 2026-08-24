@@ -2397,6 +2397,38 @@ func isNumberedMenuOption(s string) bool {
 	return false
 }
 
+// promptRemainder reports whether line is Claude's input-prompt line and returns
+// whatever follows the marker. line is expected already trimmed.
+//
+// The separator is matched with unicode.IsSpace, not a literal " ", because Claude
+// renders the gap after the marker as a NO-BREAK SPACE (U+00A0). Matching a plain
+// space missed every prompt with text typed into the box: TrimSpace strips a
+// *trailing* NBSP, so a bare "❯" still matched and the empty-box case looked fine,
+// while "❯\u00a0fix the parser" did not. In auto mode the "⏵⏵" idle pattern covered
+// for it; in default mode there is no mode bar, so detectStatus returned no signal
+// at all — which disables applyHookWaiting's pane override, the one path that
+// clears a stale waiting hook after the user escapes a prompt (no hook fires on
+// Esc). The session stayed waiting for as long as text sat in the box.
+//
+// The menu-cursor check in detectWaiting keeps its literal " ": every captured
+// permission menu renders a normal space there, so it has no equivalent bug, and
+// this function still skips numbered options either way.
+func promptRemainder(line string) (string, bool) {
+	for _, marker := range []string{"❯", ">"} {
+		rest, ok := strings.CutPrefix(line, marker)
+		if !ok {
+			continue
+		}
+		if rest == "" {
+			return "", true
+		}
+		if r, size := utf8.DecodeRuneInString(rest); unicode.IsSpace(r) {
+			return strings.TrimSpace(rest[size:]), true
+		}
+	}
+	return "", false
+}
+
 // detectFinished checks for prompt indicators and idle patterns.
 func detectFinished(recentLines []string, recentContent string, log *slog.Logger) Status {
 	if len(recentLines) == 0 {
@@ -2407,18 +2439,12 @@ func detectFinished(recentLines []string, recentContent string, log *slog.Logger
 	scanLimit := min(5, len(recentLines))
 	for i := 0; i < scanLimit; i++ {
 		line := strings.TrimSpace(recentLines[i])
-		if line == ">" || line == "❯" || strings.HasPrefix(line, "> ") || strings.HasPrefix(line, "❯ ") {
+		remainder, isPrompt := promptRemainder(line)
+		if isPrompt {
 			// Skip permission-menu cursor lines ("❯ 2. Yes…") — those are
 			// waiting state, not idle prompts. Defense-in-depth: detectWaiting
 			// should have caught these earlier, but if a new menu variant
 			// slips past it, we don't want to silently flip to finished.
-			remainder := line
-			switch {
-			case strings.HasPrefix(line, "❯ "):
-				remainder = strings.TrimPrefix(line, "❯ ")
-			case strings.HasPrefix(line, "> "):
-				remainder = strings.TrimPrefix(line, "> ")
-			}
 			if isNumberedMenuOption(remainder) {
 				continue
 			}
