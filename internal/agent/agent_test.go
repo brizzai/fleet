@@ -121,7 +121,7 @@ func TestBuildLaunchCmdModelAndEffortPerAgent(t *testing.T) {
 		{"claude effort", Claude, LaunchOpts{Effort: "xhigh"}, "claude --effort xhigh"},
 		{"claude both", Claude, LaunchOpts{Model: "claude-opus-5", Effort: "high"}, "claude --model claude-opus-5 --effort high"},
 		{"codex effort is a config override", Codex, LaunchOpts{Model: "gpt-5.1-codex-max", Effort: "high"}, "codex --model gpt-5.1-codex-max -c model_reasoning_effort=high"},
-		{"opencode effort is --variant", OpenCode, LaunchOpts{Model: "anthropic/claude-sonnet-5", Effort: "max"}, "opencode --model anthropic/claude-sonnet-5 --variant max"},
+		{"opencode takes a model but never an effort", OpenCode, LaunchOpts{Model: "anthropic/claude-sonnet-5", Effort: "max"}, "opencode --model anthropic/claude-sonnet-5"},
 		{"neither set changes nothing", Claude, LaunchOpts{}, "claude"},
 	}
 	for _, tt := range tests {
@@ -142,7 +142,11 @@ func TestModelAndEffortPrecedeThePrompt(t *testing.T) {
 		if promptAt < 0 {
 			t.Fatalf("%s: prompt missing from %q", ag, cmd)
 		}
-		for _, flag := range []string{"opus", "high"} {
+		want := []string{"opus"}
+		if ag.SupportsEffort() {
+			want = append(want, "high")
+		}
+		for _, flag := range want {
 			if at := strings.Index(cmd, flag); at < 0 || at > promptAt {
 				t.Errorf("%s: %q must precede the prompt argument, got %q", ag, flag, cmd)
 			}
@@ -175,6 +179,41 @@ func TestValidateLaunchValue(t *testing.T) {
 	for _, v := range bad {
 		if err := ValidateLaunchValue("model", v); err == nil {
 			t.Errorf("ValidateLaunchValue(%q) = nil, want an error", v)
+		}
+	}
+}
+
+// OpenCode has the concept of a reasoning effort but no way to accept one on
+// the command fleet launches: `--variant` is declared on the `run` subcommand,
+// while fleet runs the default `$0 [project]` command, whose builder declares
+// only project/prompt/network options — and OpenCode's root parser is yargs in
+// .strict() mode, so an unknown option prints the command list and exits.
+//
+// fleet shipped `--variant` here briefly. The cost of getting it wrong is not a
+// dropped setting: it is a session fleet reports as created, row saved and repo
+// pinned, whose pane is a shell prompt with no agent in it.
+func TestOpenCodeNeverReceivesAnEffortFlag(t *testing.T) {
+	if OpenCode.SupportsEffort() {
+		t.Fatal("OpenCode.SupportsEffort() = true, want false")
+	}
+	for _, ag := range []Type{Claude, Codex} {
+		if !ag.SupportsEffort() {
+			t.Errorf("%s.SupportsEffort() = false, want true", ag)
+		}
+	}
+
+	// BuildLaunchCmd guards too, so a caller that forgets to reject the flag
+	// drops it rather than launching a command OpenCode refuses outright.
+	for _, o := range []LaunchOpts{
+		{Effort: "high"},
+		{Effort: "max", Model: "anthropic/claude-sonnet-5"},
+		{Effort: "minimal", ResumeID: "abc", Prompt: "x"},
+	} {
+		cmd := OpenCode.BuildLaunchCmd(o)
+		for _, banned := range []string{"--variant", "--effort", "model_reasoning_effort", o.Effort} {
+			if strings.Contains(cmd, banned) {
+				t.Errorf("opencode command %q must not carry %q", cmd, banned)
+			}
 		}
 	}
 }

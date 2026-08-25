@@ -145,24 +145,35 @@ func ValidateLaunchValue(flag, v string) error {
 	return nil
 }
 
-// effortArg is the reasoning-effort flag as each agent spells it, and the three
+// SupportsEffort reports whether this agent can be told a reasoning effort on
+// the command line fleet launches it with.
+//
+// **OpenCode cannot, and the near miss is worth recording.** It does have the
+// concept, spelled `--variant`, but that option is declared on the `run`
+// subcommand — and fleet launches the *default* command (`opencode [project]`),
+// whose builder declares only `project`, `prompt` and the network options.
+// OpenCode's root parser is yargs in `.strict()` mode, so an option it does not
+// know is not ignored: it prints the command list and exits. The result would
+// be a session fleet reports as created — row saved, repo pinned — whose pane
+// is a shell prompt with no agent in it, which is exactly the failure promptArg
+// describes and which nothing in fleet detects at launch.
+//
+// `--model` is unaffected: the default command's handler reads args.model.
+func (t Type) SupportsEffort() bool { return t != OpenCode }
+
+// effortArg is the reasoning-effort flag as each agent spells it, and the two
 // spellings are why this lives here rather than in the callers: Claude has
-// --effort, OpenCode calls the same idea --variant, and Codex has no flag at
-// all — only a `-c key=value` override of the config.toml key its own /model
-// popup writes.
+// --effort, and Codex has no flag at all — only a `-c key=value` override of
+// the config.toml key its own /model popup writes.
 //
 // Codex's value needs no quoting: `-c` parses the value as TOML and falls back
 // to the raw string when that fails, so a bare `high` arrives intact and the
 // shell has nothing to chew on.
 func (t Type) effortArg(effort string) string {
-	switch t {
-	case Codex:
+	if t == Codex {
 		return " -c model_reasoning_effort=" + effort
-	case OpenCode:
-		return " --variant " + effort
-	default:
-		return " --effort " + effort
 	}
+	return " --effort " + effort
 }
 
 // BuildLaunchCmd returns the shell command to run in the session's tmux pane.
@@ -189,7 +200,8 @@ func (t Type) effortArg(effort string) string {
 // Model and Effort append their per-agent flags to any of those, ahead of the
 // prompt — the prompt argument must stay last, since `--` ends option parsing
 // and anything after it is no longer read as a flag. All three agents spell the
-// model flag `--model`; effort is three different spellings (see effortArg).
+// model flag `--model`; effort is two spellings and one agent that has none at
+// all (see effortArg and SupportsEffort).
 //
 // An initial prompt appends the agent's own prompt argument to any of those —
 // `-- <prompt>` for Claude and Codex, `--prompt=<prompt>` for OpenCode (see
@@ -233,7 +245,10 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	if o.Model != "" {
 		cmd += " --model " + o.Model
 	}
-	if o.Effort != "" {
+	// Guarded rather than assumed: the callers reject --effort for an agent that
+	// can't take it, and this makes a caller that forgets drop the flag instead
+	// of launching a command the agent refuses outright.
+	if o.Effort != "" && t.SupportsEffort() {
 		cmd += t.effortArg(o.Effort)
 	}
 

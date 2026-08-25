@@ -111,6 +111,36 @@ func TestParseAddArgs(t *testing.T) {
 			wantErr: `invalid --effort "$(whoami)"`,
 		},
 		{
+			// `fleet add "$REPO"` with REPO unset must not fall through to cwd —
+			// that is the failed-substitution case, not an omitted path.
+			name:    "explicitly empty path is rejected",
+			args:    []string{""},
+			wantErr: "path was empty",
+		},
+		{
+			name:    "whitespace-only path is rejected",
+			args:    []string{"   ", "-p", "do it"},
+			wantErr: "path was empty",
+		},
+		{
+			// OpenCode's --variant lives on `run`, not the default command fleet
+			// launches, and its root parser is strict — so the flag is refused
+			// rather than silently dropped.
+			name:    "effort with opencode is rejected",
+			args:    []string{".", "--agent", "opencode", "--effort", "high"},
+			wantErr: "--effort has no effect on opencode sessions",
+		},
+		{
+			name: "model with opencode is fine",
+			args: []string{".", "--agent", "opencode", "--model", "anthropic/claude-sonnet-5"},
+			want: addOpts{path: ".", agentName: "opencode", model: "anthropic/claude-sonnet-5"},
+		},
+		{
+			name: "effort with codex is fine",
+			args: []string{".", "--agent", "codex", "--effort", "high"},
+			want: addOpts{path: ".", agentName: "codex", effort: "high"},
+		},
+		{
 			name:    "two positionals",
 			args:    []string{"a", "b"},
 			wantErr: `unexpected argument "b"`,

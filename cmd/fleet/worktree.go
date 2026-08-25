@@ -214,7 +214,7 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 			return o, fmt.Errorf("--effort has no effect with --no-session (no session is started)")
 		}
 	}
-	if err := validateLaunchOverrides(o.model, o.effort); err != nil {
+	if err := validateLaunchOverrides(o.model, o.effort, o.agentName); err != nil {
 		return o, err
 	}
 	return o, nil
@@ -283,15 +283,13 @@ func runWorktree(args []string) {
 	// fallback — the same rule --agent follows, and for a costlier reason.
 	accounts := claudeaccount.Load()
 	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
+	// Nothing to resolve under --no-session, and nothing to guard either:
+	// parseWorktreeArgs already rejects --account, --agent, --model and --effort
+	// alongside it, so this can only be reached with all four unset.
 	account := ""
 	if !opts.noSession {
+		guardEffortSupported(ag, opts.effort)
 		account = resolveLaunchAccount(cfg, accounts, repoPath, ag, opts.account)
-	} else if opts.account != "" && ag != agent.Claude {
-		// --no-session starts nothing, so there is no account to resolve — but
-		// the --agent/--account mismatch is still worth naming rather than
-		// silently accepting a flag that could never have applied.
-		fmt.Fprintf(os.Stderr, "--account only applies to claude sessions (default_agent is %s)\n", ag)
-		os.Exit(1)
 	}
 
 	// Phase A: when -ticket named no branch, the fetch is required to name one,

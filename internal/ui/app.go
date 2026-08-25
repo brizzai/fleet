@@ -3757,7 +3757,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	if msg.resumeClaudeID != "" {
 		s.ClaudeSessionID = msg.resumeClaudeID
 	}
-	// One-shot: Session.Start clears it via consumeInitialPromptLocked, and it
+	// One-shot: Session.Start clears it via consumeLaunchOverridesLocked, and it
 	// is never persisted, so a restart doesn't re-ask the original question.
 	s.InitialPrompt = msg.prompt
 	return func() tea.Msg {

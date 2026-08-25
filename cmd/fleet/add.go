@@ -95,7 +95,15 @@ func parseAddArgs(args []string) (addOpts, error) {
 		return o, fmt.Errorf("unexpected argument %q — expected a single path", positional[1])
 	}
 	if len(positional) == 1 {
+		// An explicitly empty positional is NOT the same as an omitted one, and
+		// folding the two together would defeat the guard errMissingAddArgs
+		// exists for: `fleet add "$REPO"` with REPO unset or misspelled would
+		// start an agent in whatever directory the tab happened to be in. Same
+		// failed-substitution case that -prompt rejects a few lines below.
 		o.path = strings.TrimSpace(positional[0])
+		if o.path == "" {
+			return o, fmt.Errorf("path was empty")
+		}
 	}
 
 	// fs.Visit is the only thing separating `-p ''` from -p not given: both
@@ -129,7 +137,7 @@ func parseAddArgs(args []string) (addOpts, error) {
 		return o, fmt.Errorf("--account only applies to claude sessions (got --agent %s)", o.agentName)
 	}
 
-	if err := validateLaunchOverrides(o.model, o.effort); err != nil {
+	if err := validateLaunchOverrides(o.model, o.effort, o.agentName); err != nil {
 		return o, err
 	}
 	return o, nil
@@ -139,7 +147,7 @@ func parseAddArgs(args []string) (addOpts, error) {
 // accept. They are embedded in the command string that is typed into the pane's
 // shell, so an unvalidated value would be executed by it — see
 // agent.ValidateLaunchValue.
-func validateLaunchOverrides(model, effort string) error {
+func validateLaunchOverrides(model, effort, agentName string) error {
 	if model != "" {
 		if err := agent.ValidateLaunchValue("model", model); err != nil {
 			return err
@@ -148,6 +156,11 @@ func validateLaunchOverrides(model, effort string) error {
 	if effort != "" {
 		if err := agent.ValidateLaunchValue("effort", effort); err != nil {
 			return err
+		}
+		// Only checkable here when --agent was given; guardEffortSupported
+		// re-checks once default_agent has been resolved.
+		if agentName != "" && !agent.Parse(agentName).SupportsEffort() {
+			return fmt.Errorf("--effort has no effect on %s sessions — it can only be set inside the agent", agentName)
 		}
 	}
 	return nil
@@ -227,6 +240,7 @@ func runAdd(args []string) {
 	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
 
 	ag := resolveLaunchAgent(cfg, opts.agentName, true)
+	guardEffortSupported(ag, opts.effort)
 	account := resolveLaunchAccount(cfg, accounts, path, ag, opts.account)
 
 	// A prompt names the work, and the work is what the user is looking for in

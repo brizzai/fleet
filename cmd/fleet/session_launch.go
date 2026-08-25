@@ -135,6 +135,21 @@ func resolveLaunchAccount(cfg *config.Config, accounts *claudeaccount.Store, rep
 	return account
 }
 
+// guardEffortSupported refuses --effort for an agent whose launch command has
+// no way to carry it (see agent.SupportsEffort).
+//
+// Re-checked here, not only at parse time, for the same reason --account is:
+// the parse-time guard can compare --effort against --agent only when --agent
+// was given. With default_agent set to opencode, an explicit --effort would
+// otherwise reach BuildLaunchCmd, be dropped there, and the session would start
+// silently ignoring the flag.
+func guardEffortSupported(ag agent.Type, effort string) {
+	if effort != "" && !ag.SupportsEffort() {
+		fmt.Fprintf(os.Stderr, "--effort has no effect on %s sessions — it can only be set inside the agent\n", ag)
+		os.Exit(1)
+	}
+}
+
 // launchOverrides carries the per-launch choices a command hands to the agent.
 type launchOverrides struct {
 	account string

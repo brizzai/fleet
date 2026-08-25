@@ -330,6 +330,16 @@ func TestParseWorktreeArgsModelAndEffort(t *testing.T) {
 			wantErr: "invalid --effort",
 		},
 		{
+			name:    "effort with opencode is rejected",
+			args:    []string{"my-branch", "--agent", "opencode", "--effort", "high"},
+			wantErr: "--effort has no effect on opencode sessions",
+		},
+		{
+			name:      "model with opencode is fine",
+			args:      []string{"my-branch", "--agent", "opencode", "--model", "anthropic/claude-sonnet-5"},
+			wantModel: "anthropic/claude-sonnet-5",
+		},
+		{
 			name:    "model with --no-session",
 			args:    []string{"my-branch", "--no-session", "--model", "opus"},
 			wantErr: "--model has no effect with --no-session",

@@ -82,9 +82,12 @@ fleet add <path>   --agent codex --model gpt-5.1-codex-max --effort high
   `claude-opus-5`), a model id for Codex, and `provider/model` for OpenCode
   (`anthropic/claude-sonnet-5`). fleet passes it through and does not translate between
   agents, so use the spelling the chosen agent uses.
-- `--effort` is agent-neutral on fleet's side — it becomes `--effort` for Claude,
-  `--variant` for OpenCode, and a `model_reasoning_effort` config override for Codex.
-  Claude accepts `low|medium|high|xhigh|max|ultracode`; the others take their own levels.
+- `--effort` works for **Claude and Codex only** — it becomes `--effort` for Claude and a
+  `model_reasoning_effort` config override for Codex. Claude accepts
+  `low|medium|high|xhigh|max|ultracode`; Codex takes its own levels. Passing it with
+  `--agent opencode` is an error, not a silent no-op: the command fleet launches OpenCode
+  with has no option for it, so it can only be set inside the agent. `--model` works for
+  all three.
 - Both apply to the **launch only**. The user can change model in-session (`/model`), and
   a later restart uses the agent's own defaults rather than re-imposing these.
 - Values must be bare names — anything with a space or a shell metacharacter is rejected
