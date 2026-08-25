@@ -1554,7 +1554,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return true
 			})
 		}
-		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.linearTeams)
+		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.linearTeams, msg.branches)
 		if id := h.pendingTicketID; id != "" {
 			// Consumed here and nowhere else, so a ticket picked once cannot
 			// leak into the next unrelated `w`.
@@ -7205,9 +7205,17 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		if linear.Available() {
 			linearTeams = linear.TeamKeys(repoPath)
 		}
+		// Same goroutine, same reason — and unlike the worktree list this one is
+		// allowed to fail quietly: no branches simply means the Base branch field
+		// has no suggestions, never a dialog that refuses to open.
+		branches, branchErr := git.ListBranches(repoPath)
+		if branchErr != nil {
+			branches = nil
+		}
 		return workspaceListMsg{
 			workspaces: workspaces, provider: provider, repoPath: repoPath,
-			defaultBranch: defaultBranch, originKey: originKey, linearTeams: linearTeams, err: err,
+			defaultBranch: defaultBranch, originKey: originKey, linearTeams: linearTeams,
+			branches: branches, err: err,
 		}
 	}
 }

@@ -1,8 +1,10 @@
 package git
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +74,105 @@ func TestGetMainWorktreePathNonRepo(t *testing.T) {
 	dir := t.TempDir()
 	if got := GetMainWorktreePath(dir); got != dir {
 		t.Errorf("GetMainWorktreePath(non-repo) = %q, want %q", got, dir)
+	}
+}
+
+// initBranchRepo builds a repo whose branches cover every shape ListBranches
+// has to tell apart: local-only, local with a remote counterpart that is level,
+// local with a remote counterpart that is AHEAD, and remote-only.
+func initBranchRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := t.TempDir()
+	// The commit dates are pinned rather than left to the clock. Two
+	// --allow-empty commits land in the same second, and --sort=-committerdate
+	// then falls back to refname order, which always puts refs/heads before
+	// refs/remotes — silently hiding the very ordering this fixture exists to
+	// produce.
+	at := func(date string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if date != "" {
+			cmd.Env = append(os.Environ(),
+				"GIT_AUTHOR_DATE="+date,
+				"GIT_COMMITTER_DATE="+date)
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run := func(args ...string) string { return at("", args...) }
+
+	const old, recent = "2020-01-01T00:00:00Z", "2024-01-01T00:00:00Z"
+
+	run("init", "-q", ".")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test")
+	at(old, "commit", "-q", "--allow-empty", "-m", "one")
+	first := run("rev-parse", "HEAD")
+
+	run("branch", "level")
+	run("branch", "lagging")
+	run("branch", "solo")
+	run("update-ref", "refs/remotes/origin/level", first)
+
+	// A newer commit, so origin/lagging sorts strictly BEFORE the local branch
+	// of the same name — the everyday state of a branch you have not pulled,
+	// and the ordering that used to defeat the dedupe.
+	at(recent, "commit", "-q", "--allow-empty", "-m", "two")
+	second := run("rev-parse", "HEAD")
+	run("update-ref", "refs/remotes/origin/lagging", second)
+	run("update-ref", "refs/remotes/origin/ghost", second)
+
+	return repo
+}
+
+// TestListBranchesRemoteCounterparts pins both halves of the two-pass form: the
+// HasRemote flag the worktree dialog's origin/ rule reads, and the dedupe — a
+// remote ref that sorts BEFORE its local counterpart (because the local branch
+// has fallen behind) used to emit the branch twice.
+func TestListBranchesRemoteCounterparts(t *testing.T) {
+	repo := initBranchRepo(t)
+
+	branches, err := ListBranches(repo)
+	if err != nil {
+		t.Fatalf("ListBranches: %v", err)
+	}
+
+	byName := make(map[string][]BranchInfo)
+	for _, b := range branches {
+		byName[b.Name] = append(byName[b.Name], b)
+	}
+
+	cases := []struct {
+		name      string
+		isRemote  bool
+		hasRemote bool
+		why       string
+	}{
+		{"solo", false, false, "local branch with no origin/ ref"},
+		{"level", false, true, "local branch whose origin/ ref is level with it"},
+		{"lagging", false, true, "local branch whose origin/ ref is AHEAD, so the remote line sorts first"},
+		{"ghost", true, true, "origin/-only branch"},
+	}
+
+	for _, c := range cases {
+		got := byName[c.name]
+		if len(got) != 1 {
+			t.Errorf("%s (%s): listed %d times, want exactly 1", c.name, c.why, len(got))
+			continue
+		}
+		if got[0].IsRemote != c.isRemote {
+			t.Errorf("%s: IsRemote = %v, want %v (%s)", c.name, got[0].IsRemote, c.isRemote, c.why)
+		}
+		if got[0].HasRemote != c.hasRemote {
+			t.Errorf("%s: HasRemote = %v, want %v (%s)", c.name, got[0].HasRemote, c.hasRemote, c.why)
+		}
 	}
 }

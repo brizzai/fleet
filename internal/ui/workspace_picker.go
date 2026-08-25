@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -26,7 +27,11 @@ type (
 		// alongside the worktree list. Empty means the repo tracks no Linear
 		// team and every ticket surface below stays inert.
 		linearTeams []string
-		err         error
+		// branches feeds the Base branch field's suggestions. Resolved off-loop
+		// too; nil (a failed listing) leaves that field exactly as it was before
+		// suggestions existed.
+		branches []git.BranchInfo
+		err      error
 	}
 	workspaceSelectedMsg struct {
 		info workspace.WorkspaceInfo
@@ -78,6 +83,24 @@ type WorktreeDialog struct {
 	sessionCounts   map[string]int
 	defaultBranch   string
 
+	// --- Branch suggestions under the Base branch field ---
+
+	// branches is the repo's branch list, fetched once alongside the worktree
+	// list. Empty makes every surface below inert.
+	branches []git.BranchInfo
+
+	// branchMatches are the refs the current field text denotes, already in the
+	// exact form that will be written into the field — see rebuildBranchMatches
+	// for why a remote-only branch is stored origin/-prefixed.
+	branchMatches []string
+
+	// baseCursor is the second coordinate of the highlight while focus is
+	// focusBaseBranch: baseOnInput is the field, 0..n-1 is a row. Mirrors
+	// ticketCursor, and like it is forced back under any other focus.
+	baseCursor int
+
+	lastBaseInput string // change detector, so a redraw doesn't refilter
+
 	// --- Linear ticket suggestions under the New branch field ---
 
 	// linearTeams are the team keys this repo tracks. Empty means the whole
@@ -128,7 +151,7 @@ func NewWorktreeDialog() *WorktreeDialog {
 }
 
 // Show populates and shows the dialog.
-func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*session.Session, provider workspace.Provider, repoPath, defaultBranch string, linearTeams []string) {
+func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*session.Session, provider workspace.Provider, repoPath, defaultBranch string, linearTeams []string, branches []git.BranchInfo) {
 	d.visible = true
 	d.workspaces = workspaces
 	d.provider = provider
@@ -139,6 +162,10 @@ func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*
 	d.loading = false
 	d.baseBranchInput.SetValue(defaultBranch)
 	d.newBranchInput.SetValue("")
+
+	d.branches = branches
+	d.lastBaseInput = defaultBranch
+	d.rebuildBranchMatches()
 
 	d.linearTeams = linearTeams
 	d.tickets = nil
@@ -205,7 +232,7 @@ func (d *WorktreeDialog) SetSize(w, h int) {
 // highlight is the promise". Every navigation key is a one-liner through here,
 // and TestWorktreeSelectionMutatorIsTheOnlyWriter keeps it that way.
 //
-// Resetting ticketCursor when focus leaves the New-branch region is not
+// Resetting ticketCursor and baseCursor when focus leaves their region is not
 // housekeeping: without it, moving to the worktree list leaves a ▸ on a ticket
 // row as well as on a worktree row, and nothing downstream catches it.
 func (d *WorktreeDialog) setSelection(f worktreeFocus, idx int) {
@@ -215,8 +242,17 @@ func (d *WorktreeDialog) setSelection(f worktreeFocus, idx int) {
 	}
 	d.focus = f
 	d.ticketCursor = ticketOnInput
+	d.baseCursor = baseOnInput
 
 	switch f {
+	case focusBaseBranch:
+		if hi := d.visibleBranchCount() - 1; idx > hi {
+			idx = hi
+		}
+		if idx < baseOnInput {
+			idx = baseOnInput
+		}
+		d.baseCursor = idx
 	case focusNewBranch:
 		if hi := d.visibleTicketCount() - 1; idx > hi {
 			idx = hi
@@ -232,7 +268,7 @@ func (d *WorktreeDialog) setSelection(f worktreeFocus, idx int) {
 	d.baseBranchInput.Blur()
 	d.newBranchInput.Blur()
 	switch {
-	case f == focusBaseBranch:
+	case f == focusBaseBranch && d.baseCursor == baseOnInput:
 		d.baseBranchInput.Focus()
 	case f == focusNewBranch && d.ticketCursor == ticketOnInput:
 		d.newBranchInput.Focus()
@@ -272,10 +308,41 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		d.Hide()
 		return d, nil
 
-	case "tab", "down":
+	// tab moves between the three FIELDS; ↓/↑ walk every row, suggestions
+	// included. Merging them was fine while only the New branch field grew rows,
+	// and stopped being fine once the Base branch field grew its own: tabbing off
+	// a focused base field would have taken six presses to reach the next input.
+	// Splitting them gives tab one meaning everywhere in this dialog.
+	case "tab":
 		switch d.focus {
 		case focusBaseBranch:
 			d.setSelection(focusNewBranch, ticketOnInput)
+		case focusNewBranch:
+			if len(d.workspaces) > 0 {
+				d.setSelection(focusWorktreeList, 0)
+			}
+		}
+		return d, nil
+
+	case "shift+tab":
+		switch d.focus {
+		case focusNewBranch:
+			d.setSelection(focusBaseBranch, baseOnInput)
+		case focusWorktreeList:
+			d.setSelection(focusNewBranch, ticketOnInput)
+		}
+		return d, nil
+
+	case "down":
+		switch d.focus {
+		case focusBaseBranch:
+			// Branch rows sit between the field and the New branch field, so ↓
+			// walks into them first when there are any.
+			if next := d.baseCursor + 1; next < d.visibleBranchCount() {
+				d.setSelection(focusBaseBranch, next)
+			} else {
+				d.setSelection(focusNewBranch, ticketOnInput)
+			}
 		case focusNewBranch:
 			// Ticket rows sit between the field and the worktree list, so ↓
 			// walks into them first when there are any.
@@ -291,15 +358,20 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		}
 		return d, nil
 
-	case "shift+tab", "up":
+	case "up":
 		switch d.focus {
 		case focusBaseBranch:
-			// Already at top, no-op.
+			if d.baseCursor > baseOnInput {
+				d.setSelection(focusBaseBranch, d.baseCursor-1)
+			}
+			// Already at the top of the dialog otherwise, no-op.
 		case focusNewBranch:
 			if d.ticketCursor > ticketOnInput {
 				d.setSelection(focusNewBranch, d.ticketCursor-1)
 			} else {
-				d.setSelection(focusBaseBranch, 0)
+				// The last base row, not the base input — ↓ and ↑ must retrace
+				// the same path.
+				d.setSelection(focusBaseBranch, d.visibleBranchCount()-1)
 			}
 		case focusWorktreeList:
 			if d.cursor > 0 {
@@ -316,6 +388,13 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 			info := d.workspaces[d.cursor]
 			d.Hide()
 			return d, func() tea.Msg { return workspaceSelectedMsg{info: info} }
+		}
+		// Enter on a highlighted branch fills the Base field; it does NOT
+		// create, for the same reason a ticket row doesn't — the other field is
+		// still empty and the picked ref must stay editable.
+		if d.focus == focusBaseBranch && d.baseCursor >= 0 && d.baseCursor < len(d.branchMatches) {
+			d.pickBaseBranch(d.branchMatches[d.baseCursor])
+			return d, nil
 		}
 		// Enter on a highlighted ticket fills the field; it does NOT create.
 		// The base branch may still be wrong and the derived name must stay
@@ -351,9 +430,12 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		}
 	}
 
-	// Typing from a ticket row returns the highlight to the field AND keeps the
-	// keystroke — setSelection runs before the fall-through, so the same message
-	// is consumed by the input. Same ordering as the snooze dialog.
+	// Typing from a suggestion row returns the highlight to the field AND keeps
+	// the keystroke — setSelection runs before the fall-through, so the same
+	// message is consumed by the input. Same ordering as the snooze dialog.
+	if d.focus == focusBaseBranch && d.baseCursor != baseOnInput && isTypingKey(keyMsg.String()) {
+		d.setSelection(focusBaseBranch, baseOnInput)
+	}
 	if d.focus == focusNewBranch && d.ticketCursor != ticketOnInput && isTypingKey(keyMsg.String()) {
 		d.setSelection(focusNewBranch, ticketOnInput)
 	}
@@ -368,6 +450,19 @@ func (d *WorktreeDialog) routeToInput(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 	switch d.focus {
 	case focusBaseBranch:
 		d.baseBranchInput, cmd = d.baseBranchInput.Update(msg)
+		// Change-triggered, not keystroke-triggered, same as the New branch arm
+		// below. The filter is in-memory, so unlike the ticket lookup it needs
+		// no debounce and no generation guard.
+		if current := d.baseBranchInput.Value(); current != d.lastBaseInput {
+			d.lastBaseInput = current
+			d.rebuildBranchMatches()
+			// Only when the list actually shrank out from under the highlight.
+			// Re-selecting unconditionally would Blur/Focus the input on every
+			// keystroke and drop the caret-blink command with it.
+			if d.baseCursor >= d.visibleBranchCount() {
+				d.setSelection(focusBaseBranch, d.visibleBranchCount()-1)
+			}
+		}
 	case focusNewBranch:
 		d.newBranchInput, cmd = d.newBranchInput.Update(msg)
 		current := d.newBranchInput.Value()
@@ -412,7 +507,12 @@ func (d *WorktreeDialog) View() string {
 	b.WriteString(DimStyle.Render("Base branch:"))
 	b.WriteString("\n")
 	b.WriteString(d.baseBranchInput.View())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	// Branch suggestions sit directly under the field they fill. Empty unless
+	// that field carries the highlight, so the dialog opens exactly as it did
+	// before they existed.
+	b.WriteString(d.renderBranchBlock(d.innerWidth()))
+	b.WriteString("\n")
 
 	// New branch input. The team keys beside the label are the whole
 	// configuration disclosure, a few characters: this repo tracks Linear and
@@ -462,7 +562,10 @@ func (d *WorktreeDialog) View() string {
 	// The footer names what Enter does right now, changing as the highlight
 	// moves — so the highlight's promise is also stated in words. Falls back to
 	// the long-standing hint when there is nothing more specific to say.
-	footer := d.ticketFooter()
+	footer := d.baseFooter()
+	if footer == "" {
+		footer = d.ticketFooter()
+	}
 	if footer == "" {
 		footer = "tab: next  enter: create  esc: cancel"
 	}

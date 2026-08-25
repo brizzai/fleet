@@ -57,6 +57,7 @@ type BranchInfo struct {
 	Name        string
 	IsRemote    bool // only exists as remote (no local)
 	IsCurrent   bool
+	HasRemote   bool // an origin/<Name> ref exists (implied by IsRemote)
 	CommitDate  time.Time
 	AuthorEmail string // email of the last commit's author
 }
@@ -75,8 +76,20 @@ func ListBranches(repoPath string) ([]BranchInfo, error) {
 
 	currentBranch := GetBranchName(repoPath)
 
+	// Parsed in one pass, emitted in a second. The refs arrive sorted by commit
+	// date, and a branch shares its date with its origin/ counterpart, so the two
+	// can arrive in either order. Deciding inline could only ever see a
+	// counterpart that happened to sort first — which both missed HasRemote and
+	// emitted the branch twice.
+	type parsedRef struct {
+		name        string
+		remote      bool
+		commitDate  time.Time
+		authorEmail string
+	}
+	var refs []parsedRef
 	localSet := make(map[string]bool)
-	var branches []BranchInfo
+	remoteSet := make(map[string]bool)
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	for _, line := range lines {
@@ -96,31 +109,32 @@ func ListBranches(repoPath string) ([]BranchInfo, error) {
 			authorEmail = strings.Trim(parts[2], "<>")
 		}
 
-		if strings.HasPrefix(name, "origin/") {
-			remoteName := strings.TrimPrefix(name, "origin/")
-			if remoteName == "HEAD" {
+		remote := strings.HasPrefix(name, "origin/")
+		if remote {
+			name = strings.TrimPrefix(name, "origin/")
+			if name == "HEAD" {
 				continue
 			}
-			if localSet[remoteName] {
-				continue // already have local version
-			}
-			branches = append(branches, BranchInfo{
-				Name:        remoteName,
-				IsRemote:    true,
-				IsCurrent:   remoteName == currentBranch,
-				CommitDate:  commitDate,
-				AuthorEmail: authorEmail,
-			})
+			remoteSet[name] = true
 		} else {
 			localSet[name] = true
-			branches = append(branches, BranchInfo{
-				Name:        name,
-				IsRemote:    false,
-				IsCurrent:   name == currentBranch,
-				CommitDate:  commitDate,
-				AuthorEmail: authorEmail,
-			})
 		}
+		refs = append(refs, parsedRef{name: name, remote: remote, commitDate: commitDate, authorEmail: authorEmail})
+	}
+
+	var branches []BranchInfo
+	for _, r := range refs {
+		if r.remote && localSet[r.name] {
+			continue // already have local version
+		}
+		branches = append(branches, BranchInfo{
+			Name:        r.name,
+			IsRemote:    r.remote,
+			IsCurrent:   r.name == currentBranch,
+			HasRemote:   remoteSet[r.name],
+			CommitDate:  r.commitDate,
+			AuthorEmail: r.authorEmail,
+		})
 	}
 
 	// Move current branch to index 0.
