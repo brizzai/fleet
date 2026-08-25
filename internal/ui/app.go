@@ -7186,6 +7186,8 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		// else names snowball (issue #168). Custom shell providers own their own
 		// naming and run relative to the selected repo, so leave them untouched.
 		var originKey string
+		var defaultBranch string
+		var branches []git.BranchInfo
 		if !provider.IsCustom() {
 			repoPath = git.GetMainWorktreePath(repoPath)
 			// The normalized main-clone path may not be a tracked gitInfoCache key
@@ -7194,9 +7196,19 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 			// origin here (worker goroutine, blocking git is fine) so the handler
 			// can seed the cache.
 			originKey = git.GetOriginKey(repoPath)
+			// These two are read only by the worktree dialog, and the custom
+			// path never reaches it — workspaceListMsg's handler returns straight
+			// to createWorkspaceDialog. Outside the guard they were two
+			// subprocesses the user waited on behind the spinner on every `w`,
+			// against a directory a shell provider need not even keep in git.
+			defaultBranch = git.GetDefaultBranch(repoPath)
+			// Allowed to fail quietly, unlike the worktree list: no branches
+			// simply means the Base branch field has no suggestions, never a
+			// dialog that refuses to open. ListBranches already returns nil on
+			// error, so the failure needs no separate handling.
+			branches, _ = git.ListBranches(repoPath)
 		}
 		workspaces, err := provider.List(repoPath)
-		defaultBranch := git.GetDefaultBranch(repoPath)
 		// Resolved here, on the worker goroutine, so the dialog never touches the
 		// filesystem from Update(). Empty when nothing is connected or the repo
 		// names no Linear team, which makes every ticket surface in the dialog
@@ -7204,13 +7216,6 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		var linearTeams []string
 		if linear.Available() {
 			linearTeams = linear.TeamKeys(repoPath)
-		}
-		// Same goroutine, same reason — and unlike the worktree list this one is
-		// allowed to fail quietly: no branches simply means the Base branch field
-		// has no suggestions, never a dialog that refuses to open.
-		branches, branchErr := git.ListBranches(repoPath)
-		if branchErr != nil {
-			branches = nil
 		}
 		return workspaceListMsg{
 			workspaces: workspaces, provider: provider, repoPath: repoPath,

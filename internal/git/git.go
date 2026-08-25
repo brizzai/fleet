@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,6 +91,9 @@ func ListBranches(repoPath string) ([]BranchInfo, error) {
 	var refs []parsedRef
 	localSet := make(map[string]bool)
 	remoteSet := make(map[string]bool)
+	// The newest date seen for a name across BOTH namespaces — see the merge
+	// below for why the surviving ref cannot simply keep its own.
+	newest := make(map[string]time.Time)
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	for _, line := range lines {
@@ -119,6 +123,9 @@ func ListBranches(repoPath string) ([]BranchInfo, error) {
 		} else {
 			localSet[name] = true
 		}
+		if commitDate.After(newest[name]) {
+			newest[name] = commitDate
+		}
 		refs = append(refs, parsedRef{name: name, remote: remote, commitDate: commitDate, authorEmail: authorEmail})
 	}
 
@@ -128,14 +135,29 @@ func ListBranches(repoPath string) ([]BranchInfo, error) {
 			continue // already have local version
 		}
 		branches = append(branches, BranchInfo{
-			Name:        r.name,
-			IsRemote:    r.remote,
-			IsCurrent:   r.name == currentBranch,
-			HasRemote:   remoteSet[r.name],
-			CommitDate:  r.commitDate,
+			Name:      r.name,
+			IsRemote:  r.remote,
+			IsCurrent: r.name == currentBranch,
+			HasRemote: remoteSet[r.name],
+			// The LATER of the two refs, not the survivor's own date. The
+			// dedupe keeps the local ref, but a branch you have not pulled has
+			// a local tip older than origin/<name> — and callers that ask for
+			// the remote form (the worktree dialog's base-branch suggestions do,
+			// via baseRefFor) would then resolve a commit this date does not
+			// describe. It is also what the branch sorts on, so an unpulled
+			// master would sink below fresher topic branches and fall out of any
+			// top-N list.
+			CommitDate:  newest[r.name],
 			AuthorEmail: r.authorEmail,
 		})
 	}
+
+	// Re-sorted here rather than trusting for-each-ref's order: revising a date
+	// above invalidates it, and a stable sort keeps the ref order for genuine
+	// ties.
+	sort.SliceStable(branches, func(i, j int) bool {
+		return branches[i].CommitDate.After(branches[j].CommitDate)
+	})
 
 	// Move current branch to index 0.
 	for i, b := range branches {

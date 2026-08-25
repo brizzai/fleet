@@ -176,3 +176,45 @@ func TestListBranchesRemoteCounterparts(t *testing.T) {
 		}
 	}
 }
+
+// TestListBranchesReportsTheLaterOfTheTwoRefs is the half the flags test misses.
+//
+// The dedupe keeps the LOCAL ref, but a branch you have not pulled has a local
+// tip older than origin/<name>. Reporting the survivor's own date makes the row
+// describe a different commit than the ref a caller asking for the remote form
+// resolves — and since the date is the sort key, an unpulled branch sinks below
+// fresher ones and drops out of any top-N list. `lagging` is exactly that shape:
+// local at 2020, origin/lagging at 2024.
+func TestListBranchesReportsTheLaterOfTheTwoRefs(t *testing.T) {
+	repo := initBranchRepo(t)
+
+	branches, err := ListBranches(repo)
+	if err != nil {
+		t.Fatalf("ListBranches: %v", err)
+	}
+
+	pos := make(map[string]int, len(branches))
+	date := make(map[string]string, len(branches))
+	for i, b := range branches {
+		pos[b.Name] = i
+		date[b.Name] = b.CommitDate.UTC().Format("2006-01-02")
+	}
+
+	if got := date["lagging"]; got != "2024-01-01" {
+		t.Errorf("lagging date = %s, want 2024-01-01 — origin/lagging is the later ref, and it is "+
+			"the one baseRefFor hands to git when the field carries the prefix", got)
+	}
+	if got := date["level"]; got != "2020-01-01" {
+		t.Errorf("level date = %s, want 2020-01-01 — its refs are level, so there is nothing to take the max of", got)
+	}
+	if got := date["solo"]; got != "2020-01-01" {
+		t.Errorf("solo date = %s, want 2020-01-01 — no remote counterpart to consider", got)
+	}
+
+	// Ordering follows the revised dates, or the fix would be cosmetic: `lagging`
+	// must sit with the 2024 refs, not below `ghost` where its local tip put it.
+	if pos["lagging"] > pos["level"] || pos["lagging"] > pos["solo"] {
+		t.Errorf("lagging at %d sorts below level (%d) / solo (%d) — the list must be ordered by the "+
+			"date actually reported", pos["lagging"], pos["level"], pos["solo"])
+	}
+}

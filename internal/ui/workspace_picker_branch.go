@@ -54,27 +54,38 @@ func (d *WorktreeDialog) rebuildBranchMatches() {
 	wantRemote := strings.HasPrefix(text, remotePrefix)
 	q := strings.ToLower(strings.TrimPrefix(text, remotePrefix))
 
-	d.branchMatches = d.matchBranches(q, wantRemote)
-
-	// A field sitting on a complete ref is at rest, and the one row echoing it
-	// back answers a question nobody asked — Enter on it is a no-op. The useful
-	// question there is "what else is there", so fall back to the unfiltered
-	// list. This matters because the field is PRE-FILLED with origin/<default>:
-	// without it, focusing the field for the first time shows a single row
-	// repeating what is already on the line above it, and browsing would mean
-	// clearing a field you probably wanted to keep.
-	if len(d.branchMatches) == 1 && d.branchMatches[0] == text {
+	// A field nobody is typing into is at rest, and filtering it against itself
+	// yields one row echoing the line above — a row that answers nothing and
+	// no-ops on Enter. The useful question there is "what else is there", so an
+	// at-rest field lists the alternatives instead. This matters because the
+	// field is PRE-FILLED with origin/<default>: without it, focusing the field
+	// for the first time shows that single echo, and browsing would mean
+	// clearing a value you probably wanted to keep.
+	//
+	// Gated on d.baseAtRest, NOT on the text happening to equal a branch name.
+	// Those look equivalent and are not: typing your way to `master-fix` passes
+	// through `master`, which IS a complete branch name, so the equality form
+	// widened 1 row to 5 at the `r` and collapsed back at the `-` — and since
+	// the dialog is vertically centred, the whole box jumped four rows mid-word.
+	if d.baseAtRest {
 		// wantRemote is deliberately kept: you asked for a remote ref, so the
-		// wider list is the other remote refs.
-		d.branchMatches = d.matchBranches("", wantRemote)
+		// wider list is the other remote refs. text is excluded because it is
+		// the value already in the field — offering it back is the same
+		// no-op row the widening exists to get rid of.
+		d.branchMatches = d.matchBranches("", wantRemote, text)
+		return
 	}
+	d.branchMatches = d.matchBranches(q, wantRemote, "")
 }
 
 // matchBranches returns the refs whose branch name contains q, in the form each
-// one takes as a base ref. An empty q matches everything, so an at-rest field
-// lists the most recently committed branches — ListBranches is already in that
-// order.
-func (d *WorktreeDialog) matchBranches(q string, wantRemote bool) []string {
+// one takes as a base ref, skipping exclude. An empty q matches everything, so
+// an at-rest field lists the most recently committed branches — ListBranches is
+// already in that order.
+//
+// exclude is applied BEFORE the row cap, not to its result: filtering afterwards
+// would quietly return one row fewer than the cap allows.
+func (d *WorktreeDialog) matchBranches(q string, wantRemote bool, exclude string) []string {
 	var out []string
 	for _, b := range d.branches {
 		if wantRemote && !b.HasRemote {
@@ -83,7 +94,11 @@ func (d *WorktreeDialog) matchBranches(q string, wantRemote bool) []string {
 		if q != "" && !strings.Contains(strings.ToLower(b.Name), q) {
 			continue
 		}
-		out = append(out, baseRefFor(b, wantRemote))
+		ref := baseRefFor(b, wantRemote)
+		if exclude != "" && ref == exclude {
+			continue
+		}
+		out = append(out, ref)
 		if len(out) >= branchMaxRows {
 			break
 		}
@@ -108,6 +123,9 @@ func (d *WorktreeDialog) pickBaseBranch(ref string) {
 	// Write the value, then the change detector, or routeToInput refilters
 	// against text it already knows about.
 	d.lastBaseInput = ref
+	// An accepted ref is a settled field, exactly like a freshly opened one, so
+	// the list goes back to showing the alternatives rather than this ref alone.
+	d.baseAtRest = true
 	d.rebuildBranchMatches()
 	d.err = ""
 	d.setSelection(focusBaseBranch, baseOnInput)

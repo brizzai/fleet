@@ -41,6 +41,26 @@ func (d *WorktreeDialog) send(msg tea.Msg) *WorktreeDialog {
 	return out
 }
 
+// typeBase replaces the Base branch field's text the way a user does — every
+// rune through Update, so routeToInput's change detector runs and the field
+// stops being at rest.
+//
+// Poking SetValue + rebuildBranchMatches instead leaves baseAtRest true from
+// Show, so the assertions land on the at-rest branch while claiming to test
+// filtering. Three tests here did exactly that and passed for the wrong reason.
+func typeBase(t *testing.T, d *WorktreeDialog, text string) *WorktreeDialog {
+	t.Helper()
+	d.setSelection(focusBaseBranch, baseOnInput)
+	d.baseBranchInput.SetValue("")
+	for _, r := range text {
+		d = d.send(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if d.baseAtRest {
+		t.Fatalf("typing %q left the field at rest — the change detector did not run", text)
+	}
+	return d
+}
+
 // TestBaseBranchSuggestionsMatchOnName: the ordinary case — type a fragment,
 // get the branches containing it, in the form that goes into the field.
 func TestBaseBranchSuggestionsMatchOnName(t *testing.T) {
@@ -72,8 +92,7 @@ func TestBaseBranchSuggestionsMatchOnName(t *testing.T) {
 // looking perfectly valid on screen.
 func TestBaseBranchRemoteOnlyIsAlwaysPrefixed(t *testing.T) {
 	d := branchDialog(t, branchFixture()...)
-	d.baseBranchInput.SetValue("remote-only")
-	d.rebuildBranchMatches()
+	d = typeBase(t, d, "remote-only")
 
 	want := []string{"origin/feat/remote-only"}
 	if got := d.branchMatches; !equalStrings(got, want) {
@@ -87,8 +106,7 @@ func TestBaseBranchRemoteOnlyIsAlwaysPrefixed(t *testing.T) {
 func TestBaseBranchOriginPrefixIsPreserved(t *testing.T) {
 	d := branchDialog(t, branchFixture()...)
 
-	d.baseBranchInput.SetValue("origin/")
-	d.rebuildBranchMatches()
+	d = typeBase(t, d, "origin/")
 	for _, ref := range d.branchMatches {
 		if !strings.HasPrefix(ref, "origin/") {
 			t.Errorf("origin/ query offered %q — the prefix the user typed must survive", ref)
@@ -101,11 +119,8 @@ func TestBaseBranchOriginPrefixIsPreserved(t *testing.T) {
 		}
 	}
 
-	// Without the prefix, the same branch comes back in its local form. Typed
-	// partially so the at-rest widening (see TestBaseBranchAtRestFieldListsTheRest)
-	// stays out of the way — this is about the prefix, not the list length.
-	d.baseBranchInput.SetValue("mast")
-	d.rebuildBranchMatches()
+	// Without the prefix, the same branch comes back in its local form.
+	d = typeBase(t, d, "mast")
 	if got := d.branchMatches; !equalStrings(got, []string{"master"}) {
 		t.Errorf("bare query = %v, want [master] — no prefix asked for, none added", got)
 	}
@@ -129,12 +144,10 @@ func TestBaseBranchAtRestFieldListsTheRest(t *testing.T) {
 		}
 	}
 
-	// A partial match that is NOT the whole field still filters normally: the
-	// widening is for the at-rest case only, not a general fallback.
-	d.baseBranchInput.SetValue("mast")
-	d.rebuildBranchMatches()
+	// Typing filters, whatever the text happens to be.
+	d = typeBase(t, d, "mast")
 	if got := d.branchMatches; !equalStrings(got, []string{"master"}) {
-		t.Errorf("partial query = %v, want [master] — a unique match must not widen", got)
+		t.Errorf("typed query = %v, want [master] — a field being typed into must filter", got)
 	}
 }
 
@@ -142,8 +155,8 @@ func TestBaseBranchAtRestFieldListsTheRest(t *testing.T) {
 // dead end.
 func TestBaseBranchEmptyFieldListsRecent(t *testing.T) {
 	d := branchDialog(t, branchFixture()...)
-	d.baseBranchInput.SetValue("")
-	d.rebuildBranchMatches()
+	d = typeBase(t, d, "x")
+	d = d.send(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if len(d.branchMatches) != len(branchFixture()) {
 		t.Errorf("empty field matched %d branches, want all %d", len(d.branchMatches), len(branchFixture()))
 	}
@@ -231,8 +244,8 @@ func TestBaseBranchEnterFillsAndDoesNotCreate(t *testing.T) {
 // that returned you to it.
 func TestBaseBranchTypingFromARowKeepsTheKeystroke(t *testing.T) {
 	d := branchDialog(t, branchFixture()...)
-	d.baseBranchInput.SetValue("")
-	d.rebuildBranchMatches()
+	d = typeBase(t, d, "x")
+	d = d.send(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	d.setSelection(focusBaseBranch, 0)
 
 	d = d.send(key("m"))
@@ -294,4 +307,192 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestBaseBranchWidenedListExcludesTheField — the widened list exists because a
+// row echoing the field is a no-op on Enter, so putting that same row back at
+// position 0 reintroduces exactly what it was there to remove.
+func TestBaseBranchWidenedListExcludesTheField(t *testing.T) {
+	d := branchDialog(t, branchFixture()...)
+	d.setSelection(focusBaseBranch, baseOnInput)
+
+	if len(d.branchMatches) == 0 {
+		t.Fatal("no rows at rest, the test proves nothing")
+	}
+	for _, ref := range d.branchMatches {
+		if ref == d.baseBranchInput.Value() {
+			t.Errorf("widened list offered %q, the value already in the field — ⏎ on it does nothing", ref)
+		}
+	}
+}
+
+// TestBaseBranchExclusionRunsBeforeTheCap: filtering the field's own value out
+// of matchBranches' RESULT would quietly return four rows where five fit.
+func TestBaseBranchExclusionRunsBeforeTheCap(t *testing.T) {
+	// The excluded branch sorts first, so a post-filter would lose a row.
+	branches := []git.BranchInfo{
+		{Name: "master", HasRemote: true},
+		{Name: "b1", HasRemote: true}, {Name: "b2", HasRemote: true},
+		{Name: "b3", HasRemote: true}, {Name: "b4", HasRemote: true},
+		{Name: "b5", HasRemote: true},
+	}
+	d := branchDialog(t, branches...)
+	d.setSelection(focusBaseBranch, baseOnInput)
+
+	if got := len(d.branchMatches); got != branchMaxRows {
+		t.Errorf("widened list has %d rows, want %d — the exclusion must be applied before the cap, not to its result",
+			got, branchMaxRows)
+	}
+}
+
+// TestBaseBranchTypingNeverWidens is the gate the doc sentence describes.
+//
+// Equality with the field was the wrong test for "at rest": typing toward
+// master-fix passes THROUGH master, a complete branch name, so the list went
+// 1 row → 5 → 0 across two keystrokes. The dialog is vertically centred, so
+// that is the whole box jumping four rows mid-word.
+func TestBaseBranchTypingNeverWidens(t *testing.T) {
+	branches := []git.BranchInfo{
+		{Name: "master"}, {Name: "topic-a"}, {Name: "topic-b"},
+		{Name: "topic-c"}, {Name: "topic-d"},
+	}
+	d := branchDialog(t, branches...)
+
+	for _, step := range []struct {
+		typed string
+		want  int
+	}{
+		{"mast", 1}, {"maste", 1}, {"master", 1}, {"master-", 0}, {"master-f", 0},
+	} {
+		d = typeBase(t, d, step.typed)
+		if got := len(d.branchMatches); got != step.want {
+			t.Errorf("typed %q -> %d rows %v, want %d", step.typed, got, d.branchMatches, step.want)
+		}
+	}
+}
+
+// TestBaseBranchSettlesOnOpenAndOnPick: the flip side — the two ways a field
+// arrives at a value without being typed into must both widen.
+func TestBaseBranchSettlesOnOpenAndOnPick(t *testing.T) {
+	d := branchDialog(t, branchFixture()...)
+	if !d.baseAtRest {
+		t.Error("a freshly opened dialog is not at rest")
+	}
+	if len(d.branchMatches) < 2 {
+		t.Errorf("opened with %v, want the alternatives listed", d.branchMatches)
+	}
+
+	d = typeBase(t, d, "base")
+	if d.baseAtRest {
+		t.Fatal("typing left the field at rest")
+	}
+	d.setSelection(focusBaseBranch, 0)
+	d, _ = d.Update(keyEnter)
+
+	if !d.baseAtRest {
+		t.Error("accepting a suggestion left the field un-settled — it is no longer being typed into")
+	}
+	for _, ref := range d.branchMatches {
+		if ref == d.baseBranchInput.Value() {
+			t.Errorf("after accepting, the list offers %q back", ref)
+		}
+	}
+}
+
+// TestWorktreeTabCyclesBothWays: tab is documented as "next field", so a tab
+// that does nothing on the last field is a dead key. Wrapping only forward
+// would just move the dead end onto shift+tab.
+func TestWorktreeTabCyclesBothWays(t *testing.T) {
+	d := branchDialog(t, branchFixture()...)
+	d.workspaces = []workspace.WorkspaceInfo{{Name: "wt-a", Path: "/a"}}
+
+	order := []worktreeFocus{focusBaseBranch, focusNewBranch, focusWorktreeList}
+	d.setSelection(focusBaseBranch, baseOnInput)
+	for i := 1; i <= len(order); i++ { // one extra step, to land back on the start
+		d = d.send(keyTab)
+		if want := order[i%len(order)]; d.focus != want {
+			t.Fatalf("tab #%d landed on focus=%v, want %v", i, d.focus, want)
+		}
+	}
+	for i := len(order) - 1; i >= 0; i-- {
+		d = d.send(keyShiftTab)
+		if want := order[i]; d.focus != want {
+			t.Fatalf("shift+tab back to %d landed on focus=%v, want %v", i, d.focus, want)
+		}
+	}
+
+	// With no worktrees the cycle is two fields, and must still close.
+	d2 := branchDialog(t, branchFixture()...)
+	d2.setSelection(focusNewBranch, ticketOnInput)
+	d2 = d2.send(keyTab)
+	if d2.focus != focusBaseBranch {
+		t.Errorf("tab off the last field with no worktrees landed on %v, want the base field", d2.focus)
+	}
+}
+
+// TestWorktreeFocusedDialogIsNoTallerThanAtRest.
+//
+// The dialog has no height budget — wrapDialog only Places, and the worktree
+// list loop is unbounded — so five suggestion rows took an 80x24 terminal from
+// 21 box lines to 26, pushing the footer (which names what Enter does) off the
+// bottom mid-interaction. Hiding the worktree list while the base field has the
+// highlight reclaims more than the rows add.
+//
+// TestWorktreeDialogRowsNeverOverflow cannot catch this: it is width-only and
+// runs at height 40.
+func TestWorktreeFocusedDialogIsNoTallerThanAtRest(t *testing.T) {
+	var wss []workspace.WorkspaceInfo
+	for i := 0; i < 6; i++ {
+		n := "wt-" + string(rune('a'+i))
+		wss = append(wss, workspace.WorkspaceInfo{Name: n, Branch: "b", Path: "/" + n})
+	}
+	branches := []git.BranchInfo{
+		{Name: "master", HasRemote: true}, {Name: "b1", HasRemote: true},
+		{Name: "b2", HasRemote: true}, {Name: "b3", HasRemote: true},
+		{Name: "b4", HasRemote: true}, {Name: "b5", HasRemote: true},
+	}
+
+	const termH = 24
+	boxLines := func(focus worktreeFocus) int {
+		d := NewWorktreeDialog()
+		d.SetSize(80, termH)
+		d.Show(wss, nil, nil, "/r", "origin/master", nil, branches)
+		d.setSelection(focus, baseOnInput)
+		n := 0
+		for _, l := range strings.Split(d.View(), "\n") {
+			if strings.ContainsAny(l, "│╭╰") {
+				n++
+			}
+		}
+		return n
+	}
+
+	atRest, focused := boxLines(focusNewBranch), boxLines(focusBaseBranch)
+	if focused > atRest {
+		t.Errorf("focusing the base field grew the dialog %d -> %d lines; the suggestions must not cost "+
+			"more height than the worktree list they replace", atRest, focused)
+	}
+	if focused > termH {
+		t.Errorf("focused dialog is %d lines on a %d-row terminal — the footer scrolls off", focused, termH)
+	}
+}
+
+// TestWorktreeListHiddenWhileBaseFocusedStaysReachable: hidden is not gone. The
+// list is still in the model, and shift+tab still cycles onto it.
+func TestWorktreeListHiddenWhileBaseFocusedStaysReachable(t *testing.T) {
+	d := branchDialog(t, branchFixture()...)
+	d.workspaces = []workspace.WorkspaceInfo{{Name: "wt-alpha", Path: "/a", Branch: "b"}}
+
+	d.setSelection(focusBaseBranch, baseOnInput)
+	if strings.Contains(d.View(), "wt-alpha") {
+		t.Error("worktree list rendered while the base field has the highlight")
+	}
+
+	d = d.send(keyShiftTab)
+	if d.focus != focusWorktreeList {
+		t.Fatalf("shift+tab from base landed on %v, want the worktree list", d.focus)
+	}
+	if !strings.Contains(d.View(), "wt-alpha") {
+		t.Error("worktree list still hidden after cycling onto it — hidden must not mean unreachable")
+	}
 }

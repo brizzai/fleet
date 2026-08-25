@@ -101,6 +101,12 @@ type WorktreeDialog struct {
 
 	lastBaseInput string // change detector, so a redraw doesn't refilter
 
+	// baseAtRest is true while nobody is typing into the Base branch field —
+	// set when the dialog opens and when a suggestion is accepted, cleared by
+	// the first keystroke that changes the text. It is what decides whether the
+	// rows filter or list the alternatives; see rebuildBranchMatches.
+	baseAtRest bool
+
 	// --- Linear ticket suggestions under the New branch field ---
 
 	// linearTeams are the team keys this repo tracks. Empty means the whole
@@ -165,6 +171,7 @@ func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*
 
 	d.branches = branches
 	d.lastBaseInput = defaultBranch
+	d.baseAtRest = true
 	d.rebuildBranchMatches()
 
 	d.linearTeams = linearTeams
@@ -313,6 +320,11 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 	// and stopped being fine once the Base branch field grew its own: tabbing off
 	// a focused base field would have taken six presses to reach the next input.
 	// Splitting them gives tab one meaning everywhere in this dialog.
+	//
+	// It CYCLES rather than stopping at the ends. "tab no longer walks the
+	// worktree list" is a deliberate cost, but a key documented as "next field"
+	// doing literally nothing on the last field is a dead key, not a design —
+	// and wrapping only one way would just move the dead end to shift+tab.
 	case "tab":
 		switch d.focus {
 		case focusBaseBranch:
@@ -320,12 +332,22 @@ func (d *WorktreeDialog) Update(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		case focusNewBranch:
 			if len(d.workspaces) > 0 {
 				d.setSelection(focusWorktreeList, 0)
+			} else {
+				d.setSelection(focusBaseBranch, baseOnInput)
 			}
+		case focusWorktreeList:
+			d.setSelection(focusBaseBranch, baseOnInput)
 		}
 		return d, nil
 
 	case "shift+tab":
 		switch d.focus {
+		case focusBaseBranch:
+			if len(d.workspaces) > 0 {
+				d.setSelection(focusWorktreeList, 0)
+			} else {
+				d.setSelection(focusNewBranch, ticketOnInput)
+			}
 		case focusNewBranch:
 			d.setSelection(focusBaseBranch, baseOnInput)
 		case focusWorktreeList:
@@ -455,6 +477,7 @@ func (d *WorktreeDialog) routeToInput(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 		// no debounce and no generation guard.
 		if current := d.baseBranchInput.Value(); current != d.lastBaseInput {
 			d.lastBaseInput = current
+			d.baseAtRest = false
 			d.rebuildBranchMatches()
 			// Only when the list actually shrank out from under the highlight.
 			// Re-selecting unconditionally would Blur/Focus the input on every
@@ -545,8 +568,16 @@ func (d *WorktreeDialog) View() string {
 		b.WriteString("\n")
 	}
 
-	// Existing worktrees.
-	if len(d.workspaces) > 0 {
+	// Existing worktrees — hidden while the Base branch field carries the
+	// highlight. Not cosmetic: the dialog has no height budget (wrapDialog only
+	// Places, and this loop is unbounded), and measured at 80x24 with six
+	// worktrees the box went 21 rows at rest to 26 focused, taking the footer
+	// off the bottom. Dropping the list reclaims more than the suggestions add,
+	// so the focused dialog is strictly shorter than the resting one — a cap on
+	// the rows would instead have made the cursor clamp depend on terminal
+	// height, since setSelection runs nowhere near View. The list is only hidden,
+	// never unreachable: shift+tab still cycles onto it and brings it back.
+	if len(d.workspaces) > 0 && d.focus != focusBaseBranch {
 		b.WriteString("\n")
 		b.WriteString(DimStyle.Render("Existing worktrees:"))
 		b.WriteString("\n")
