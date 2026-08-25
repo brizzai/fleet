@@ -47,7 +47,7 @@ func ticketDialog(t *testing.T, tickets ...ticket.Ticket) *WorktreeDialog {
 	t.Helper()
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"))
+	d.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"), nil)
 	d.tickets = tickets
 	return d
 }
@@ -62,13 +62,16 @@ func TestWorktreeCaretAndHighlightNeverCoexist(t *testing.T) {
 		ticket.Ticket{Identifier: "BRZ-3040", Title: "Collapse resets"},
 	)
 	d.workspaces = []workspace.WorkspaceInfo{{Name: "wt-a", Path: "/a"}}
+	d.branchMatches = []string{"master", "feature/x"}
 
 	states := []struct {
 		name string
 		f    worktreeFocus
 		idx  int
 	}{
-		{"base branch", focusBaseBranch, 0},
+		{"base branch, on input", focusBaseBranch, baseOnInput},
+		{"base branch, branch 0", focusBaseBranch, 0},
+		{"base branch, branch 1", focusBaseBranch, 1},
 		{"new branch, on input", focusNewBranch, ticketOnInput},
 		{"new branch, ticket 0", focusNewBranch, 0},
 		{"new branch, ticket 1", focusNewBranch, 1},
@@ -83,8 +86,9 @@ func TestWorktreeCaretAndHighlightNeverCoexist(t *testing.T) {
 			t.Errorf("%s: new-branch caret = %v, want %v — the caret must live exactly where the highlight is",
 				s.name, got, onInput)
 		}
-		if got := d.baseBranchInput.Focused(); got != (d.focus == focusBaseBranch) {
-			t.Errorf("%s: base caret = %v", s.name, got)
+		onBase := d.focus == focusBaseBranch && d.baseCursor == baseOnInput
+		if got := d.baseBranchInput.Focused(); got != onBase {
+			t.Errorf("%s: base caret = %v, want %v", s.name, got, onBase)
 		}
 
 		// The render is the thing the user actually reads: exactly one marker.
@@ -100,46 +104,58 @@ func TestWorktreeCaretAndHighlightNeverCoexist(t *testing.T) {
 // and the caret sync, and reintroduces the double highlight.
 func TestWorktreeSelectionMutatorIsTheOnlyWriter(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "workspace_picker.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+	// Every file that can reach the highlight, not just the one that declares it:
+	// the suggestion logic lives beside the dialog, and a stray write there is
+	// exactly as damaging as one here.
+	var files []*ast.File
+	for _, name := range []string{"workspace_picker.go", "workspace_picker_branch.go", "workspace_picker_ticket.go"} {
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		files = append(files, f)
 	}
 
 	writesInsideMutator := 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
-		}
-		ast.Inspect(fn.Body, func(m ast.Node) bool {
-			as, ok := m.(*ast.AssignStmt)
-			if !ok {
+	inspect := func(f *ast.File) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
 				return true
 			}
-			for _, lhs := range as.Lhs {
-				sel, ok := lhs.(*ast.SelectorExpr)
+			ast.Inspect(fn.Body, func(m ast.Node) bool {
+				as, ok := m.(*ast.AssignStmt)
 				if !ok {
-					continue
+					return true
 				}
-				ident, ok := sel.X.(*ast.Ident)
-				if !ok || ident.Name != "d" {
-					continue
-				}
-				switch sel.Sel.Name {
-				case "focus", "ticketCursor":
-					if fn.Name.Name != "setSelection" {
-						t.Errorf("%s writes d.%s directly at %s — only setSelection may move the "+
-							"highlight, or the caret and the marker drift apart",
-							fn.Name.Name, sel.Sel.Name, fset.Position(as.Pos()))
-					} else {
-						writesInsideMutator++
+				for _, lhs := range as.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok {
+						continue
+					}
+					ident, ok := sel.X.(*ast.Ident)
+					if !ok || ident.Name != "d" {
+						continue
+					}
+					switch sel.Sel.Name {
+					case "focus", "ticketCursor", "baseCursor":
+						if fn.Name.Name != "setSelection" {
+							t.Errorf("%s writes d.%s directly at %s — only setSelection may move the "+
+								"highlight, or the caret and the marker drift apart",
+								fn.Name.Name, sel.Sel.Name, fset.Position(as.Pos()))
+						} else {
+							writesInsideMutator++
+						}
 					}
 				}
-			}
+				return true
+			})
 			return true
 		})
-		return true
-	})
+	}
+	for _, f := range files {
+		inspect(f)
+	}
 
 	// Positive control: a scanner that finds nothing would pass vacuously.
 	if writesInsideMutator < 2 {
@@ -340,7 +356,7 @@ func TestWorktreeBlankRenderUnchangedWithoutTracker(t *testing.T) {
 	mk := func(teams []string) string {
 		d := NewWorktreeDialog()
 		d.SetSize(120, 40)
-		d.Show(nil, nil, nil, "/repo", "master", boundTo(teams...))
+		d.Show(nil, nil, nil, "/repo", "master", boundTo(teams...), nil)
 		d.newBranchInput.SetValue("my-experiment")
 		return d.View()
 	}
@@ -360,7 +376,7 @@ func TestWorktreeBlankRenderUnchangedWithoutTracker(t *testing.T) {
 	jiraRepo := func() string {
 		d := NewWorktreeDialog()
 		d.SetSize(120, 40)
-		d.Show(nil, nil, nil, "/repo", "master", boundToBoth(nil, []string{"OPS"}))
+		d.Show(nil, nil, nil, "/repo", "master", boundToBoth(nil, []string{"OPS"}), nil)
 		d.newBranchInput.SetValue("my-experiment")
 		return d.View()
 	}()
@@ -508,7 +524,7 @@ func TestResolvedLineReadsAsAppliedNotOffered(t *testing.T) {
 func TestOneBrokenTrackerDoesNotSilenceTheOther(t *testing.T) {
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}))
+	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}), nil)
 
 	d.applyTickets(worktreeTicketsMsg{
 		gen: d.ticketGen, query: "OPS-1", byID: true,
@@ -556,7 +572,7 @@ func TestOneBrokenTrackerDoesNotSilenceTheOther(t *testing.T) {
 func TestFanOutSearchFailureLatchesNothing(t *testing.T) {
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}))
+	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}), nil)
 
 	d.applyTickets(worktreeTicketsMsg{gen: d.ticketGen, query: "some prose", err: ticket.ErrNotAuthenticated})
 
@@ -573,7 +589,7 @@ func TestFanOutSearchFailureLatchesNothing(t *testing.T) {
 func TestSearchingLineNamesTheTrackers(t *testing.T) {
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}))
+	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}), nil)
 	d.ticketPending = true
 
 	got := ansi.Strip(d.renderTicketBlock(80))
@@ -588,7 +604,7 @@ func TestSearchingLineNamesTheTrackers(t *testing.T) {
 	d2.Show(nil, nil, nil, "/repo", "master", []ticketing.Bound{
 		{Provider: linear.New(), Keys: []string{"BRZ"}},
 		{Provider: linear.New(), Keys: []string{"PRD"}},
-	})
+	}, nil)
 	d2.ticketPending = true
 	got = ansi.Strip(d2.renderTicketBlock(80))
 	if strings.Contains(got, "Linear and Linear") {

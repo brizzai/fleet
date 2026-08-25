@@ -33,7 +33,7 @@ func TestTicketLookupSurvivesTheRealMessageLoop(t *testing.T) {
 	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
 	h.width, h.height = 120, 40
 	h.worktreeDialog.SetSize(120, 40)
-	h.worktreeDialog.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"))
+	h.worktreeDialog.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"), nil)
 
 	// Type "sdk" the way a user does: one key at a time, through Home.
 	var pending []tea.Cmd
@@ -93,7 +93,7 @@ func TestTicketLookupSurvivesTheRealMessageLoop(t *testing.T) {
 func TestWrongWorkspaceIsNamedNotSilent(t *testing.T) {
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"))
+	d.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"), nil)
 
 	// Connected to a workspace that has no BRZ team.
 	linear.SetAccountForTest(ticket.Account{Name: "fleet", Keys: []string{"FLE"}})
@@ -151,7 +151,7 @@ func TestWorkspaceMismatchNoteFitsOnOneLine(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			d := NewWorktreeDialog()
 			d.SetSize(120, 40)
-			d.Show(nil, nil, nil, "/repo", "master", boundTo(c.teams...))
+			d.Show(nil, nil, nil, "/repo", "master", boundTo(c.teams...), nil)
 			linear.SetAccountForTest(ticket.Account{Name: c.ws, Keys: []string{"FLE"}})
 			t.Cleanup(func() { linear.SetAccountForTest(ticket.Account{}) })
 
