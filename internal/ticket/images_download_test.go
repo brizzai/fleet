@@ -191,3 +191,77 @@ func TestCollectImagesIndexesAreNotPrefixes(t *testing.T) {
 		t.Errorf("rewrote %d links, want 12:\n%s", n, body)
 	}
 }
+
+// TestBytesBeatHeaders is the check the reviewer showed was not there.
+//
+// Jira sends a filename AND a Content-Type on every attachment, so a
+// header-first rule short-circuited on both and never looked at the body: a 200
+// carrying an HTML interstitial for screenshot.png wrote an HTML file called
+// 1-screenshot.png, past a check whose stated purpose was to stop exactly that.
+// The old TestFetchImageRejectsNonImages passed only because its fixture also
+// sent a wrong Content-Type.
+func TestBytesBeatHeaders(t *testing.T) {
+	t.Run("convincing headers over an HTML body are refused", func(t *testing.T) {
+		srv, host := imageServer(t, func(w http.ResponseWriter, r *http.Request) {
+			// Everything a server could say to make this look like a PNG.
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Disposition", `attachment; filename="screenshot.png"`)
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><body>Sign in to continue</body></html>"))
+		})
+		doc := &Document{Host: host, Auth: func(context.Context) (string, error) { return "x", nil }}
+		dir := t.TempDir()
+		if _, _, err := fetchImage(context.Background(), doc, srv.URL+"/x", dir, "screenshot.png", 1); err == nil {
+			t.Fatal("an HTML body was accepted because the headers claimed PNG")
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("wrote %d file(s) for a non-image", len(entries))
+		}
+	})
+
+	t.Run("bytes win over a wrong header", func(t *testing.T) {
+		// A real PNG announced as a GIF. The extension has to follow the bytes,
+		// since that is what an agent's file-read tool will actually parse.
+		srv, host := imageServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/gif")
+			_, _ = w.Write(onePixelPNG)
+		})
+		doc := &Document{Host: host, Auth: func(context.Context) (string, error) { return "x", nil }}
+		name, _, err := fetchImage(context.Background(), doc, srv.URL+"/x", t.TempDir(), "shot", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(name, ".png") {
+			t.Errorf("name = %q, want the extension the BYTES imply", name)
+		}
+	})
+
+	t.Run("svg is the one type the headers may vouch for", func(t *testing.T) {
+		// Go's sniffer has no SVG rule — <?xml reads as text/xml — so a
+		// bytes-only rule would reject every valid SVG. Trusting the header is
+		// safe here because the body still has to look like the text an SVG is.
+		const svg = `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`
+		srv, host := imageServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/svg+xml")
+			_, _ = w.Write([]byte(svg))
+		})
+		doc := &Document{Host: host, Auth: func(context.Context) (string, error) { return "x", nil }}
+		name, _, err := fetchImage(context.Background(), doc, srv.URL+"/x", t.TempDir(), "diagram", 1)
+		if err != nil {
+			t.Fatalf("a valid SVG was rejected: %v", err)
+		}
+		if !strings.HasSuffix(name, ".svg") {
+			t.Errorf("name = %q, want .svg", name)
+		}
+	})
+
+	t.Run("an svg header cannot launder HTML", func(t *testing.T) {
+		srv, host := imageServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/svg+xml")
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><body>nope</body></html>"))
+		})
+		doc := &Document{Host: host, Auth: func(context.Context) (string, error) { return "x", nil }}
+		if _, _, err := fetchImage(context.Background(), doc, srv.URL+"/x", t.TempDir(), "x", 1); err == nil {
+			t.Fatal("HTML was accepted under an SVG header — the body sniff is the backstop")
+		}
+	})
+}

@@ -84,10 +84,24 @@ func (Provider) Document(ctx context.Context, id string) (*ticket.Document, erro
 	comments := iss.Fields.Comment
 	if comments != nil && comments.Total > len(comments.Comments) {
 		var page commentPage
-		cpath := fmt.Sprintf("/rest/api/3/issue/%s/comment?maxResults=%d&orderBy=created",
+		// -created, not created. Jira's orderBy is ascending by default, so
+		// `created` fetches the OLDEST page — the exact opposite of the reason
+		// this round trip is worth taking.
+		cpath := fmt.Sprintf("/rest/api/3/issue/%s/comment?maxResults=%d&orderBy=-created",
 			url.PathEscape(key), commentFetchLimit)
 		if err := doWith(ctx, cred, ticket.FullTimeout, http.MethodGet, cpath, nil, &page); err == nil {
-			comments = &page
+			// Replace only when the page is actually bigger. An issue can embed
+			// more comments than commentFetchLimit, and swapping 100 embedded
+			// for 50 fetched would lose half of them while looking like a fix.
+			if len(page.Comments) > len(comments.Comments) {
+				// Back to chronological. The page arrives newest-first because
+				// that is how the newest ones were selected, but ticket.md must
+				// read as a conversation in both trackers — Linear's comments
+				// are oldest-first and an agent comparing the two would be
+				// reading one of them backwards.
+				reverseComments(page.Comments)
+				comments = &page
+			}
 		}
 	}
 
@@ -119,6 +133,32 @@ func (Provider) Document(ctx context.Context, id string) (*ticket.Document, erro
 	return doc, nil
 }
 
+// claimByName returns the next index for this filename that no media node has
+// taken yet, falling back to the first when they have all been claimed.
+//
+// The fallback matters: the same screenshot is often referenced twice in one
+// description, and refusing the second reference would replace a perfectly good
+// image with "see Attachments".
+func claimByName(byName map[string][]int, used map[int]bool, name string) (int, bool) {
+	idx, ok := byName[name]
+	if !ok || len(idx) == 0 {
+		return 0, false
+	}
+	for _, n := range idx {
+		if !used[n] {
+			return n, true
+		}
+	}
+	return idx[0], true
+}
+
+// reverseComments flips a page in place.
+func reverseComments(cs []comment) {
+	for i, j := 0, len(cs)-1; i < j; i, j = i+1, j-1 {
+		cs[i], cs[j] = cs[j], cs[i]
+	}
+}
+
 // renderBody turns the issue into the markdown an agent will read, and lists
 // the images that markdown references.
 //
@@ -136,13 +176,32 @@ func renderBody(iss *issue, comments *commentPage) (string, []ticket.Image) {
 	// drop the screenshot on exactly the bug reports that are mostly screenshot.
 	// Downloading everything and listing it under ## Attachments costs at worst
 	// an unreferenced image inside caps fleet already enforces.
+	// Two indexes, because they answer two different questions and one map
+	// cannot do both.
+	//
+	// byID is how an attachment finds ITS OWN image, and it is keyed on the
+	// attachment id because Jira lets one issue carry two attachments called
+	// image.png. A filename-keyed map silently collapsed them: both names
+	// resolved to the second index, the first became unreachable, and
+	// renderAttachments emitted the same placeholder twice — so one screenshot
+	// was rendered double and the other never downloaded at all. On a bug
+	// report that is mostly screenshots, which is the case this whole "download
+	// everything" branch exists for.
+	//
+	// byName is how a MEDIA NODE finds an image, and there the filename is all
+	// Atlassian gives us — so it holds a queue, and each media node consumes
+	// the next unclaimed index for that name.
 	var images []ticket.Image
-	byName := map[string]int{}
+	byID := map[string]int{}
+	byName := map[string][]int{}
 	for _, a := range iss.Fields.Attachment {
 		if !a.isImage() || a.Content == "" {
 			continue
 		}
-		byName[strings.ToLower(a.Filename)] = len(images)
+		n := len(images)
+		byID[a.ID] = n
+		lower := strings.ToLower(a.Filename)
+		byName[lower] = append(byName[lower], n)
 		images = append(images, ticket.Image{URL: a.Content, Alt: a.Filename})
 	}
 
@@ -160,7 +219,7 @@ func renderBody(iss *issue, comments *commentPage) (string, []ticket.Image) {
 			// agent knows something visual belongs here.
 			return "_(image — see Attachments)_"
 		}
-		n, ok := byName[strings.ToLower(alt)]
+		n, ok := claimByName(byName, used, strings.ToLower(alt))
 		if !ok {
 			return "_(image: " + alt + " — see Attachments)_"
 		}
@@ -206,7 +265,7 @@ func renderBody(iss *issue, comments *commentPage) (string, []ticket.Image) {
 		b.WriteString(links)
 	}
 
-	if att := renderAttachments(iss.Fields.Attachment, byName, used); att != "" {
+	if att := renderAttachments(iss.Fields.Attachment, byID, used); att != "" {
 		b.WriteString("\n## Attachments\n\n")
 		b.WriteString(att)
 	}
@@ -239,13 +298,15 @@ func renderLinks(links []issueLink) string {
 // agent cannot follow a URL to look at one, and a 40MB video or a customer's
 // spreadsheet is neither readable by the agent nor something to pull into a
 // worktree unasked.
-func renderAttachments(atts []attachment, byName map[string]int, used map[int]bool) string {
+func renderAttachments(atts []attachment, byID map[string]int, used map[int]bool) string {
 	var b strings.Builder
 	for _, a := range atts {
 		if a.Filename == "" {
 			continue
 		}
-		n, isImage := byName[strings.ToLower(a.Filename)]
+		// By id, never by filename: two attachments can share a name, and a
+		// name lookup would give them both the same placeholder.
+		n, isImage := byID[a.ID]
 		switch {
 		case isImage && used[n]:
 			fmt.Fprintf(&b, "- %s (shown above)\n", a.Filename)

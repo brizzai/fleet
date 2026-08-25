@@ -42,6 +42,7 @@ func materializeTicket(repoPath, worktreePath string, t *ticket.Ticket, moveStat
 	res, err := ticketing.Materialize(ctx, repoPath, ticket.Opts{
 		WorktreePath: worktreePath,
 		Identifier:   t.Identifier,
+		Provider:     t.Provider,
 		MoveState:    moveState,
 	})
 	if err != nil {
@@ -90,12 +91,12 @@ func ticketStatusLine(tracker string, res *ticket.Result, err error) string {
 		if errors.Is(err, ticket.ErrNotFound) {
 			return tracker + ": issue not found — worktree created without the ticket"
 		}
-		// Still a resting state, and barely reachable from this caller anyway:
-		// the dialog's own fetch had to succeed for there to be a ticket to
-		// materialize at all.
-		if errors.Is(err, ticket.ErrNotConnected) {
-			return ""
-		}
+		// Deliberately NOT swallowed here, unlike everywhere else this sentinel
+		// appears. "Not connected" is the resting state for someone who never
+		// connected a tracker — but this caller only runs when the user picked
+		// a ticket the dialog had already fetched, so reaching it means the
+		// credential went away in between. Silence there leaves a worktree with
+		// no ticket, no prompt, and nothing on screen saying why.
 		return fmt.Sprintf("%s: %v — starting without the ticket", tracker, err)
 	case res == nil:
 		return ""

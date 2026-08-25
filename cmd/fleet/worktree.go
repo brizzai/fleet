@@ -456,6 +456,7 @@ func runWorktree(args []string) {
 		res, merr := ticketing.Materialize(ctx, repoPath, ticket.Opts{
 			WorktreePath: info.Path,
 			Identifier:   tkt.Identifier,
+			Provider:     tkt.Provider,
 			MoveState:    cfg.IsTicketStartStateEnabled() && !opts.noTicketStart,
 		})
 		cancel()

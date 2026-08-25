@@ -325,3 +325,79 @@ func TestFormatJiraTime(t *testing.T) {
 		t.Errorf("unparseable = %q, want it passed through", got)
 	}
 }
+
+// TestDuplicateAttachmentNamesEachGetTheirOwnImage pins the case the
+// "download everything" branch exists for and used to break.
+//
+// Jira lets one issue carry two attachments both called image.png. A
+// filename-keyed index collapsed them: both resolved to the second, the first
+// became unreachable, and renderAttachments emitted the same placeholder twice
+// — so one screenshot rendered double and the other was never downloaded at
+// all. On a bug report that is mostly screenshots, which is precisely the case
+// the surrounding comment claims to protect.
+func TestDuplicateAttachmentNamesEachGetTheirOwnImage(t *testing.T) {
+	iss := &issue{Key: "BRZ-1", Fields: issueFields{
+		Summary: "Two shots, one name",
+		Description: json.RawMessage(`{"type":"doc","content":[
+			{"type":"mediaSingle","content":[{"type":"media","attrs":{"alt":"image.png"}}]},
+			{"type":"mediaSingle","content":[{"type":"media","attrs":{"alt":"image.png"}}]}]}`),
+		Attachment: []attachment{
+			{ID: "9001", Filename: "image.png", MimeType: "image/png", Content: "https://acme.atlassian.net/a/9001"},
+			{ID: "9002", Filename: "image.png", MimeType: "image/png", Content: "https://acme.atlassian.net/a/9002"},
+		},
+	}}
+
+	body, images := renderBody(iss, nil)
+
+	if len(images) != 2 {
+		t.Fatalf("queued %d images, want both", len(images))
+	}
+	if images[0].URL == images[1].URL {
+		t.Fatal("both entries point at the same attachment")
+	}
+
+	// Each placeholder appears, so collectImages downloads both files.
+	for i := 0; i < 2; i++ {
+		ref := "](" + ticket.PlaceholderFor(i) + ")"
+		if n := strings.Count(body, ref); n != 1 {
+			t.Errorf("placeholder %d appears %d time(s), want exactly 1:\n%s", i, n, body)
+		}
+	}
+
+	// Two media nodes with the same name consume two different attachments,
+	// rather than both landing on the last one.
+	if !strings.Contains(body, "![image.png]("+ticket.PlaceholderFor(0)+")") ||
+		!strings.Contains(body, "![image.png]("+ticket.PlaceholderFor(1)+")") {
+		t.Errorf("the two media nodes did not resolve to two files:\n%s", body)
+	}
+	// Both were placed inline, so the Attachments list reports both as shown
+	// rather than repeating either.
+	if n := strings.Count(body, "image.png (shown above)"); n != 2 {
+		t.Errorf("Attachments listed %d as shown above, want 2:\n%s", n, body)
+	}
+}
+
+// TestRepeatedReferenceToOneAttachmentStillRenders: the same screenshot is
+// often referenced twice in one description. Once every index for a name is
+// claimed the resolver reuses the first, because replacing a perfectly good
+// image with "see Attachments" would be a worse answer than showing it twice.
+func TestRepeatedReferenceToOneAttachmentStillRenders(t *testing.T) {
+	iss := &issue{Key: "BRZ-1", Fields: issueFields{
+		Description: json.RawMessage(`{"type":"doc","content":[
+			{"type":"mediaSingle","content":[{"type":"media","attrs":{"alt":"only.png"}}]},
+			{"type":"mediaSingle","content":[{"type":"media","attrs":{"alt":"only.png"}}]}]}`),
+		Attachment: []attachment{
+			{ID: "1", Filename: "only.png", MimeType: "image/png", Content: "https://acme.atlassian.net/a/1"},
+		},
+	}}
+	body, images := renderBody(iss, nil)
+	if len(images) != 1 {
+		t.Fatalf("queued %d images, want 1", len(images))
+	}
+	if n := strings.Count(body, "]("+ticket.PlaceholderFor(0)+")"); n != 2 {
+		t.Errorf("both references should render, got %d:\n%s", n, body)
+	}
+	if strings.Contains(body, "see Attachments") {
+		t.Errorf("a second reference to a present image should not degrade:\n%s", body)
+	}
+}

@@ -67,13 +67,15 @@ type LinearConfig struct {
 // and `projects` lists append and dedupe. Two trackers with two sets of merge
 // semantics would be a thing to look up rather than a thing to know.
 //
-// Site is the odd one out and is optional. The site normally rides with the
-// credential, because an Atlassian API token is scoped to an account rather
-// than to a site and one fleet install talks to one Jira at a time; this exists
-// for the repo that belongs to a different site than the user's default, where
-// the alternative would be reconnecting to switch between two repos.
+// There is deliberately no per-repo `site`. The site rides with the credential,
+// because an Atlassian API token is scoped to an *account* rather than to a
+// site — so a repo pointing at a second Jira has no guarantee the same token
+// reaches it, and honouring the key would need its own credential story. An
+// earlier version of this struct carried the field and documented it while
+// nothing read it, which is the worse of the two failures: the key parsed
+// cleanly and was silently ignored, so a user who set it saw their requests go
+// to the original site with no error anywhere.
 type JiraConfig struct {
-	Site     string   `json:"site,omitempty"`
 	Project  string   `json:"project,omitempty"`
 	Projects []string `json:"projects,omitempty"`
 }
@@ -106,9 +108,6 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 	}
 	merged.Linear.Teams = dedupeStrings(append(base.Linear.Teams, local.Linear.Teams...))
 
-	if local.Jira.Site != "" {
-		merged.Jira.Site = local.Jira.Site
-	}
 	if local.Jira.Project != "" {
 		merged.Jira.Project = local.Jira.Project
 	}
@@ -159,12 +158,6 @@ func LinearTeamKeys(repoPath string) []string {
 func JiraProjectKeys(repoPath string) []string {
 	cfg := loadMergedRepoConfig(repoPath).Jira
 	return trackerKeys(cfg.Project, cfg.Projects)
-}
-
-// JiraSite returns the repo's Jira site override, normalized to lower case, or
-// "" when it names none — in which case the credential's own site is used.
-func JiraSite(repoPath string) string {
-	return strings.ToLower(strings.TrimSpace(loadMergedRepoConfig(repoPath).Jira.Site))
 }
 
 // trackerKeys folds the singular and plural forms into one upper-cased, deduped

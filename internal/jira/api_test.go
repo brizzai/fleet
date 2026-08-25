@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -210,20 +211,37 @@ func TestAssignedIssuesUsesCurrentUser(t *testing.T) {
 	}
 }
 
-// TestSearchQuotesTheTerm: a term with a quote in it must be data, never syntax.
+// TestSearchQuotesTheTerm: whatever the user typed must be data, never syntax.
+//
+// Both layers are asserted through the real request body, because the failure
+// this guards is not a wrong string — it is a 400 the dialog then reports as
+// "Jira: unavailable", blaming the tracker for the user's own half-typed branch
+// name.
 func TestSearchQuotesTheTerm(t *testing.T) {
-	rec := fakeJira(t, map[string]func(http.ResponseWriter, *http.Request){
-		"/rest/api/3/search/jql": func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte(`{"issues":[]}`))
-		},
-	})
-	if _, err := Search(context.Background(), `retry "charge"`, 5); err != nil {
-		t.Fatal(err)
-	}
-	var req searchRequest
-	_ = json.Unmarshal([]byte(rec.posts["/rest/api/3/search/jql"]), &req)
-	if !strings.Contains(req.JQL, `text ~ "retry \"charge\""`) {
-		t.Errorf("JQL = %q, want the quotes escaped inside the literal", req.JQL)
+	for _, term := range []string{`retry "charge"`, `fix (login`, `what?`, `C++`} {
+		rec := fakeJira(t, map[string]func(http.ResponseWriter, *http.Request){
+			"/rest/api/3/search/jql": func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"issues":[]}`))
+			},
+		})
+		if _, err := Search(context.Background(), term, 5); err != nil {
+			t.Fatal(err)
+		}
+		var req searchRequest
+		if err := json.Unmarshal([]byte(rec.posts["/rest/api/3/search/jql"]), &req); err != nil {
+			t.Fatalf("request body: %v", err)
+		}
+		want := `text ~ "` + escapeJQL(term) + `"`
+		if !strings.Contains(req.JQL, want) {
+			t.Errorf("JQL = %q, want it to contain %q", req.JQL, want)
+		}
+		// No reserved character may reach Lucene unescaped.
+		for _, r := range luceneReserved {
+			bare := string(r)
+			if strings.Contains(term, bare) && !strings.Contains(req.JQL, `\\`+bare) {
+				t.Errorf("%q reached the query unescaped in %q", bare, req.JQL)
+			}
+		}
 	}
 }
 
@@ -292,11 +310,14 @@ func TestDocumentBuildsTheWholeTicket(t *testing.T) {
 func TestDocumentFetchesMoreCommentsOnlyWhenTruncated(t *testing.T) {
 	rec := fakeJira(t, map[string]func(http.ResponseWriter, *http.Request){
 		"/rest/api/3/issue/OPS-42/comment": func(w http.ResponseWriter, r *http.Request) {
+			// Newest first, which is what orderBy=-created returns. The
+			// fixture has to match the request or the reversal back to
+			// chronological cannot be tested at all.
 			_, _ = w.Write([]byte(`{"total":2,"comments":[
-				{"author":{"displayName":"Sam"},"created":"2026-08-25T09:41:22.113+0000",
-				 "body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"first"}]}]}},
 				{"author":{"displayName":"Dana"},"created":"2026-08-25T10:00:00.000+0000",
-				 "body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"second"}]}]}}
+				 "body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"second"}]}]}},
+				{"author":{"displayName":"Sam"},"created":"2026-08-25T09:41:22.113+0000",
+				 "body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"first"}]}]}}
 			]}`))
 		},
 		"/rest/api/3/issue/OPS-42": func(w http.ResponseWriter, r *http.Request) {
@@ -313,11 +334,63 @@ func TestDocumentFetchesMoreCommentsOnlyWhenTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := rec.seen["/rest/api/3/issue/OPS-42/comment"]; !ok {
+	q, ok := rec.seen["/rest/api/3/issue/OPS-42/comment"]
+	if !ok {
 		t.Fatal("a truncated comment page should have been re-fetched")
+	}
+	// -created, not created: Jira's orderBy is ascending by default, so the
+	// plain form fetches the OLDEST page — the opposite of the reason this
+	// round trip is worth taking.
+	if !strings.Contains(q, "orderBy=-created") {
+		t.Errorf("query = %q, want the NEWEST comments", q)
 	}
 	if !strings.Contains(doc.Body, "second") || !strings.Contains(doc.Body, "## Comments (2)") {
 		t.Errorf("the later comment did not reach the body:\n%s", doc.Body)
+	}
+	// Rendered oldest-first even though they arrived newest-first: ticket.md
+	// reads as a conversation, and Linear's comments are chronological.
+	if strings.Index(doc.Body, "first") > strings.Index(doc.Body, "second") {
+		t.Errorf("comments render newest-first; they must read in order:\n%s", doc.Body)
+	}
+}
+
+// TestCommentRefetchNeverShrinksTheSet: an issue can embed more comments than
+// commentFetchLimit, and swapping 100 embedded for 50 fetched would lose half
+// of them while looking like a fix.
+func TestCommentRefetchNeverShrinksTheSet(t *testing.T) {
+	var embedded strings.Builder
+	for i := 0; i < 60; i++ {
+		if i > 0 {
+			embedded.WriteString(",")
+		}
+		fmt.Fprintf(&embedded, `{"author":{"displayName":"Sam"},"created":"2026-08-25T09:%02d:00.000+0000",
+			"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"embedded-%d"}]}]}}`, i, i)
+	}
+
+	fakeJira(t, map[string]func(http.ResponseWriter, *http.Request){
+		"/rest/api/3/issue/OPS-42/comment": func(w http.ResponseWriter, r *http.Request) {
+			// A smaller page than what the issue already carried.
+			_, _ = w.Write([]byte(`{"total":120,"comments":[
+				{"author":{"displayName":"Dana"},"created":"2026-08-25T11:00:00.000+0000",
+				 "body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"page-only"}]}]}}
+			]}`))
+		},
+		"/rest/api/3/issue/OPS-42": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"key":"OPS-42","fields":{"summary":"x",
+				"status":{"name":"To Do","statusCategory":{"key":"new"}},
+				"comment":{"total":120,"comments":[%s]}}}`, embedded.String())
+		},
+	})
+
+	doc, err := New().Document(context.Background(), "OPS-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(doc.Body, "## Comments (60)") {
+		t.Errorf("the smaller page replaced the larger embedded set:\n%s", doc.Body[:min(400, len(doc.Body))])
+	}
+	if strings.Contains(doc.Body, "page-only") {
+		t.Error("a one-comment page displaced 60 embedded comments")
 	}
 }
 

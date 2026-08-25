@@ -74,7 +74,17 @@ func allowedImageURL(target string, host func(*url.URL) bool) bool {
 	return u.Scheme == "https" && host(u)
 }
 
-// detectExt recovers a file extension for image bytes.
+// sniff returns the bare media type http.DetectContentType reads out of the
+// bytes themselves, with any charset parameter stripped.
+func sniff(body []byte) string {
+	ct := http.DetectContentType(body)
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(ct))
+}
+
+// detectExt recovers a file extension from image BYTES, and only from the bytes.
 //
 // This is not cosmetic. Linear's default alt text is literally "image.png" and
 // its upload URLs carry no filename at all, so a real PNG would land on disk
@@ -82,27 +92,33 @@ func allowedImageURL(target string, host func(*url.URL) bool) bool {
 // extension, making a perfectly downloaded screenshot unreadable. Recovering the
 // extension is the difference between "we fetched it" and "the agent can see it".
 //
-// http.DetectContentType sniffs magic bytes, so it is the backstop when the
-// response headers say nothing useful. Jira does send a filename, but the sniff
-// still runs as a check rather than a rescue: it is what stops a 401 HTML page
-// landing beside real screenshots under a .png name the server volunteered.
-func detectExt(name string, body []byte) (string, bool) {
-	if ext := strings.ToLower(filepath.Ext(name)); ext != "" {
-		for _, known := range extByContentType {
-			if ext == known {
-				return ext, true
-			}
-		}
-		if ext == ".jpeg" {
-			return ".jpg", true
-		}
-	}
-	ct := http.DetectContentType(body)
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	ext, ok := extByContentType[strings.ToLower(strings.TrimSpace(ct))]
+// It deliberately does NOT consult a filename any more. It used to short-circuit
+// on a recognized extension in the alt text, which meant that for Jira — where
+// the alt IS the filename and Content-Disposition is always sent — the sniff
+// never ran at all. A 200 carrying an HTML interstitial for screenshot.png
+// landed on disk as a .png, past a check whose whole stated purpose was to stop
+// that. The bytes are the only thing a server cannot get wrong on your behalf.
+func detectExt(body []byte) (string, bool) {
+	ext, ok := extByContentType[sniff(body)]
 	return ext, ok
+}
+
+// svgExt recognizes the one image type Go's sniffer cannot name.
+//
+// http.DetectContentType has no SVG rule: a document opening with <?xml sniffs
+// as text/xml and a bare <svg> as text/plain, so a bytes-only rule would reject
+// every valid SVG. Trusting the header here is safe precisely because the body
+// still has to look like the text an SVG is — an HTML interstitial sniffs as
+// text/html and is refused whatever the headers claim.
+func svgExt(h http.Header, body []byte) (string, bool) {
+	if ext, ok := extFromHeaders(h); !ok || ext != ".svg" {
+		return "", false
+	}
+	switch sniff(body) {
+	case "text/xml", "text/plain":
+		return ".svg", true
+	}
+	return "", false
 }
 
 // fetchImage downloads one attachment into destDir.
@@ -158,9 +174,15 @@ func fetchImage(ctx context.Context, doc *Document, target, destDir, alt string,
 
 	// Reject anything that isn't an image, so a 401 HTML page or a JSON error
 	// body can never land beside real screenshots looking like one.
-	ext, ok := extFromHeaders(resp.Header)
+	//
+	// The BYTES decide, and the headers only get a say for SVG, which Go's
+	// sniffer cannot name. Reading the headers first is what made this check
+	// vacuous for Jira, which sends both a filename and a Content-Type on every
+	// attachment: the body was never inspected, so a server serving HTML under
+	// an image/png header wrote an HTML file called 1-screenshot.png.
+	ext, ok := detectExt(body)
 	if !ok {
-		if ext, ok = detectExt(alt, body); !ok {
+		if ext, ok = svgExt(resp.Header, body); !ok {
 			return "", 0, fmt.Errorf("not an image response")
 		}
 	}

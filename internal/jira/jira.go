@@ -45,13 +45,38 @@ func ProjectKeys(repoPath string) []string {
 	return workspace.JiraProjectKeys(repoPath)
 }
 
-// escapeJQL quotes a user's search term for a JQL string literal.
+// luceneReserved is the set Atlassian documents as reserved inside a text
+// search: everything Lucene's query parser treats as an operator.
+const luceneReserved = `+-&|!(){}[]^~*?:\"`
+
+// escapeJQL quotes a user's search term for a `text ~ "..."` clause.
 //
-// JQL string literals take backslash escapes, so a term containing a quote
-// would otherwise end the literal and turn the rest of what someone typed into
-// syntax. Only these two characters need it — everything else inside quotes is
-// data, including the reserved words that would break an unquoted term.
+// TWO layers, applied in this order, because the value passes through two
+// parsers on the way in:
+//
+//  1. Lucene, which parses the CONTENTS of the literal for a `~` comparison.
+//     Quoting is not enough here — an unescaped `(` or `?` is an operator, not
+//     data, and the query is rejected outright.
+//  2. The JQL string literal itself, where a backslash or a quote would
+//     otherwise end the string early.
+//
+// The earlier version escaped only for layer 2 and asserted in its own comment
+// that "everything else inside quotes is data". That is true of an `=`
+// comparison and false of `~` — so typing `fix (login` into the New branch
+// field, which fires a search at three runes, produced a 400 that the dialog
+// reported as "Jira: unavailable". Half a branch name is not evidence that the
+// tracker is down.
 func escapeJQL(term string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
-	return r.Replace(term)
+	var b strings.Builder
+	b.Grow(len(term) * 2)
+	for _, r := range term {
+		if strings.ContainsRune(luceneReserved, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	// Now the JQL literal: every backslash this produced (and every one the
+	// user typed) has to survive as a backslash, and a quote has to stay inside
+	// the string.
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(b.String())
 }

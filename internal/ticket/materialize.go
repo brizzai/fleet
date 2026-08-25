@@ -43,6 +43,15 @@ type Opts struct {
 	WorktreePath string
 	Identifier   string
 
+	// Provider is the Kind of the tracker that produced this identifier, when
+	// the caller already knows it — which it does whenever the ticket came from
+	// a Fetch or a Search rather than from a bare string the user typed.
+	//
+	// Carrying it is what stops the provider being resolved a SECOND time, by a
+	// different rule, at a point where the decision was already made. See
+	// ticketing.Materialize.
+	Provider string
+
 	// MoveState requests the one mutation fleet ever makes.
 	MoveState bool
 }

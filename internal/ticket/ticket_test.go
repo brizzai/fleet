@@ -175,14 +175,22 @@ func TestDetectExtRecoversExtension(t *testing.T) {
 
 	// The real case: the CLI writes "Filter bar renders cramped (screenshot)"
 	// with no extension, and an agent's read tool dispatches on extension.
-	if ext, ok := detectExt("Filter bar renders cramped (screenshot)", png); !ok || ext != ".png" {
+	if ext, ok := detectExt(png); !ok || ext != ".png" {
 		t.Errorf("extensionless PNG: got (%q, %v), want (.png, true)", ext, ok)
 	}
-	if ext, ok := detectExt("x.gif", gif); !ok || ext != ".gif" {
+	if ext, ok := detectExt(gif); !ok || ext != ".gif" {
 		t.Errorf("gif: got (%q, %v)", ext, ok)
 	}
-	if _, ok := detectExt("whatever", html); ok {
+	if _, ok := detectExt(html); ok {
 		t.Error("an HTML 401 body must be rejected, not saved beside real screenshots")
+	}
+
+	// A filename cannot vouch for bytes. This is the whole reason detectExt
+	// stopped taking one: for Jira the alt IS the filename, so a name-first
+	// rule meant the sniff never ran and an HTML interstitial served for
+	// screenshot.png landed on disk as a .png.
+	if _, ok := detectExt([]byte("<!DOCTYPE html><html>nope</html>")); ok {
+		t.Error("HTML must be rejected however convincingly it is named")
 	}
 	if got := http.DetectContentType(png); !strings.HasPrefix(got, "image/png") {
 		t.Fatalf("sniffer precondition failed: %s", got)

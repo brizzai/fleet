@@ -233,3 +233,92 @@ func ids(ts []ticket.Ticket) []string {
 	}
 	return out
 }
+
+// TestMaterializeHonoursTheTicketsOwnProvider pins the regression this fix
+// closes.
+//
+// Search is deliberately unscoped by team or project, so a repo that names only
+// BRZ will happily offer PRD-45 in the `w` dialog. Re-resolving that pick
+// against the repo's keys refused it here — after the branch had been named and
+// the worktree created — and ticketStatusLine swallowed ErrNotConnected, so the
+// user got `prd-45-login-crash` with no ticket, no prompt, and nothing on
+// screen saying why. It worked before the router existed.
+//
+// The repo gate decides WHETHER ticket surfaces appear at all. It is not a rule
+// about which issue you may work on, and applying it a second time made it one.
+func TestMaterializeHonoursTheTicketsOwnProvider(t *testing.T) {
+	// A repo that tracks BRZ only.
+	tracked := &fake{kind: "tracked", available: true, keys: []string{"BRZ"}}
+	// ...and a connected provider whose keys this repo does not name, which is
+	// exactly what an unscoped search can surface.
+	other := &fake{kind: "other", available: true}
+	swap(t, tracked, other)
+
+	if _, ok := Owner("/repo", "PRD-45"); ok {
+		t.Fatal("precondition: the repo must not claim PRD-45 by key")
+	}
+
+	// With the provider carried, routing succeeds and reaches that provider.
+	p, ok := ByKind("other")
+	if !ok || p.Kind() != "other" {
+		t.Fatalf("ByKind = %v", p)
+	}
+
+	// Document is what Materialize calls; a sentinel error proves which
+	// provider it routed to without needing a worktree on disk.
+	other.err = errSentinel
+	_, err := Materialize(context.Background(), "/repo", ticket.Opts{
+		WorktreePath: t.TempDir(),
+		Identifier:   "PRD-45",
+		Provider:     "other",
+	})
+	if !errors.Is(err, errSentinel) {
+		t.Errorf("err = %v, want the pick to have been routed to its own provider", err)
+	}
+	if errors.Is(err, ticket.ErrNotConnected) {
+		t.Error("the repo gate was applied a second time to a ticket that already had a provider")
+	}
+}
+
+// TestMaterializeFallsBackToTheRepoGate: a bare identifier nobody has claimed
+// yet — the `fleet wt --ticket` path — still resolves by the repo's keys.
+func TestMaterializeFallsBackToTheRepoGate(t *testing.T) {
+	tracked := &fake{kind: "tracked", available: true, keys: []string{"BRZ"}, err: errSentinel}
+	swap(t, tracked)
+
+	_, err := Materialize(context.Background(), "/repo", ticket.Opts{
+		WorktreePath: t.TempDir(),
+		Identifier:   "BRZ-1",
+	})
+	if !errors.Is(err, errSentinel) {
+		t.Errorf("err = %v, want the repo gate to have resolved BRZ", err)
+	}
+
+	// And an identifier no provider claims, with no provider carried, is still
+	// the honest "nothing here will read this".
+	_, err = Materialize(context.Background(), "/repo", ticket.Opts{
+		WorktreePath: t.TempDir(),
+		Identifier:   "ZZZ-1",
+	})
+	if !errors.Is(err, ticket.ErrNotConnected) {
+		t.Errorf("err = %v, want ErrNotConnected", err)
+	}
+}
+
+// TestMaterializeIgnoresAnUnknownProviderKind: a stale kind on a ticket must
+// fall through to the repo gate rather than failing outright.
+func TestMaterializeIgnoresAnUnknownProviderKind(t *testing.T) {
+	tracked := &fake{kind: "tracked", available: true, keys: []string{"BRZ"}, err: errSentinel}
+	swap(t, tracked)
+
+	_, err := Materialize(context.Background(), "/repo", ticket.Opts{
+		WorktreePath: t.TempDir(),
+		Identifier:   "BRZ-1",
+		Provider:     "a-tracker-that-was-removed",
+	})
+	if !errors.Is(err, errSentinel) {
+		t.Errorf("err = %v, want the fallback to have resolved BRZ", err)
+	}
+}
+
+var errSentinel = errors.New("routed here")

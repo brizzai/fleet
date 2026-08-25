@@ -169,10 +169,22 @@ func Fetch(ctx context.Context, repoPath, id string) (ticket.Ticket, error) {
 }
 
 // Materialize writes a ticket into a worktree through the provider that owns it.
+//
+// o.Provider wins when it is set, and resolving by repo keys is only the
+// fallback for a bare identifier nobody has claimed yet (the `fleet wt
+// --ticket` path). The order matters: search is deliberately unscoped, so a
+// repo that tracks only BRZ will happily offer you PRD-45 — and re-resolving
+// that pick against the repo's keys refused it here, after the branch had been
+// named and the worktree created, with ticketStatusLine swallowing the reason.
+//
+// The repo gate decides WHETHER ticket surfaces appear at all. It is not a rule
+// about which issue you may work on, and applying it twice made it one.
 func Materialize(ctx context.Context, repoPath string, o ticket.Opts) (ticket.Result, error) {
-	p, ok := Owner(repoPath, o.Identifier)
+	p, ok := ByKind(o.Provider)
 	if !ok {
-		return ticket.Result{}, ticket.ErrNotConnected
+		if p, ok = Owner(repoPath, o.Identifier); !ok {
+			return ticket.Result{}, ticket.ErrNotConnected
+		}
 	}
 	return ticket.Materialize(ctx, p, o)
 }

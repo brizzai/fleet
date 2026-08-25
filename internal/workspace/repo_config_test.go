@@ -243,15 +243,4 @@ func TestJiraProjectKeysMirrorLinearsMergeRules(t *testing.T) {
 		}
 	})
 
-	t.Run("site override is optional and lower-cased", func(t *testing.T) {
-		dir := t.TempDir()
-		write(t, dir, ".fleet.json", `{"jira":{"project":"OPS"}}`)
-		if got := JiraSite(dir); got != "" {
-			t.Errorf("JiraSite = %q, want empty so the credential's own site is used", got)
-		}
-		write(t, dir, ".fleet.local.json", `{"jira":{"site":"  Other.Atlassian.NET  "}}`)
-		if got := JiraSite(dir); got != "other.atlassian.net" {
-			t.Errorf("JiraSite = %q", got)
-		}
-	})
 }

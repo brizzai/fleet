@@ -104,15 +104,32 @@ func TestCredentialNeedsAllThreeParts(t *testing.T) {
 
 // TestEscapeJQL pins that a typed term cannot become syntax.
 //
-// JQL string literals take backslash escapes, so an unescaped quote ends the
-// literal and turns the rest of what someone typed into operators — at best a
-// confusing error, at worst a query that means something else.
+// TWO layers, because the value passes two parsers: Lucene reads the CONTENTS
+// of the literal for a `~` comparison, and the JQL string literal wraps it.
+// Escaping only the second was the bug — quoting does not make `(` or `?` data
+// to Lucene, so `fix (login` in the New branch field, which fires a search at
+// three runes, came back as a 400 the dialog reported as "Jira: unavailable".
 func TestEscapeJQL(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`plain`, `plain`},
-		{`say "hi"`, `say \"hi\"`},
-		{`back\slash`, `back\\slash`},
-		{`" OR project = X`, `\" OR project = X`},
+		{`two words`, `two words`},
+
+		// Lucene operators inside ordinary prose. Every one of these is a
+		// character somebody types into a branch field without thinking.
+		{`fix (login`, `fix \\(login`},
+		{`what?`, `what\\?`},
+		{`C++`, `C\\+\\+`},
+		{`a-b`, `a\\-b`},
+		{`50% off [beta]`, `50% off \\[beta\\]`},
+		{`ns:key`, `ns\\:key`},
+
+		// A quote must survive both layers: escaped for Lucene, then again for
+		// the JQL literal it sits inside.
+		{`say "hi"`, `say \\\"hi\\\"`},
+		{`" OR project = X`, `\\\" OR project = X`},
+
+		// A user's own backslash doubles at each layer.
+		{`back\slash`, `back\\\\slash`},
 	}
 	for _, c := range cases {
 		if got := escapeJQL(c.in); got != c.want {
