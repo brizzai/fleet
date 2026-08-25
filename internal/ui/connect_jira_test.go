@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -211,5 +212,49 @@ func TestJiraDisconnectRefusesEnvCredential(t *testing.T) {
 	}
 	if !d.IsVisible() {
 		t.Error("refusing must not close the dialog")
+	}
+}
+
+// TestJiraEscCancelsVerification pins the promise the footer makes.
+//
+// `esc` used to hide the dialog and leave the round trip running, so a
+// verification that succeeded afterwards called jira.SetCredential anyway —
+// while the footer had said "esc: cancel" the whole time. That is the exact
+// failure ConnectLinearDialog.abortSignIn exists for: the difference between "I
+// changed my mind" and "I changed my mind and it happened anyway".
+func TestJiraEscCancelsVerification(t *testing.T) {
+	d := jiraDialog(t)
+	d.inputs[jiraFieldSite].SetValue("acme")
+	d.inputs[jiraFieldEmail].SetValue("you@example.com")
+	d.inputs[jiraFieldToken].SetValue("ATATTsecret")
+	d.setFocus(jiraFieldToken)
+
+	d, cmd := d.submit()
+	if d.stage != connectWorking || cmd == nil {
+		t.Fatalf("verification did not start: stage=%v", d.stage)
+	}
+	if d.cancelVerify == nil {
+		t.Fatal("the dialog must hold the cancel func, or esc has nothing to cancel")
+	}
+
+	d = pressJira(d, "esc")
+	if d.IsVisible() {
+		t.Error("esc should hide the dialog")
+	}
+	if d.cancelVerify != nil {
+		t.Error("Hide must clear the cancel func after calling it")
+	}
+}
+
+// TestJiraCancelledVerificationIsNotReportedAsRejection: the command surfaces
+// cancellation as an error, and announcing "rejected — check the email and
+// token" for something the user chose is the dialog arguing with them.
+func TestJiraCancelledVerificationIsNotReportedAsRejection(t *testing.T) {
+	d := jiraDialog(t)
+	d.stage = connectWorking
+
+	d, _ = d.Update(jiraConnectFailedMsg{err: context.Canceled})
+	if d.err != nil {
+		t.Errorf("a cancelled verification reported an error: %v", d.err)
 	}
 }

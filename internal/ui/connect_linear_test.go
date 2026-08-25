@@ -221,3 +221,32 @@ func TestPersistFailureStillReportsConnected(t *testing.T) {
 		t.Errorf("it must name the way out that needs no keychain:\n%s", got)
 	}
 }
+
+// TestLinearEscCancelsKeyVerification covers the half abortSignIn never did.
+//
+// abortSignIn cancels the loopback listener for the BROWSER path only, so
+// escaping while a pasted key was being verified left the round trip running —
+// and a verification that finished afterwards stored the key. Same bug as the
+// Jira dialog's, in a file that already had the machinery for the other flow.
+func TestLinearEscCancelsKeyVerification(t *testing.T) {
+	d := connectDialog(t)
+	d.stage = connectPasting
+	d.input.Focus()
+	d.input.SetValue("lin_api_something")
+
+	d = pressConnect(d, "enter")
+	if d.stage != connectWorking {
+		t.Fatalf("verification did not start: stage=%v", d.stage)
+	}
+	if d.cancelVerify == nil {
+		t.Fatal("the dialog must hold the cancel func, or esc has nothing to cancel")
+	}
+
+	d = pressConnect(d, "esc")
+	if d.IsVisible() {
+		t.Error("esc from the spinner should hide the dialog")
+	}
+	if d.cancelVerify != nil {
+		t.Error("Hide must clear the cancel func after calling it")
+	}
+}

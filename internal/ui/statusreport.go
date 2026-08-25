@@ -412,7 +412,12 @@ var jiraTokenPattern = regexp.MustCompile(`ATATT[A-Za-z0-9_.\-=]+`)
 // or a pane excerpt would survive every other rule here intact. The floor of 20
 // characters keeps it off the words "Basic" and "Basic auth" in prose, since
 // the capture must look like base64 to the end of the run.
-var basicAuthPattern = regexp.MustCompile(`Basic\s+[A-Za-z0-9+/]{20,}={0,2}`)
+//
+// The scheme is matched case-insensitively because RFC 7235 says it is one:
+// fleet writes "Basic ", but what this pattern actually scans is a pane
+// excerpt — arbitrary terminal text, including a curl the user typed with a
+// lowercase header. Over-matching is the safe error in a redactor.
+var basicAuthPattern = regexp.MustCompile(`(?i:Basic)\s+[A-Za-z0-9+/]{20,}={0,2}`)
 
 // shortSessionID trims an agent session id to its leading block for the issue
 // table. The only question asked of these ids is whether the one on disk is the

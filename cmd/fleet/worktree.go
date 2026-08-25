@@ -652,8 +652,14 @@ func unclaimedTicketAdvice(repoPath, id string) string {
 			"Connect it in the TUI (Ctrl+K → Connect %s), or set its environment variables.",
 			key, p.Name(), p.Name(), p.Name())
 	}
+	// Both forms, because this branch fires when NO provider claims the key —
+	// so the reader is as likely to be a Linear user as a Jira one, and this
+	// line is the only thing telling them what to write. A single Jira example
+	// invites a Linear user to put a team key under a "jira" block, which then
+	// fails a second time and less legibly.
 	return fmt.Sprintf("No tracker in this repo claims %s.\n"+
-		"Name its team or project in .fleet.local.json, e.g. {\"jira\": {\"project\": %q}}", id, key)
+		"Name its Linear team or Jira project in .fleet.local.json, e.g.\n"+
+		"  {\"linear\": {\"team\": %q}}   or   {\"jira\": {\"project\": %q}}", id, key, key)
 }
 
 // describeTicketFiles summarizes what landed on disk, so the echo-back is

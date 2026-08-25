@@ -530,7 +530,13 @@ func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
 // jira.Fetch or ticketing.Assigned would have sailed straight through the guard
 // that exists to stop exactly that.
 func TestTicketWorkStaysOffTheWorkers(t *testing.T) {
-	packages := []string{"linear", "jira", "ticketing", "ticket."}
+	// Plain identifiers, no trailing dot: mentions compares *ast.Ident.Name,
+	// and in `ticket.Materialize` Go stores "ticket" on the selector's receiver
+	// and "Materialize" on Sel — so "ticket." matched nothing and that entry
+	// was dead while claiming to cover the package. A local variable named
+	// `ticket` trips this too, which is the right answer here and is why the
+	// create path's local is named `tkt`.
+	packages := []string{"linear", "jira", "ticketing", "ticket"}
 	for _, fn := range []string{"refreshAllGitAndPR", "gitWorkerCycle", "statusWorkerCycle"} {
 		for _, pkg := range packages {
 			if mentions(t, fn, pkg) {

@@ -75,6 +75,24 @@ type ConnectJiraDialog struct {
 	persistErr error
 	account    ticket.Account
 	via        string
+
+	// cancelVerify aborts an in-flight verification. Without it `esc` only hid
+	// the dialog while the round trip kept going, and a verification that
+	// succeeded afterwards stored the credential anyway — with the footer
+	// saying "esc: cancel" the whole time. Cancelling is the difference
+	// between "I changed my mind" and "I changed my mind and it happened
+	// anyway", which is the same reason ConnectLinearDialog cancels its
+	// sign-in.
+	cancelVerify context.CancelFunc
+}
+
+// abortVerify cancels any in-flight verification. Safe when none is running, so
+// every exit can call it unconditionally.
+func (d *ConnectJiraDialog) abortVerify() {
+	if d.cancelVerify != nil {
+		d.cancelVerify()
+		d.cancelVerify = nil
+	}
 }
 
 func NewConnectJiraDialog() *ConnectJiraDialog {
@@ -134,6 +152,10 @@ func (d *ConnectJiraDialog) Hide() {
 	for i := range d.inputs {
 		d.inputs[i].Blur()
 	}
+	// Every way out of this dialog goes through Hide, so cancelling here covers
+	// esc from the form, esc from the spinner, and enter on the done screen,
+	// rather than leaving each one to remember.
+	d.abortVerify()
 }
 
 // setFocus is the single writer of focus, so the caret can never be left
@@ -158,6 +180,7 @@ func (d *ConnectJiraDialog) setFocus(i int) {
 func (d *ConnectJiraDialog) Update(msg tea.Msg) (*ConnectJiraDialog, tea.Cmd) {
 	switch m := msg.(type) {
 	case jiraConnectedMsg:
+		d.cancelVerify = nil
 		d.stage, d.account, d.via = connectDone, m.account, m.via
 		d.err, d.persistErr = nil, m.persistErr
 		return d, nil
@@ -172,6 +195,14 @@ func (d *ConnectJiraDialog) Update(msg tea.Msg) (*ConnectJiraDialog, tea.Cmd) {
 		}
 		return d, nil
 	case jiraConnectFailedMsg:
+		d.cancelVerify = nil
+		// A cancelled verification is not a failure — it is the user pressing
+		// esc, and the command only reports it because cancellation surfaces
+		// as an error. Announcing "rejected" for something they chose is the
+		// dialog arguing with them.
+		if errors.Is(m.err, context.Canceled) {
+			return d, nil
+		}
 		// Back to the fields that produced it, so the fix is one keystroke away
 		// rather than one navigation away.
 		d.err = m.err
@@ -275,7 +306,10 @@ func (d *ConnectJiraDialog) submit() (*ConnectJiraDialog, tea.Cmd) {
 	for i := range d.inputs {
 		d.inputs[i].Blur()
 	}
-	return d, verifyAndStoreJiraToken(jira.Credential{Site: site, Email: email, Token: token})
+	ctx, cancel := context.WithTimeout(context.Background(), connectJiraTimeout)
+	d.abortVerify() // a previous attempt must not outlive this one
+	d.cancelVerify = cancel
+	return d, verifyAndStoreJiraToken(ctx, jira.Credential{Site: site, Email: email, Token: token})
 }
 
 // verifyAndStoreJiraToken proves a credential works before anything is written.
@@ -284,14 +318,20 @@ func (d *ConnectJiraDialog) submit() (*ConnectJiraDialog, tea.Cmd) {
 // a hope, and it means a typo is caught while the user is still looking at the
 // field they typed it into — not three days later when a worktree quietly
 // starts without its ticket.
-func verifyAndStoreJiraToken(cred jira.Credential) tea.Cmd {
+// The dialog owns the context, so esc releases the request immediately rather
+// than at the timeout — and, more to the point, a verification that completes
+// after an escape cannot store anything.
+func verifyAndStoreJiraToken(ctx context.Context, cred jira.Credential) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), connectJiraTimeout)
-		defer cancel()
-
 		acct, err := jira.VerifyCredential(ctx, cred)
 		if err != nil {
 			return jiraConnectFailedMsg{err: err}
+		}
+		// Checked between the round trip and the write: the request can finish
+		// in the window after esc, and storing then is precisely what the
+		// footer promised would not happen.
+		if ctx.Err() != nil {
+			return jiraConnectFailedMsg{err: ctx.Err()}
 		}
 		// Not an error path: the credential is already live. See jiraConnectedMsg.
 		persistErr := jira.SetCredential(cred)

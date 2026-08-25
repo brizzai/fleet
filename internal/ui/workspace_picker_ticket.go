@@ -216,7 +216,8 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 				// "no such issue" is the wrong diagnosis when the credential
 				// simply cannot see this repo's workspace — the issue exists,
 				// we are looking in the wrong place.
-				if note, wrong := d.workspaceMismatchNote(); wrong {
+				owner, _ := ticketing.ByKind(m.provider)
+				if note, wrong := d.workspaceMismatchNote(owner); wrong {
 					d.ticketNote = note
 				} else {
 					d.ticketNote = m.query + " — no such issue"
@@ -272,7 +273,7 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 	// EVERY search returns nothing, and rendering that as silence leaves the
 	// user typing into a feature that looks broken with no way to find out why.
 	if len(d.tickets) == 0 {
-		if note, wrong := d.workspaceMismatchNote(); wrong {
+		if note, wrong := d.workspaceMismatchNote(nil); wrong {
 			d.ticketNote = note
 		}
 	}
@@ -294,15 +295,31 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 // at the end always survives.
 const maxWorkspaceNameInNote = 24
 
-func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
-	if len(d.bound) == 0 {
+// owner scopes the check. For an identifier lookup we know exactly which
+// tracker was asked, so only that one's workspace can be the wrong one — and
+// consulting the others actively hides the answer: a repo tracking Linear BRZ
+// and Jira OPS, whose Jira credential is on the wrong site, would find BRZ in
+// Linear's account, bail out, and report "OPS-42 — no such issue". That is the
+// precise misdiagnosis this note exists to prevent.
+//
+// A fan-out search passes nil, because no single provider owns the query and
+// every one of them has to disagree before "wrong workspace" is the diagnosis.
+func (d *WorktreeDialog) workspaceMismatchNote(owner ticket.Provider) (string, bool) {
+	bound := d.bound
+	if owner != nil {
+		bound = nil
+		for _, b := range d.bound {
+			if b.Provider.Kind() == owner.Kind() {
+				bound = append(bound, b)
+			}
+		}
+	}
+	if len(bound) == 0 {
 		return "", false
 	}
-	// Every provider must disagree for this to be the diagnosis. With two
-	// connected, one of them seeing the repo's keys means the lookup had a
-	// place to succeed and "wrong workspace" is not what went wrong.
 	var name string
-	for _, b := range d.bound {
+	var keys []string
+	for _, b := range bound {
 		acct, known := b.Provider.Account()
 		if !known || len(acct.Keys) == 0 {
 			return "", false
@@ -314,6 +331,7 @@ func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
 				}
 			}
 		}
+		keys = append(keys, b.Keys...)
 		if name == "" {
 			name = acct.Name
 		}
@@ -331,7 +349,7 @@ func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
 	// part that tells you what to do. Bounding the variable is what actually
 	// holds the line.
 	name = ansi.Truncate(name, maxWorkspaceNameInNote, "…")
-	return fmt.Sprintf("%s has no %s — reconnect: Ctrl+K", name, strings.Join(d.ticketKeys, "/")), true
+	return fmt.Sprintf("%s has no %s — reconnect: Ctrl+K", name, strings.Join(keys, "/")), true
 }
 
 // PrefillTicket seeds the New branch field with an identifier and starts its

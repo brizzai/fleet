@@ -141,9 +141,14 @@ func TestBuildStatusReportBody_NeverLeaksLinearKey(t *testing.T) {
 func TestBuildStatusReportBody_NeverLeaksJiraToken(t *testing.T) {
 	const token = "ATATT3xFfGF0T4kL9mNoPqRsTuVwXyZ0123456789abcdefgh=="
 	const header = "Basic eW91QGV4YW1wbGUuY29tOkFUQVRUM3hGZkdGMFQ0a0w5bU5vUHFSc1R1Vnc="
+	// The scheme is case-insensitive per RFC 7235, and what this scans is a
+	// pane excerpt — arbitrary terminal text, including a curl someone typed
+	// with a lowercase header.
+	const lower = "basic eW91QGV4YW1wbGUuY29tOkFUQVRUM3hGZkdGMFQ0a0w5bU5vUHFSc1R1Vnc="
 
 	f := statusFormFixture()
-	f.snap.paneClean = "❯ paste your API token:\n" + token + "\n"
+	f.snap.paneClean = "❯ paste your API token:\n" + token + "\n" +
+		"$ curl -H 'authorization: " + lower + "' …\n"
 	f.snap.debugTail = "time=... msg=\"jira request\" authorization=\"" + header + "\""
 	r := &diagnostics.Report{Version: "v2.30.3", OS: "darwin", Arch: "arm64"}
 
@@ -156,6 +161,10 @@ func TestBuildStatusReportBody_NeverLeaksJiraToken(t *testing.T) {
 		if strings.Contains(body, header) {
 			t.Fatalf("issue body leaked a Basic auth header (includeContent=%v) — "+
 				"the ATATT prefix is base64-encoded away in that form:\n%s", includeContent, body)
+		}
+		if strings.Contains(body, lower) {
+			t.Fatalf("a lowercase scheme slipped past the redactor (includeContent=%v) — "+
+				"HTTP auth schemes are case-insensitive:\n%s", includeContent, body)
 		}
 	}
 }

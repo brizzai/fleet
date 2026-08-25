@@ -87,6 +87,22 @@ type ConnectLinearDialog struct {
 	// credential. Cancelling is the difference between "I changed my mind" and
 	// "I changed my mind and it happened anyway".
 	cancelSignIn context.CancelFunc
+
+	// cancelVerify does for the PASTE path what cancelSignIn does for the
+	// browser one. abortSignIn only ever covered the loopback listener, so
+	// escaping while a pasted key was being verified still stored it if the
+	// round trip finished afterwards — the same "it happened anyway" this
+	// dialog already refuses for sign-in.
+	cancelVerify context.CancelFunc
+}
+
+// abortVerify cancels any in-flight key verification. Safe when none is
+// running, so every exit can call it unconditionally.
+func (d *ConnectLinearDialog) abortVerify() {
+	if d.cancelVerify != nil {
+		d.cancelVerify()
+		d.cancelVerify = nil
+	}
 }
 
 // abortSignIn cancels any in-flight sign-in. Safe to call when none is running,
@@ -135,6 +151,7 @@ func (d *ConnectLinearDialog) Hide() {
 	// esc, enter on the done screen, and any future exit — rather than leaving
 	// each one to remember.
 	d.abortSignIn()
+	d.abortVerify()
 }
 
 // setFocus is the single writer of focus, so the caret can never be left
@@ -152,6 +169,7 @@ func (d *ConnectLinearDialog) setFocus(i int) {
 func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd) {
 	switch m := msg.(type) {
 	case linearConnectedMsg:
+		d.cancelVerify = nil
 		d.stage, d.workspace, d.via = connectDone, m.workspace, m.via
 		d.err, d.persistErr = nil, m.persistErr
 		return d, nil
@@ -167,6 +185,7 @@ func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd
 		}
 		return d, nil
 	case linearConnectFailedMsg:
+		d.cancelVerify = nil
 		// A cancelled sign-in is not a failure — it is the user pressing esc,
 		// and the cmd only reports it because cancellation surfaces as an error
 		// from SignIn. Announcing "sign-in failed" for something they chose is
@@ -230,7 +249,10 @@ func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd
 			d.stage = connectWorking
 			d.err = nil
 			d.input.Blur()
-			return d, verifyAndStoreLinearKey(key)
+			ctx, cancel := context.WithTimeout(context.Background(), connectLinearTimeout)
+			d.abortVerify() // a previous attempt must not outlive this one
+			d.cancelVerify = cancel
+			return d, verifyAndStoreLinearKey(ctx, key)
 		}
 		var cmd tea.Cmd
 		d.input, cmd = d.input.Update(msg)
@@ -282,17 +304,22 @@ type linearDisconnectedMsg struct{ err error }
 // a hope, and it means a typo is caught while the user is still looking at the
 // field they typed it into — not three days later when a worktree quietly
 // starts without its ticket.
-func verifyAndStoreLinearKey(key string) tea.Cmd {
+// The dialog owns the context, so esc releases the request immediately — and a
+// verification that completes after an escape cannot store anything.
+func verifyAndStoreLinearKey(ctx context.Context, key string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), connectLinearTimeout)
-		defer cancel()
-
 		cred := linear.Credential{Kind: linear.KindAPIKey, Token: key}
 		ws, err := linear.VerifyCredential(ctx, cred)
 		if err != nil {
 			return linearConnectFailedMsg{err: err}
 		}
 		cred.Workspace = ws.Name
+		// Checked between the round trip and the write: the request can finish
+		// in the window after esc, and storing then is precisely what the
+		// footer promised would not happen.
+		if ctx.Err() != nil {
+			return linearConnectFailedMsg{err: ctx.Err()}
+		}
 		// Not an error path: the credential is already live. See linearConnectedMsg.
 		persistErr := linear.SetCredential(cred)
 		return linearConnectedMsg{workspace: ws, via: linear.ConnectedVia(), persistErr: persistErr}

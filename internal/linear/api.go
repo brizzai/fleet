@@ -327,7 +327,11 @@ type workflowState struct {
 
 type issueFull struct {
 	issueLite
-	Priority    int    `json:"priority"`
+	// No Priority field here, deliberately. issueLite already declares one for
+	// the same `priority` key, and encoding/json resolves that conflict by
+	// depth: a field declared HERE would win and the embedded one would stay
+	// zero. issueLite.ticket() reads the embedded one, so the projection —
+	// and therefore ticket.md's front matter — silently lost every priority.
 	Description string `json:"description"`
 	Assignee    *struct {
 		DisplayName string `json:"displayName"`

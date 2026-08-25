@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"encoding/json"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -343,4 +344,46 @@ func TestPriorityOrderingWithinAState(t *testing.T) {
 	}
 	// high-a before high-b is the recency tiebreak surviving: they entered in
 	// that order and a stable sort must not disturb it.
+}
+
+// TestFullDecodeKeepsPriority pins the field-shadowing trap that silently
+// emptied ticket.md's priority line.
+//
+// issueFull embeds issueLite, and both used to declare a `priority` JSON field.
+// encoding/json resolves that by depth: the outer one wins and the embedded one
+// stays zero — while issueLite.ticket(), which builds the projection every
+// caller reads, returns the embedded one. So a full fetch decoded the priority
+// correctly into a field nothing looked at, and every materialized ticket lost
+// its front-matter priority with no error anywhere.
+//
+// Asserted through the same projection Document returns, not through the struct
+// field, because reading the field directly is what made the bug invisible.
+func TestFullDecodeKeepsPriority(t *testing.T) {
+	const payload = `{
+		"identifier": "BRZ-1", "title": "Filter bar cramped", "priority": 2,
+		"state": {"name": "In Progress", "type": "started", "position": 2},
+		"description": "x"
+	}`
+	var full issueFull
+	if err := json.Unmarshal([]byte(payload), &full); err != nil {
+		t.Fatal(err)
+	}
+	got := full.ticket()
+	if got.Priority != ticket.PriorityHigh {
+		t.Errorf("priority = %v, want High — a duplicate field on issueFull shadows the embedded one", got.Priority)
+	}
+	if got.Identifier != "BRZ-1" || got.StateName != "In Progress" {
+		t.Errorf("the rest of the projection broke: %+v", got)
+	}
+
+	// And the lite path, which decodes issueLite directly rather than embedded,
+	// must keep agreeing with it — the two are compared in one merged list.
+	var lite issueLite
+	if err := json.Unmarshal([]byte(payload), &lite); err != nil {
+		t.Fatal(err)
+	}
+	if lite.ticket().Priority != got.Priority {
+		t.Errorf("lite=%v full=%v — the two decode paths disagree",
+			lite.ticket().Priority, got.Priority)
+	}
 }

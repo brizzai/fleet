@@ -155,7 +155,7 @@ func TestWorkspaceMismatchNoteFitsOnOneLine(t *testing.T) {
 			linear.SetAccountForTest(ticket.Account{Name: c.ws, Keys: []string{"FLE"}})
 			t.Cleanup(func() { linear.SetAccountForTest(ticket.Account{}) })
 
-			note, wrong := d.workspaceMismatchNote()
+			note, wrong := d.workspaceMismatchNote(nil)
 			if !wrong {
 				t.Fatal("expected a mismatch")
 			}

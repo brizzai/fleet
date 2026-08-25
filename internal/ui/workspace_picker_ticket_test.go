@@ -630,3 +630,50 @@ func TestJiraIdentifierResolvesThroughItsOwnProvider(t *testing.T) {
 		t.Errorf("brz-1 resolved to %v, want the Linear provider", p)
 	}
 }
+
+// TestMismatchNoteForAnIdentifierChecksOnlyItsOwner pins the diagnosis the
+// multi-provider loop was hiding.
+//
+// A repo tracks Linear BRZ and Jira OPS. The Jira credential is on the wrong
+// site, so its account has no OPS. Typing OPS-42 used to consult every bound
+// provider, find BRZ in Linear's account, and conclude nothing was wrong — so
+// the note degraded to "no such issue", which is the precise misdiagnosis this
+// note exists to prevent. The issue does exist; fleet was looking in the wrong
+// place, and only the OWNER of that key can say so.
+func TestMismatchNoteForAnIdentifierChecksOnlyItsOwner(t *testing.T) {
+	linear.SetAccountForTest(ticket.Account{Name: "Brizz", Keys: []string{"BRZ"}})
+	jira.SetAccountForTest(ticket.Account{Name: "wrong.atlassian.net", Keys: []string{"PLATFORM"}})
+	t.Cleanup(func() {
+		linear.SetAccountForTest(ticket.Account{})
+		jira.SetAccountForTest(ticket.Account{})
+	})
+
+	d := NewWorktreeDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}), nil)
+
+	// Scoped to the tracker actually asked: Jira has no OPS, so this is a
+	// wrong-site problem and the note names Jira's site and Jira's key.
+	note, wrong := d.workspaceMismatchNote(jira.New())
+	if !wrong {
+		t.Fatal("a Jira key missing from the Jira account is a mismatch")
+	}
+	if !strings.Contains(note, "wrong.atlassian.net") || !strings.Contains(note, "OPS") {
+		t.Errorf("note = %q, want it to name the Jira site and the Jira key", note)
+	}
+	if strings.Contains(note, "BRZ") {
+		t.Errorf("note = %q — an owner-scoped note must not list another tracker's keys", note)
+	}
+
+	// The owner that CAN see its key is not a mismatch, even though its
+	// neighbour cannot see theirs.
+	if _, wrong := d.workspaceMismatchNote(linear.New()); wrong {
+		t.Error("Linear can see BRZ; asking about a Linear key must report no mismatch")
+	}
+
+	// A fan-out search owns no single provider, so every one has to disagree —
+	// and Linear agreeing means this is not the diagnosis.
+	if _, wrong := d.workspaceMismatchNote(nil); wrong {
+		t.Error("a search must stay silent while any bound tracker sees its keys")
+	}
+}
