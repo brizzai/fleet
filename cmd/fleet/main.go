@@ -13,10 +13,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/brizzai/fleet/internal/analytics"
-	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
-	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/session"
@@ -53,11 +51,7 @@ func main() {
 
 	switch args[0] {
 	case "add":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: fleet add <path>")
-			os.Exit(1)
-		}
-		runAdd(args[1])
+		runAdd(args[1:])
 	case "list", "ls":
 		runList()
 	case "remove", "rm":
@@ -220,81 +214,6 @@ func runTUI() {
 	}
 }
 
-func runAdd(path string) {
-	if err := tmux.IsTmuxAvailable(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	// Expand and validate path.
-	path = expandPath(path)
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "Invalid directory: %s\n", path)
-		os.Exit(1)
-	}
-
-	storage, err := session.Open(session.DefaultDBPath())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
-		os.Exit(1)
-	}
-	defer storage.Close()
-
-	title := session.TitleFromPath(path)
-	s := session.NewSession(title, path)
-
-	// `fleet add` leaves Agent empty, which resolves to Claude at launch — so
-	// the session is account-eligible and needs one picked, or it silently
-	// ignores a configured multi-account setup.
-	accounts := claudeaccount.Load()
-	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
-	cfg := config.Load()
-	// The same per-origin allowlist the TUI and `fleet worktree` enforce.
-	// Shelling out to git is fine here where it is not in the TUI: this is a
-	// one-shot CLI, not the Update goroutine.
-	allowed := cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(path)))
-	if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
-		Accounts: accounts.List(),
-		Strategy: cfg.GetAccountStrategy(),
-		Manual:   cfg.DefaultAccount,
-		Allowed:  allowed,
-	}); ok {
-		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
-			fmt.Fprintln(os.Stderr, conflict.Message(acct.Email))
-			// A helper is not fatal: there is no command that clears it for one
-			// launch, so refusing would leave no way to run the session at all.
-			if conflict.Fatal {
-				os.Exit(1)
-			}
-		}
-		s.Account = acct.Email
-	} else if accounts.Len() > 0 {
-		// Same split as `fleet worktree` — see claudeaccount.AllowedConfigured.
-		if !claudeaccount.AllowedConfigured(accounts.List(), allowed) {
-			fmt.Fprintf(os.Stderr, "allowed_accounts for this origin names no account fleet knows about (%s)\n",
-				strings.Join(allowed, ", "))
-			fmt.Fprintln(os.Stderr, "add one of them, or drop the restriction — launching would bill whichever account you happen to be logged into")
-			os.Exit(1)
-		}
-		fmt.Fprintln(os.Stderr, "Note: every account allowed here is logged out — starting on your ambient Claude login.")
-		debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
-			"allowed", allowed, "configured", accounts.Len())
-	}
-
-	if err := s.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start session: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := storage.SaveSession(s.ToRow()); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to save session: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Created session '%s' (%s)\n", title, s.ID)
-}
-
 func runList() {
 	storage, err := session.Open(session.DefaultDBPath())
 	if err != nil {
@@ -392,11 +311,13 @@ func printUsage() {
 	fmt.Println(`
 Usage:
   fleet              Launch TUI
-  fleet add <path>   Add a new session
+  fleet add [path]   Add a new session in a directory (default: current)
+                           (--agent, --account, --prompt, --model, --effort)
   fleet list         List all sessions
   fleet remove <id>  Remove a session
   fleet worktree <branch>  Create a git worktree and start a session in it
-                           (--base, --path, --agent, --no-session, --prompt)
+                           (--base, --path, --agent, --account, --no-session,
+                            --prompt, --ticket, --model, --effort)
   fleet send <session> <message>  Send a message to a running session
   fleet skill <install|uninstall|status>  Install the fleet agent skill, which
                            teaches Claude Code, Codex, Cursor, and OpenCode how

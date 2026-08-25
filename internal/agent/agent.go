@@ -4,7 +4,10 @@
 // forms).
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
 
 // Type identifies which coding agent a session runs.
 type Type string
@@ -108,6 +111,69 @@ type LaunchOpts struct {
 	// start working on it. Only its emptiness is read here — the text itself
 	// travels out-of-band in PromptEnvVar (see above).
 	Prompt string
+	// Model names the model to launch on. Its text IS embedded in the command
+	// string, unlike Prompt — see ValidateLaunchValue for why that is safe.
+	Model string
+	// Effort names the reasoning effort to launch at. Embedded like Model.
+	Effort string
+}
+
+// launchValueRe is the shape a Model or Effort value must have.
+//
+// Unlike a prompt — free-form prose that must survive whatever it contains —
+// these values are *embedded in the command string*, which tmux send-keys types
+// into the pane's shell (see PromptEnvVar). A value carrying `;`, a backtick or
+// `$(...)` would be executed by that shell, so the env-var trick that protects
+// the prompt would be the other way to do this. Validation is chosen instead
+// because a model id has a known shape and an effort level is a bare word:
+// every real value passes, every shell metacharacter is rejected, and the
+// rejection happens at parse time, before anything has been created.
+//
+// The charset is sized against the values that actually exist: aliases
+// (`opus`), full ids (`claude-opus-5`, `gpt-5.1-codex-max`), OpenCode's
+// provider-qualified form (`anthropic/claude-sonnet-5`), dotted versions, and
+// effort levels (`high`, `xhigh`, `ultracode`).
+var launchValueRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+
+// ValidateLaunchValue reports whether v is a usable Model or Effort value,
+// naming flag in the error so the caller need not reword it. Both `fleet add`
+// and `fleet worktree` call this, so the rule has one definition.
+func ValidateLaunchValue(flag, v string) error {
+	if !launchValueRe.MatchString(v) {
+		return fmt.Errorf("invalid --%s %q — expected a bare name like opus, high, or anthropic/claude-sonnet-5", flag, v)
+	}
+	return nil
+}
+
+// SupportsEffort reports whether this agent can be told a reasoning effort on
+// the command line fleet launches it with.
+//
+// **OpenCode cannot, and the near miss is worth recording.** It does have the
+// concept, spelled `--variant`, but that option is declared on the `run`
+// subcommand — and fleet launches the *default* command (`opencode [project]`),
+// whose builder declares only `project`, `prompt` and the network options.
+// OpenCode's root parser is yargs in `.strict()` mode, so an option it does not
+// know is not ignored: it prints the command list and exits. The result would
+// be a session fleet reports as created — row saved, repo pinned — whose pane
+// is a shell prompt with no agent in it, which is exactly the failure promptArg
+// describes and which nothing in fleet detects at launch.
+//
+// `--model` is unaffected: the default command's handler reads args.model.
+func (t Type) SupportsEffort() bool { return t != OpenCode }
+
+// effortArg is the reasoning-effort flag as each agent spells it, and the two
+// spellings are why this lives here rather than in the callers: Claude has
+// --effort, and Codex has no flag at all — only a `-c key=value` override of
+// the config.toml key its own /model popup writes.
+//
+// Codex's value needs no quoting: `-c` parses the value as TOML and falls back
+// to the raw string when that fails, so a bare `high` arrives intact and the
+// shell has nothing to chew on.
+func (t Type) effortArg(effort string) string {
+	if t == Codex {
+		return " -c model_reasoning_effort=" + effort
+	}
+	return " --effort " + effort
 }
 
 // BuildLaunchCmd returns the shell command to run in the session's tmux pane.
@@ -130,6 +196,12 @@ type LaunchOpts struct {
 //	opencode
 //	opencode --session <id>
 //	opencode --session <id> --fork         (fork)
+//
+// Model and Effort append their per-agent flags to any of those, ahead of the
+// prompt — the prompt argument must stay last, since `--` ends option parsing
+// and anything after it is no longer read as a flag. All three agents spell the
+// model flag `--model`; effort is two spellings and one agent that has none at
+// all (see effortArg and SupportsEffort).
 //
 // An initial prompt appends the agent's own prompt argument to any of those —
 // `-- <prompt>` for Claude and Codex, `--prompt=<prompt>` for OpenCode (see
@@ -165,6 +237,19 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 		} else if o.ResumeID != "" {
 			cmd += fmt.Sprintf(" --resume %s", o.ResumeID)
 		}
+	}
+
+	// Ahead of the prompt, whose `--` would swallow them. Model and effort are
+	// consumed on the first launch (see Session.consumeLaunchOverridesLocked),
+	// so in practice they never coincide with a resume or fork id.
+	if o.Model != "" {
+		cmd += " --model " + o.Model
+	}
+	// Guarded rather than assumed: the callers reject --effort for an agent that
+	// can't take it, and this makes a caller that forgets drop the flag instead
+	// of launching a command the agent refuses outright.
+	if o.Effort != "" && t.SupportsEffort() {
+		cmd += t.effortArg(o.Effort)
 	}
 
 	if o.Prompt != "" {

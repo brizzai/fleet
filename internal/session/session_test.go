@@ -301,14 +301,23 @@ func TestNoInitialPromptLeavesLaunchUnchanged(t *testing.T) {
 // re-submits the original task. This asserts the clear itself, which is what
 // those paths call — the launches need real tmux and can't run here.
 func TestInitialPromptIsOneShot(t *testing.T) {
-	s := &Session{ID: "abc-123", Agent: agent.Claude, InitialPrompt: "do the thing"}
+	s := &Session{ID: "abc-123", Agent: agent.Claude, InitialPrompt: "do the thing", Model: "opus", Effort: "xhigh"}
 
 	s.mu.Lock()
-	s.consumeInitialPromptLocked()
+	s.consumeLaunchOverridesLocked()
 	s.mu.Unlock()
 
 	if s.InitialPrompt != "" {
 		t.Fatalf("InitialPrompt = %q, want it consumed", s.InitialPrompt)
+	}
+	// Model and effort are consumed on the same rule: they shape the launch the
+	// user asked for, and a session the user has since re-pointed with /model
+	// must keep that choice across an `r` restart.
+	if s.Model != "" || s.Effort != "" {
+		t.Fatalf("Model = %q, Effort = %q, want both consumed", s.Model, s.Effort)
+	}
+	if cmd := s.buildAgentCmd(); strings.Contains(cmd, "--model") || strings.Contains(cmd, "--effort") {
+		t.Errorf("relaunch command still carries model/effort: %q", cmd)
 	}
 	// A second launch must now look exactly like a promptless one, or `r` on a
 	// finished session would ask the agent to redo its first task.
