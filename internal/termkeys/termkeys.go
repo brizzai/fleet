@@ -60,6 +60,38 @@ const (
 const disablePreamble = disableModifyOtherKeys + ansi.DisableKittyKeyboard +
 	saveAltScreenScroll + disableAltScreenScroll
 
+// disableMouseReporting turns off every mouse-reporting mode a tmux client can
+// leave switched on in our terminal. fleet sets `mouse on` per session
+// (tmux.Session.ApplyStatusBar), so an attach puts the outer terminal into
+// DECSET 1000/1002/1003 + SGR 1006; the modes are reset in that same broad
+// sweep because which ones tmux enabled is not knowable from here, and a reset
+// for a mode that was never set is a no-op.
+const disableMouseReporting = ansi.ResetModeMouseNormal + ansi.ResetModeMouseButtonEvent +
+	ansi.ResetModeMouseAnyEvent + ansi.ResetModeMouseExtSgr
+
+// Reassert re-applies what Disable asked for, for callers returning from a
+// full-screen attach that handed the terminal to tmux and got it back dirty:
+// fleet's attach ends by killing the tmux client (Ctrl+Q, see
+// internal/tmux/pty.go), so tmux never runs its own cleanup and whatever it
+// enabled stays on. It also turns mouse reporting off, which Disable never had
+// to: Bubble Tea owns that mode via Home.chrome, and owns it only on the way in
+// — its renderer emits a mouse-mode change only when the mode *differs* from
+// the last view's, and fleet's is MouseModeNone on every frame including the
+// first one after an attach. So nothing else will ever take reporting back off,
+// and the next scroll is a MouseWheelMsg burst costing a full View() apiece.
+//
+// It is deliberately not a second call to Disable, because two of Disable's
+// four sequences carry state and are not idempotent: XTSAVE (1007s) would
+// overwrite the saved original with the already-cleared value, so Restore would
+// hand the user back the wrong mode on exit, and ansi.DisableKittyKeyboard
+// pushes onto the Kitty keyboard stack, which Restore pops exactly once — every
+// extra push would leak an entry. What is left is the two sequences that are
+// plain idempotent sets, plus the mouse reset.
+func Reassert(w io.Writer) error {
+	_, err := io.WriteString(w, disableModifyOtherKeys+disableAltScreenScroll+disableMouseReporting)
+	return err
+}
+
 // Disable asks the terminal for legacy key reporting so modified keys (Ctrl+K
 // in particular) arrive in their legacy encoding instead of as CSI-u sequences
 // Bubble Tea v1 can't parse. Terminals that don't support a given mode ignore
