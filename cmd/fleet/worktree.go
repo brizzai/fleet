@@ -19,7 +19,6 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
-	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/session"
@@ -58,6 +57,11 @@ type worktreeOpts struct {
 	// noTicketStart opts out of the one mutation fleet makes: moving the issue
 	// to its team's first started state.
 	noTicketStart bool
+	// model and effort override the agent's own defaults for this launch. Both
+	// are embedded in the command string, so their shape is validated at parse
+	// time — see validateLaunchOverrides.
+	model  string
+	effort string
 }
 
 // worktreeFlagSet builds the `fleet worktree` flag set, binding into o.
@@ -81,6 +85,8 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.StringVar(&o.ticket, "ticket", "", "Linear issue to materialize into the worktree, e.g. BRZ-3182 (names the branch when none is given)")
 	fs.StringVar(&o.ticket, "t", "", "shorthand for -ticket")
 	fs.BoolVar(&o.noTicketStart, "no-ticket-start", false, "don't move the Linear issue to its team's first started state")
+	fs.StringVar(&o.model, "model", "", "model to launch on, e.g. opus or anthropic/claude-sonnet-5 (default: the agent's own)")
+	fs.StringVar(&o.effort, "effort", "", "reasoning effort to launch at, e.g. high or xhigh (default: the agent's own)")
 	return fs
 }
 
@@ -198,6 +204,19 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 			return o, fmt.Errorf("--account only applies to claude sessions (got --agent %s)", o.agentName)
 		}
 	}
+	// Same rule the other session-shaping flags follow: nothing is launched, so
+	// a flag that only shapes a launch could never have applied.
+	if o.noSession {
+		if o.model != "" {
+			return o, fmt.Errorf("--model has no effect with --no-session (no session is started)")
+		}
+		if o.effort != "" {
+			return o, fmt.Errorf("--effort has no effect with --no-session (no session is started)")
+		}
+	}
+	if err := validateLaunchOverrides(o.model, o.effort); err != nil {
+		return o, err
+	}
 	return o, nil
 }
 
@@ -257,16 +276,7 @@ func runWorktree(args []string) {
 	}
 
 	cfg := config.Load()
-	ag := agent.Parse(cfg.GetDefaultAgent())
-	if opts.agentName != "" {
-		ag = agent.Parse(opts.agentName)
-	}
-	if !opts.noSession {
-		if _, err := exec.LookPath(ag.Binary()); err != nil {
-			fmt.Fprintf(os.Stderr, "%s CLI not found — install %s to create sessions\n", ag.Binary(), ag.DisplayName())
-			os.Exit(1)
-		}
-	}
+	ag := resolveLaunchAgent(cfg, opts.agentName, !opts.noSession)
 
 	// Resolve the Claude account before doing any work. A typo here bills the
 	// wrong subscription, so an unknown name is an error rather than a silent
@@ -274,75 +284,14 @@ func runWorktree(args []string) {
 	accounts := claudeaccount.Load()
 	session.SetAccountConfigDirFunc(accounts.ConfigDirFor)
 	account := ""
-	// Re-checked here, not only at parse time: the parse-time guard can compare
-	// --account against --agent only when --agent was given. With default_agent
-	// set to codex or opencode, an explicit --account would otherwise be dropped
-	// on the floor and the session created as the wrong agent — the silent typo
-	// the explicit validation exists to prevent.
-	if opts.account != "" && ag != agent.Claude {
+	if !opts.noSession {
+		account = resolveLaunchAccount(cfg, accounts, repoPath, ag, opts.account)
+	} else if opts.account != "" && ag != agent.Claude {
+		// --no-session starts nothing, so there is no account to resolve — but
+		// the --agent/--account mismatch is still worth naming rather than
+		// silently accepting a flag that could never have applied.
 		fmt.Fprintf(os.Stderr, "--account only applies to claude sessions (default_agent is %s)\n", ag)
 		os.Exit(1)
-	}
-	if !opts.noSession && ag == agent.Claude {
-		// The same per-origin allowlist the TUI enforces. Without it the policy
-		// held in one surface and not the other, which is worse than not having
-		// one — including for an explicit --account, which could name an account
-		// the origin disallows.
-		allowed := cfg.GetAllowedAccounts(originExpandKey(git.GetOriginKey(repoPath)))
-		if opts.account != "" {
-			if _, ok := accounts.Get(opts.account); !ok {
-				fmt.Fprintf(os.Stderr, "unknown account %q — configure it in fleet first\n", opts.account)
-				os.Exit(1)
-			}
-			if !accountAllowed(opts.account, allowed) {
-				fmt.Fprintf(os.Stderr, "account %q is not in allowed_accounts for this origin\n", opts.account)
-				os.Exit(1)
-			}
-			account = opts.account
-		} else if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
-			Accounts: accounts.List(),
-			Strategy: cfg.GetAccountStrategy(),
-			Manual:   cfg.DefaultAccount,
-			Allowed:  allowed,
-		}); ok {
-			account = acct.Email
-			// Quota lives only in a running TUI's memory, so SelectOpts.Usage is
-			// empty here and least_used degrades to configured order. Said out
-			// loud — on stderr, not only in debug.log, since the person running a
-			// scripted `fleet worktree` never opens that: it can otherwise land on
-			// a nearly spent account with nothing to indicate the strategy didn't
-			// apply.
-			if claudeaccount.RanksByUsage(cfg.GetAccountStrategy()) && accounts.Len() > 1 {
-				fmt.Fprintf(os.Stderr, "Note: quota isn't available outside the TUI, so configured order chose %s.\n", account)
-				debuglog.Logger.Info("account select: no quota available from the CLI, configured order decided",
-					"chosen", account, "strategy", cfg.GetAccountStrategy())
-			}
-		} else if accounts.Len() > 0 {
-			// Select declined, and the two reasons it can decline want opposite
-			// answers — see claudeaccount.AllowedConfigured.
-			if !claudeaccount.AllowedConfigured(accounts.List(), allowed) {
-				fmt.Fprintf(os.Stderr, "allowed_accounts for this origin names no account fleet knows about (%s)\n",
-					strings.Join(allowed, ", "))
-				fmt.Fprintln(os.Stderr, "add one of them, or drop the restriction — launching would bill whichever account you happen to be logged into")
-				os.Exit(1)
-			}
-			// Every allowed account is logged out. Falling back to the ambient
-			// login is deliberate (see dropLoggedOut) — but saying nothing about
-			// it is not: the session is about to run as somebody fleet did not
-			// choose.
-			fmt.Fprintln(os.Stderr, "Note: every account allowed here is logged out — starting on your ambient Claude login.")
-			debuglog.Logger.Warn("account select: all allowed accounts logged out, using the ambient login",
-				"allowed", allowed, "configured", accounts.Len())
-		}
-		if account != "" {
-			if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
-				fmt.Fprintln(os.Stderr, conflict.Message(account))
-				// Only an env var is fatal — see AuthConflict.
-				if conflict.Fatal {
-					os.Exit(1)
-				}
-			}
-		}
 	}
 
 	// Phase A: when -ticket named no branch, the fetch is required to name one,
@@ -454,39 +403,17 @@ func runWorktree(args []string) {
 		return
 	}
 
-	// A CLI-created session needs the agent's hooks installed for status
-	// detection, which normally only happens on TUI launch. Only the chosen
-	// agent's hooks are touched — never create a config dir for an agent that
-	// isn't being launched.
-	installAgentHooks(ag, info.Path)
-
 	s := session.NewSession(name, info.Path)
-	s.Agent = ag
-	s.Account = account
 	s.WorkspaceName = name
-	s.InitialPrompt = prompt
-	if err := s.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Created worktree %s, but failed to start session: %v\n", info.Path, err)
-		os.Exit(1)
-	}
-	if err := storage.SaveSession(s.ToRow()); err != nil {
-		// The tmux session is already live but nothing will ever point at it —
-		// no DB row means the TUI can't list it, adopt it, or offer to delete
-		// it. Tear it down so the failure is clean; if that also fails, name it
-		// so the user can find it with `tmux ls`.
-		fmt.Fprintf(os.Stderr, "Failed to save session: %v\n", err)
-		if killErr := s.GetTmuxSession().Kill(); killErr != nil {
-			fmt.Fprintf(os.Stderr, "Also failed to stop its tmux session %q: %v\n", s.TmuxSessionName, killErr)
-		} else {
-			fmt.Fprintf(os.Stderr, "Stopped the orphaned tmux session. The worktree %s was kept.\n", info.Path)
-		}
-		os.Exit(1)
-	}
-	// Pin the new checkout so it shows in the sidebar even before it has a
-	// running session, mirroring what the TUI does on session create.
-	if err := storage.PinRepo(session.GetRepoRoot(info.Path)); err != nil {
-		debuglog.Logger.Error("failed to pin repo", "repo", info.Path, "err", err)
-	}
+	launchSession(s, ag, launchOverrides{
+		account: account,
+		prompt:  prompt,
+		model:   opts.model,
+		effort:  opts.effort,
+	}, storage, launchNotes{
+		startFailPrefix: fmt.Sprintf("Created worktree %s, but ", info.Path),
+		keptOnTeardown:  fmt.Sprintf(" The worktree %s was kept.", info.Path),
+	})
 
 	fmt.Printf("Created worktree %s (%s)\n", info.Path, branchNote(opts.branch, reusedBranch))
 	fmt.Printf("Started %s session '%s' (%s)\n", ag.DisplayName(), name, s.ID)
@@ -553,31 +480,6 @@ func branchExists(repoPath, branch string) bool {
 	err := exec.CommandContext(ctx, "git", "-C", repoPath,
 		"show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run()
 	return err == nil
-}
-
-// installAgentHooks installs the status hooks for the agent about to be
-// launched. Failures are logged, not fatal: a session without hooks still runs,
-// it just falls back to pane-based status detection.
-func installAgentHooks(ag agent.Type, projectPath string) {
-	switch ag {
-	case agent.Codex:
-		if _, err := hooks.InjectCodexHooks(hooks.GetCodexConfigDir()); err != nil {
-			debuglog.Logger.Error("codex hook inject failed", "err", err)
-		}
-		// Codex prompts to trust a new directory on first launch; pre-seed trust
-		// so the session opens straight to the prompt.
-		if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), projectPath); err != nil {
-			debuglog.Logger.Error("codex dir trust seeding failed", "path", projectPath, "err", err)
-		}
-	case agent.OpenCode:
-		if _, err := hooks.InjectOpenCodePlugin(hooks.GetOpenCodeConfigDir()); err != nil {
-			debuglog.Logger.Error("opencode plugin inject failed", "err", err)
-		}
-	default:
-		if _, err := hooks.InjectClaudeHooks(hooks.GetClaudeConfigDir()); err != nil {
-			debuglog.Logger.Error("claude hook inject failed", "err", err)
-		}
-	}
 }
 
 // copyClaudeSettings copies .claude/settings.local.json from srcRepo to dstRepo.

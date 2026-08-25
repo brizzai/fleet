@@ -72,12 +72,27 @@ type Session struct {
 	// InitialPrompt is the first message to hand the agent, sent as the agent's
 	// own prompt argument so it opens already working on it. Transient and
 	// one-shot: every launch path clears it on success via
-	// consumeInitialPromptLocked, so a later restart, respawn or idle-suspend
+	// consumeLaunchOverridesLocked, so a later restart, respawn or idle-suspend
 	// wake can't re-submit a prompt the user asked for once. Never persisted — a
 	// prompt that outlived its launch would replay on every app restart. The
 	// text reaches the pane through agent.PromptEnvVar, never the command
 	// string; see sessionEnv.
 	InitialPrompt string
+
+	// Model and Effort override the agent's own defaults for this launch —
+	// `--model opus`, `--effort xhigh`. Transient and one-shot on exactly the
+	// same terms as InitialPrompt, and cleared by the same call.
+	//
+	// Not persisted, and that is a decision rather than an omission: all three
+	// agents treat these as session-scoped (Claude's --effort is documented as
+	// non-persistent; Codex's /model popup writes its own config), and every one
+	// of them lets the user change model mid-session. A value fleet stored would
+	// be re-imposed on the next restart, silently undoing that choice.
+	//
+	// Unlike InitialPrompt these ride *in* the command string, so their shape is
+	// validated before they ever get here — see agent.ValidateLaunchValue.
+	Model  string
+	Effort string
 
 	// snoozedUntil mutes this session from the attention surfaces (Space jump,
 	// status pills) until the deadline passes. Deliberately NOT a Status: a
@@ -178,6 +193,8 @@ func (s *Session) buildAgentCmd() string {
 		ResumeID: s.ClaudeSessionID,
 		ForkID:   s.ForkFromID,
 		Prompt:   s.InitialPrompt,
+		Model:    s.Model,
+		Effort:   s.Effort,
 	})
 }
 
@@ -353,13 +370,14 @@ func (s *Session) Start() error {
 	// transcript heuristic (which can't see a fork). Cleared on divergence.
 	s.forkParentID = s.ForkFromID
 	s.ForkFromID = "" // Clear after first start so restarts use session's own ClaudeSessionID.
-	s.consumeInitialPromptLocked()
+	s.consumeLaunchOverridesLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
 	return nil
 }
 
-// consumeInitialPromptLocked clears the one-shot launch prompt. Caller holds mu.
+// consumeLaunchOverridesLocked clears the one-shot launch overrides — the
+// initial prompt, and the model/effort chosen for this launch. Caller holds mu.
 //
 // Every path that hands the agent a command line has to call this, because each
 // of them would otherwise re-submit the prompt: Start, Restart (the `r` key, and
@@ -367,10 +385,16 @@ func (s *Session) Start() error {
 // buildAgentCmd and the env from sessionEnv. Missing one means a user who
 // restarts a finished session silently gets the original task asked again.
 //
+// Model and effort are cleared alongside it, on the same one-shot rule: they
+// shape the launch the user asked for and nothing after it, so a session the
+// user has since re-pointed with /model keeps that choice across a restart.
+//
 // Called only after a launch has succeeded, so a failed one can be retried with
 // the prompt intact.
-func (s *Session) consumeInitialPromptLocked() {
+func (s *Session) consumeLaunchOverridesLocked() {
 	s.InitialPrompt = ""
+	s.Model = ""
+	s.Effort = ""
 }
 
 // Kill terminates the tmux session.
@@ -919,7 +943,7 @@ func (s *Session) Restart() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
-	s.consumeInitialPromptLocked()
+	s.consumeLaunchOverridesLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session restarted", "id", s.ID, "title", s.Title)
 	return nil
@@ -967,7 +991,7 @@ func (s *Session) RespawnClaude() error {
 
 	s.mu.Lock()
 	s.Status = s.initialRunStatus()
-	s.consumeInitialPromptLocked()
+	s.consumeLaunchOverridesLocked()
 	s.mu.Unlock()
 	debuglog.Logger.Info("session respawned", "id", s.ID, "title", s.Title)
 	return nil
