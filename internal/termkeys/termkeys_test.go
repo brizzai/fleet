@@ -81,9 +81,10 @@ func TestReassertTurnsMouseReportingOff(t *testing.T) {
 	if err := Reassert(&b); err != nil {
 		t.Fatalf("Reassert returned error: %v", err)
 	}
-	// modifyOtherKeys off + clear alternate-screen scroll (no save, see below),
-	// then reset the four mouse-reporting modes a tmux client may have left on.
-	if got, want := b.String(), "\x1b[>4;0m\x1b[?1007l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"; got != want {
+	// Clear alternate-screen scroll (no save, see below), then reset the four
+	// mouse-reporting modes a tmux client may have left on. No key-reporting
+	// sequence: see TestReassertLeavesKeyReportingToBubbleTea.
+	if got, want := b.String(), "\x1b[?1007l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"; got != want {
 		t.Errorf("Reassert wrote %q, want %q", got, want)
 	}
 }
@@ -114,5 +115,23 @@ func TestReassertRepeatsNothingStateful(t *testing.T) {
 func TestReassertPropagatesWriteError(t *testing.T) {
 	if err := Reassert(errWriter{}); err == nil {
 		t.Error("expected error from failing writer, got nil")
+	}
+}
+
+// TestReassertLeavesKeyReportingToBubbleTea pins the omission, which is easy to
+// read as a bug and "fix" back in. Reassert cannot restore legacy key reporting:
+// tea.Exec calls RestoreTerminal as soon as attachCmd.Run returns (v2.0.7
+// exec.go:125), reaching cursedRenderer.start() with a non-nil lastView, which
+// unconditionally writes SetModifyOtherKeys2 at cursed_renderer.go:136. Anything
+// this wrote would be overwritten microseconds later — dead bytes plus a comment
+// the terminal contradicts.
+func TestReassertLeavesKeyReportingToBubbleTea(t *testing.T) {
+	var b strings.Builder
+	if err := Reassert(&b); err != nil {
+		t.Fatalf("Reassert returned error: %v", err)
+	}
+	if strings.Contains(b.String(), disableModifyOtherKeys) {
+		t.Errorf("Reassert wrote modifyOtherKeys-off (%q); Bubble Tea overwrites it with "+
+			"mode 2 microseconds later, so it asserts a state the terminal will not be in", b.String())
 	}
 }

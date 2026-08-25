@@ -3298,10 +3298,10 @@ func (a attachCmd) Run() error {
 	// runs its terminal cleanup and the mouse reporting it enabled for `mouse on`
 	// stays on in our terminal — where nothing else would ever turn it off, and the
 	// next trackpad scroll lands as the MouseWheelMsg repaint storm #268 fixed.
-	// Before Bubble Tea's RestoreTerminal re-enters the alternate screen (exec.go
-	// calls it after Run), which is the order termkeys.Disable was verified in.
+	// Mouse and 1007 only: Bubble Tea's RestoreTerminal, which exec.go runs the
+	// moment this returns, rewrites key reporting itself (see termkeys.Reassert).
 	if rerr := termkeys.Reassert(os.Stdout); rerr != nil {
-		debuglog.Logger.Warn("failed to re-assert key/mouse reporting after attach", "err", rerr)
+		debuglog.Logger.Warn("failed to re-assert mouse reporting after attach", "err", rerr)
 	}
 	return err
 }

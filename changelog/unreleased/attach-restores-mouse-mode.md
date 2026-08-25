@@ -2,4 +2,4 @@
 type: fixed
 ---
 
-**Scrolling stays fast after you detach.** Attaching to a session left your terminal reporting mouse events — `Ctrl+Q` kills the tmux client before tmux can clean up — so the next scroll brought back the ~270 redraws/sec that pinned fleet at 250% CPU. Detaching now puts the terminal back.
+**Scrolling after detach.** Attaching to a session used to leave your terminal sending mouse events to fleet, so the next scroll pinned it at 250% CPU until you stopped. Detaching now puts the terminal back.

@@ -61,7 +61,7 @@ func TestAttachRestoresTerminalModes(t *testing.T) {
 	})
 	if !found {
 		t.Error("attachCmd.Run does not call termkeys.Reassert: the terminal keeps " +
-			"whatever mouse/key reporting tmux left on, and the next scroll is a " +
+			"whatever mouse reporting tmux left on, and the next scroll is a " +
 			"full-View() repaint storm that nothing in the process will stop")
 	}
 }

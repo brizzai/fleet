@@ -69,26 +69,38 @@ const disablePreamble = disableModifyOtherKeys + ansi.DisableKittyKeyboard +
 const disableMouseReporting = ansi.ResetModeMouseNormal + ansi.ResetModeMouseButtonEvent +
 	ansi.ResetModeMouseAnyEvent + ansi.ResetModeMouseExtSgr
 
-// Reassert re-applies what Disable asked for, for callers returning from a
-// full-screen attach that handed the terminal to tmux and got it back dirty:
-// fleet's attach ends by killing the tmux client (Ctrl+Q, see
-// internal/tmux/pty.go), so tmux never runs its own cleanup and whatever it
-// enabled stays on. It also turns mouse reporting off, which Disable never had
-// to: Bubble Tea owns that mode via Home.chrome, and owns it only on the way in
-// — its renderer emits a mouse-mode change only when the mode *differs* from
-// the last view's, and fleet's is MouseModeNone on every frame including the
-// first one after an attach. So nothing else will ever take reporting back off,
-// and the next scroll is a MouseWheelMsg burst costing a full View() apiece.
+// Reassert clears the terminal modes a full-screen attach leaves switched on,
+// for callers returning from one: fleet's attach ends by killing the tmux client
+// (Ctrl+Q, see internal/tmux/pty.go), so tmux never runs its own cleanup and
+// whatever it enabled stays on.
 //
-// It is deliberately not a second call to Disable, because two of Disable's
-// four sequences carry state and are not idempotent: XTSAVE (1007s) would
-// overwrite the saved original with the already-cleared value, so Restore would
-// hand the user back the wrong mode on exit, and ansi.DisableKittyKeyboard
-// pushes onto the Kitty keyboard stack, which Restore pops exactly once — every
-// extra push would leak an entry. What is left is the two sequences that are
-// plain idempotent sets, plus the mouse reset.
+// Mouse reporting is the one that matters, and Disable never had to touch it.
+// Bubble Tea owns that mode via Home.chrome — but owns it only on the way in: its
+// renderer emits a mouse-mode change only when the mode *differs* from the last
+// view's, and fleet's is MouseModeNone on every frame including the first one
+// after an attach, so nothing else will ever take reporting back off. The next
+// scroll is then a MouseWheelMsg burst costing a full View() apiece.
+//
+// Key reporting is deliberately *not* re-asserted, because it is not ours to
+// own here: tea.Exec calls RestoreTerminal the moment attachCmd.Run returns
+// (v2.0.7 exec.go:125), which reaches cursedRenderer.start() with a non-nil
+// lastView and unconditionally writes SetModifyOtherKeys2 — \x1b[>4;2m —
+// at cursed_renderer.go:136. A mode-0 written here would be overwritten
+// microseconds later, so including it would buy nothing but a comment the
+// terminal contradicts. Harmless in practice: Bubble Tea v2 decodes CSI-u and
+// modifyOtherKeys alike, which is why the Ctrl+K bug Disable exists for has not
+// come back. Disable itself is left as-is — its mode-0 is overwritten on frame
+// one for the same reason (cursed_renderer.go:386), but that predates this and
+// changing it is a separate question.
+//
+// What is left is two sequences, and both are plain idempotent resets — which is
+// also why this is not a second call to Disable. Two of Disable's four carry
+// state: XTSAVE (1007s) would overwrite the saved original with the
+// already-cleared value, so Restore would hand the terminal back wrong on exit,
+// and ansi.DisableKittyKeyboard pushes onto the Kitty keyboard stack, which
+// Restore pops exactly once — every extra push would leak an entry.
 func Reassert(w io.Writer) error {
-	_, err := io.WriteString(w, disableModifyOtherKeys+disableAltScreenScroll+disableMouseReporting)
+	_, err := io.WriteString(w, disableAltScreenScroll+disableMouseReporting)
 	return err
 }
 
