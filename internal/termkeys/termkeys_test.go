@@ -75,3 +75,63 @@ func TestRestorePropagatesWriteError(t *testing.T) {
 		t.Error("expected error from failing writer, got nil")
 	}
 }
+
+func TestReassertTurnsMouseReportingOff(t *testing.T) {
+	var b strings.Builder
+	if err := Reassert(&b); err != nil {
+		t.Fatalf("Reassert returned error: %v", err)
+	}
+	// Clear alternate-screen scroll (no save, see below), then reset the four
+	// mouse-reporting modes a tmux client may have left on. No key-reporting
+	// sequence: see TestReassertLeavesKeyReportingToBubbleTea.
+	if got, want := b.String(), "\x1b[?1007l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"; got != want {
+		t.Errorf("Reassert wrote %q, want %q", got, want)
+	}
+}
+
+// TestReassertRepeatsNothingStateful is the reason Reassert exists as its own
+// function rather than a second call to Disable. Two of Disable's sequences
+// carry state across calls: XTSAVE (1007s) has a single save slot, so a repeat
+// would overwrite the user's original value with the already-cleared one and
+// Restore would hand back the wrong mode on exit; DisableKittyKeyboard pushes
+// onto a stack Restore pops exactly once, so a repeat leaks an entry per attach.
+// Reassert runs once per attach, so either would compound all session long.
+func TestReassertRepeatsNothingStateful(t *testing.T) {
+	var b strings.Builder
+	if err := Reassert(&b); err != nil {
+		t.Fatalf("Reassert returned error: %v", err)
+	}
+	if strings.Contains(b.String(), saveAltScreenScroll) {
+		t.Errorf("Reassert wrote the 1007 XTSAVE (%q); it would overwrite the value "+
+			"Disable saved with the cleared one, so Restore leaves the terminal wrong", b.String())
+	}
+	// ansi.DisableKittyKeyboard emits the flags-omitted push form \x1b[>u.
+	if strings.Contains(b.String(), "\x1b[>u") {
+		t.Errorf("Reassert pushed a Kitty keyboard entry (%q); Restore pops exactly "+
+			"one, so every attach past the first leaks an entry", b.String())
+	}
+}
+
+func TestReassertPropagatesWriteError(t *testing.T) {
+	if err := Reassert(errWriter{}); err == nil {
+		t.Error("expected error from failing writer, got nil")
+	}
+}
+
+// TestReassertLeavesKeyReportingToBubbleTea pins the omission, which is easy to
+// read as a bug and "fix" back in. Reassert cannot restore legacy key reporting:
+// tea.Exec calls RestoreTerminal as soon as attachCmd.Run returns (v2.0.7
+// exec.go:125), reaching cursedRenderer.start() with a non-nil lastView, which
+// unconditionally writes SetModifyOtherKeys2 at cursed_renderer.go:136. Anything
+// this wrote would be overwritten microseconds later — dead bytes plus a comment
+// the terminal contradicts.
+func TestReassertLeavesKeyReportingToBubbleTea(t *testing.T) {
+	var b strings.Builder
+	if err := Reassert(&b); err != nil {
+		t.Fatalf("Reassert returned error: %v", err)
+	}
+	if strings.Contains(b.String(), disableModifyOtherKeys) {
+		t.Errorf("Reassert wrote modifyOtherKeys-off (%q); Bubble Tea overwrites it with "+
+			"mode 2 microseconds later, so it asserts a state the terminal will not be in", b.String())
+	}
+}

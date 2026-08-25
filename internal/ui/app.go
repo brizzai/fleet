@@ -40,6 +40,7 @@ import (
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/skill"
+	"github.com/brizzai/fleet/internal/termkeys"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/vterm"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -3289,7 +3290,20 @@ type attachCmd struct {
 }
 
 func (a attachCmd) Run() error {
-	return a.session.Attach(context.Background())
+	err := a.session.Attach(context.Background())
+	// Every attach path (session, drawer shell, account login pane) runs through
+	// here, so the terminal is put back in one place rather than in three tea.Exec
+	// callbacks a fourth path could forget. The attach ends by killing the tmux
+	// client rather than detaching it (Ctrl+Q, internal/tmux/pty.go), so tmux never
+	// runs its terminal cleanup and the mouse reporting it enabled for `mouse on`
+	// stays on in our terminal — where nothing else would ever turn it off, and the
+	// next trackpad scroll lands as the MouseWheelMsg repaint storm #268 fixed.
+	// Mouse and 1007 only: Bubble Tea's RestoreTerminal, which exec.go runs the
+	// moment this returns, rewrites key reporting itself (see termkeys.Reassert).
+	if rerr := termkeys.Reassert(os.Stdout); rerr != nil {
+		debuglog.Logger.Warn("failed to re-assert mouse reporting after attach", "err", rerr)
+	}
+	return err
 }
 
 func (a attachCmd) SetStdin(r io.Reader)  {}

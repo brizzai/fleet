@@ -60,6 +60,50 @@ const (
 const disablePreamble = disableModifyOtherKeys + ansi.DisableKittyKeyboard +
 	saveAltScreenScroll + disableAltScreenScroll
 
+// disableMouseReporting turns off every mouse-reporting mode a tmux client can
+// leave switched on in our terminal. fleet sets `mouse on` per session
+// (tmux.Session.ApplyStatusBar), so an attach puts the outer terminal into
+// DECSET 1000/1002/1003 + SGR 1006; the modes are reset in that same broad
+// sweep because which ones tmux enabled is not knowable from here, and a reset
+// for a mode that was never set is a no-op.
+const disableMouseReporting = ansi.ResetModeMouseNormal + ansi.ResetModeMouseButtonEvent +
+	ansi.ResetModeMouseAnyEvent + ansi.ResetModeMouseExtSgr
+
+// Reassert clears the terminal modes a full-screen attach leaves switched on,
+// for callers returning from one: fleet's attach ends by killing the tmux client
+// (Ctrl+Q, see internal/tmux/pty.go), so tmux never runs its own cleanup and
+// whatever it enabled stays on.
+//
+// Mouse reporting is the one that matters, and Disable never had to touch it.
+// Bubble Tea owns that mode via Home.chrome — but owns it only on the way in: its
+// renderer emits a mouse-mode change only when the mode *differs* from the last
+// view's, and fleet's is MouseModeNone on every frame including the first one
+// after an attach, so nothing else will ever take reporting back off. The next
+// scroll is then a MouseWheelMsg burst costing a full View() apiece.
+//
+// Key reporting is deliberately *not* re-asserted, because it is not ours to
+// own here: tea.Exec calls RestoreTerminal the moment attachCmd.Run returns
+// (v2.0.7 exec.go:125), which reaches cursedRenderer.start() with a non-nil
+// lastView and unconditionally writes SetModifyOtherKeys2 — \x1b[>4;2m —
+// at cursed_renderer.go:136. A mode-0 written here would be overwritten
+// microseconds later, so including it would buy nothing but a comment the
+// terminal contradicts. Harmless in practice: Bubble Tea v2 decodes CSI-u and
+// modifyOtherKeys alike, which is why the Ctrl+K bug Disable exists for has not
+// come back. Disable itself is left as-is — its mode-0 is overwritten on frame
+// one for the same reason (cursed_renderer.go:386), but that predates this and
+// changing it is a separate question.
+//
+// What is left is two sequences, and both are plain idempotent resets — which is
+// also why this is not a second call to Disable. Two of Disable's four carry
+// state: XTSAVE (1007s) would overwrite the saved original with the
+// already-cleared value, so Restore would hand the terminal back wrong on exit,
+// and ansi.DisableKittyKeyboard pushes onto the Kitty keyboard stack, which
+// Restore pops exactly once — every extra push would leak an entry.
+func Reassert(w io.Writer) error {
+	_, err := io.WriteString(w, disableAltScreenScroll+disableMouseReporting)
+	return err
+}
+
 // Disable asks the terminal for legacy key reporting so modified keys (Ctrl+K
 // in particular) arrive in their legacy encoding instead of as CSI-u sequences
 // Bubble Tea v1 can't parse. Terminals that don't support a given mode ignore
