@@ -111,7 +111,7 @@ func TestWorktreeDialogRowsNeverOverflow(t *testing.T) {
 	for _, w := range []int{40, 60, 80, 100, 120, 200} {
 		d := NewWorktreeDialog()
 		d.SetSize(w, 40)
-		d.Show(wss, nil, nil, "/Users/y/code/brizzai", "origin/master", nil)
+		d.Show(wss, nil, nil, "/Users/y/code/brizzai", "origin/master", nil, nil)
 		d.sessionCounts = counts
 
 		// Ground-truth innerWidth against Lip Gloss itself, rather than against
