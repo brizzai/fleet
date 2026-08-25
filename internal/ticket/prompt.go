@@ -1,4 +1,4 @@
-package linear
+package ticket
 
 import (
 	"fmt"
@@ -18,12 +18,16 @@ const maxPromptTitle = 60
 // Put the title first and every ticket session gets a sidebar row that has been
 // truncated before it names its ticket.
 //
+// The tracker is named ("Read Jira ticket BRZ-3182") rather than left generic,
+// because it is a fact the agent can act on — it is what makes "look it up
+// yourself" possible when the snapshot on disk has gone stale.
+//
 // The "don't start" instruction is stated twice, top and bottom, and this is
 // deliberate rather than redundant: a first message that describes a task is
 // overwhelmingly read as an instruction to perform it, and the whole point of
 // this flow is that the human reads the agent's understanding before any code
 // moves. TestSeedPromptTellsAgentNotToStart pins both.
-const seedPromptTemplate = `Read Linear ticket %s — %s. Do not start work yet.
+const seedPromptTemplate = `Read %s ticket %s — %s. Do not start work yet.
 
 The ticket is materialized in this worktree at %s (git-excluded):
   ticket.md   the description, and any comments
@@ -34,13 +38,14 @@ ambiguous, missing, or contradictory.
 Do not edit files, run builds, or begin implementing until I tell you to.%s
 `
 
-// SeedPrompt renders the first message for a materialized ticket.
+// SeedPrompt renders the first message for a materialized ticket. provider is
+// the tracker's display name — "Linear", "Jira".
 //
 // The images clauses collapse to nothing when no image made it to disk. That is
 // the honest-degradation rule in concrete form: a ticket whose images all failed
 // to download must not produce a prompt pointing at an images/ directory that
 // does not exist.
-func SeedPrompt(r Result) string {
+func SeedPrompt(provider string, r Result) string {
 	imagesBlock := ""
 	imagesClause := ""
 	if r.Images > 0 {
@@ -58,6 +63,7 @@ func SeedPrompt(r Result) string {
 	}
 
 	return fmt.Sprintf(seedPromptTemplate,
+		provider,
 		r.Identifier,
 		truncateWords(r.Title, maxPromptTitle),
 		r.RelDir,

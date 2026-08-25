@@ -8,7 +8,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/brizzai/fleet/internal/linear"
+	"github.com/brizzai/fleet/internal/ticket"
 	"github.com/brizzai/fleet/internal/workspace"
 )
 
@@ -34,11 +34,13 @@ type (
 		name, branch, baseBranch string
 		repoPath                 string
 		provider                 workspace.Provider
-		// ticket is the Linear issue this branch name was derived from, nil
-		// when the user typed a name. Carried rather than re-fetched: the
-		// dialog already paid the round trip while the user was looking at the
-		// form, and a second fetch can fail differently.
-		ticket *linear.Ticket
+		// ticket is the issue this branch name was derived from, nil when the
+		// user typed a name. Carried rather than re-fetched: the dialog
+		// already paid the round trip while the user was looking at the form,
+		// and a second fetch can fail differently. It also carries which
+		// tracker answered, which is what names the tracker in the status line
+		// once the worktree exists and the repo path is out of scope.
+		ticket *ticket.Ticket
 	}
 	workspaceCreateResultMsg struct {
 		info      *workspace.WorkspaceInfo
@@ -49,8 +51,10 @@ type (
 		// when there was no ticket or nothing usable landed. ticketErr is
 		// advisory only — the session always starts (see the closure in
 		// app.go's workspaceCreateMsg handler).
-		ticket    *linear.Result
+		ticket    *ticket.Result
 		ticketErr error
+		// ticketTracker is the provider's display name, for the status line.
+		ticketTracker string
 	}
 	// deleteCleanupDoneMsg fires when finalizeDelete's background cleanup
 	// (tmux kill, hook removal, optional workspace destroy) completes. The

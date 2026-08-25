@@ -15,6 +15,7 @@ import (
 
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/ticket"
 )
 
 // apiEndpoint is Linear's only GraphQL endpoint. Overridable so tests can point
@@ -26,29 +27,10 @@ var apiEndpointVar = apiEndpoint
 // getenv is a seam for tests; production always reads the real environment.
 var getenv = os.Getenv
 
-func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), d)
-}
-
 // httpClient is shared so connections are reused across a burst of image
 // downloads. The per-call context does the real bounding; the client timeout is
 // a backstop for a request that never reaches the deadline machinery.
 var httpClient = &http.Client{Timeout: 90 * time.Second}
-
-// imageClient fetches issue attachments. It refuses to follow redirects at all,
-// because the request carries the Linear credential and a redirect target is a
-// URL that allowedImageURL never saw. Go's own protection stops at a domain
-// change and deliberately permits uploads.linear.app -> anything.linear.app.
-//
-// http.ErrUseLastResponse makes Do return the 3xx instead of an error, which
-// then fails the StatusOK check with the redirect's own status — a more honest
-// message than a synthetic one.
-var imageClient = &http.Client{
-	Timeout: 90 * time.Second,
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-}
 
 // failures are one-shot rather than polled, so this throttle isn't stopping a
 // flood — it stops a user who creates ten worktrees against a broken credential
@@ -69,8 +51,9 @@ func trackFailure(reason string) {
 	}
 	failLast = time.Now()
 	failMu.Unlock()
-	analytics.Track(analytics.EventLinearCommandFailure, map[string]any{
-		"reason": reason,
+	analytics.Track(analytics.EventTicketCommandFailure, map[string]any{
+		"provider": kind,
+		"reason":   reason,
 	})
 }
 
@@ -103,16 +86,16 @@ type gqlEnvelope struct {
 //	bad token   -> 401, code AUTHENTICATION_ERROR
 func classifyGraphQL(status int, errs []gqlErrorEntry) error {
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return ErrNotAuthenticated
+		return ticket.ErrNotAuthenticated
 	}
 	for _, e := range errs {
 		code := strings.ToUpper(e.Extensions.Code)
 		msg := strings.ToLower(e.Message)
 		switch {
 		case code == "AUTHENTICATION_ERROR", strings.Contains(msg, "not authenticated"):
-			return ErrNotAuthenticated
+			return ticket.ErrNotAuthenticated
 		case strings.Contains(msg, "entity not found"):
-			return ErrNotFound
+			return ticket.ErrNotFound
 		}
 	}
 	if len(errs) > 0 {
@@ -165,7 +148,7 @@ func executeWith(ctx context.Context, cred Credential, timeout time.Duration, qu
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, ticket.MaxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("linear: reading response: %w", err)
 	}
@@ -176,7 +159,7 @@ func executeWith(ctx context.Context, cred Credential, timeout time.Duration, qu
 		return fmt.Errorf("linear: unreadable response (http %d)", resp.StatusCode)
 	}
 	if err := classifyGraphQL(resp.StatusCode, env.Errors); err != nil {
-		if err != ErrNotFound {
+		if err != ticket.ErrNotFound {
 			debuglog.Logger.Debug("linear: request failed", "status", resp.StatusCode, "error", err)
 			trackFailure(reasonFor(err))
 		}
@@ -192,11 +175,11 @@ func executeWith(ctx context.Context, cred Credential, timeout time.Duration, qu
 // error string: those can carry an issue identifier.
 func reasonFor(err error) string {
 	switch err {
-	case ErrNotAuthenticated:
+	case ticket.ErrNotAuthenticated:
 		return "not_authenticated"
-	case ErrNotConnected:
+	case ticket.ErrNotConnected:
 		return "not_connected"
-	case ErrNotFound:
+	case ticket.ErrNotFound:
 		return "not_found"
 	}
 	return "request_failed"
@@ -267,7 +250,7 @@ const assignedIssuesQuery = `query Mine($first: Int!) {
 }`
 
 const workspaceQuery = `query Workspace {
-  organization { name urlKey }
+  organization { name }
   teams(first: 250) { nodes { key name } }
 }`
 
@@ -293,29 +276,44 @@ type issueLite struct {
 	} `json:"state"`
 }
 
-func (i *issueLite) stateType() string {
-	if i == nil || i.State == nil {
-		return ""
+// stateType maps Linear's own category onto fleet's.
+//
+// Matching on the category rather than the name is what makes ordering work on
+// a team that renamed its states to "In Dev" or "Doing".
+func stateType(t string) ticket.StateType {
+	switch t {
+	case "started":
+		return ticket.StateStarted
+	case "unstarted": // Linear's "Todo"
+		return ticket.StateUnstarted
+	case "triage":
+		return ticket.StateTriage
+	case "backlog":
+		return ticket.StateBacklog
 	}
-	return i.State.Type
+	return ticket.StateOther
 }
 
-// statePosition returns the state's order within its team. A missing state
-// sorts last rather than first, so an unusable payload cannot lead the list.
-func (i *issueLite) statePosition() float64 {
-	if i == nil || i.State == nil {
-		return 1 << 30
-	}
-	return i.State.Position
-}
-
-func (i *issueLite) ticket() Ticket {
+func (i *issueLite) ticket() ticket.Ticket {
 	if i == nil {
-		return Ticket{}
+		return ticket.Ticket{}
 	}
-	t := Ticket{Identifier: i.Identifier, Title: i.Title, URL: i.URL, Priority: i.Priority}
+	t := ticket.Ticket{
+		Provider:   kind,
+		Identifier: i.Identifier,
+		Title:      i.Title,
+		URL:        i.URL,
+		// Linear's numeric priority is fleet's, verbatim: 1 urgent … 4 low, 0
+		// unset. ticket.Priority was defined on Linear's numbering precisely so
+		// this stays a conversion and not a mapping table.
+		Priority: ticket.Priority(i.Priority),
+		// A missing state sorts last rather than first, so an unusable payload
+		// cannot lead the list.
+		State:    ticket.StateOther,
+		StatePos: 1 << 30,
+	}
 	if i.State != nil {
-		t.StateName, t.StateType = i.State.Name, i.State.Type
+		t.StateName, t.State, t.StatePos = i.State.Name, stateType(i.State.Type), i.State.Position
 	}
 	return t
 }
@@ -409,18 +407,18 @@ func (i *issueFull) startedState() (workflowState, bool) {
 // Fetch returns an issue's metadata. Used by the worktree dialog and by
 // `fleet wt --ticket` to confirm an identifier exists before a branch is named
 // after it.
-func Fetch(ctx context.Context, id string) (Ticket, error) {
+func Fetch(ctx context.Context, id string) (ticket.Ticket, error) {
 	var out struct {
 		Issue *issueLite `json:"issue"`
 	}
-	if err := execute(ctx, metaTimeout, issueLiteQuery, map[string]any{"id": strings.ToUpper(id)}, &out); err != nil {
-		return Ticket{}, err
+	if err := execute(ctx, ticket.MetaTimeout, issueLiteQuery, map[string]any{"id": strings.ToUpper(id)}, &out); err != nil {
+		return ticket.Ticket{}, err
 	}
 	// A null node with no errors[] is Linear's other way of saying "no such
 	// issue" — treat it the same rather than returning an empty ticket that
 	// callers would have to re-check.
 	if out.Issue == nil || out.Issue.Identifier == "" {
-		return Ticket{}, ErrNotFound
+		return ticket.Ticket{}, ticket.ErrNotFound
 	}
 	return out.Issue.ticket(), nil
 }
@@ -430,7 +428,7 @@ func Fetch(ctx context.Context, id string) (Ticket, error) {
 // Deliberately unscoped by team: the repo gate already decides WHETHER we
 // search here, and someone typing prose wants matches, not a filter they
 // didn't ask for.
-func Search(ctx context.Context, term string, limit int) ([]Ticket, error) {
+func Search(ctx context.Context, term string, limit int) ([]ticket.Ticket, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -439,10 +437,10 @@ func Search(ctx context.Context, term string, limit int) ([]Ticket, error) {
 			Nodes []issueLite `json:"nodes"`
 		} `json:"searchIssues"`
 	}
-	if err := execute(ctx, metaTimeout, searchQuery, map[string]any{"term": term, "first": limit}, &out); err != nil {
+	if err := execute(ctx, ticket.MetaTimeout, searchQuery, map[string]any{"term": term, "first": limit}, &out); err != nil {
 		return nil, err
 	}
-	var tickets []Ticket
+	var tickets []ticket.Ticket
 	for i := range out.SearchIssues.Nodes {
 		n := out.SearchIssues.Nodes[i]
 		if n.Identifier == "" {
@@ -453,14 +451,18 @@ func Search(ctx context.Context, term string, limit int) ([]Ticket, error) {
 	return tickets, nil
 }
 
-// MoveToStarted moves an issue into its team's first started state and returns
+// moveToStarted moves an issue into its team's first started state and returns
 // the resulting state name.
 //
 // Takes the already-fetched issue so the whole thing is one mutation: the
 // states came along with the full fetch. Returns ("", nil) when the team has no
 // started state at all, which is not an error — it is a team fleet has nothing
 // to say about.
-func MoveToStarted(ctx context.Context, issue *issueFull) (string, error) {
+//
+// Unexported and reached only through Document.Start. It used to be exported
+// while taking an unexported *issueFull, which made it unusable from outside
+// the package anyway — the closure states the same contract honestly.
+func moveToStarted(ctx context.Context, issue *issueFull) (string, error) {
 	state, ok := issue.startedState()
 	if !ok {
 		return "", nil
@@ -476,7 +478,7 @@ func MoveToStarted(ctx context.Context, issue *issueFull) (string, error) {
 		} `json:"issueUpdate"`
 	}
 	vars := map[string]any{"id": issue.Identifier, "stateId": state.ID}
-	if err := execute(ctx, stateTimeout, updateStateMutation, vars, &out); err != nil {
+	if err := execute(ctx, ticket.StateTimeout, updateStateMutation, vars, &out); err != nil {
 		trackFailure("state_write_failed")
 		return "", err
 	}
@@ -490,49 +492,13 @@ func MoveToStarted(ctx context.Context, issue *issueFull) (string, error) {
 	return state.Name, nil
 }
 
-// stateTypeRank orders Linear's state categories by how close the work is to
-// your hands. Ranking on the TYPE rather than the name is what makes this work
-// on a team that renamed its states.
-// PriorityRank orders Linear's priorities most-urgent-first.
-//
-// It exists because the raw number cannot be sorted on: Linear uses 0 for "not
-// set", so ascending order would put every unprioritised ticket above the
-// urgent ones. Unset sorts last, which is what "not set" should mean in a queue.
-func PriorityRank(p int) int {
-	switch p {
-	case 1: // urgent
-		return 0
-	case 2: // high
-		return 1
-	case 3: // medium
-		return 2
-	case 4: // low
-		return 3
-	}
-	return 4 // unset
-}
-
-func stateTypeRank(t string) int {
-	switch t {
-	case "started":
-		return 0
-	case "unstarted": // Linear's "Todo"
-		return 1
-	case "triage":
-		return 2
-	case "backlog":
-		return 3
-	}
-	return 4
-}
-
 // AssignedIssues returns your open assigned issues, most actionable first.
 //
 // Sorted client-side rather than by the API because the useful order is by
 // state category, and Linear can only order by one field. Within a category the
 // server's updatedAt order is preserved, so the top of each group is what you
 // touched last.
-func AssignedIssues(ctx context.Context, limit int) ([]Ticket, error) {
+func AssignedIssues(ctx context.Context, limit int) ([]ticket.Ticket, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -543,76 +509,56 @@ func AssignedIssues(ctx context.Context, limit int) ([]Ticket, error) {
 			} `json:"assignedIssues"`
 		} `json:"viewer"`
 	}
-	if err := execute(ctx, metaTimeout, assignedIssuesQuery, map[string]any{"first": limit}, &out); err != nil {
+	if err := execute(ctx, ticket.MetaTimeout, assignedIssuesQuery, map[string]any{"first": limit}, &out); err != nil {
 		return nil, err
 	}
 
-	// Sort the raw nodes, not the projection: position is what separates two
-	// states of the same type, and it is the difference between "In Progress"
-	// and "In Review" leading the list. A work queue wants the one you are
-	// actually in the middle of.
+	// The projection carries the state position, so sorting it is the same as
+	// sorting the raw nodes — and position is what separates two states of the
+	// same category, the difference between "In Progress" and "In Review"
+	// leading the list. A work queue wants the one you are in the middle of.
+	//
+	// ticket.SortAssigned owns the comparison so a merged Linear+Jira list is
+	// ordered by the same rule as either one alone.
 	nodes := out.Viewer.AssignedIssues.Nodes
-	// State, then priority, then whatever the server gave us — which is
-	// updatedAt. Recency has to be the tiebreak rather than the whole rule:
-	// most of a real backlog shares one priority (21 of 50 here were High), and
-	// priority alone would leave that block in an order that shifts between
-	// opens for no visible reason.
-	sort.SliceStable(nodes, func(a, b int) bool {
-		ra, rb := stateTypeRank(nodes[a].stateType()), stateTypeRank(nodes[b].stateType())
-		if ra != rb {
-			return ra < rb
-		}
-		if pa, pb := nodes[a].statePosition(), nodes[b].statePosition(); pa != pb {
-			return pa < pb
-		}
-		return PriorityRank(nodes[a].Priority) < PriorityRank(nodes[b].Priority)
-	})
-
-	tickets := make([]Ticket, 0, len(nodes))
+	tickets := make([]ticket.Ticket, 0, len(nodes))
 	for i := range nodes {
 		if nodes[i].Identifier == "" {
 			continue
 		}
 		tickets = append(tickets, nodes[i].ticket())
 	}
+	ticket.SortAssigned(tickets)
 	return tickets, nil
 }
 
 // ---------------------------------------------------------------------------
-// Workspace
+// Account
 // ---------------------------------------------------------------------------
-
-// Workspace is the connected organization, for display and for telling the user
-// which team keys they can put in .fleet.json.
-type Workspace struct {
-	Name     string
-	URLKey   string
-	TeamKeys []string
-}
 
 var wsCache struct {
 	mu     sync.RWMutex
-	ws     Workspace
+	ws     ticket.Account
 	loaded bool
 }
 
-func resetWorkspaceCache() {
+func resetAccountCache() {
 	wsCache.mu.Lock()
-	wsCache.ws, wsCache.loaded = Workspace{}, false
+	wsCache.ws, wsCache.loaded = ticket.Account{}, false
 	wsCache.mu.Unlock()
 }
 
-// WorkspaceInfo returns the cached workspace, and whether it has been read yet.
+// accountInfo returns the cached workspace, and whether it has been read yet.
 // Free and non-blocking — safe from the Update goroutine.
-func WorkspaceInfo() (Workspace, bool) {
+func accountInfo() (ticket.Account, bool) {
 	wsCache.mu.RLock()
 	defer wsCache.mu.RUnlock()
 	return wsCache.ws, wsCache.loaded
 }
 
-// FetchWorkspace reads the organization and its team keys, caching the result.
-func FetchWorkspace(ctx context.Context) (Workspace, error) {
-	return fetchWorkspaceWith(ctx, Credential{}, true)
+// fetchAccount reads the organization and its team keys, caching the result.
+func fetchAccount(ctx context.Context) (ticket.Account, error) {
+	return fetchAccountWith(ctx, Credential{}, true)
 }
 
 // VerifyCredential proves a credential works before fleet stores it, and
@@ -621,15 +567,14 @@ func FetchWorkspace(ctx context.Context) (Workspace, error) {
 // Verifying first is what lets the Connect dialog say "connected" as a fact
 // rather than a hope, and it means a typo is caught while the user is still
 // looking at the field they typed it into.
-func VerifyCredential(ctx context.Context, cred Credential) (Workspace, error) {
-	return fetchWorkspaceWith(ctx, cred, false)
+func VerifyCredential(ctx context.Context, cred Credential) (ticket.Account, error) {
+	return fetchAccountWith(ctx, cred, false)
 }
 
-func fetchWorkspaceWith(ctx context.Context, cred Credential, useStored bool) (Workspace, error) {
+func fetchAccountWith(ctx context.Context, cred Credential, useStored bool) (ticket.Account, error) {
 	var out struct {
 		Organization *struct {
-			Name   string `json:"name"`
-			URLKey string `json:"urlKey"`
+			Name string `json:"name"`
 		} `json:"organization"`
 		Teams struct {
 			Nodes []struct {
@@ -641,30 +586,30 @@ func fetchWorkspaceWith(ctx context.Context, cred Credential, useStored bool) (W
 
 	var err error
 	if useStored {
-		err = execute(ctx, metaTimeout, workspaceQuery, nil, &out)
+		err = execute(ctx, ticket.MetaTimeout, workspaceQuery, nil, &out)
 	} else {
-		err = executeWith(ctx, cred, metaTimeout, workspaceQuery, nil, &out)
+		err = executeWith(ctx, cred, ticket.MetaTimeout, workspaceQuery, nil, &out)
 	}
 	if err != nil {
-		return Workspace{}, err
+		return ticket.Account{}, err
 	}
 
-	ws := Workspace{}
+	ws := ticket.Account{}
 	if out.Organization != nil {
-		ws.Name, ws.URLKey = out.Organization.Name, out.Organization.URLKey
+		ws.Name = out.Organization.Name
 	}
 	for _, t := range out.Teams.Nodes {
 		if t.Key != "" {
-			ws.TeamKeys = append(ws.TeamKeys, strings.ToUpper(t.Key))
+			ws.Keys = append(ws.Keys, strings.ToUpper(t.Key))
 		}
 	}
-	sort.Strings(ws.TeamKeys)
+	sort.Strings(ws.Keys)
 
 	// Only cache a reading taken with the STORED credential. VerifyCredential
 	// calls this with a candidate the user has just pasted and that nothing has
 	// persisted yet; if the store then refuses (a denied keychain prompt is the
-	// ordinary case, which is why persistErr exists at all), WorkspaceInfo would
-	// go on reporting a workspace no stored credential backs — and
+	// ordinary case, which is why persistErr exists at all), Account() would go
+	// on reporting a workspace no stored credential backs — and
 	// workspaceMismatchNote reads exactly that.
 	if useStored {
 		wsCache.mu.Lock()
@@ -674,11 +619,11 @@ func fetchWorkspaceWith(ctx context.Context, cred Credential, useStored bool) (W
 	return ws, nil
 }
 
-// SetWorkspaceForTest installs a workspace reading without a network call, so
-// UI tests can exercise the wrong-workspace path. An empty Workspace clears it.
-func SetWorkspaceForTest(ws Workspace) {
+// SetAccountForTest installs a workspace reading without a network call, so UI
+// tests can exercise the wrong-workspace path. An empty Account clears it.
+func SetAccountForTest(ws ticket.Account) {
 	wsCache.mu.Lock()
 	defer wsCache.mu.Unlock()
 	wsCache.ws = ws
-	wsCache.loaded = ws.Name != "" || len(ws.TeamKeys) > 0
+	wsCache.loaded = ws.Name != "" || len(ws.Keys) > 0
 }

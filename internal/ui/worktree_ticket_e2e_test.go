@@ -12,6 +12,7 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/ticket"
 )
 
 // TestTicketLookupSurvivesTheRealMessageLoop drives a real Home from a keypress
@@ -32,7 +33,7 @@ func TestTicketLookupSurvivesTheRealMessageLoop(t *testing.T) {
 	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
 	h.width, h.height = 120, 40
 	h.worktreeDialog.SetSize(120, 40)
-	h.worktreeDialog.Show(nil, nil, nil, "/repo", "master", []string{"BRZ"})
+	h.worktreeDialog.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"))
 
 	// Type "sdk" the way a user does: one key at a time, through Home.
 	var pending []tea.Cmd
@@ -71,7 +72,7 @@ func TestTicketLookupSurvivesTheRealMessageLoop(t *testing.T) {
 	model, _ = h.Update(worktreeTicketsMsg{
 		gen:     gen,
 		query:   "sdk",
-		tickets: []linear.Ticket{{Identifier: "BRZ-3013", Title: "TS sdk spanprocessor"}},
+		tickets: []ticket.Ticket{{Identifier: "BRZ-3013", Title: "TS sdk spanprocessor"}},
 	})
 	h = model.(*Home)
 	if h.worktreeDialog.ticketPending {
@@ -92,11 +93,11 @@ func TestTicketLookupSurvivesTheRealMessageLoop(t *testing.T) {
 func TestWrongWorkspaceIsNamedNotSilent(t *testing.T) {
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", []string{"BRZ"})
+	d.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"))
 
 	// Connected to a workspace that has no BRZ team.
-	linear.SetWorkspaceForTest(linear.Workspace{Name: "fleet", TeamKeys: []string{"FLE"}})
-	t.Cleanup(func() { linear.SetWorkspaceForTest(linear.Workspace{}) })
+	linear.SetAccountForTest(ticket.Account{Name: "fleet", Keys: []string{"FLE"}})
+	t.Cleanup(func() { linear.SetAccountForTest(ticket.Account{}) })
 
 	d.ticketGen = 7
 	d.applyTickets(worktreeTicketsMsg{gen: 7, query: "sdk", tickets: nil})
@@ -110,14 +111,14 @@ func TestWrongWorkspaceIsNamedNotSilent(t *testing.T) {
 	// And a by-id miss must not be reported as "no such issue" — the issue
 	// exists, we are looking in the wrong workspace.
 	d.ticketGen = 8
-	d.applyTickets(worktreeTicketsMsg{gen: 8, query: "BRZ-3013", byID: true, err: linear.ErrNotFound})
+	d.applyTickets(worktreeTicketsMsg{gen: 8, query: "BRZ-3013", byID: true, err: ticket.ErrNotFound})
 	if strings.Contains(d.ticketNote, "no such issue") {
 		t.Errorf("wrong diagnosis for a wrong-workspace credential: %q", d.ticketNote)
 	}
 
 	// The converse: a workspace that DOES hold the team stays quiet on an
 	// ordinary empty search.
-	linear.SetWorkspaceForTest(linear.Workspace{Name: "Brizz", TeamKeys: []string{"BRZ", "PRD"}})
+	linear.SetAccountForTest(ticket.Account{Name: "Brizz", Keys: []string{"BRZ", "PRD"}})
 	d.ticketGen = 9
 	d.applyTickets(worktreeTicketsMsg{gen: 9, query: "zzzz", tickets: nil})
 	if d.ticketNote != "" {
@@ -150,9 +151,9 @@ func TestWorkspaceMismatchNoteFitsOnOneLine(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			d := NewWorktreeDialog()
 			d.SetSize(120, 40)
-			d.Show(nil, nil, nil, "/repo", "master", c.teams)
-			linear.SetWorkspaceForTest(linear.Workspace{Name: c.ws, TeamKeys: []string{"FLE"}})
-			t.Cleanup(func() { linear.SetWorkspaceForTest(linear.Workspace{}) })
+			d.Show(nil, nil, nil, "/repo", "master", boundTo(c.teams...))
+			linear.SetAccountForTest(ticket.Account{Name: c.ws, Keys: []string{"FLE"}})
+			t.Cleanup(func() { linear.SetAccountForTest(ticket.Account{}) })
 
 			note, wrong := d.workspaceMismatchNote()
 			if !wrong {

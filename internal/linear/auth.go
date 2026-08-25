@@ -1,6 +1,8 @@
 package linear
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -8,7 +10,54 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/ticket"
 )
+
+// store is Linear's slot in the OS keychain. One item holds the whole record as
+// JSON, so an OAuth refresh rewrites a single entry rather than juggling three.
+var store = ticket.Store{
+	Service:  "fleet-linear",
+	Label:    "fleet: Linear",
+	FileName: "linear.json",
+}
+
+// stored is the on-disk/keychain record. Deliberately a superset of both
+// credential kinds so the backend never needs to know which one it is holding.
+type stored struct {
+	Kind      string    `json:"kind"` // credAPIKey | credOAuth
+	Token     string    `json:"token"`
+	Refresh   string    `json:"refresh,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	Workspace string    `json:"workspace,omitempty"`
+}
+
+// loadStored reads the credential fleet put away, and whether there was one.
+//
+// A failure to read is reported as "no credential" rather than as an error: a
+// locked keychain and an empty one look the same from here, and the caller's
+// only sensible response to either is to treat Linear as not connected.
+func loadStored() (stored, bool) {
+	raw, ok := store.Load()
+	if !ok || len(raw) == 0 {
+		return stored{}, false
+	}
+	var s stored
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return stored{}, false
+	}
+	if s.Token == "" {
+		return stored{}, false
+	}
+	return s, true
+}
+
+func saveStored(s stored) error {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return store.Save(data)
+}
 
 // The two credential kinds fleet can hold. They differ in exactly one place —
 // the Authorization header form — which is why they share a struct.
@@ -93,7 +142,10 @@ func envKey() string { return strings.TrimSpace(getenv(APIKeyEnvVar)) }
 // Called from the TUI's startup batch. Idempotent: a second call after a
 // successful load is a no-op, so it is safe to use as a "make sure" before any
 // path that needs a definite answer.
-func Warm() {
+//
+// The context is part of ticket.Provider's signature and is unused here: this
+// reads a local keychain, which runQuiet already bounds with its own deadline.
+func Warm(context.Context) {
 	credState.mu.Lock()
 	defer credState.mu.Unlock()
 	loadLocked()
@@ -137,7 +189,7 @@ func credential() (Credential, error) {
 	credState.mu.Unlock()
 
 	if !c.ok() {
-		return Credential{}, ErrNotConnected
+		return Credential{}, ticket.ErrNotConnected
 	}
 	if !c.needsRefresh() {
 		return c, nil
@@ -169,7 +221,7 @@ func renew(c Credential) (Credential, error) {
 		return current, nil
 	}
 
-	ctx, cancel := contextWithTimeout(metaTimeout)
+	ctx, cancel := ticket.ContextWithTimeout(ticket.MetaTimeout)
 	defer cancel()
 
 	fresh, err := refresh(ctx, c.Refresh)
@@ -178,10 +230,10 @@ func renew(c Credential) (Credential, error) {
 		// request would 401 with no explanation anywhere. Clearing it is what
 		// makes the dialog and the tip say "not connected" instead of leaving
 		// the user with a fleet that silently stopped fetching tickets.
-		if errors.Is(err, ErrNotAuthenticated) {
+		if errors.Is(err, ticket.ErrNotAuthenticated) {
 			debuglog.Logger.Warn("linear: refresh was refused — disconnecting")
 			_ = Disconnect()
-			return Credential{}, ErrNotAuthenticated
+			return Credential{}, ticket.ErrNotAuthenticated
 		}
 		// Anything else (offline, endpoint down) is not evidence against the
 		// grant. Keep it and let the caller fail this one request.
@@ -229,8 +281,8 @@ func Disconnect() error {
 	credState.present.Store(false)
 	credState.mu.Unlock()
 
-	resetWorkspaceCache()
-	return clearStored()
+	resetAccountCache()
+	return store.Clear()
 }
 
 // StoredWorkspace returns the workspace name behind the current credential, for

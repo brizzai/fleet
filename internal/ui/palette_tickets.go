@@ -8,12 +8,14 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 )
 
-// ticketListLimit caps the "my tickets" fetch. Fifty covers a real backlog
-// while keeping one query well inside Linear's per-query complexity budget.
+// ticketListLimit caps the "my tickets" fetch, per tracker. Fifty covers a real
+// backlog while keeping one query well inside Linear's per-query complexity
+// budget and one page of Jira's JQL search.
 const ticketListLimit = 50
 
 // ticketListTimeout bounds the fetch. It runs while the palette is already
@@ -22,36 +24,44 @@ const ticketListTimeout = 12 * time.Second
 
 // paletteTicketsMsg carries the loaded tickets back to Update.
 type paletteTicketsMsg struct {
-	tickets []linear.Ticket
+	tickets []ticket.Ticket
 	err     error
 }
 
-// loadPaletteTickets fetches your open assigned issues.
+// loadPaletteTickets fetches your open assigned issues, from every connected
+// tracker at once.
 //
 // Fired when the palette opens rather than on a timer: this is the same
-// event-driven, one-shot posture as every other Linear call in fleet, which is
+// event-driven, one-shot posture as every other tracker call in fleet, which is
 // what keeps the status workers clear of the network entirely.
+//
+// One list rather than one tab per tracker. The question the tab answers is
+// "what am I meant to be working on", and that question does not have a Linear
+// half and a Jira half — the identifiers already say which is which, and
+// ticketing.Assigned re-sorts the merged set by the same rule either one uses
+// alone.
 func loadPaletteTickets() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), ticketListTimeout)
 		defer cancel()
-		tickets, err := linear.AssignedIssues(ctx, ticketListLimit)
+		tickets, err := ticketing.Assigned(ctx, ticketListLimit)
 		return paletteTicketsMsg{tickets: tickets, err: err}
 	}
 }
 
 // sessionsByTicket maps a ticket identifier to the session already working it.
 //
-// This join is the whole reason the tab is worth having: Linear can list your
-// issues, but only fleet knows which ones already have a worktree and what that
-// session is doing right now.
-func (h *Home) sessionsByTicket(tickets []linear.Ticket) map[string]*session.Session {
+// This join is the whole reason the tab is worth having: a tracker can list
+// your issues, but only fleet knows which ones already have a worktree and what
+// that session is doing right now.
+func (h *Home) sessionsByTicket(tickets []ticket.Ticket) map[string]*session.Session {
 	if len(tickets) == 0 || len(h.sessions) == 0 {
 		return nil
 	}
-	// Team keys come from the tickets themselves — the prefix of an identifier
-	// IS its team — so this needs no repo config and works across every repo on
-	// screen at once.
+	// Tracker keys come from the tickets themselves — the prefix of an
+	// identifier IS its team or project — so this needs no repo config, works
+	// across every repo on screen at once, and needs no idea of which tracker
+	// a given row came from.
 	seen := map[string]bool{}
 	var teams []string
 	for _, t := range tickets {
@@ -74,7 +84,7 @@ func (h *Home) sessionsByTicket(tickets []linear.Ticket) map[string]*session.Ses
 		if info, ok := gitInfo[s.ProjectPath]; ok && info != nil {
 			branch = info.Branch
 		}
-		id := linear.IdentifierFromBranch(branch, teams)
+		id := ticket.IdentifierFromBranch(branch, teams)
 		if id == "" {
 			// The worktree directory still carries the identifier when the git
 			// cache is cold, same fallback branch inference uses.
@@ -84,7 +94,7 @@ func (h *Home) sessionsByTicket(tickets []linear.Ticket) map[string]*session.Ses
 				// Update goroutine. A worktree is its own root anyway.
 				root = s.ProjectPath
 			}
-			id = linear.IdentifierFromBranch(pathTailAfterRepo(s.ProjectPath, root), teams)
+			id = ticket.IdentifierFromBranch(pathTailAfterRepo(s.ProjectPath, root), teams)
 		}
 		if id == "" {
 			continue
@@ -116,7 +126,7 @@ func ticketSessionRank(s *session.Session) int {
 }
 
 // ticketPaletteItems turns tickets into palette rows.
-func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
+func (h *Home) ticketPaletteItems(tickets []ticket.Ticket) []PaletteItem {
 	byTicket := h.sessionsByTicket(tickets)
 
 	// Identifiers vary in length (BRZ-453 vs BRZ-3142), so pad them to the
@@ -137,11 +147,15 @@ func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 		// the mixed tab.
 		name := fmt.Sprintf("%-*s  %s", idWidth, t.Identifier, t.Title)
 		it := PaletteItem{
-			Kind:     PaletteKindTicket,
-			ID:       t.Identifier,
-			Name:     name,
-			Priority: t.Priority,
-			// The Linear state is the group header, so it is deliberately NOT
+			Kind: PaletteKindTicket,
+			ID:   t.Identifier,
+			Name: name,
+			// int(t.Priority), not a translation: ticket.Priority is defined
+			// on Linear's numbering (0 unset, 1 urgent … 4 low) precisely so
+			// the gauge and its colour ladder need no mapping layer, and so a
+			// Jira row and a Linear row of the same urgency render identically.
+			Priority: int(t.Priority),
+			// The state is the group header, so it is deliberately NOT
 			// repeated on every row. The right column carries what fleet knows
 			// instead — and stays empty when there is nothing to say.
 			Group: t.StateName,
@@ -172,10 +186,10 @@ func (h *Home) ticketPaletteItems(tickets []linear.Ticket) []PaletteItem {
 // new path of its own, so the base branch and the repo are still confirmed by
 // the same screen that always confirms them.
 func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
-	var tickets []linear.Ticket
+	var tickets []ticket.Ticket
 	for _, it := range h.commandPalette.items {
 		if it.Kind == PaletteKindTicket && it.ID == identifier {
-			tickets = append(tickets, linear.Ticket{Identifier: it.ID})
+			tickets = append(tickets, ticket.Ticket{Identifier: it.ID})
 		}
 	}
 	if s := h.sessionsByTicket(tickets)[identifier]; s != nil {
@@ -222,7 +236,7 @@ func (h *Home) jumpToSessionID(id string) (tea.Model, tea.Cmd) {
 // and does nothing at all when Linear isn't connected — so a user who has never
 // heard of Linear pays no round trip for pressing Ctrl+K.
 func (h *Home) maybeLoadPaletteTickets() tea.Cmd {
-	if !linear.Available() {
+	if !ticketing.Available() {
 		return nil
 	}
 	return loadPaletteTickets()

@@ -9,6 +9,7 @@ import (
 
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/linear"
+	"github.com/brizzai/fleet/internal/ticket"
 )
 
 func connectDialog(t *testing.T) *ConnectLinearDialog {
@@ -197,7 +198,7 @@ func TestPersistFailureStillReportsConnected(t *testing.T) {
 	d.stage = connectWorking
 
 	d, _ = d.Update(linearConnectedMsg{
-		workspace:  linear.Workspace{Name: "Brizz", TeamKeys: []string{"BRZ"}},
+		workspace:  ticket.Account{Name: "Brizz", Keys: []string{"BRZ"}},
 		via:        "API key",
 		persistErr: errors.New("keychain write failed: signal: killed"),
 	})

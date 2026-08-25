@@ -81,7 +81,7 @@ var (
 	// Panel title style (cyan/blue like agent-deck).
 	PanelTitleStyle lipgloss.Style
 
-	// PaletteSectionStyle labels a group of palette rows (a Linear state). Dim
+	// PaletteSectionStyle labels a group of palette rows (a ticket state). Dim
 	// and bold so it reads as structure rather than as another row competing
 	// with the ones under it.
 	PaletteSectionStyle lipgloss.Style

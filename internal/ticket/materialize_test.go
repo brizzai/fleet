@@ -1,4 +1,4 @@
-package linear
+package ticket
 
 import (
 	"os"
@@ -64,8 +64,8 @@ func TestStateWriteSkippedRecordDoesNotBlock(t *testing.T) {
 // TestPriorStateWriteIsNotReportedAsThisRunsMove separates the record from the
 // report.
 //
-// res.StateMoved is what cmd/fleet/worktree.go prints as "Moved %s to its team's
-// started state", and what ticketStatusLine shows in the TUI. Copying a prior
+// res.StateMoved is what cmd/fleet/worktree.go prints as "Moved %s to %s", and
+// what ticketStatusLine shows in the TUI. Copying a prior
 // run's MovedTo into it made a re-materialization claim a write to someone's
 // board that never happened on that run — a false statement about a mutation,
 // which is the one thing this feature must never make. The record must still
@@ -87,7 +87,7 @@ func TestPriorStateWriteIsNotReportedAsThisRunsMove(t *testing.T) {
 		t.Fatalf("the carry-forward branch is gone — this guard is stale, %s not found", marker)
 	}
 	rest := body[i+len(marker):]
-	j := strings.Index(rest, "case o.MoveState:")
+	j := strings.Index(rest, "case o.MoveState && doc.Start != nil:")
 	if j < 0 {
 		t.Fatal("could not find the end of the carry-forward branch")
 	}
@@ -95,8 +95,8 @@ func TestPriorStateWriteIsNotReportedAsThisRunsMove(t *testing.T) {
 
 	if strings.Contains(branch, "res.StateMoved") {
 		t.Error("the carry-forward branch assigns res.StateMoved, which the caller " +
-			"prints as \"Moved ... to its team's started state\". This run performed no " +
-			"mutation; only the branch that calls MoveToStarted may set it.")
+			"prints as \"Moved ... to ...\". This run performed no mutation; only the " +
+			"branch that calls doc.Start may set it.")
 	}
 	if !strings.Contains(branch, "m.MovedTo") {
 		t.Error("the carry-forward branch must still carry MovedTo into the new record, " +
@@ -117,4 +117,44 @@ func stripLineComments(src string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// TestPriorRecordFromAnotherProviderDoesNotCount pins the one thing the ledger
+// gained when a second tracker arrived.
+//
+// .fleet/ticket/<ID>/ is not namespaced by provider, so a repo tracking a Linear
+// team and a Jira project that share a key can land two different issues in one
+// directory. They are different issues on different boards: a Linear write says
+// nothing about whether the Jira issue has been started, and treating it as
+// prior would silently skip the mutation the user asked for.
+func TestPriorRecordFromAnotherProviderDoesNotCount(t *testing.T) {
+	dir := t.TempDir()
+	writeMeta(dir, meta{Identifier: "BRZ-1", Provider: "linear", StateWrite: "done", MovedTo: "In Progress"})
+
+	m, ok := readMeta(dir)
+	if !ok {
+		t.Fatal("record should read back")
+	}
+	if m.Provider != "linear" {
+		t.Fatalf("provider did not round-trip: %+v", m)
+	}
+
+	// The rule Materialize applies, stated here so a change to it has to change
+	// this line too.
+	countsAsPrior := func(kind string) bool { return m.Provider == "" || m.Provider == kind }
+
+	if countsAsPrior("jira") {
+		t.Error("a Linear record must not suppress Jira's state write for the same key")
+	}
+	if !countsAsPrior("linear") {
+		t.Error("a Linear record must still suppress a second Linear write")
+	}
+	// A record written before the provider field existed has no provider. It
+	// can only have come from Linear, and re-asserting "started" on an issue a
+	// human may have moved on is the failure this ledger exists to prevent — so
+	// a blank provider counts as prior for whoever asks.
+	m.Provider = ""
+	if !countsAsPrior("jira") {
+		t.Error("a legacy record with no provider must still count as prior")
+	}
 }

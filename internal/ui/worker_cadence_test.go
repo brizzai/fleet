@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -520,14 +521,23 @@ func TestStatusWorkerFeedsHookChangesIntoPriority(t *testing.T) {
 // false goroutine dumps — and the instinct to "just refresh the ticket here"
 // will be strong, because that is where every other external lookup lives.
 //
-// It is safe to keep Linear out of the workers only because the design ships no
-// badge: there is no live ticket state on screen, so there is nothing to poll.
-// Every ticket fetch is event-driven and one-shot.
+// It is safe to keep the trackers out of the workers only because the design
+// ships no badge: there is no live ticket state on screen, so there is nothing
+// to poll. Every ticket fetch is event-driven and one-shot.
+//
+// Every ticket package is listed, not just Linear. The single-name version
+// passed vacuously the moment a second provider arrived — a worker calling
+// jira.Fetch or ticketing.Assigned would have sailed straight through the guard
+// that exists to stop exactly that.
 func TestTicketWorkStaysOffTheWorkers(t *testing.T) {
+	packages := []string{"linear", "jira", "ticketing", "ticket."}
 	for _, fn := range []string{"refreshAllGitAndPR", "gitWorkerCycle", "statusWorkerCycle"} {
-		if mentions(t, fn, "linear") {
-			t.Errorf("%s reaches into internal/linear — a network call there blows the "+
-				"~70s per-repo budget that workerStallThreshold (90s) is sized against", fn)
+		for _, pkg := range packages {
+			if mentions(t, fn, pkg) {
+				t.Errorf("%s reaches into internal/%s — a network call there blows the "+
+					"~70s per-repo budget that workerStallThreshold (90s) is sized against",
+					fn, strings.TrimSuffix(pkg, "."))
+			}
 		}
 		if mentions(t, fn, "materializeTicket") {
 			t.Errorf("%s materializes tickets; that work is event-driven and one-shot by design", fn)

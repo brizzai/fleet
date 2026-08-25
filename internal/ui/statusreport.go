@@ -360,10 +360,10 @@ func (d *BugReportDialog) viewStatusForm() string {
 //     the boundary leaves fragments shorter than Redact's 16-character floor and
 //     files verbatim. Widening costs nothing — the loose pattern still only
 //     matches strings beginning `sk-ant-`, so ordinary prose is untouched.
-//   - Linear credentials. A pasted API key can reach a pane excerpt the same way
-//     an Anthropic one can, and fleet now holds one of its own — so it gets the
-//     same treatment at the same chokepoint rather than a promise that it will
-//     never appear.
+//   - Tracker credentials, Linear and Jira. A pasted key can reach a pane
+//     excerpt the same way an Anthropic one can, and fleet now holds one of
+//     each — so they get the same treatment at the same chokepoint rather than
+//     a promise that they will never appear.
 //   - Email addresses, local part and domain both. The multi-account work put
 //     account emails into config.json (default_account, allowed_accounts) and
 //     into the debug log on every launch and poll, and both blocks are published
@@ -377,6 +377,8 @@ func (d *BugReportDialog) viewStatusForm() string {
 func sanitizeForIssue(s string) string {
 	s = claudeaccount.RedactCaptured(s)
 	s = linearKeyPattern.ReplaceAllString(s, "<redacted-linear-key>")
+	s = jiraTokenPattern.ReplaceAllString(s, "<redacted-jira-token>")
+	s = basicAuthPattern.ReplaceAllString(s, "Basic <redacted>")
 	s = emailPattern.ReplaceAllString(s, "<redacted-email>")
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -397,6 +399,20 @@ var emailPattern = regexp.MustCompile(`[\w.+-]+@[\w-]+\.[\w.-]+`)
 // boundary leaves a short fragment that a minimum-length rule would file
 // verbatim. Nothing in ordinary prose starts with these prefixes.
 var linearKeyPattern = regexp.MustCompile(`lin_(?:api|oauth)_[A-Za-z0-9_-]+`)
+
+// jiraTokenPattern matches an Atlassian API token, which carries an ATATT
+// prefix. Same looseness on length and for the same reason as the Linear
+// pattern above.
+var jiraTokenPattern = regexp.MustCompile(`ATATT[A-Za-z0-9_.\-=]+`)
+
+// basicAuthPattern is the backstop the prefix rules cannot be.
+//
+// Jira's credential travels as base64(email:token) in an Authorization header,
+// where the ATATT prefix is encoded away — so a header that reached a log line
+// or a pane excerpt would survive every other rule here intact. The floor of 20
+// characters keeps it off the words "Basic" and "Basic auth" in prose, since
+// the capture must look like base64 to the end of the run.
+var basicAuthPattern = regexp.MustCompile(`Basic\s+[A-Za-z0-9+/]{20,}={0,2}`)
 
 // shortSessionID trims an agent session id to its leading block for the issue
 // table. The only question asked of these ids is whether the one on disk is the

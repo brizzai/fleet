@@ -8,8 +8,9 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 	"github.com/brizzai/fleet/internal/workspace"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -22,11 +23,12 @@ type (
 		repoPath      string
 		defaultBranch string
 		originKey     string // origin of repoPath (native provider); seeds gitInfoCache so the phantom groups correctly
-		// linearTeams are the team keys this repo tracks, resolved off-loop
-		// alongside the worktree list. Empty means the repo tracks no Linear
-		// team and every ticket surface below stays inert.
-		linearTeams []string
-		err         error
+		// bound is the connected providers this repo tracks, each with its
+		// keys, resolved off-loop alongside the worktree list. Empty means the
+		// repo tracks no team and no project, and every ticket surface below
+		// stays inert.
+		bound []ticketing.Bound
+		err   error
 	}
 	workspaceSelectedMsg struct {
 		info workspace.WorkspaceInfo
@@ -78,34 +80,48 @@ type WorktreeDialog struct {
 	sessionCounts   map[string]int
 	defaultBranch   string
 
-	// --- Linear ticket suggestions under the New branch field ---
+	// --- Ticket suggestions under the New branch field ---
 
-	// linearTeams are the team keys this repo tracks. Empty means the whole
-	// feature is inert: no lookups, no rows, no footer changes, and the dialog
-	// renders exactly as it did before any of this existed.
-	linearTeams []string
+	// bound is the connected providers this repo tracks, each with its keys.
+	//
+	// Held rather than re-derived from the registry on every call, for two
+	// reasons that point the same way: the dialog latches individual providers
+	// off as their credentials are refused, and re-deriving would search a
+	// tracker it has already given up on — and a dialog whose behaviour depends
+	// on process-wide credential state cannot be tested at all.
+	bound []ticketing.Bound
+
+	// ticketKeys is the union of bound's keys, computed once in Show. Empty
+	// means the whole feature is inert: no lookups, no rows, no footer changes,
+	// and the dialog renders exactly as it did before any of this existed.
+	ticketKeys []string
 
 	// ticketCursor is the second coordinate of the highlight while focus is
 	// focusNewBranch: ticketOnInput is the field, 0..n-1 is a row. Forced back
 	// to ticketOnInput under any other focus, or two ▸ markers render at once.
 	ticketCursor int
 
-	tickets []linear.Ticket
+	tickets []ticket.Ticket
 
 	// resolved is the issue the CURRENT field text denotes. Cleared
 	// synchronously the moment the text stops denoting it, so a stale title can
 	// never sit under a changed identifier even for one frame.
-	resolved *linear.Ticket
+	resolved *ticket.Ticket
 
 	lastInput     string // change detector, so a redraw doesn't refire a lookup
 	ticketGen     int    // monotonic; tags the debounce tick and the lookup it fires
 	ticketPending bool
 	ticketNote    string // one dim line explaining a degradation; never blocks Enter
 
-	// ticketsOff latches after a failure that will keep failing (not logged in,
-	// CLI missing). Without it a broken `linear` forks a subprocess on every
-	// pause, forever.
-	ticketsOff bool
+	// ticketsOff latches after a failure that will keep failing: no credential,
+	// or one the tracker rejected. Without it a broken credential is re-spent
+	// on every pause, forever.
+	//
+	// Keyed by provider Kind rather than a single flag, so a rejected Jira
+	// token cannot silence the Linear suggestions in the same repo — the two
+	// credentials fail independently and one being broken says nothing about
+	// the other.
+	ticketsOff map[string]bool
 }
 
 // NewWorktreeDialog creates a new worktree dialog.
@@ -128,7 +144,7 @@ func NewWorktreeDialog() *WorktreeDialog {
 }
 
 // Show populates and shows the dialog.
-func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*session.Session, provider workspace.Provider, repoPath, defaultBranch string, linearTeams []string) {
+func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*session.Session, provider workspace.Provider, repoPath, defaultBranch string, bound []ticketing.Bound) {
 	d.visible = true
 	d.workspaces = workspaces
 	d.provider = provider
@@ -140,13 +156,17 @@ func (d *WorktreeDialog) Show(workspaces []workspace.WorkspaceInfo, sessions []*
 	d.baseBranchInput.SetValue(defaultBranch)
 	d.newBranchInput.SetValue("")
 
-	d.linearTeams = linearTeams
+	d.bound = bound
+	d.ticketKeys = nil
+	for _, b := range bound {
+		d.ticketKeys = append(d.ticketKeys, b.Keys...)
+	}
 	d.tickets = nil
 	d.resolved = nil
 	d.lastInput = ""
 	d.ticketPending = false
 	d.ticketNote = ""
-	d.ticketsOff = false
+	d.ticketsOff = nil
 	// Monotonic, never reset to zero. A per-dialog counter that restarted would
 	// recycle values, so a reply from a previous open could match a new one
 	// where the user had typed the same number of characters.
@@ -414,12 +434,12 @@ func (d *WorktreeDialog) View() string {
 	b.WriteString(d.baseBranchInput.View())
 	b.WriteString("\n\n")
 
-	// New branch input. The team keys beside the label are the whole
-	// configuration disclosure, a few characters: this repo tracks Linear and
-	// these are its teams.
+	// New branch input. The tracker keys beside the label are the whole
+	// configuration disclosure, a few characters: this repo tracks tickets and
+	// these are its teams or projects.
 	b.WriteString(DimStyle.Render("New branch:"))
-	if len(d.linearTeams) > 0 {
-		b.WriteString(DimStyle.Render("   " + strings.Join(d.linearTeams, " ")))
+	if len(d.ticketKeys) > 0 {
+		b.WriteString(DimStyle.Render("   " + strings.Join(d.ticketKeys, " ")))
 	}
 	b.WriteString("\n")
 	b.WriteString(d.newBranchInput.View())

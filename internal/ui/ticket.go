@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
-	"github.com/brizzai/fleet/internal/linear"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 )
 
 // ticketMaterializeBudget bounds the whole fetch-and-write step, which runs on
@@ -19,28 +20,33 @@ import (
 // way, and past this the prompt simply isn't seeded.
 const ticketMaterializeBudget = 25 * time.Second
 
-// materializeTicket writes a Linear ticket and its screenshots into a freshly
-// created worktree.
+// materializeTicket writes a ticket and its screenshots into a freshly created
+// worktree.
 //
 // Called from the worktree-creation closure, off the Update goroutine, beside
 // copyClaudeSettingsFile and CopyConfiguredFiles — and with the same contract:
 // it never fails its caller. A nil result means no prompt gets seeded, which is
 // the honest outcome, because a prompt pointing at files that were never
 // written is worse than no prompt.
-func materializeTicket(worktreePath string, t *linear.Ticket, moveState bool) (*linear.Result, error) {
+//
+// repoPath is the checkout the ticket was picked in, not the new worktree: it
+// is what names the tracker keys, and therefore which provider owns this
+// identifier.
+func materializeTicket(repoPath, worktreePath string, t *ticket.Ticket, moveState bool) (*ticket.Result, error) {
 	if t == nil || !t.Ok() {
 		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ticketMaterializeBudget)
 	defer cancel()
 
-	res, err := linear.Materialize(ctx, linear.Opts{
+	res, err := ticketing.Materialize(ctx, repoPath, ticket.Opts{
 		WorktreePath: worktreePath,
 		Identifier:   t.Identifier,
 		MoveState:    moveState,
 	})
 	if err != nil {
-		debuglog.Logger.Warn("linear: materialize failed", "id", t.Identifier, "worktree", worktreePath, "err", err)
+		debuglog.Logger.Warn("ticket: materialize failed",
+			"provider", t.Provider, "id", t.Identifier, "worktree", worktreePath, "err", err)
 		return nil, err
 	}
 	return &res, nil
@@ -61,7 +67,15 @@ func pathTailAfterRepo(path, repoRoot string) string {
 }
 
 // ticketStatusLine renders what happened, for the one line the user sees.
-func ticketStatusLine(res *linear.Result, err error) string {
+//
+// tracker is the provider's display name, taken from the ticket the dialog
+// carried rather than re-resolved: by the time this runs the worktree exists
+// and its repo path is no longer to hand, and naming the wrong tracker in an
+// error line is worse than naming none.
+func ticketStatusLine(tracker string, res *ticket.Result, err error) string {
+	if tracker == "" {
+		tracker = "Ticket"
+	}
 	switch {
 	case err != nil:
 		// ErrNotFound used to be swallowed beside ErrNotConnected, because
@@ -72,18 +86,17 @@ func ticketStatusLine(res *linear.Result, err error) string {
 		// re-fetched it. "Not found" there means it was deleted, or their
 		// access to it changed, in the seconds since — a real event, and
 		// swallowing it leaves a worktree that opens with no prompt and no
-		// explanation. Worded rather than %v-formatted: the sentinel reads
-		// "linear: issue not found", which renders as "Linear: linear: …".
-		if errors.Is(err, linear.ErrNotFound) {
-			return "Linear: issue not found — worktree created without the ticket"
+		// explanation.
+		if errors.Is(err, ticket.ErrNotFound) {
+			return tracker + ": issue not found — worktree created without the ticket"
 		}
 		// Still a resting state, and barely reachable from this caller anyway:
 		// the dialog's own fetch had to succeed for there to be a ticket to
 		// materialize at all.
-		if errors.Is(err, linear.ErrNotConnected) {
+		if errors.Is(err, ticket.ErrNotConnected) {
 			return ""
 		}
-		return fmt.Sprintf("Linear: %v — starting without the ticket", err)
+		return fmt.Sprintf("%s: %v — starting without the ticket", tracker, err)
 	case res == nil:
 		return ""
 	}

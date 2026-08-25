@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/brizzai/fleet/internal/linear"
+	"github.com/brizzai/fleet/internal/ticket"
 )
 
 // connectLinearTimeout bounds the verification round trip. One GraphQL call,
@@ -26,7 +27,7 @@ const connectLinearTimeout = 20 * time.Second
 // as "connect failed" contradicted the code and sent people back to re-paste a
 // key that was already working.
 type linearConnectedMsg struct {
-	workspace  linear.Workspace
+	workspace  ticket.Account
 	via        string
 	persistErr error
 }
@@ -75,7 +76,7 @@ type ConnectLinearDialog struct {
 
 	err        error
 	persistErr error
-	workspace  linear.Workspace
+	workspace  ticket.Account
 	via        string
 
 	// cancelSignIn aborts an in-flight browser sign-in. `esc` used to only hide
@@ -117,7 +118,7 @@ func (d *ConnectLinearDialog) Show() {
 	d.err, d.persistErr = nil, nil
 	d.input.SetValue("")
 	d.input.Blur()
-	d.workspace, _ = linear.WorkspaceInfo()
+	d.workspace, _ = linear.New().Account()
 	d.via = linear.ConnectedVia()
 	if d.via != "" {
 		d.stage = connectDone
@@ -350,16 +351,16 @@ func (d *ConnectLinearDialog) View() string {
 			b.WriteString(DimStyle.Render("To make it stick, set " + linear.APIKeyEnvVar + " in your shell instead."))
 			b.WriteString("\n")
 		}
-		if len(d.workspace.TeamKeys) > 0 {
+		if len(d.workspace.Keys) > 0 {
 			b.WriteString("\n")
-			b.WriteString(DimStyle.Render("Teams: " + strings.Join(d.workspace.TeamKeys, ", ")))
+			b.WriteString(DimStyle.Render("Teams: " + strings.Join(d.workspace.Keys, ", ")))
 			b.WriteString("\n\n")
 			// The per-repo step is the part people miss, so it is spelled out
 			// rather than left to documentation: a connected fleet still does
 			// nothing in a repo until that repo names a team.
 			b.WriteString(DimStyle.Render("Turn a repo on by naming its team in .fleet.local.json:"))
 			b.WriteString("\n")
-			b.WriteString(DimStyle.Render(fmt.Sprintf(`  {"linear": {"team": %q}}`, d.workspace.TeamKeys[0])))
+			b.WriteString(DimStyle.Render(fmt.Sprintf(`  {"linear": {"team": %q}}`, d.workspace.Keys[0])))
 			b.WriteString("\n")
 		}
 

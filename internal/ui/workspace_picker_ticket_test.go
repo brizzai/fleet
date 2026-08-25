@@ -9,15 +9,45 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/brizzai/fleet/internal/jira"
 	"github.com/brizzai/fleet/internal/linear"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 	"github.com/brizzai/fleet/internal/workspace"
 )
 
-func ticketDialog(t *testing.T, tickets ...linear.Ticket) *WorktreeDialog {
+// boundTo builds the provider set the worktree dialog is handed, from tracker
+// keys alone.
+//
+// The real provider values are used rather than a stub: both are zero-size and
+// only Kind() and Name() are reached from a test, since every lookup reply is
+// injected as a message rather than fetched. Passing the real ones also means a
+// provider that changed its Kind breaks these tests, which is the point.
+func boundTo(keys ...string) []ticketing.Bound {
+	if len(keys) == 0 {
+		return nil
+	}
+	return []ticketing.Bound{{Provider: linear.New(), Keys: keys}}
+}
+
+// boundToBoth hands the dialog two trackers, which is the state every
+// per-provider rule here exists for.
+func boundToBoth(linearKeys, jiraKeys []string) []ticketing.Bound {
+	var out []ticketing.Bound
+	if len(linearKeys) > 0 {
+		out = append(out, ticketing.Bound{Provider: linear.New(), Keys: linearKeys})
+	}
+	if len(jiraKeys) > 0 {
+		out = append(out, ticketing.Bound{Provider: jira.New(), Keys: jiraKeys})
+	}
+	return out
+}
+
+func ticketDialog(t *testing.T, tickets ...ticket.Ticket) *WorktreeDialog {
 	t.Helper()
 	d := NewWorktreeDialog()
 	d.SetSize(120, 40)
-	d.Show(nil, nil, nil, "/repo", "master", []string{"BRZ"})
+	d.Show(nil, nil, nil, "/repo", "master", boundTo("BRZ"))
 	d.tickets = tickets
 	return d
 }
@@ -28,8 +58,8 @@ func ticketDialog(t *testing.T, tickets ...linear.Ticket) *WorktreeDialog {
 // because a branch gets created either way.
 func TestWorktreeCaretAndHighlightNeverCoexist(t *testing.T) {
 	d := ticketDialog(t,
-		linear.Ticket{Identifier: "BRZ-3182", Title: "Filter bar cramped"},
-		linear.Ticket{Identifier: "BRZ-3040", Title: "Collapse resets"},
+		ticket.Ticket{Identifier: "BRZ-3182", Title: "Filter bar cramped"},
+		ticket.Ticket{Identifier: "BRZ-3040", Title: "Collapse resets"},
 	)
 	d.workspaces = []workspace.WorkspaceInfo{{Name: "wt-a", Path: "/a"}}
 
@@ -135,7 +165,7 @@ func TestWorktreeStaleTicketReplyIgnored(t *testing.T) {
 
 	d.applyTickets(worktreeTicketsMsg{
 		gen: stale, byID: true,
-		tickets: []linear.Ticket{{Identifier: "BRZ-3182", Title: "the wrong one"}},
+		tickets: []ticket.Ticket{{Identifier: "BRZ-3182", Title: "the wrong one"}},
 	})
 	if d.resolved != nil {
 		t.Errorf("a stale reply resolved %s onto a field reading %q",
@@ -144,7 +174,7 @@ func TestWorktreeStaleTicketReplyIgnored(t *testing.T) {
 
 	d.applyTickets(worktreeTicketsMsg{
 		gen: current, byID: true,
-		tickets: []linear.Ticket{{Identifier: "BRZ-3184", Title: "the right one"}},
+		tickets: []ticket.Ticket{{Identifier: "BRZ-3184", Title: "the right one"}},
 	})
 	if d.resolved == nil || d.resolved.Identifier != "BRZ-3184" {
 		t.Errorf("current reply did not install: %+v", d.resolved)
@@ -159,7 +189,7 @@ func TestWorktreeTicketReplyNeverMovesHighlight(t *testing.T) {
 	d.onFieldChanged("drawer")
 	gen := d.ticketGen
 
-	d.applyTickets(worktreeTicketsMsg{gen: gen, tickets: []linear.Ticket{
+	d.applyTickets(worktreeTicketsMsg{gen: gen, tickets: []ticket.Ticket{
 		{Identifier: "BRZ-3182", Title: "a"}, {Identifier: "BRZ-3040", Title: "b"},
 	}})
 	if d.ticketCursor != ticketOnInput {
@@ -173,7 +203,7 @@ func TestWorktreeTicketReplyNeverMovesHighlight(t *testing.T) {
 	d.setSelection(focusNewBranch, 1)
 	d.onFieldChanged("drawer2")
 	gen = d.ticketGen
-	d.applyTickets(worktreeTicketsMsg{gen: gen, tickets: []linear.Ticket{{Identifier: "BRZ-1", Title: "only"}}})
+	d.applyTickets(worktreeTicketsMsg{gen: gen, tickets: []ticket.Ticket{{Identifier: "BRZ-1", Title: "only"}}})
 	if d.ticketCursor != 0 {
 		t.Errorf("cursor = %d after the list shrank to 1 row, want 0", d.ticketCursor)
 	}
@@ -182,7 +212,7 @@ func TestWorktreeTicketReplyNeverMovesHighlight(t *testing.T) {
 // TestWorktreeTypingReturnsHighlightAndKeepsKeystroke pins both halves: the
 // jump back, and that the character that caused it is not swallowed.
 func TestWorktreeTypingReturnsHighlightAndKeepsKeystroke(t *testing.T) {
-	d := ticketDialog(t, linear.Ticket{Identifier: "BRZ-3182", Title: "x"})
+	d := ticketDialog(t, ticket.Ticket{Identifier: "BRZ-3182", Title: "x"})
 	d.newBranchInput.SetValue("dra")
 	d.setSelection(focusNewBranch, 0)
 	if d.newBranchInput.Focused() {
@@ -203,7 +233,7 @@ func TestWorktreeTypingReturnsHighlightAndKeepsKeystroke(t *testing.T) {
 // does NOT create: the base branch may still be wrong and the name must stay
 // editable. The second Enter is the one that acts.
 func TestWorktreeEnterOnTicketFillsDerivedName(t *testing.T) {
-	d := ticketDialog(t, linear.Ticket{Identifier: "BRZ-3182", Title: "Filter bar renders cramped"})
+	d := ticketDialog(t, ticket.Ticket{Identifier: "BRZ-3182", Title: "Filter bar renders cramped"})
 	d.setSelection(focusNewBranch, 0)
 
 	d, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -237,7 +267,7 @@ func TestWorktreeEnterOnTicketFillsDerivedName(t *testing.T) {
 	}
 }
 
-// TestWorktreeEnterAlwaysCreates: no Linear state may ever block the dialog's
+// TestWorktreeEnterAlwaysCreates: no tracker state may ever block the dialog's
 // primary action. The suggestion list can be empty, loading, latched off, or
 // erroring — Enter still makes a worktree.
 func TestWorktreeEnterAlwaysCreates(t *testing.T) {
@@ -245,12 +275,12 @@ func TestWorktreeEnterAlwaysCreates(t *testing.T) {
 		name  string
 		setup func(*WorktreeDialog)
 	}{
-		{"no linear at all", func(d *WorktreeDialog) { d.linearTeams = nil }},
-		{"latched off", func(d *WorktreeDialog) { d.ticketsOff = true }},
+		{"no tracker at all", func(d *WorktreeDialog) { d.bound, d.ticketKeys = nil, nil }},
+		{"latched off", func(d *WorktreeDialog) { d.markTrackerOff("linear") }},
 		{"lookup in flight", func(d *WorktreeDialog) { d.ticketPending = true }},
-		{"error note showing", func(d *WorktreeDialog) { d.ticketNote = "linear: timed out" }},
+		{"error note showing", func(d *WorktreeDialog) { d.ticketNote = "Linear: timed out" }},
 		{"suggestions present", func(d *WorktreeDialog) {
-			d.tickets = []linear.Ticket{{Identifier: "BRZ-1", Title: "x"}}
+			d.tickets = []ticket.Ticket{{Identifier: "BRZ-1", Title: "x"}}
 		}},
 	}
 	for _, c := range cases {
@@ -280,7 +310,7 @@ func TestWorktreeEnterAlwaysCreates(t *testing.T) {
 // TestWorktreeTicketDropsWhenFieldEditedAway: pick a ticket, then clear the
 // field and type something else — the creation message must not still claim it.
 func TestWorktreeTicketDropsWhenFieldEditedAway(t *testing.T) {
-	d := ticketDialog(t, linear.Ticket{Identifier: "BRZ-3182", Title: "Filter bar"})
+	d := ticketDialog(t, ticket.Ticket{Identifier: "BRZ-3182", Title: "Filter bar"})
 	d.setSelection(focusNewBranch, 0)
 	d, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
@@ -299,13 +329,18 @@ func TestWorktreeTicketDropsWhenFieldEditedAway(t *testing.T) {
 	}
 }
 
-// TestWorktreeBlankRenderUnchangedWithoutLinear: a user with no Linear must not
-// be able to tell this feature shipped.
-func TestWorktreeBlankRenderUnchangedWithoutLinear(t *testing.T) {
+// TestWorktreeBlankRenderUnchangedWithoutTracker: a user with no tracker must
+// not be able to tell this feature shipped.
+//
+// The opt-out-by-absence rule, executable. It has to hold for BOTH providers
+// now — the failure it guards against is a connected Jira user seeing ticket
+// chrome under the branch field of every unrelated repo on their machine, which
+// is exactly what a "search every project on the site" fallback would produce.
+func TestWorktreeBlankRenderUnchangedWithoutTracker(t *testing.T) {
 	mk := func(teams []string) string {
 		d := NewWorktreeDialog()
 		d.SetSize(120, 40)
-		d.Show(nil, nil, nil, "/repo", "master", teams)
+		d.Show(nil, nil, nil, "/repo", "master", boundTo(teams...))
 		d.newBranchInput.SetValue("my-experiment")
 		return d.View()
 	}
@@ -314,16 +349,29 @@ func TestWorktreeBlankRenderUnchangedWithoutLinear(t *testing.T) {
 	}
 	plain := mk(nil)
 	if strings.Contains(plain, "BRZ") || strings.Contains(plain, "ticket") {
-		t.Errorf("a repo with no .linear.toml shows Linear chrome:\n%s", plain)
+		t.Errorf("a repo that names no team and no project shows ticket chrome:\n%s", plain)
 	}
 	if !strings.Contains(plain, "tab: next  enter: create  esc: cancel") {
 		t.Error("the long-standing footer should still be the default")
+	}
+
+	// And the same for a repo that names a Jira project: the chrome must appear
+	// only because THIS repo asked for it.
+	jiraRepo := func() string {
+		d := NewWorktreeDialog()
+		d.SetSize(120, 40)
+		d.Show(nil, nil, nil, "/repo", "master", boundToBoth(nil, []string{"OPS"}))
+		d.newBranchInput.SetValue("my-experiment")
+		return d.View()
+	}()
+	if !strings.Contains(jiraRepo, "OPS") {
+		t.Errorf("a Jira-tracked repo should disclose its project key:\n%s", jiraRepo)
 	}
 }
 
 // TestWorktreeFooterNamesEnter — the footer is the words half of the promise.
 func TestWorktreeFooterNamesEnter(t *testing.T) {
-	d := ticketDialog(t, linear.Ticket{Identifier: "BRZ-3182", Title: "Filter bar"})
+	d := ticketDialog(t, ticket.Ticket{Identifier: "BRZ-3182", Title: "Filter bar"})
 
 	d.newBranchInput.SetValue("my-experiment")
 	d.setSelection(focusNewBranch, ticketOnInput)
@@ -358,16 +406,16 @@ func TestTypedIdentifierBecomesTheBranchName(t *testing.T) {
 
 	d.applyTickets(worktreeTicketsMsg{
 		gen: d.ticketGen, byID: true,
-		tickets: []linear.Ticket{{Identifier: "BRZ-3217", Title: "Fix the ingest guide"}},
+		tickets: []ticket.Ticket{{Identifier: "BRZ-3217", Title: "Fix the ingest guide"}},
 	})
 
-	want := linear.BranchNameFor("BRZ-3217", "Fix the ingest guide")
+	want := ticket.BranchNameFor("BRZ-3217", "Fix the ingest guide")
 	if got := d.newBranchInput.Value(); got != want {
 		t.Errorf("field should hold the branch name, not the bare identifier:\n got %q\nwant %q", got, want)
 	}
 	// The two paths must agree, which is the invariant that was broken.
 	picked := ticketDialog(t)
-	picked.pickTicket(linear.Ticket{Identifier: "BRZ-3217", Title: "Fix the ingest guide"})
+	picked.pickTicket(ticket.Ticket{Identifier: "BRZ-3217", Title: "Fix the ingest guide"})
 	if picked.newBranchInput.Value() != d.newBranchInput.Value() {
 		t.Errorf("typing and picking must produce the same branch: %q vs %q",
 			d.newBranchInput.Value(), picked.newBranchInput.Value())
@@ -404,7 +452,7 @@ func TestResolvedRewriteOnlyTouchesABareIdentifier(t *testing.T) {
 			d.onFieldChanged(c.field)
 			d.applyTickets(worktreeTicketsMsg{
 				gen: d.ticketGen, byID: true,
-				tickets: []linear.Ticket{{Identifier: "BRZ-3217", Title: "Fix the ingest guide"}},
+				tickets: []ticket.Ticket{{Identifier: "BRZ-3217", Title: "Fix the ingest guide"}},
 			})
 			if got := d.newBranchInput.Value(); got != c.field {
 				t.Errorf("the field must not be rewritten under the user: got %q, want it left as %q", got, c.field)
@@ -433,7 +481,7 @@ func TestResolvedLineReadsAsAppliedNotOffered(t *testing.T) {
 			d.onFieldChanged(c.field)
 			d.applyTickets(worktreeTicketsMsg{
 				gen: d.ticketGen, byID: true,
-				tickets: []linear.Ticket{{Identifier: "BRZ-3217", Title: "Fix with external AI agent"}},
+				tickets: []ticket.Ticket{{Identifier: "BRZ-3217", Title: "Fix with external AI agent"}},
 			})
 
 			got := ansi.Strip(d.View())
@@ -448,5 +496,121 @@ func TestResolvedLineReadsAsAppliedNotOffered(t *testing.T) {
 				t.Errorf("the footer must not invite ↓ when there is nothing to pick:\n%s", got)
 			}
 		})
+	}
+}
+
+// TestOneBrokenTrackerDoesNotSilenceTheOther pins why ticketsOff is a map.
+//
+// With Linear and Jira both configured, a single flag meant a rejected Jira
+// token took the Linear suggestions down with it — two credentials that fail
+// completely independently, latched together. The note must name the tracker
+// that failed, and the surviving one must keep answering.
+func TestOneBrokenTrackerDoesNotSilenceTheOther(t *testing.T) {
+	d := NewWorktreeDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}))
+
+	d.applyTickets(worktreeTicketsMsg{
+		gen: d.ticketGen, query: "OPS-1", byID: true,
+		err: ticket.ErrNotAuthenticated, tracker: "Jira", provider: "jira",
+	})
+
+	if !d.ticketsOff["jira"] {
+		t.Error("a rejected Jira credential should latch Jira off")
+	}
+	if d.ticketsOff["linear"] {
+		t.Error("Linear was latched off by Jira's failure")
+	}
+	if !d.ticketsEnabled() {
+		t.Error("the dialog went inert though Linear is still usable")
+	}
+	if !strings.Contains(d.ticketNote, "Jira") {
+		t.Errorf("note should name the tracker that failed, got %q", d.ticketNote)
+	}
+
+	// And the live set narrows to the working tracker, so no further round trip
+	// is spent on the broken one.
+	bound, keys, names := d.live()
+	if len(bound) != 1 || bound[0].Provider.Kind() != "linear" {
+		t.Errorf("live bound = %+v, want Linear only", bound)
+	}
+	if len(keys) != 1 || keys[0] != "BRZ" {
+		t.Errorf("live keys = %v, want [BRZ] — an OPS identifier must stop resolving", keys)
+	}
+	if len(names) != 1 || names[0] != "Linear" {
+		t.Errorf("live names = %v", names)
+	}
+
+	// Latching the last one off finally makes the dialog inert.
+	d.applyTickets(worktreeTicketsMsg{
+		gen: d.ticketGen, query: "BRZ-1", byID: true,
+		err: ticket.ErrNotAuthenticated, tracker: "Linear", provider: "linear",
+	})
+	if d.ticketsEnabled() {
+		t.Error("with both trackers latched off the dialog must go inert")
+	}
+}
+
+// TestFanOutSearchFailureLatchesNothing: a search that failed belongs to no
+// single provider, so latching on it would silence a tracker that may be fine.
+func TestFanOutSearchFailureLatchesNothing(t *testing.T) {
+	d := NewWorktreeDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}))
+
+	d.applyTickets(worktreeTicketsMsg{gen: d.ticketGen, query: "some prose", err: ticket.ErrNotAuthenticated})
+
+	if len(d.ticketsOff) != 0 {
+		t.Errorf("a fan-out failure latched %v — it names no single provider", d.ticketsOff)
+	}
+	if !strings.Contains(d.ticketNote, "tickets") {
+		t.Errorf("a fan-out failure should say \"tickets\", not guess a tracker: %q", d.ticketNote)
+	}
+}
+
+// TestSearchingLineNamesTheTrackers: with two connected, a user who just added
+// Jira needs to see that the search reaches it.
+func TestSearchingLineNamesTheTrackers(t *testing.T) {
+	d := NewWorktreeDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, nil, "/repo", "master", boundToBoth([]string{"BRZ"}, []string{"OPS"}))
+	d.ticketPending = true
+
+	got := ansi.Strip(d.renderTicketBlock(80))
+	if !strings.Contains(got, "searching Linear and Jira…") {
+		t.Errorf("searching line = %q, want both trackers named", strings.TrimSpace(got))
+	}
+
+	// A repo tracking two teams of ONE tracker binds it twice; "Linear and
+	// Linear" is not a sentence.
+	d2 := NewWorktreeDialog()
+	d2.SetSize(120, 40)
+	d2.Show(nil, nil, nil, "/repo", "master", []ticketing.Bound{
+		{Provider: linear.New(), Keys: []string{"BRZ"}},
+		{Provider: linear.New(), Keys: []string{"PRD"}},
+	})
+	d2.ticketPending = true
+	got = ansi.Strip(d2.renderTicketBlock(80))
+	if strings.Contains(got, "Linear and Linear") {
+		t.Errorf("repeated provider names: %q", strings.TrimSpace(got))
+	}
+}
+
+// TestJiraIdentifierResolvesThroughItsOwnProvider: the union gates the shape
+// test, and the owning provider is picked by the key prefix — so a Jira key in
+// a repo that tracks both must not be sent to Linear.
+func TestJiraIdentifierResolvesThroughItsOwnProvider(t *testing.T) {
+	bound := boundToBoth([]string{"BRZ"}, []string{"OPS"})
+
+	if _, ok := ticket.LooksLikeIdentifier("OPS-42", []string{"BRZ", "OPS"}); !ok {
+		t.Fatal("OPS-42 should pass the shape test for a repo tracking OPS")
+	}
+	p, ok := ticketing.OwnerIn(bound, "OPS-42")
+	if !ok || p.Kind() != "jira" {
+		t.Errorf("OPS-42 resolved to %v, want the Jira provider", p)
+	}
+	p, ok = ticketing.OwnerIn(bound, "brz-1")
+	if !ok || p.Kind() != "linear" {
+		t.Errorf("brz-1 resolved to %v, want the Linear provider", p)
 	}
 }

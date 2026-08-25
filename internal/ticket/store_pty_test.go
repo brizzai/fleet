@@ -1,4 +1,4 @@
-package linear
+package ticket
 
 import (
 	"bytes"
@@ -12,6 +12,15 @@ import (
 
 	"github.com/creack/pty"
 )
+
+// testStore builds a Store on a namespaced service so these tests never touch
+// the real fleet-linear or fleet-jira items. The Store value IS the seam — the
+// previous version had a pair of *To/*From functions existing only for tests,
+// and one of them ignored the service name it was handed on Linux, so the seam
+// silently did not work there.
+func testStore(service string) Store {
+	return Store{Service: service, Label: "fleet: test", FileName: "ticket-test.json"}
+}
 
 // TestKeychainWriteWorksUnderATTY is a regression test that must run under a
 // real controlling terminal, because that is the only place the bug exists.
@@ -83,14 +92,14 @@ func runKeychainTTYChild(t *testing.T) {
 
 	const payload = `{"kind":"api_key","token":"probe-not-a-real-key"}`
 	start := time.Now()
-	if err := writeSecretTo(service, []byte(payload)); err != nil {
+	if err := testStore(service).Save([]byte(payload)); err != nil {
 		t.Fatalf("write: %v (after %s)", err, time.Since(start).Round(time.Millisecond))
 	}
 	// A write that only just beat the deadline is the bug in slow motion.
 	if elapsed := time.Since(start); elapsed > storeTimeout/2 {
 		t.Fatalf("write took %s, near the %s deadline — it is waiting on something", elapsed, storeTimeout)
 	}
-	got, ok := readSecretFrom(service)
+	got, ok := testStore(service).Load()
 	if !ok || strings.TrimSpace(string(got)) != payload {
 		t.Fatalf("read back %q (ok=%v), want the payload", got, ok)
 	}
@@ -125,10 +134,10 @@ func TestKeychainStoresRecordsPastThePasswordBufferLimit(t *testing.T) {
 
 	for _, n := range []int{1, 64, 128, 129, 200, 512, 1024} {
 		payload := []byte(strings.Repeat("x", n))
-		if err := writeSecretTo(svc, payload); err != nil {
+		if err := testStore(svc).Save(payload); err != nil {
 			t.Fatalf("len=%d: write failed: %v", n, err)
 		}
-		got, ok := readSecretFrom(svc)
+		got, ok := testStore(svc).Load()
 		if !ok {
 			t.Errorf("len=%d: record did not read back", n)
 			continue
@@ -150,14 +159,14 @@ func TestKeychainShrinkingARecordLeavesNoTail(t *testing.T) {
 	t.Cleanup(func() { clearKeychainChunks(svc) })
 
 	long := []byte(strings.Repeat("y", 600))
-	if err := writeSecretTo(svc, long); err != nil {
+	if err := testStore(svc).Save(long); err != nil {
 		t.Fatalf("write long: %v", err)
 	}
 	short := []byte("z")
-	if err := writeSecretTo(svc, short); err != nil {
+	if err := testStore(svc).Save(short); err != nil {
 		t.Fatalf("write short: %v", err)
 	}
-	got, ok := readSecretFrom(svc)
+	got, ok := testStore(svc).Load()
 	if !ok || !bytes.Equal(got, short) {
 		t.Errorf("a shrunk record must read back as itself, got ok=%v len=%d", ok, len(got))
 	}

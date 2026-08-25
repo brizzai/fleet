@@ -88,13 +88,18 @@ const (
 	EventBugReportSubmitted      = "bug_report_submitted"
 
 	// Subsystem failures (counters).
-	EventTmuxCommandFailure   = "tmux_command_failure"
-	EventGitCommandFailure    = "git_command_failure"
-	EventGhCommandFailure     = "gh_command_failure"
-	EventLinearCommandFailure = "linear_command_failure"
+	EventTmuxCommandFailure = "tmux_command_failure"
+	EventGitCommandFailure  = "git_command_failure"
+	EventGhCommandFailure   = "gh_command_failure"
 
-	// Linear tickets materialized into a worktree.
-	EventLinearTicketMaterialized = "linear_ticket_materialized"
+	// Ticket-tracker failures. One event for every provider, with the provider
+	// as a property rather than baked into the name: a per-provider event name
+	// makes "how often does ticket fetching fail" a query that has to be
+	// rewritten every time a tracker is added.
+	EventTicketCommandFailure = "ticket_command_failure"
+
+	// Tickets materialized into a worktree. Carries a "provider" property.
+	EventTicketMaterialized = "ticket_materialized"
 
 	// Onboarding funnel (one-shot per install).
 	EventOnboardingFirstLaunch         = "onboarding_first_launch"

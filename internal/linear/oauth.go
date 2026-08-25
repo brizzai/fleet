@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/brizzai/fleet/internal/ticket"
 )
 
 // Linear's OAuth endpoints. The authorize URL is on the app domain and the token
@@ -269,7 +271,7 @@ func refresh(ctx context.Context, refreshToken string) (Credential, error) {
 }
 
 func postToken(ctx context.Context, form url.Values) (Credential, error) {
-	ctx, cancel := context.WithTimeout(ctx, metaTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ticket.MetaTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURLVar, strings.NewReader(form.Encode()))
@@ -285,14 +287,14 @@ func postToken(ctx context.Context, form url.Values) (Credential, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return Credential{}, fmt.Errorf("%w (token endpoint returned http %d)", ErrNotAuthenticated, resp.StatusCode)
+		return Credential{}, fmt.Errorf("%w (token endpoint returned http %d)", ticket.ErrNotAuthenticated, resp.StatusCode)
 	}
 	var tr tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
 		return Credential{}, fmt.Errorf("linear: unreadable token response: %w", err)
 	}
 	if tr.AccessToken == "" {
-		return Credential{}, ErrNotAuthenticated
+		return Credential{}, ticket.ErrNotAuthenticated
 	}
 
 	c := Credential{Kind: credOAuth, Token: tr.AccessToken, Refresh: tr.RefreshToken}
