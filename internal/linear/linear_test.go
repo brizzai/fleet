@@ -1,93 +1,15 @@
 package linear
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"net/http"
+	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"testing"
+
+	"github.com/brizzai/fleet/internal/ticket"
 )
-
-// TestNoLinearSubprocess is the point of the move off the CLI, pinned.
-//
-// An earlier version of this package shelled out to `linear`, which cost three
-// version-skew bugs in one session: a release compiled without network access to
-// uploads.linear.app that failed every image download and still exited 0, an
-// `auth login` command that did not exist in the installed version, and an error
-// message naming a `configure` command that never existed at all. None of that
-// can come back while this holds.
-//
-// The guard is an allowlist rather than a ban, because the package legitimately
-// runs three OS helpers — two keychains and a browser opener. An allowlist fails
-// on anything new, which is the property that matters: adding a subprocess here
-// should require saying so out loud.
-func TestNoLinearSubprocess(t *testing.T) {
-	allowed := map[string]string{
-		"security":    "macOS keychain",
-		"secret-tool": "libsecret keychain",
-		"open":        "browser, macOS",
-		"xdg-open":    "browser, Linux",
-	}
-
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fset := token.NewFileSet()
-	scanned := 0
-
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		scanned++
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "exec" {
-				return true
-			}
-			if sel.Sel.Name != "Command" && sel.Sel.Name != "CommandContext" && sel.Sel.Name != "LookPath" {
-				return true
-			}
-			// The binary is the first string-literal argument, after the ctx
-			// that CommandContext takes.
-			for _, arg := range call.Args {
-				lit, ok := arg.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
-				}
-				bin := strings.Trim(lit.Value, `"`)
-				if _, allow := allowed[bin]; !allow {
-					t.Errorf("%s runs %q — the data path is HTTP now, on purpose. "+
-						"If this is a genuinely new OS helper, add it to the allowlist above.", name, bin)
-				}
-				return false
-			}
-			return false
-		})
-	}
-	if scanned == 0 {
-		t.Fatal("scanned no files — this guard is vacuous")
-	}
-}
 
 // TestStartedStateResolvesByTypeAndPosition pins how the one mutation picks a
 // state.
@@ -134,15 +56,15 @@ func TestGraphQLErrorClassification(t *testing.T) {
 	}{
 		{"ok", 200, nil, nil},
 		{"unknown issue is a 200", 200,
-			[]gqlErrorEntry{{Message: "Entity not found: Issue"}}, ErrNotFound},
+			[]gqlErrorEntry{{Message: "Entity not found: Issue"}}, ticket.ErrNotFound},
 		{"rejected credential", 401,
-			[]gqlErrorEntry{{Message: "Authentication required, not authenticated"}}, ErrNotAuthenticated},
+			[]gqlErrorEntry{{Message: "Authentication required, not authenticated"}}, ticket.ErrNotAuthenticated},
 		{"auth error code without a 401", 200,
 			[]gqlErrorEntry{{Message: "nope", Extensions: struct {
 				Type string `json:"type"`
 				Code string `json:"code"`
-			}{Code: "AUTHENTICATION_ERROR"}}}, ErrNotAuthenticated},
-		{"forbidden", 403, nil, ErrNotAuthenticated},
+			}{Code: "AUTHENTICATION_ERROR"}}}, ticket.ErrNotAuthenticated},
+		{"forbidden", 403, nil, ticket.ErrNotAuthenticated},
 	}
 	for _, c := range cases {
 		got := classifyGraphQL(c.status, c.errs)
@@ -157,188 +79,6 @@ func TestGraphQLErrorClassification(t *testing.T) {
 	}
 }
 
-// TestSeedPromptTellsAgentNotToStart is the requirement the user stated
-// directly: the agent must read and understand, not begin working.
-func TestSeedPromptTellsAgentNotToStart(t *testing.T) {
-	p := SeedPrompt(Result{
-		Ticket: Ticket{Identifier: "BRZ-3182", Title: "Filter bar renders cramped", URL: "https://linear.app/x/BRZ-3182"},
-		RelDir: ".fleet/ticket/BRZ-3182",
-		Images: 3,
-	})
-
-	for _, want := range []string{
-		"Do not start work yet",
-		"Do not edit files, run builds, or begin implementing",
-		"BRZ-3182",
-		".fleet/ticket/BRZ-3182",
-	} {
-		if !strings.Contains(p, want) {
-			t.Errorf("seeded prompt is missing %q.\nA first message that merely describes a task "+
-				"reads as an instruction to perform it, and the agent will start editing before "+
-				"the human has read its understanding.\ngot:\n%s", want, p)
-		}
-	}
-
-	if regexp.MustCompile(`(?i)\b(implement|fix|build|start working on) (it|this|the)\b`).MatchString(p) {
-		t.Errorf("seeded prompt reads as an instruction to begin work:\n%s", p)
-	}
-}
-
-// TestSeedPromptFirstLineCarriesIdentifier pins the interaction with the two
-// surfaces that only see line one: the preview pane's prompt strip and
-// naming.GenerateTitle, which cuts at ~50 runes.
-func TestSeedPromptFirstLineCarriesIdentifier(t *testing.T) {
-	p := SeedPrompt(Result{
-		Ticket: Ticket{
-			Identifier: "BRZ-3182",
-			Title:      "Filter bar renders cramped on narrow viewports in the intent drawer",
-		},
-		RelDir: ".fleet/ticket/BRZ-3182",
-	})
-	first := strings.SplitN(p, "\n", 2)[0]
-	r := []rune(first)
-	if len(r) > 50 {
-		r = r[:50]
-	}
-	if !strings.Contains(string(r), "BRZ-3182") {
-		t.Errorf("identifier must survive a 50-rune cut of line 1, else every ticket session "+
-			"gets a sidebar row that doesn't name its ticket.\nfirst 50: %q", string(r))
-	}
-}
-
-// TestSeedPromptOmitsImagesWhenNoneDownloaded is honest degradation made
-// executable: never point the agent at a directory that does not exist.
-func TestSeedPromptOmitsImagesWhenNoneDownloaded(t *testing.T) {
-	p := SeedPrompt(Result{
-		Ticket: Ticket{Identifier: "BRZ-1", Title: "x"},
-		RelDir: ".fleet/ticket/BRZ-1",
-		Images: 0,
-	})
-	if strings.Contains(p, "images/") {
-		t.Errorf("prompt points at images/ when none were downloaded:\n%s", p)
-	}
-}
-
-func TestIdentifierFromBranch(t *testing.T) {
-	brz := []string{"BRZ"}
-	cases := []struct {
-		branch string
-		teams  []string
-		want   string
-	}{
-		{"brz-3182-magic-fix", brz, "BRZ-3182"},
-		{"BRZ-3182-Remove-streamer", brz, "BRZ-3182"},
-		{"alice/brz-1594-conversation-items", brz, "BRZ-1594"},
-		{"brz-3182", brz, "BRZ-3182"},
-		{"BRZ-3182", []string{"brz"}, "BRZ-3182"},
-
-		// A repo may track more than one team — a workspace routinely has
-		// several, and both must resolve.
-		{"prd-7-spec", []string{"BRZ", "PRD"}, "PRD-7"},
-		{"brz-9-x", []string{"BRZ", "PRD"}, "BRZ-9"},
-
-		// The whole point of the team gate. An ungated parser reads these as
-		// identifiers for teams that don't exist.
-		{"fix-123-something", brz, ""},
-		{"release-2024-cleanup", brz, ""},
-		{"eng-42-other-team", brz, ""},
-
-		// Real non-ticket branches from the user's tree.
-		{"kinshasa", brz, ""},
-		{"frosty-mahavira", brz, ""},
-		{"brzctl-gcp-project-default", brz, ""},
-		{"master", brz, ""},
-
-		{"brz-3182-x", nil, ""},
-		{"", brz, ""},
-	}
-	for _, c := range cases {
-		if got := IdentifierFromBranch(c.branch, c.teams); got != c.want {
-			t.Errorf("IdentifierFromBranch(%q, %v) = %q, want %q", c.branch, c.teams, got, c.want)
-		}
-	}
-}
-
-func TestLooksLikeIdentifier(t *testing.T) {
-	brz := []string{"BRZ"}
-	cases := []struct {
-		text  string
-		teams []string
-		want  string
-		ok    bool
-	}{
-		{"BRZ-3182", brz, "BRZ-3182", true},
-		{"brz-3182", brz, "BRZ-3182", true},
-		{" BRZ-3182 ", brz, "BRZ-3182", true},
-		{"prd-7", []string{"BRZ", "PRD"}, "PRD-7", true},
-
-		// Prose must NOT look like an identifier — this is what keeps the
-		// suggestion list from ever stealing Enter from someone naming a branch.
-		{"drawer", brz, "", false},
-		{"brz-3182-fix", brz, "", false},
-		{"fix-123", brz, "", false},
-		{"", brz, "", false},
-		{"BRZ-3182", nil, "", false},
-	}
-	for _, c := range cases {
-		got, ok := LooksLikeIdentifier(c.text, c.teams)
-		if got != c.want || ok != c.ok {
-			t.Errorf("LooksLikeIdentifier(%q, %v) = (%q, %v), want (%q, %v)",
-				c.text, c.teams, got, ok, c.want, c.ok)
-		}
-	}
-}
-
-func TestBranchNameFor(t *testing.T) {
-	cases := []struct{ id, title, want string }{
-		{"BRZ-3182", "Filter bar renders cramped", "brz-3182-filter-bar-renders-cramped"},
-		{"BRZ-1", "", "brz-1"},
-		{"BRZ-1", "!!! ???", "brz-1"},
-		{"BRZ-1", "Fix the API/SDK mismatch", "brz-1-fix-the-api-sdk-mismatch"},
-		{"BRZ-1", "  spaced   out  ", "brz-1-spaced-out"},
-	}
-	for _, c := range cases {
-		if got := BranchNameFor(c.id, c.title); got != c.want {
-			t.Errorf("BranchNameFor(%q, %q) = %q, want %q", c.id, c.title, got, c.want)
-		}
-	}
-
-	// No derived name may ever be rejected by the dialog that shows it.
-	long := BranchNameFor("BRZ-3182", strings.Repeat("very long title segment ", 20))
-	if len(long) > len("brz-3182-")+maxBranchSlug {
-		t.Errorf("derived branch not capped: %q", long)
-	}
-	for _, bad := range []string{"..", "//", "@{", " "} {
-		if strings.Contains(long, bad) {
-			t.Errorf("derived branch %q contains %q, which git rejects", long, bad)
-		}
-	}
-	if strings.HasSuffix(long, "-") || strings.HasPrefix(long, "-") {
-		t.Errorf("derived branch has a dangling dash: %q", long)
-	}
-}
-
-func TestDetectExtRecoversExtension(t *testing.T) {
-	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 512)...)
-	gif := append([]byte("GIF89a"), make([]byte, 512)...)
-	html := []byte(`<!DOCTYPE html><html><body>401 Unauthorized</body></html>`)
-
-	// The real case: the CLI writes "Filter bar renders cramped (screenshot)"
-	// with no extension, and an agent's read tool dispatches on extension.
-	if ext, ok := detectExt("Filter bar renders cramped (screenshot)", png); !ok || ext != ".png" {
-		t.Errorf("extensionless PNG: got (%q, %v), want (.png, true)", ext, ok)
-	}
-	if ext, ok := detectExt("x.gif", gif); !ok || ext != ".gif" {
-		t.Errorf("gif: got (%q, %v)", ext, ok)
-	}
-	if _, ok := detectExt("whatever", html); ok {
-		t.Error("an HTML 401 body must be rejected, not saved beside real screenshots")
-	}
-	if got := http.DetectContentType(png); !strings.HasPrefix(got, "image/png") {
-		t.Fatalf("sniffer precondition failed: %s", got)
-	}
-}
-
 // TestFindImagesTakesOnlyRemoteLinks pins what fleet is willing to go and fetch.
 //
 // Linear's markdown carries absolute uploads.linear.app URLs; anything else in a
@@ -346,17 +86,49 @@ func TestDetectExtRecoversExtension(t *testing.T) {
 // something fleet has any business reading off the filesystem and copying into a
 // worktree.
 func TestFindImagesTakesOnlyRemoteLinks(t *testing.T) {
-	md := []byte("text\n" +
+	md := "text\n" +
 		"![shot](/etc/passwd)\n" +
 		"![rel](../../secrets.png)\n" +
 		"![inline](data:image/png;base64,AAAA)\n" +
-		"![other](https://uploads.linear.app/a/b/c)\n")
-	refs := findImages(md)
-	if len(refs) != 1 {
-		t.Fatalf("found %d images, want only the remote one: %+v", len(refs), refs)
+		"![evil](https://uploads.linear.app.evil.example/a)\n" +
+		"![other](https://uploads.linear.app/a/b/c)\n"
+	_, targets := findImages(md)
+	if len(targets) != 1 {
+		t.Fatalf("found %d images, want only the remote one: %+v", len(targets), targets)
 	}
-	if refs[0].target != "https://uploads.linear.app/a/b/c" {
-		t.Errorf("kept the wrong link: %q", refs[0].target)
+	if targets[0] != "https://uploads.linear.app/a/b/c" {
+		t.Errorf("kept the wrong link: %q", targets[0])
+	}
+}
+
+// TestAllowedImageHostRejectsLookalikes pins the host predicate this package
+// hands to ticket.Document.
+//
+// The comparison must be on url.Hostname() and nothing else: a suffix test
+// matches uploads.linear.app.evil.example, a prefix test matches
+// evil-uploads.linear.app.evil.example, and either one hands a live credential
+// to whoever registered the domain. ticket's own security test covers the
+// scheme and the re-check at the download; this covers the half that lives here.
+func TestAllowedImageHostRejectsLookalikes(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"https://uploads.linear.app/a", true},
+		{"https://uploads.linear.app:443/a", true},
+		{"https://uploads.linear.app.evil.example/a", false},
+		{"https://evil-uploads.linear.app/a", false},
+		{"https://uploads.linear.app@evil.example/a", false},
+		{"https://api.linear.app/a", false},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.host)
+		if err != nil {
+			t.Fatalf("%s: %v", c.host, err)
+		}
+		if got := allowedImageHost(u); got != c.want {
+			t.Errorf("allowedImageHost(%q) = %v, want %v", c.host, got, c.want)
+		}
 	}
 }
 
@@ -403,6 +175,7 @@ func TestTeamKeysReadOnlyTeamID(t *testing.T) {
 // without any UI, and it is the only path that works in CI, where there is no
 // keychain to read.
 func TestCredentialResolutionOrder(t *testing.T) {
+	isolateStore(t)
 	orig := getenv
 	t.Cleanup(func() { getenv = orig; resetCredentialForTest() })
 
@@ -426,8 +199,8 @@ func TestCredentialResolutionOrder(t *testing.T) {
 
 	getenv = func(string) string { return "" }
 	resetCredentialForTest()
-	if _, err := credential(); err != ErrNotConnected {
-		t.Errorf("with no environment key and nothing stored, credential must be ErrNotConnected, got %v", err)
+	if _, err := credential(); err != ticket.ErrNotConnected {
+		t.Errorf("with no environment key and nothing stored, credential must be ticket.ErrNotConnected, got %v", err)
 	}
 }
 
@@ -441,6 +214,24 @@ func TestAuthHeaderFormDiffersByKind(t *testing.T) {
 	if got := (Credential{Kind: credOAuth, Token: "k"}).authHeader(); got != "Bearer k" {
 		t.Errorf("oauth header = %q, want Bearer", got)
 	}
+}
+
+// isolateStore points the credential store at a service name nothing has ever
+// written, so a test that resolves a credential can never read the developer's
+// real one.
+//
+// Without it the "nothing stored" branch below passes in CI and fails on any
+// machine that is actually connected to Linear — which is every machine where
+// someone would run the suite while changing this code.
+func isolateStore(t *testing.T) {
+	t.Helper()
+	orig := store
+	store = ticket.Store{
+		Service:  "fleet-linear-test-" + strings.ReplaceAll(t.Name(), "/", "-"),
+		Label:    "fleet: test",
+		FileName: "linear-test-does-not-exist.json",
+	}
+	t.Cleanup(func() { store = orig })
 }
 
 // resetCredentialForTest drops the cached credential so a test can re-resolve.
@@ -460,33 +251,20 @@ func resetCredentialForTest() {
 // difference between "In Progress" and "In Review" leading the list — a work
 // queue wants the thing you are in the middle of, not the thing you already
 // handed off.
+//
+// It exercises the real comparator, ticket.SortAssigned, through this package's
+// real projection. The previous version re-implemented the sort inline, which
+// meant it could keep passing while AssignedIssues sorted differently — and
+// that gap got wider, not narrower, once a merged Linear+Jira list had to come
+// out in the same order as either one alone.
 func TestAssignedIssuesOrderPutsWorkInHand(t *testing.T) {
-	mk := func(id, name, typ string, pos float64) issueLite {
-		return mkWithPriority(id, name, typ, pos, 0)
-	}
-	mkp := func(id, name, typ string, pos float64, pri int) issueLite {
-		return mkWithPriority(id, name, typ, pos, pri)
-	}
-	_ = mkp
-
 	nodes := []issueLite{
-		mk("BRZ-4", "Backlog", "backlog", 0),
-		mk("BRZ-3", "Todo", "unstarted", 1),
-		mk("BRZ-2", "In Review", "started", 1002),
-		mk("BRZ-1", "In Dev", "started", 2),
+		mkWithPriority("BRZ-4", "Backlog", "backlog", 0, 0),
+		mkWithPriority("BRZ-3", "Todo", "unstarted", 1, 0),
+		mkWithPriority("BRZ-2", "In Review", "started", 1002, 0),
+		mkWithPriority("BRZ-1", "In Dev", "started", 2, 0),
 	}
-	sort.SliceStable(nodes, func(a, b int) bool {
-		ra, rb := stateTypeRank(nodes[a].stateType()), stateTypeRank(nodes[b].stateType())
-		if ra != rb {
-			return ra < rb
-		}
-		return nodes[a].statePosition() < nodes[b].statePosition()
-	})
-
-	var got []string
-	for _, n := range nodes {
-		got = append(got, n.Identifier)
-	}
+	got := sortedIdentifiers(nodes)
 	want := []string{"BRZ-1", "BRZ-2", "BRZ-3", "BRZ-4"}
 	for i := range want {
 		if got[i] != want[i] {
@@ -494,14 +272,28 @@ func TestAssignedIssuesOrderPutsWorkInHand(t *testing.T) {
 		}
 	}
 
-	// A payload with no state must sort last rather than lead.
+	// A payload with no state must sort last rather than lead. issueLite.ticket
+	// gives it StateOther and the sorts-last position sentinel for exactly this.
 	nodes = append(nodes, issueLite{Identifier: "BRZ-9"})
-	sort.SliceStable(nodes, func(a, b int) bool {
-		return stateTypeRank(nodes[a].stateType()) < stateTypeRank(nodes[b].stateType())
-	})
-	if nodes[len(nodes)-1].Identifier != "BRZ-9" {
-		t.Errorf("a stateless issue should sort last, got order ending in %s", nodes[len(nodes)-1].Identifier)
+	got = sortedIdentifiers(nodes)
+	if last := got[len(got)-1]; last != "BRZ-9" {
+		t.Errorf("a stateless issue should sort last, got order ending in %s", last)
 	}
+}
+
+// sortedIdentifiers projects nodes the way AssignedIssues does and applies the
+// shared comparator, so these tests fail if either half changes.
+func sortedIdentifiers(nodes []issueLite) []string {
+	tickets := make([]ticket.Ticket, 0, len(nodes))
+	for i := range nodes {
+		tickets = append(tickets, nodes[i].ticket())
+	}
+	ticket.SortAssigned(tickets)
+	out := make([]string, 0, len(tickets))
+	for _, t := range tickets {
+		out = append(out, t.Identifier)
+	}
+	return out
 }
 
 // mkWithPriority builds a decoded node for the ordering tests.
@@ -522,39 +314,28 @@ func mkWithPriority(id, stateName, stateType string, pos float64, pri int) issue
 // priority alone is not enough — most of a real backlog shares one priority
 // (21 of 50 in the workspace this was built against were High), so recency has
 // to survive as the tiebreak or that block reorders itself between opens.
+//
+// ticket.Priority deliberately keeps Linear's numbering, so these raw numbers
+// are the same values the API returns and the palette's gauge switches on.
 func TestPriorityOrderingWithinAState(t *testing.T) {
-	if got := PriorityRank(0); got <= PriorityRank(4) {
-		t.Errorf("unset priority ranked %d, must sort BELOW low (%d)", got, PriorityRank(4))
+	rank := func(p int) int { return ticket.Priority(p).Rank() }
+	if rank(0) <= rank(4) {
+		t.Errorf("unset priority ranked %d, must sort BELOW low (%d)", rank(0), rank(4))
 	}
 	for _, c := range []struct{ hi, lo int }{{1, 2}, {2, 3}, {3, 4}, {4, 0}} {
-		if PriorityRank(c.hi) >= PriorityRank(c.lo) {
+		if rank(c.hi) >= rank(c.lo) {
 			t.Errorf("priority %d should outrank %d", c.hi, c.lo)
 		}
 	}
 
 	// Same state, mixed priorities, entering in a deliberately unhelpful order.
-	nodes := []issueLite{
+	got := sortedIdentifiers([]issueLite{
 		mkWithPriority("BRZ-none", "Todo", "unstarted", 1, 0),
 		mkWithPriority("BRZ-high-a", "Todo", "unstarted", 1, 2),
 		mkWithPriority("BRZ-urgent", "Todo", "unstarted", 1, 1),
 		mkWithPriority("BRZ-high-b", "Todo", "unstarted", 1, 2),
 		mkWithPriority("BRZ-low", "Todo", "unstarted", 1, 4),
-	}
-	sort.SliceStable(nodes, func(a, b int) bool {
-		ra, rb := stateTypeRank(nodes[a].stateType()), stateTypeRank(nodes[b].stateType())
-		if ra != rb {
-			return ra < rb
-		}
-		if pa, pb := nodes[a].statePosition(), nodes[b].statePosition(); pa != pb {
-			return pa < pb
-		}
-		return PriorityRank(nodes[a].Priority) < PriorityRank(nodes[b].Priority)
 	})
-
-	var got []string
-	for _, n := range nodes {
-		got = append(got, n.Identifier)
-	}
 	want := []string{"BRZ-urgent", "BRZ-high-a", "BRZ-high-b", "BRZ-low", "BRZ-none"}
 	for i := range want {
 		if got[i] != want[i] {
@@ -563,4 +344,46 @@ func TestPriorityOrderingWithinAState(t *testing.T) {
 	}
 	// high-a before high-b is the recency tiebreak surviving: they entered in
 	// that order and a stable sort must not disturb it.
+}
+
+// TestFullDecodeKeepsPriority pins the field-shadowing trap that silently
+// emptied ticket.md's priority line.
+//
+// issueFull embeds issueLite, and both used to declare a `priority` JSON field.
+// encoding/json resolves that by depth: the outer one wins and the embedded one
+// stays zero — while issueLite.ticket(), which builds the projection every
+// caller reads, returns the embedded one. So a full fetch decoded the priority
+// correctly into a field nothing looked at, and every materialized ticket lost
+// its front-matter priority with no error anywhere.
+//
+// Asserted through the same projection Document returns, not through the struct
+// field, because reading the field directly is what made the bug invisible.
+func TestFullDecodeKeepsPriority(t *testing.T) {
+	const payload = `{
+		"identifier": "BRZ-1", "title": "Filter bar cramped", "priority": 2,
+		"state": {"name": "In Progress", "type": "started", "position": 2},
+		"description": "x"
+	}`
+	var full issueFull
+	if err := json.Unmarshal([]byte(payload), &full); err != nil {
+		t.Fatal(err)
+	}
+	got := full.ticket()
+	if got.Priority != ticket.PriorityHigh {
+		t.Errorf("priority = %v, want High — a duplicate field on issueFull shadows the embedded one", got.Priority)
+	}
+	if got.Identifier != "BRZ-1" || got.StateName != "In Progress" {
+		t.Errorf("the rest of the projection broke: %+v", got)
+	}
+
+	// And the lite path, which decodes issueLite directly rather than embedded,
+	// must keep agreeing with it — the two are compared in one merged list.
+	var lite issueLite
+	if err := json.Unmarshal([]byte(payload), &lite); err != nil {
+		t.Fatal(err)
+	}
+	if lite.ticket().Priority != got.Priority {
+		t.Errorf("lite=%v full=%v — the two decode paths disagree",
+			lite.ticket().Priority, got.Priority)
+	}
 }

@@ -1,21 +1,31 @@
-package linear
+package ticket
 
 import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
 
-// TestImageLinksAreHostGated pins the gate that keeps the Linear credential off
-// every host but Linear's.
+// uploadsHost mirrors internal/linear's real gate. Duplicated here rather than
+// imported because internal/linear imports this package: the point of the test
+// is the machinery in THIS file, exercised against a host predicate shaped
+// exactly like a provider's.
+const uploadsHost = "uploads.linear.app"
+
+func linearHost(u *url.URL) bool { return u.Hostname() == uploadsHost }
+
+// TestImageLinksAreHostGated pins the gate that keeps a tracker credential off
+// every host but that tracker's.
 //
-// fetchImage attaches a raw personal API key or an OAuth access token to
-// whatever URL it is given, and the URLs come from issue descriptions and
-// comments — content anyone who can write to the issue controls, including
-// through Linear's customer requests and public intake. An ungated link is a
+// fetchImage attaches a raw personal API key, an OAuth access token, or a Basic
+// header carrying an Atlassian API token to whatever URL it is given, and the
+// URLs come from issue descriptions, comments and attachment records — content
+// anyone who can write to the issue controls, including through Linear's
+// customer requests and Jira's public service-desk intake. An ungated link is a
 // one-line credential exfiltration primitive.
 func TestImageLinksAreHostGated(t *testing.T) {
 	cases := []struct {
@@ -49,13 +59,8 @@ func TestImageLinksAreHostGated(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := allowedImageURL(c.target); got != c.want {
+			if got := allowedImageURL(c.target, linearHost); got != c.want {
 				t.Errorf("allowedImageURL(%q) = %v, want %v", c.target, got, c.want)
-			}
-			md := []byte("![x](" + c.target + ")")
-			refs := findImages(md)
-			if got := len(refs) == 1; got != c.want {
-				t.Errorf("findImages kept %q = %v, want %v", c.target, got, c.want)
 			}
 		})
 	}
@@ -68,11 +73,6 @@ func TestImageLinksAreHostGated(t *testing.T) {
 // refuses before any request is made. Testing findImages alone would keep
 // passing if someone later called fetchImage from a new code path.
 func TestFetchImageNeverSendsCredentialOffHost(t *testing.T) {
-	// Deliberately no credential is installed. The host check sits ABOVE the
-	// credential() call, so the refusal must happen whether or not one is
-	// resolvable — and this test must never touch the real keychain.
-	t.Setenv(APIKeyEnvVar, "")
-
 	var hits int64
 	var sawAuth atomic.Bool
 	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +84,14 @@ func TestFetchImageNeverSendsCredentialOffHost(t *testing.T) {
 	}))
 	defer attacker.Close()
 
-	_, _, err := fetchImage(context.Background(), attacker.URL+"/x.png", t.TempDir(), "x", 0)
+	// The Auth closure would hand over a live credential if it were ever
+	// reached. The host check sits ABOVE it, so the refusal must happen whether
+	// or not one is resolvable — which is exactly what this asserts.
+	doc := &Document{
+		Host: linearHost,
+		Auth: func(context.Context) (string, error) { return "secret-credential", nil },
+	}
+	_, _, err := fetchImage(context.Background(), doc, attacker.URL+"/x.png", t.TempDir(), "x", 0)
 	if err == nil {
 		t.Fatal("fetchImage accepted a foreign host")
 	}
@@ -95,16 +102,17 @@ func TestFetchImageNeverSendsCredentialOffHost(t *testing.T) {
 		t.Errorf("fetchImage contacted the foreign host %d time(s) — it must refuse before dialing", n)
 	}
 	if sawAuth.Load() {
-		t.Error("the Linear credential reached a foreign host")
+		t.Error("the tracker credential reached a foreign host")
 	}
 }
 
 // TestImageClientRefusesRedirects covers the gap the host check alone leaves.
 //
 // Go strips Authorization across a redirect only when the registrable domain
-// changes; it deliberately permits uploads.linear.app -> anything.linear.app.
-// A redirect target is a URL allowedImageURL never inspected, so the client
-// must not follow one at all.
+// changes; it deliberately permits uploads.linear.app -> anything.linear.app,
+// and the same hole exists for any Jira site on a shared domain. A redirect
+// target is a URL allowedImageURL never inspected, so the client must not
+// follow one at all.
 func TestImageClientRefusesRedirects(t *testing.T) {
 	var followed atomic.Bool
 	dest := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {

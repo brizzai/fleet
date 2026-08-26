@@ -1,4 +1,4 @@
-package linear
+package ticket
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +16,6 @@ import (
 	"github.com/brizzai/fleet/internal/git"
 )
 
-// Layout inside a worktree. Kept narrow (.fleet/ticket/, not .fleet/) because
-// JetBrains Fleet owns .fleet/ in project roots and a repo may legitimately
-// commit .fleet/settings.json.
 const (
 	fleetDir   = ".fleet"
 	ticketDir  = "ticket"
@@ -45,6 +43,15 @@ type Opts struct {
 	WorktreePath string
 	Identifier   string
 
+	// Provider is the Kind of the tracker that produced this identifier, when
+	// the caller already knows it — which it does whenever the ticket came from
+	// a Fetch or a Search rather than from a bare string the user typed.
+	//
+	// Carrying it is what stops the provider being resolved a SECOND time, by a
+	// different rule, at a point where the decision was already made. See
+	// ticketing.Materialize.
+	Provider string
+
 	// MoveState requests the one mutation fleet ever makes.
 	MoveState bool
 }
@@ -59,6 +66,7 @@ var inFlight sync.Map // worktreePath -> struct{}
 // feature could do.
 type meta struct {
 	Identifier string    `json:"identifier"`
+	Provider   string    `json:"provider,omitempty"`
 	FetchedAt  time.Time `json:"fetched_at"`
 	Images     int       `json:"images"`
 	StateWrite string    `json:"state_write"` // "done" | "skipped" | "failed"
@@ -66,6 +74,13 @@ type meta struct {
 }
 
 // TicketDir returns where a ticket materializes inside a worktree.
+//
+// Deliberately not namespaced by provider. A Linear PROJ-1 and a Jira PROJ-1 in
+// one repo would share a directory, but that needs a repo that tracks both
+// trackers AND a key collision between them; namespacing would change the path
+// under every worktree that already exists and lengthen the one line of the
+// seed prompt an agent has to act on. The provider is recorded in meta.json
+// instead, and a mismatch there re-materializes.
 func TicketDir(worktreePath, id string) string {
 	return filepath.Join(worktreePath, fleetDir, ticketDir, strings.ToUpper(id))
 }
@@ -78,28 +93,33 @@ func TicketDir(worktreePath, id string) string {
 // exists, nothing here may fail the caller. The returned error is advisory —
 // log it, surface one line, and start the session anyway. The one hard rule is
 // that Result.Prompt stays empty unless ticket.md verifiably exists: a pointer
-// at a file that isn't there is worse than no pointer.
-func Materialize(ctx context.Context, o Opts) (Result, error) {
+// to files that were never written is worse than no prompt at all.
+func Materialize(ctx context.Context, p Provider, o Opts) (Result, error) {
 	var res Result
 
+	if p == nil {
+		return res, ErrNotConnected
+	}
 	if o.WorktreePath == "" || o.Identifier == "" {
-		return res, fmt.Errorf("linear: materialize needs a worktree and an identifier")
+		return res, fmt.Errorf("materialize needs a worktree and an identifier")
 	}
 	id := strings.ToUpper(o.Identifier)
 
 	if _, busy := inFlight.LoadOrStore(o.WorktreePath, struct{}{}); busy {
-		return res, fmt.Errorf("linear: already materializing %s", o.WorktreePath)
+		return res, fmt.Errorf("already materializing %s", o.WorktreePath)
 	}
 	defer inFlight.Delete(o.WorktreePath)
 
-	// One round trip for everything: description, comments, labels, and the
-	// team's workflow states so the optional state write needs no second query.
-	issue, err := fetchFull(ctx, id)
+	// One round trip for everything: description, comments, labels, and
+	// whatever the optional state write needs, so the whole flow costs one
+	// query plus the image GETs.
+	doc, err := p.Document(ctx, id)
 	if err != nil {
 		return res, err
 	}
 
-	res.Ticket = issue.ticket()
+	res.Ticket = doc.Ticket
+	res.Provider = p.Kind()
 	dir := TicketDir(o.WorktreePath, res.Identifier)
 	res.Dir = dir
 	res.RelDir = filepath.Join(fleetDir, ticketDir, res.Identifier)
@@ -108,7 +128,7 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	// the exclude does not is a window where `git add -A` sweeps a customer
 	// screenshot into a commit.
 	if err := git.AddFleetExclude(o.WorktreePath); err != nil {
-		debuglog.Logger.Warn("linear: could not exclude .fleet from git — ticket files are stageable",
+		debuglog.Logger.Warn("ticket: could not exclude .fleet from git — ticket files are stageable",
 			"worktree", o.WorktreePath, "error", err)
 	}
 
@@ -117,25 +137,31 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 		return res, fmt.Errorf("create %s: %w", imgDir, err)
 	}
 
-	body, images, dropped := collectImages(ctx, renderBody(issue), imgDir)
+	body, images, dropped := collectImages(ctx, doc, imgDir)
 	res.Images, res.ImagesDropped = images, dropped
 
 	if images == 0 {
 		_ = os.Remove(imgDir) // only succeeds when empty, which is what we want
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, ticketFile), renderTicketFile(res, issue, body), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ticketFile), renderTicketFile(res, doc, body), 0644); err != nil {
 		return res, fmt.Errorf("write %s: %w", ticketFile, err)
 	}
 
-	res.Prompt = SeedPrompt(res)
+	res.Prompt = SeedPrompt(p.Name(), res)
 	if err := os.WriteFile(filepath.Join(dir, promptFile), []byte(res.Prompt), 0644); err != nil {
 		// Non-fatal: the prompt is still returned in-memory for this session,
 		// it just won't be reused by the next one.
-		debuglog.Logger.Debug("linear: could not persist prompt.txt", "error", err)
+		debuglog.Logger.Debug("ticket: could not persist prompt.txt", "error", err)
 	}
 
-	m := meta{Identifier: res.Identifier, FetchedAt: time.Now(), Images: images, StateWrite: "skipped"}
+	m := meta{
+		Identifier: res.Identifier,
+		Provider:   p.Kind(),
+		FetchedAt:  time.Now(),
+		Images:     images,
+		StateWrite: "skipped",
+	}
 
 	// meta.json is the durable record that keeps the one mutation exactly-once.
 	// inFlight above cannot do this job: it is an in-process concurrency guard,
@@ -146,7 +172,14 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	// directory, so deleting that directory — the documented way to refresh —
 	// deliberately re-arms the write. That is the intended behaviour, not a gap.
 	// What this closes is every path where the directory survives.
+	//
+	// A record left by a DIFFERENT provider does not count as prior: the two
+	// trackers keep separate boards, so a Linear write says nothing about
+	// whether the Jira issue of the same key has been started.
 	prior, hadPrior := readMeta(dir)
+	if hadPrior && prior.Provider != "" && prior.Provider != p.Kind() {
+		hadPrior = false
+	}
 	switch {
 	case hadPrior && prior.StateWrite == "done":
 		// Already moved. Carry the record forward rather than re-asserting it:
@@ -154,14 +187,15 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 		// "started" is the worst thing this feature could do.
 		//
 		// The record travels; the REPORT does not. res.StateMoved is what the
-		// caller prints as "Moved %s to its team's started state", so setting it
-		// here would claim a write to someone's board that this run did not
-		// make. Only the mutation below may set it.
+		// caller prints as "Moved %s to its started state", so setting it here
+		// would claim a write to someone's board that this run did not make.
+		// Only the mutation below may set it.
 		m.StateWrite, m.MovedTo = "done", prior.MovedTo
-	case o.MoveState:
-		if name, err := MoveToStarted(ctx, issue); err != nil {
+	case o.MoveState && doc.Start != nil:
+		if name, err := doc.Start(ctx); err != nil {
 			m.StateWrite = "failed"
-			debuglog.Logger.Warn("linear: could not move issue to started", "id", res.Identifier, "error", err)
+			debuglog.Logger.Warn("ticket: could not move issue to started",
+				"provider", p.Kind(), "id", res.Identifier, "error", err)
 		} else if name != "" {
 			m.StateWrite, m.MovedTo = "done", name
 			res.StateMoved = name
@@ -169,112 +203,92 @@ func Materialize(ctx context.Context, o Opts) (Result, error) {
 	}
 	writeMeta(dir, m)
 
-	analytics.Track(analytics.EventLinearTicketMaterialized, map[string]any{
-		"images":  images,
-		"dropped": dropped,
+	analytics.Track(analytics.EventTicketMaterialized, map[string]any{
+		"provider": p.Kind(),
+		"images":   images,
+		"dropped":  dropped,
 	})
 	return res, nil
 }
 
-// fetchFull reads the whole issue in one query.
-func fetchFull(ctx context.Context, id string) (*issueFull, error) {
-	var out struct {
-		Issue *issueFull `json:"issue"`
-	}
-	if err := execute(ctx, fullTimeout, issueFullQuery, map[string]any{"id": id}, &out); err != nil {
-		return nil, err
-	}
-	if out.Issue == nil || out.Issue.Identifier == "" {
-		return nil, ErrNotFound
-	}
-	return out.Issue, nil
-}
-
-// renderBody turns the issue into the markdown an agent will read.
+// collectImages downloads every image the document references into imgDir and
+// rewrites the placeholders to the relative paths the agent will read.
 //
-// fleet composes this itself rather than asking the API for a rendered form,
-// which is what lets comments carry their author and time. "Who asked for this
-// and when" is usually the part that decides whether a ticket is still current.
-func renderBody(i *issueFull) string {
-	var b strings.Builder
-	desc := strings.TrimSpace(i.Description)
-	if desc == "" {
-		desc = "_(no description)_"
-	}
-	b.WriteString("## Description\n\n")
-	b.WriteString(desc)
-	b.WriteString("\n")
-
-	if n := len(i.Comments.Nodes); n > 0 {
-		fmt.Fprintf(&b, "\n## Comments (%d)\n", n)
-		for _, c := range i.Comments.Nodes {
-			author := "someone"
-			if c.User != nil && c.User.DisplayName != "" {
-				author = c.User.DisplayName
-			}
-			fmt.Fprintf(&b, "\n### %s — %s\n\n", author, c.CreatedAt.Format("2006-01-02 15:04"))
-			b.WriteString(strings.TrimSpace(c.Body))
-			b.WriteString("\n")
-		}
-	}
-
-	if n := len(i.Children.Nodes); n > 0 {
-		b.WriteString("\n## Sub-issues\n\n")
-		for _, c := range i.Children.Nodes {
-			fmt.Fprintf(&b, "- %s — %s\n", c.Identifier, c.Title)
-		}
-	}
-
-	// Attachments are links (PRs, Figma, Slack threads), not files. Listed
-	// rather than downloaded: fleet fetches images because an agent cannot
-	// follow a URL, and it deliberately does not go crawling anything else.
-	if n := len(i.Attachments.Nodes); n > 0 {
-		b.WriteString("\n## Links\n\n")
-		for _, a := range i.Attachments.Nodes {
-			title := a.Title
-			if title == "" {
-				title = a.URL
-			}
-			fmt.Fprintf(&b, "- [%s](%s)\n", title, a.URL)
-		}
-	}
-	return b.String()
-}
-
-// collectImages downloads every image the body references into imgDir and
-// rewrites the links to the relative paths the agent will read.
+// Both halves are required and neither is sufficient alone: an attachment URL
+// is 401 to an agent with no credential, and an extensionless filename defeats
+// extension dispatch in its file-read tool. Fix one and the agent still sees
+// nothing.
 //
-// Both halves are required and neither is sufficient alone: an uploads.linear.app
-// URL is 401 to an agent with no credential, and an extensionless filename
-// defeats extension dispatch in its file-read tool. Fix one and the agent still
-// sees nothing.
-func collectImages(ctx context.Context, markdown, imgDir string) (body string, kept, dropped int) {
-	refs := findImages([]byte(markdown))
-	body = markdown
+// A placeholder whose download failed or hit a cap is replaced by its alt text
+// alone, so ticket.md never links a file that isn't on disk.
+func collectImages(ctx context.Context, doc *Document, imgDir string) (body string, kept, dropped int) {
+	body = doc.Body
 
 	var total int64
-	for i, ref := range refs {
-		if kept >= maxImages || total >= maxTotalBytes {
-			dropped++
+	for i, img := range doc.Images {
+		// The whole link target, closing paren included. Matching the bare
+		// token instead would make fleet-image:1 a prefix of fleet-image:10 —
+		// so image 1 succeeding would rewrite half of image 10's link and leave
+		// the rest as literal text.
+		ref := "](" + PlaceholderFor(i) + ")"
+		if !strings.Contains(body, ref) {
+			// The provider listed a file the body never referenced. Nothing to
+			// rewrite, so nothing to fetch.
 			continue
 		}
-		name, size, err := fetchImage(ctx, ref.target, imgDir, ref.alt, i+1)
-		if err != nil {
-			debuglog.Logger.Debug("linear: image unavailable", "error", err)
+		if kept >= maxImages || total >= maxTotalBytes {
 			dropped++
+			body = dropImageLink(body, ref)
+			continue
+		}
+		name, size, err := fetchImage(ctx, doc, img.URL, imgDir, img.Alt, i+1)
+		if err != nil {
+			debuglog.Logger.Debug("ticket: image unavailable", "error", err)
+			dropped++
+			body = dropImageLink(body, ref)
 			continue
 		}
 		kept++
 		total += size
-		body = strings.ReplaceAll(body, ref.target, filepath.Join(imagesDir, name))
+		body = strings.ReplaceAll(body, ref, "]("+filepath.Join(imagesDir, name)+")")
 	}
 	return body, kept, dropped
+}
+
+// PlaceholderFor renders the link target a Document must use for Images[i].
+func PlaceholderFor(i int) string { return ImagePlaceholder + strconv.Itoa(i) }
+
+// dropImageLink turns ![alt](fleet-image:3) into a plain "(image: alt)" note.
+//
+// A failed download has to degrade to a sentence rather than to a dangling
+// link: an agent told to open every file in images/ will try, and a 404 on the
+// first thing it reads is a worse start than being told the screenshot is
+// missing.
+func dropImageLink(body, ref string) string {
+	for {
+		end := strings.Index(body, ref)
+		if end < 0 {
+			return body
+		}
+		note := "(image — not downloaded)"
+		start := strings.LastIndex(body[:end], "![")
+		if start < 0 {
+			// Defensive: a placeholder outside an image link. Drop the target
+			// so no fleet-image: token can survive into ticket.md.
+			body = body[:end] + "]()" + body[end+len(ref):]
+			continue
+		}
+		if alt := strings.TrimSpace(body[start+2 : end]); alt != "" {
+			note = "(image: " + alt + " — not downloaded)"
+		}
+		body = body[:start] + note + body[end+len(ref):]
+	}
 }
 
 // renderTicketFile writes front matter carrying the fields the body does not,
 // plus honest provenance, so a reader (human or agent) knows this is a snapshot
 // rather than live state.
-func renderTicketFile(r Result, i *issueFull, body string) []byte {
+func renderTicketFile(r Result, doc *Document, body string) []byte {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "ticket: %s\n", r.Identifier)
@@ -285,21 +299,17 @@ func renderTicketFile(r Result, i *issueFull, body string) []byte {
 	if r.StateName != "" {
 		fmt.Fprintf(&b, "state_when_fetched: %s\n", r.StateName)
 	}
-	if i.Assignee != nil && i.Assignee.DisplayName != "" {
-		fmt.Fprintf(&b, "assignee: %s\n", i.Assignee.DisplayName)
+	if doc.Assignee != "" {
+		fmt.Fprintf(&b, "assignee: %s\n", doc.Assignee)
 	}
-	if p := priorityName(i.Priority); p != "" {
+	if p := r.Priority.Name(); p != "" {
 		fmt.Fprintf(&b, "priority: %s\n", p)
 	}
-	if n := len(i.Labels.Nodes); n > 0 {
-		names := make([]string, 0, n)
-		for _, l := range i.Labels.Nodes {
-			names = append(names, l.Name)
-		}
-		fmt.Fprintf(&b, "labels: %s\n", strings.Join(names, ", "))
+	if len(doc.Labels) > 0 {
+		fmt.Fprintf(&b, "labels: %s\n", strings.Join(doc.Labels, ", "))
 	}
-	if i.Parent != nil && i.Parent.Identifier != "" {
-		fmt.Fprintf(&b, "parent: %s — %s\n", i.Parent.Identifier, i.Parent.Title)
+	if doc.Parent != "" {
+		fmt.Fprintf(&b, "parent: %s\n", doc.Parent)
 	}
 	fmt.Fprintf(&b, "fetched_at: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "images: %d\n", r.Images)
@@ -312,22 +322,6 @@ func renderTicketFile(r Result, i *issueFull, body string) []byte {
 			"or not a readable image.\n", r.ImagesDropped)
 	}
 	return []byte(b.String())
-}
-
-// priorityName maps Linear's numeric priority. 0 means "not set", which is not
-// worth a line in the front matter.
-func priorityName(p int) string {
-	switch p {
-	case 1:
-		return "urgent"
-	case 2:
-		return "high"
-	case 3:
-		return "medium"
-	case 4:
-		return "low"
-	}
-	return ""
 }
 
 // readMeta returns a previously written record for this ticket directory.

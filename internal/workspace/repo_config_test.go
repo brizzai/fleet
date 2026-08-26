@@ -176,3 +176,71 @@ func writeFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestJiraProjectKeysMirrorLinearsMergeRules pins that the two trackers merge
+// the same way.
+//
+// The asymmetry is deliberate and worth keeping identical across providers: a
+// local `project` REPLACES the committed one, because personal membership
+// overriding a repo default is the point, while `projects` lists append and
+// dedupe, because silently dropping half a list is not. Two trackers with two
+// sets of merge semantics would be a thing to look up rather than a thing to
+// know.
+func TestJiraProjectKeysMirrorLinearsMergeRules(t *testing.T) {
+	write := func(t *testing.T, dir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("singular replaces, plural appends", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, ".fleet.json", `{"jira":{"project":"TEAM","projects":["SHARED"]}}`)
+		write(t, dir, ".fleet.local.json", `{"jira":{"project":"MINE","projects":["EXTRA"]}}`)
+
+		got := JiraProjectKeys(dir)
+		want := []string{"MINE", "SHARED", "EXTRA"}
+		if len(got) != len(want) {
+			t.Fatalf("JiraProjectKeys = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("JiraProjectKeys = %v, want %v", got, want)
+			}
+		}
+	})
+
+	t.Run("upper-cased and deduped", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, ".fleet.json", `{"jira":{"projects":[" ops ","OPS","brz"]}}`)
+		got := JiraProjectKeys(dir)
+		want := []string{"OPS", "BRZ"}
+		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("JiraProjectKeys = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("absent means not tracked", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, ".fleet.json", `{"linear":{"team":"BRZ"}}`)
+		if got := JiraProjectKeys(dir); got != nil {
+			t.Errorf("a Linear-only repo reported Jira projects: %v", got)
+		}
+		if got := LinearTeamKeys(dir); len(got) != 1 || got[0] != "BRZ" {
+			t.Errorf("LinearTeamKeys = %v, want [BRZ] — the two must not interfere", got)
+		}
+	})
+
+	t.Run("both trackers in one repo", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, ".fleet.json", `{"linear":{"team":"BRZ"},"jira":{"project":"OPS"}}`)
+		if got := LinearTeamKeys(dir); len(got) != 1 || got[0] != "BRZ" {
+			t.Errorf("LinearTeamKeys = %v", got)
+		}
+		if got := JiraProjectKeys(dir); len(got) != 1 || got[0] != "OPS" {
+			t.Errorf("JiraProjectKeys = %v", got)
+		}
+	})
+
+}

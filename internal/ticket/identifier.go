@@ -1,4 +1,4 @@
-package linear
+package ticket
 
 import (
 	"path/filepath"
@@ -8,24 +8,29 @@ import (
 	"unicode"
 )
 
-// identifierRe matches a Linear identifier at the start of a branch segment:
+// identifierRe matches a tracker identifier at the start of a branch segment:
 // BRZ-3182, brz-3182-some-slug, and (after the last "/") alice/brz-3182-x.
 //
-// It is deliberately loose about the team prefix, because the CALLER gates on
-// the repo's real team keys. That split matters: an ungated pattern like this
-// reads fix-123-thing as FIX-123 and release-2024-cleanup as RELEASE-2024 —
+// One pattern serves both providers because a Linear team key and a Jira
+// project key are the same shape — which is why this file was always the
+// provider-neutral half of the old linear package.
+//
+// It is deliberately loose about the prefix, because the CALLER gates on the
+// repo's real keys. That split matters: an ungated pattern like this reads
+// fix-123-thing as FIX-123 and release-2024-cleanup as RELEASE-2024 —
 // identifiers for teams that don't exist, costing a network round trip and a
 // wrong answer.
 var identifierRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9]{0,9})-(\d{1,7})(?:[-_./]|$)`)
 
-// matchesTeam reports whether candidate is one of the repo's team keys.
+// matchesKey reports whether candidate is one of the repo's tracker keys.
 //
 // This is the gate the loose regex above depends on, and passing a SET rather
-// than a single key is what lets one repo track more than one team — a real
-// case, since a workspace routinely has several (this one has BRZ and PRD) and
-// a repo may legitimately see branches from both.
-func matchesTeam(candidate string, teamKeys []string) bool {
-	for _, k := range teamKeys {
+// than a single key is what lets one repo track more than one team or project —
+// a real case, since a workspace routinely has several (this one has BRZ and
+// PRD) and a repo may legitimately see branches from both. With two providers
+// connected the set is the union across them.
+func matchesKey(candidate string, keys []string) bool {
+	for _, k := range keys {
 		if strings.EqualFold(candidate, k) {
 			return true
 		}
@@ -33,13 +38,13 @@ func matchesTeam(candidate string, teamKeys []string) bool {
 	return false
 }
 
-// IdentifierFromBranch extracts the Linear identifier a branch names, gated on
-// teamKeys. It returns "" when the branch names no issue for those teams.
+// IdentifierFromBranch extracts the identifier a branch names, gated on keys.
+// It returns "" when the branch names no issue for those keys.
 //
-// Matching starts after the last "/", so Linear's own suggested branch names
+// Matching starts after the last "/", so a tracker's own suggested branch names
 // (alice/brz-3182-slug) resolve as well as fleet's (brz-3182-slug).
-func IdentifierFromBranch(branch string, teamKeys []string) string {
-	if branch == "" || len(teamKeys) == 0 {
+func IdentifierFromBranch(branch string, keys []string) string {
+	if branch == "" || len(keys) == 0 {
 		return ""
 	}
 	seg := branch
@@ -47,25 +52,25 @@ func IdentifierFromBranch(branch string, teamKeys []string) string {
 		seg = seg[i+1:]
 	}
 	m := identifierRe.FindStringSubmatch(seg)
-	if m == nil || !matchesTeam(m[1], teamKeys) {
+	if m == nil || !matchesKey(m[1], keys) {
 		return ""
 	}
 	return strings.ToUpper(m[1]) + "-" + m[2]
 }
 
-// LooksLikeIdentifier reports whether text is an identifier for one of teamKeys
-// and nothing else — the shape test the worktree dialog uses to decide whether
-// what you typed denotes a ticket or is just a branch name.
+// LooksLikeIdentifier reports whether text is an identifier for one of keys and
+// nothing else — the shape test the worktree dialog uses to decide whether what
+// you typed denotes a ticket or is just a branch name.
 //
 // This is what keeps a picker from ever stealing the Enter key from someone
 // naming a branch: prose fails this test, so the literal text stays the default.
-func LooksLikeIdentifier(text string, teamKeys []string) (string, bool) {
+func LooksLikeIdentifier(text string, keys []string) (string, bool) {
 	t := strings.TrimSpace(text)
-	if t == "" || len(teamKeys) == 0 {
+	if t == "" || len(keys) == 0 {
 		return "", false
 	}
 	m := identifierRe.FindStringSubmatch(t)
-	if m == nil || len(m[0]) != len(t) || !matchesTeam(m[1], teamKeys) {
+	if m == nil || len(m[0]) != len(t) || !matchesKey(m[1], keys) {
 		return "", false
 	}
 	return strings.ToUpper(m[1]) + "-" + m[2], true
@@ -79,10 +84,11 @@ const maxBranchSlug = 40
 // BranchNameFor derives fleet's branch name for an issue: the lowercased
 // identifier, then a slug of the title.
 //
-// Deliberately not Linear's own `branchName` field, which carries an owner
-// prefix (alice/brz-3182-…). Linear links a PR by finding the identifier
-// ANYWHERE in the branch name, so both forms link identically — and this form
-// matches the convention already in use across the user's worktrees.
+// Deliberately not the tracker's own suggested branch name: Linear's carries an
+// owner prefix (alice/brz-3182-…) and Jira's carries the summary verbatim. Both
+// trackers link a PR by finding the identifier ANYWHERE in the branch name, so
+// every form links identically — and this one matches the convention already in
+// use across the user's worktrees.
 //
 // The result is always a valid git ref: the identifier alone is valid, and the
 // slug only ever appends [a-z0-9-] runs. An empty or punctuation-only title
@@ -129,8 +135,9 @@ func slugify(s string, limit int) string {
 // the bytes, which is the only trustworthy source.
 //
 // Stripping a trailing image extension first matters because Linear's default
-// alt text is literally "image.png": slugifying that whole string would give
-// "image-png", and the result would read "1-image-png.png".
+// alt text is literally "image.png", and a Jira attachment's alt IS its
+// filename: slugifying either whole string would give "image-png", and the
+// result would read "1-image-png.png".
 //
 // The index prefix keeps files distinct when several images share alt text,
 // which is the common case.

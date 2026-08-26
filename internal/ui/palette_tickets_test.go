@@ -12,6 +12,7 @@ import (
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/ticket"
 )
 
 func ticketHome(t *testing.T) *Home {
@@ -40,9 +41,9 @@ func TestPaletteTicketsReachThePalette(t *testing.T) {
 	if h.commandPalette.TicketsLoaded() {
 		t.Fatal("precondition: nothing loaded yet")
 	}
-	model, _ := h.Update(paletteTicketsMsg{tickets: []linear.Ticket{
-		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started"},
-		{Identifier: "BRZ-3013", Title: "TS sdk spanprocessor", StateName: "Todo", StateType: "unstarted"},
+	model, _ := h.Update(paletteTicketsMsg{tickets: []ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
+		{Identifier: "BRZ-3013", Title: "TS sdk spanprocessor", StateName: "Todo", State: ticket.StateUnstarted},
 	}})
 	h = model.(*Home)
 
@@ -60,8 +61,8 @@ func TestPaletteTicketsReachThePalette(t *testing.T) {
 	}
 
 	// A second load must replace, not append — otherwise reopening doubles it.
-	model, _ = h.Update(paletteTicketsMsg{tickets: []linear.Ticket{
-		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started"},
+	model, _ = h.Update(paletteTicketsMsg{tickets: []ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
 	}})
 	h = model.(*Home)
 	count := 0
@@ -89,10 +90,10 @@ func TestTicketRowsCarryTheirSession(t *testing.T) {
 		return true
 	})
 
-	tickets := []linear.Ticket{
-		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started"},
-		{Identifier: "BRZ-2996", Title: "subagents drilldown", StateName: "In Progress", StateType: "started"},
-		{Identifier: "BRZ-3013", Title: "TS sdk", StateName: "Todo", StateType: "unstarted"},
+	tickets := []ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
+		{Identifier: "BRZ-2996", Title: "subagents drilldown", StateName: "In Progress", State: ticket.StateStarted},
+		{Identifier: "BRZ-3013", Title: "TS sdk", StateName: "Todo", State: ticket.StateUnstarted},
 	}
 	items := h.ticketPaletteItems(tickets)
 	if len(items) != 3 {
@@ -141,7 +142,7 @@ func TestWaitingSessionWinsTheTicketRow(t *testing.T) {
 		m["/code/brizzai-brz-2644-x"] = &git.RepoInfo{Branch: "brz-2644-x"}
 		return true
 	})
-	got := h.sessionsByTicket([]linear.Ticket{{Identifier: "BRZ-2644"}})["BRZ-2644"]
+	got := h.sessionsByTicket([]ticket.Ticket{{Identifier: "BRZ-2644"}})["BRZ-2644"]
 	if got == nil || got.ID != "b" {
 		t.Fatalf("row picked %v, want the waiting session", got)
 	}
@@ -182,10 +183,10 @@ func TestTicketTabLayout(t *testing.T) {
 		m["/c/brizzai-brz-2644-x"] = &git.RepoInfo{Branch: "brz-2644-x"}
 		return true
 	})
-	tickets := []linear.Ticket{
-		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started"},
-		{Identifier: "BRZ-3142", Title: "BYOCH backfill", StateName: "Todo", StateType: "unstarted"},
-		{Identifier: "BRZ-2732", Title: "audit feature flags", StateName: "Todo", StateType: "unstarted"},
+	tickets := []ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
+		{Identifier: "BRZ-3142", Title: "BYOCH backfill", StateName: "Todo", State: ticket.StateUnstarted},
+		{Identifier: "BRZ-2732", Title: "audit feature flags", StateName: "Todo", State: ticket.StateUnstarted},
 	}
 	h.commandPalette.SetSize(120, 40)
 	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
@@ -247,8 +248,8 @@ func TestFilteredTicketsKeepTheirState(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(120, 40)
 	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
-	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
-		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started"},
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
 	}))
 
 	h.commandPalette.filterInput.SetValue("storage")
@@ -273,11 +274,11 @@ func TestPriorityIsVisibleBecauseItIsSorted(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(120, 40)
 	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
-	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
-		{Identifier: "BRZ-1", Title: "urgent one", StateName: "Todo", StateType: "unstarted", Priority: 1},
-		{Identifier: "BRZ-2", Title: "high one", StateName: "Todo", StateType: "unstarted", Priority: 2},
-		{Identifier: "BRZ-3", Title: "medium one", StateName: "Todo", StateType: "unstarted", Priority: 3},
-		{Identifier: "BRZ-4", Title: "unset one", StateName: "Todo", StateType: "unstarted", Priority: 0},
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-1", Title: "urgent one", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityUrgent},
+		{Identifier: "BRZ-2", Title: "high one", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityHigh},
+		{Identifier: "BRZ-3", Title: "medium one", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityMedium},
+		{Identifier: "BRZ-4", Title: "unset one", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityNone},
 	}))
 
 	got := renderedPalette(t, h)
@@ -338,8 +339,8 @@ func TestPriorityColumnOnlyInTheTicketsTab(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(120, 40)
 	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
-	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
-		{Identifier: "BRZ-2124", Title: "The magic fix button", StateName: "In Review", StateType: "started", Priority: 2},
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-2124", Title: "The magic fix button", StateName: "In Review", State: ticket.StateStarted, Priority: ticket.PriorityHigh},
 	}))
 
 	// In the tickets tab the mark shows.
@@ -386,9 +387,9 @@ func TestMixedTabCarriesStateAndPriorityOnTheRight(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(120, 40)
 	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabAll)
-	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
-		{Identifier: "BRZ-3013", Title: "TS sdk consider pushing spanprocessor", StateName: "Todo", StateType: "unstarted", Priority: 1},
-		{Identifier: "BRZ-2365", Title: "Tighten the backend scope", StateName: "Backlog", StateType: "backlog", Priority: 0},
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-3013", Title: "TS sdk consider pushing spanprocessor", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityUrgent},
+		{Identifier: "BRZ-2365", Title: "Tighten the backend scope", StateName: "Backlog", State: ticket.StateBacklog, Priority: ticket.PriorityNone},
 	}))
 	h.commandPalette.filterInput.SetValue("spanprocessor")
 	h.commandPalette.rebuildFiltered()
@@ -405,9 +406,9 @@ func TestMixedTabHasNoStateHeaders(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(120, 40)
 	h.commandPalette.ShowOnTab(nil, nil, PaletteTabAll)
-	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
-		{Identifier: "BRZ-3013", Title: "TS sdk", StateName: "Todo", StateType: "unstarted", Priority: 1},
-		{Identifier: "BRZ-2365", Title: "Tighten scope", StateName: "Backlog", StateType: "backlog"},
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-3013", Title: "TS sdk", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityUrgent},
+		{Identifier: "BRZ-2365", Title: "Tighten scope", StateName: "Backlog", State: ticket.StateBacklog},
 	}))
 
 	got := renderedPalette(t, h)
@@ -473,9 +474,9 @@ func TestTicketsTabSpellsOutTheFleetJoin(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(100, 40)
 	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
-	items := h.ticketPaletteItems([]linear.Ticket{
-		{Identifier: "BRZ-1", Title: "has a worktree", StateName: "Todo", StateType: "unstarted", Priority: 1},
-		{Identifier: "BRZ-2", Title: "not in fleet", StateName: "Todo", StateType: "unstarted", Priority: 1},
+	items := h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-1", Title: "has a worktree", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityUrgent},
+		{Identifier: "BRZ-2", Title: "not in fleet", StateName: "Todo", State: ticket.StateUnstarted, Priority: ticket.PriorityUrgent},
 	})
 	items[0].HasSession, items[0].SessionStatus = true, session.StatusWaiting
 	h.commandPalette.SetTickets(items)
@@ -530,8 +531,8 @@ func TestFilteredTicketsTabDoesNotDoubleThePriority(t *testing.T) {
 	h := ticketHome(t)
 	h.commandPalette.SetSize(120, 40)
 	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
-	h.commandPalette.SetTickets(h.ticketPaletteItems([]linear.Ticket{
-		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", StateType: "started", Priority: 1},
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted, Priority: ticket.PriorityUrgent},
 	}))
 	h.commandPalette.filterInput.SetValue("storage")
 	h.commandPalette.rebuildFiltered()

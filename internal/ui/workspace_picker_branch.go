@@ -142,7 +142,7 @@ func (d *WorktreeDialog) renderBranchBlock(innerW int) string {
 	}
 	var b strings.Builder
 	for i, ref := range d.branchMatches {
-		row := ansi.Truncate(ref, maxInt(innerW-4, 12), "…")
+		row := ansi.Truncate(ref, max(innerW-4, 12), "…")
 		if d.baseCursor == i {
 			b.WriteString(SelectionMarker(true).Render("▸ ") + selTitle().Render(row))
 		} else {

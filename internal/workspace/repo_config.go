@@ -16,6 +16,7 @@ type RepoWorkspaceConfig struct {
 	PRChecks  PRChecksConfig  `json:"pr_checks"`
 	CopyFiles CopyFilesConfig `json:"copy_files"`
 	Linear    LinearConfig    `json:"linear"`
+	Jira      JiraConfig      `json:"jira"`
 }
 
 // ShellConfig holds shell command configuration for workspace operations.
@@ -59,6 +60,26 @@ type LinearConfig struct {
 	Teams []string `json:"teams,omitempty"`
 }
 
+// JiraConfig names the Jira project(s) whose issues this repo tracks.
+//
+// The Linear rules apply unchanged, deliberately: presence is what turns the
+// ticket features on for a repo, a local `project` REPLACES the committed one,
+// and `projects` lists append and dedupe. Two trackers with two sets of merge
+// semantics would be a thing to look up rather than a thing to know.
+//
+// There is deliberately no per-repo `site`. The site rides with the credential,
+// because an Atlassian API token is scoped to an *account* rather than to a
+// site — so a repo pointing at a second Jira has no guarantee the same token
+// reaches it, and honouring the key would need its own credential story. An
+// earlier version of this struct carried the field and documented it while
+// nothing read it, which is the worse of the two failures: the key parsed
+// cleanly and was silently ignored, so a user who set it saw their requests go
+// to the original site with no error anywhere.
+type JiraConfig struct {
+	Project  string   `json:"project,omitempty"`
+	Projects []string `json:"projects,omitempty"`
+}
+
 // loadMergedRepoConfig resolves .fleet.json / .fleet.local.json (with legacy
 // .bc.json / .bc.local.json fallback) and returns the merged config. Workspace
 // fields are merged field-by-field (local overrides base); PRChecks.Ignore is
@@ -86,6 +107,11 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 		merged.Linear.Team = local.Linear.Team
 	}
 	merged.Linear.Teams = dedupeStrings(append(base.Linear.Teams, local.Linear.Teams...))
+
+	if local.Jira.Project != "" {
+		merged.Jira.Project = local.Jira.Project
+	}
+	merged.Jira.Projects = dedupeStrings(append(base.Jira.Projects, local.Jira.Projects...))
 	return merged
 }
 
@@ -124,11 +150,25 @@ func CopyFilesPatterns(repoPath string) []string {
 // which every ticket surface treats as off.
 func LinearTeamKeys(repoPath string) []string {
 	cfg := loadMergedRepoConfig(repoPath).Linear
+	return trackerKeys(cfg.Team, cfg.Teams)
+}
+
+// JiraProjectKeys returns the merged, upper-cased Jira project keys for a repo,
+// or nil when the repo names none. Nil means "this repo is not Jira-tracked".
+func JiraProjectKeys(repoPath string) []string {
+	cfg := loadMergedRepoConfig(repoPath).Jira
+	return trackerKeys(cfg.Project, cfg.Projects)
+}
+
+// trackerKeys folds the singular and plural forms into one upper-cased, deduped
+// list. Shared so a Linear team key and a Jira project key can never be
+// normalized differently — they are compared against the same branch text.
+func trackerKeys(one string, many []string) []string {
 	var out []string
-	if cfg.Team != "" {
-		out = append(out, cfg.Team)
+	if one != "" {
+		out = append(out, one)
 	}
-	out = append(out, cfg.Teams...)
+	out = append(out, many...)
 	for i, k := range out {
 		out[i] = strings.ToUpper(strings.TrimSpace(k))
 	}

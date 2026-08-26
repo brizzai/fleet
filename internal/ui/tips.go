@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
-	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/ticketing"
 )
 
 // tipPolicy controls how a tip is dismissed and whether it can return.
@@ -48,7 +48,12 @@ const (
 	tipTCCBlockedID        = "tcc_blocked_folder"
 	tipSessionsSuspendedID = "sessions_suspended"
 	tipAgentSkillID        = "agent_skill"
-	tipConnectLinearID     = "connect_linear"
+	// The literal value stays "connect_linear" even though the tip now offers
+	// both trackers: it is persisted in config.seen_tips and counted in
+	// config.feature_usage, so renaming the STRING would re-show a tip every
+	// existing user has already dismissed and reset everyone's learned count.
+	// Only the Go identifier changed.
+	tipConnectTicketsID = "connect_linear"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -115,18 +120,18 @@ var tipRegistry = []Tip{
 	},
 	{
 		// Fires only for someone who is demonstrably working from tickets: a
-		// branch shaped like an identifier, and no Linear credential. That is a
+		// branch shaped like an identifier, and no tracker credential. That is a
 		// far better trigger than "has sessions", because it never appears for
 		// anyone the feature would not help — and it appears at the exact
 		// moment it would have helped.
-		ID:         tipConnectLinearID,
+		ID:         tipConnectTicketsID,
 		Policy:     tipOnce,
 		Priority:   11,
-		LearnedKey: tipConnectLinearID,
+		LearnedKey: tipConnectTicketsID,
 		active:     func(h *Home) bool { return h.anyTicketShapedBranch() },
 		text: func(h *Home) string {
-			return "That branch looks like a ticket. `Ctrl+K` → \"Connect Linear\" and fleet will pull the " +
-				"ticket and its screenshots into the worktree, and open the agent already told to read them."
+			return "That branch looks like a ticket. `Ctrl+K` → \"Connect Linear\" or \"Connect Jira\" and fleet " +
+				"will pull the ticket and its screenshots into the worktree, and open the agent already told to read them."
 		},
 	},
 	{
@@ -329,7 +334,7 @@ func renderTip(body string, maxWidth int) string {
 var ticketShapedBranch = regexp.MustCompile(`(?i)(^|/)[a-z]{2,6}-\d{1,6}($|[-_/])`)
 
 // anyTicketShapedBranch reports whether any session sits on a branch that looks
-// like ticket work while fleet has no Linear credential.
+// like ticket work while fleet has no tracker credential at all.
 //
 // Reads the git cache the worker already maintains, so it costs nothing on the
 // ~2s tick that evaluates tips.
@@ -337,7 +342,7 @@ func (h *Home) anyTicketShapedBranch() bool {
 	// Resolved before Available: until the startup lookup finishes, "no
 	// credential" is ignorance rather than a fact, and offering to connect a
 	// fleet that is already connected is the one thing this tip must not do.
-	if !linear.Resolved() || linear.Available() {
+	if !ticketing.Resolved() || ticketing.Available() {
 		return false
 	}
 	for _, info := range h.gitInfo() {

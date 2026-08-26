@@ -8,7 +8,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/brizzai/fleet/internal/linear"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 	"github.com/brizzai/fleet/internal/workspace"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -39,14 +40,64 @@ type (
 		gen     int
 		query   string
 		byID    bool
-		tickets []linear.Ticket
+		tickets []ticket.Ticket
 		err     error
+		// tracker is the provider the lookup went to, so the note can name it
+		// and ticketsOff can latch it alone. Empty for a fan-out search, which
+		// no single provider owns.
+		tracker  string
+		provider string
 	}
 )
 
 // ticketsEnabled reports whether any ticket surface should exist at all.
+//
+// It asks whether ANY tracker is still worth trying, not whether all are: with
+// Linear and Jira both configured, a rejected Jira token must not take the
+// Linear suggestions down with it.
 func (d *WorktreeDialog) ticketsEnabled() bool {
-	return len(d.linearTeams) > 0 && !d.ticketsOff
+	if len(d.ticketKeys) == 0 {
+		return false
+	}
+	for _, b := range d.bound {
+		if !d.ticketsOff[b.Provider.Kind()] {
+			return true
+		}
+	}
+	return false
+}
+
+// liveKeys is the subset of this repo's tracker keys whose provider has not
+// latched off, and the display names of those providers.
+//
+// Gating lookups on this rather than on d.ticketKeys is what keeps a broken
+// credential from being re-spent on every pause while its neighbour keeps
+// working: a key belonging to a latched-off provider stops matching, so
+// LooksLikeIdentifier rejects it and no round trip is attempted.
+func (d *WorktreeDialog) live() (bound []ticketing.Bound, keys, names []string) {
+	for _, b := range d.bound {
+		if d.ticketsOff[b.Provider.Kind()] {
+			continue
+		}
+		bound = append(bound, b)
+		keys = append(keys, b.Keys...)
+		names = append(names, b.Provider.Name())
+	}
+	return bound, keys, names
+}
+
+// markTrackerOff latches one provider off for the rest of this dialog.
+func (d *WorktreeDialog) markTrackerOff(kind string) {
+	if kind == "" {
+		// A fan-out search that failed names no single provider. Latching all
+		// of them on that would be wrong — the failure may be one tracker's —
+		// so nothing latches and the next pause retries.
+		return
+	}
+	if d.ticketsOff == nil {
+		d.ticketsOff = map[string]bool{}
+	}
+	d.ticketsOff[kind] = true
 }
 
 // visibleTicketCount is how many rows are actually rendered, which is what the
@@ -96,19 +147,32 @@ func (d *WorktreeDialog) onDebounceElapsed(m worktreeTicketTickMsg) tea.Cmd {
 		return nil
 	}
 
-	teams := d.linearTeams
+	bound, keys, _ := d.live()
 	gen := m.gen
 
-	if id, ok := linear.LooksLikeIdentifier(text, teams); ok {
+	if id, ok := ticket.LooksLikeIdentifier(text, keys); ok {
 		if d.resolved != nil && strings.EqualFold(d.resolved.Identifier, id) {
 			return nil // already resolved; don't refire on a redraw
+		}
+		// Resolved here rather than inside the closure so the reply can name
+		// the tracker it went to even when the fetch failed — which is the
+		// case where naming it matters most.
+		owner, ok := ticketing.OwnerIn(bound, id)
+		if !ok {
+			return nil
 		}
 		d.ticketPending = true
 		return func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), ticketLookupTimeout)
 			defer cancel()
-			t, err := linear.Fetch(ctx, id)
-			return worktreeTicketsMsg{gen: gen, query: text, byID: true, tickets: []linear.Ticket{t}, err: err}
+			t, err := owner.Fetch(ctx, id)
+			return worktreeTicketsMsg{
+				gen: gen, query: text, byID: true,
+				tickets:  []ticket.Ticket{t},
+				err:      err,
+				tracker:  owner.Name(),
+				provider: owner.Kind(),
+			}
 		}
 	}
 
@@ -119,7 +183,7 @@ func (d *WorktreeDialog) onDebounceElapsed(m worktreeTicketTickMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), ticketLookupTimeout)
 		defer cancel()
-		items, err := linear.Search(ctx, text, ticketMaxRows)
+		items, err := ticketing.SearchBound(ctx, bound, text, ticketMaxRows)
 		return worktreeTicketsMsg{gen: gen, query: text, tickets: items, err: err}
 	}
 }
@@ -140,28 +204,35 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 	d.ticketNote = ""
 
 	if m.err != nil {
+		// The tracker's own name where there is one. A fan-out search that
+		// failed belongs to no single provider, so it says "tickets".
+		who := m.tracker
+		if who == "" {
+			who = "tickets"
+		}
 		switch {
-		case errors.Is(m.err, linear.ErrNotFound):
+		case errors.Is(m.err, ticket.ErrNotFound):
 			if m.byID {
 				// "no such issue" is the wrong diagnosis when the credential
 				// simply cannot see this repo's workspace — the issue exists,
 				// we are looking in the wrong place.
-				if note, wrong := d.workspaceMismatchNote(); wrong {
+				owner, _ := ticketing.ByKind(m.provider)
+				if note, wrong := d.workspaceMismatchNote(owner); wrong {
 					d.ticketNote = note
 				} else {
 					d.ticketNote = m.query + " — no such issue"
 				}
 			}
-		case errors.Is(m.err, linear.ErrNotAuthenticated):
-			d.ticketNote = "linear: credential rejected — Ctrl+K → Connect Linear"
-			d.ticketsOff = true // it will keep failing; stop spending round trips
-		case errors.Is(m.err, linear.ErrNotConnected):
+		case errors.Is(m.err, ticket.ErrNotAuthenticated):
+			d.ticketNote = who + ": credential rejected — Ctrl+K → Connect " + who
+			d.markTrackerOff(m.provider) // it will keep failing; stop spending round trips
+		case errors.Is(m.err, ticket.ErrNotConnected):
 			// Never connected is a resting state, not a complaint. Go quiet.
-			d.ticketsOff = true
+			d.markTrackerOff(m.provider)
 		case errors.Is(m.err, context.DeadlineExceeded):
-			d.ticketNote = "linear: timed out"
+			d.ticketNote = who + ": timed out"
 		default:
-			d.ticketNote = "linear: unavailable"
+			d.ticketNote = who + ": unavailable"
 		}
 		d.tickets = nil
 		if d.focus == focusNewBranch {
@@ -202,7 +273,7 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 	// EVERY search returns nothing, and rendering that as silence leaves the
 	// user typing into a feature that looks broken with no way to find out why.
 	if len(d.tickets) == 0 {
-		if note, wrong := d.workspaceMismatchNote(); wrong {
+		if note, wrong := d.workspaceMismatchNote(nil); wrong {
 			d.ticketNote = note
 		}
 	}
@@ -211,8 +282,8 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 	}
 }
 
-// workspaceMismatchNote reports when the connected Linear workspace contains
-// none of this repo's teams.
+// workspaceMismatchNote reports when a connected tracker's workspace contains
+// none of this repo's keys.
 //
 // This is a real and easily-hit state: authorizing browser sign-in against the
 // wrong workspace produces a credential that works perfectly and can see none
@@ -224,19 +295,47 @@ func (d *WorktreeDialog) applyTickets(m worktreeTicketsMsg) {
 // at the end always survives.
 const maxWorkspaceNameInNote = 24
 
-func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
-	ws, known := linear.WorkspaceInfo()
-	if !known || len(d.linearTeams) == 0 || len(ws.TeamKeys) == 0 {
-		return "", false
-	}
-	for _, repoTeam := range d.linearTeams {
-		for _, wsTeam := range ws.TeamKeys {
-			if strings.EqualFold(repoTeam, wsTeam) {
-				return "", false
+// owner scopes the check. For an identifier lookup we know exactly which
+// tracker was asked, so only that one's workspace can be the wrong one — and
+// consulting the others actively hides the answer: a repo tracking Linear BRZ
+// and Jira OPS, whose Jira credential is on the wrong site, would find BRZ in
+// Linear's account, bail out, and report "OPS-42 — no such issue". That is the
+// precise misdiagnosis this note exists to prevent.
+//
+// A fan-out search passes nil, because no single provider owns the query and
+// every one of them has to disagree before "wrong workspace" is the diagnosis.
+func (d *WorktreeDialog) workspaceMismatchNote(owner ticket.Provider) (string, bool) {
+	bound := d.bound
+	if owner != nil {
+		bound = nil
+		for _, b := range d.bound {
+			if b.Provider.Kind() == owner.Kind() {
+				bound = append(bound, b)
 			}
 		}
 	}
-	name := ws.Name
+	if len(bound) == 0 {
+		return "", false
+	}
+	var name string
+	var keys []string
+	for _, b := range bound {
+		acct, known := b.Provider.Account()
+		if !known || len(acct.Keys) == 0 {
+			return "", false
+		}
+		for _, repoKey := range b.Keys {
+			for _, acctKey := range acct.Keys {
+				if strings.EqualFold(repoKey, acctKey) {
+					return "", false
+				}
+			}
+		}
+		keys = append(keys, b.Keys...)
+		if name == "" {
+			name = acct.Name
+		}
+	}
 	if name == "" {
 		name = "that workspace"
 	}
@@ -250,7 +349,7 @@ func (d *WorktreeDialog) workspaceMismatchNote() (string, bool) {
 	// part that tells you what to do. Bounding the variable is what actually
 	// holds the line.
 	name = ansi.Truncate(name, maxWorkspaceNameInNote, "…")
-	return fmt.Sprintf("%s has no %s team — reconnect: Ctrl+K", name, strings.Join(d.linearTeams, "/")), true
+	return fmt.Sprintf("%s has no %s — reconnect: Ctrl+K", name, strings.Join(keys, "/")), true
 }
 
 // PrefillTicket seeds the New branch field with an identifier and starts its
@@ -284,13 +383,13 @@ func (d *WorktreeDialog) PrefillTicket(identifier string) tea.Cmd {
 // identifier the user has already extended by hand — brz-3217-my-variant — is
 // left alone, which is the same thing onFieldChanged protects when it keeps the
 // resolution across an edited tail.
-func (d *WorktreeDialog) applyResolvedBranchName(t linear.Ticket) {
+func (d *WorktreeDialog) applyResolvedBranchName(t ticket.Ticket) {
 	text := strings.TrimSpace(d.newBranchInput.Value())
-	id, ok := linear.LooksLikeIdentifier(text, d.linearTeams)
+	id, ok := ticket.LooksLikeIdentifier(text, d.ticketKeys)
 	if !ok || !strings.EqualFold(id, t.Identifier) {
 		return
 	}
-	branch := linear.BranchNameFor(t.Identifier, t.Title)
+	branch := ticket.BranchNameFor(t.Identifier, t.Title)
 	if branch == "" || strings.EqualFold(branch, text) {
 		return
 	}
@@ -301,13 +400,13 @@ func (d *WorktreeDialog) applyResolvedBranchName(t linear.Ticket) {
 
 // pickTicket fills the field from a highlighted row and collapses back to the
 // resolved state, so both ways of naming a ticket end up identical.
-func (d *WorktreeDialog) pickTicket(t linear.Ticket) {
-	branch := linear.BranchNameFor(t.Identifier, t.Title)
+func (d *WorktreeDialog) pickTicket(t ticket.Ticket) {
+	branch := ticket.BranchNameFor(t.Identifier, t.Title)
 	d.newBranchInput.SetValue(branch)
 	d.newBranchInput.SetCursor(len([]rune(branch)))
 	d.lastInput = branch // don't re-query the name we just wrote
-	ticket := t
-	d.resolved = &ticket
+	picked := t
+	d.resolved = &picked
 	d.tickets = nil
 	d.ticketNote = ""
 	d.ticketPending = false
@@ -318,7 +417,7 @@ func (d *WorktreeDialog) pickTicket(t linear.Ticket) {
 
 // ticketForCurrentInput returns the ticket the field currently denotes, for the
 // creation message. Nil when the user typed a plain branch name.
-func (d *WorktreeDialog) ticketForCurrentInput() *linear.Ticket {
+func (d *WorktreeDialog) ticketForCurrentInput() *ticket.Ticket {
 	if d.resolved == nil {
 		return nil
 	}
@@ -342,7 +441,15 @@ func (d *WorktreeDialog) renderTicketBlock(innerW int) string {
 
 	switch {
 	case d.ticketPending:
-		b.WriteString(DimStyle.Render("  ⋯ searching Linear…"))
+		// Names what is actually being searched. With one tracker connected
+		// that is its name; with two it is both, because a user who connected
+		// Jira after Linear needs to see that the search reaches it.
+		_, _, names := d.live()
+		who := strings.Join(dedupeNames(names), " and ")
+		if who == "" {
+			who = "tickets"
+		}
+		b.WriteString(DimStyle.Render("  ⋯ searching " + who + "…"))
 		b.WriteString("\n")
 	case d.resolved != nil:
 		// "named from", not a bare identifier. This line sits exactly where the
@@ -364,10 +471,10 @@ func (d *WorktreeDialog) renderTicketBlock(innerW int) string {
 		b.WriteString(PROpenStyle.Render("  ✓"))
 		b.WriteString(DimStyle.Render(" named from "))
 		b.WriteString(PROpenStyle.Render(d.resolved.Identifier))
-		b.WriteString(DimStyle.Render(" · " + ansi.Truncate(d.resolved.Title, maxInt(innerW-ansi.StringWidth(head)-3, 8), "…")))
+		b.WriteString(DimStyle.Render(" · " + ansi.Truncate(d.resolved.Title, max(innerW-ansi.StringWidth(head)-3, 8), "…")))
 		b.WriteString("\n")
 	case d.ticketNote != "":
-		b.WriteString(DimStyle.Render("  " + ansi.Truncate(d.ticketNote, maxInt(innerW-2, 8), "…")))
+		b.WriteString(DimStyle.Render("  " + ansi.Truncate(d.ticketNote, max(innerW-2, 8), "…")))
 		b.WriteString("\n")
 	}
 
@@ -377,7 +484,7 @@ func (d *WorktreeDialog) renderTicketBlock(innerW int) string {
 		// Pad the RAW identifier before styling — padding a styled string
 		// counts the ANSI bytes and the columns come out ragged.
 		row := fmt.Sprintf("%-9s %s", t.Identifier, t.Title)
-		row = ansi.Truncate(row, maxInt(innerW-4, 12), "…")
+		row = ansi.Truncate(row, max(innerW-4, 12), "…")
 		if selected {
 			b.WriteString(SelectionMarker(true).Render("▸ ") + selTitle().Render(row))
 		} else {
@@ -416,9 +523,18 @@ func (d *WorktreeDialog) ticketFooter() string {
 	return ""
 }
 
-func maxInt(a, b int) int {
-	if a > b {
-		return a
+// dedupeNames collapses repeats while preserving order: a repo that tracks two
+// Linear teams binds one provider twice, and "searching Linear and Linear…" is
+// not a sentence.
+func dedupeNames(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
 	}
-	return b
+	return out
 }

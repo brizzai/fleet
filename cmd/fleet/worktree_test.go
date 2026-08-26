@@ -231,7 +231,7 @@ func TestParseWorktreeArgsTicket(t *testing.T) {
 		{
 			name:    "non-identifier is rejected before anything is created",
 			args:    []string{"-ticket", "not-a-ticket"},
-			wantErr: "not a Linear issue identifier",
+			wantErr: "not a ticket identifier",
 		},
 		{
 			// They set the same field and say opposite things.

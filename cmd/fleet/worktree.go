@@ -19,9 +19,10 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
-	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/workspace"
 )
@@ -32,7 +33,10 @@ const worktreeUsage = "Usage: fleet worktree <branch> [flags]"
 // usage line alongside it, so the message itself stays a plain error string.
 var errMissingBranch = errors.New("missing branch name")
 
-// ticketIDRe validates a Linear identifier shape before anything is created.
+// ticketIDRe validates a ticket identifier shape before anything is created.
+// One pattern for both trackers: a Linear team key and a Jira project key are
+// the same shape, and which one owns it is settled by the repo's config, not
+// by the text.
 // Deliberately checked here rather than deferred: a typo'd ticket should fail
 // while the worktree still doesn't exist.
 var ticketIDRe = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}-\d{1,7}$`)
@@ -50,7 +54,7 @@ type worktreeOpts struct {
 	// prompt is the raw flag value, which may still be "-" for stdin. Reading
 	// stdin is I/O, and parsing stays pure — runWorktree resolves it.
 	prompt string
-	// ticket is a Linear issue identifier. It names the branch when no branch
+	// ticket is a tracker issue identifier. It names the branch when no branch
 	// is given, and materializes the issue (with its screenshots) into the new
 	// worktree so the agent opens having been pointed at it.
 	ticket string
@@ -82,9 +86,9 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.BoolVar(&o.noSession, "no-session", false, "create the worktree only, print its path, and start no session")
 	fs.StringVar(&o.prompt, "prompt", "", "first message for the agent, which it starts working on (use - to read stdin)")
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
-	fs.StringVar(&o.ticket, "ticket", "", "Linear issue to materialize into the worktree, e.g. BRZ-3182 (names the branch when none is given)")
+	fs.StringVar(&o.ticket, "ticket", "", "ticket to materialize into the worktree, e.g. BRZ-3182 (names the branch when none is given)")
 	fs.StringVar(&o.ticket, "t", "", "shorthand for -ticket")
-	fs.BoolVar(&o.noTicketStart, "no-ticket-start", false, "don't move the Linear issue to its team's first started state")
+	fs.BoolVar(&o.noTicketStart, "no-ticket-start", false, "don't move the issue to its first started state")
 	fs.StringVar(&o.model, "model", "", "model to launch on, e.g. opus or anthropic/claude-sonnet-5 (default: the agent's own)")
 	fs.StringVar(&o.effort, "effort", "", "reasoning effort to launch at, e.g. high or xhigh (default: the agent's own)")
 	return fs
@@ -166,7 +170,7 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 
 	if ticketSet {
 		if !ticketIDRe.MatchString(o.ticket) {
-			return o, fmt.Errorf("not a Linear issue identifier: %q — expected something like BRZ-3182", o.ticket)
+			return o, fmt.Errorf("not a ticket identifier: %q — expected something like BRZ-3182", o.ticket)
 		}
 		// Both set the agent's first message, and they say opposite things:
 		// -prompt means "start working on this", -ticket means "read this and
@@ -296,22 +300,43 @@ func runWorktree(args []string) {
 	// so it may fail hard — and it does so while nothing has been created yet,
 	// the same line `-p -` already draws. With an explicit branch this is
 	// skipped and any later ticket failure is soft.
-	var ticket *linear.Ticket
+	var tkt *ticket.Ticket
 	if opts.ticket != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		t, ferr := linear.Fetch(ctx, opts.ticket)
+		// Warm first: this is a one-shot process, so nothing has read the
+		// keychain yet and every provider would report itself unavailable.
+		ticketing.Warm(ctx)
+		t, ferr := ticketing.Fetch(ctx, repoPath, opts.ticket)
 		cancel()
 		switch {
+		case errors.Is(ferr, ticket.ErrNotConnected):
+			// No provider will read this key here, which is a configuration
+			// answer rather than a network one — and worth its own words, since
+			// the bare sentinel ("not connected") sends someone to re-paste a
+			// credential that may already be fine.
+			//
+			// Which configuration, though, depends on WHICH gate failed. A repo
+			// that already names the project needs a credential, not a config
+			// edit, and telling someone to add a line they can see is already
+			// there is a false statement about their own setup.
+			//
+			// Fatal only when the branch depended on the fetch. With an explicit
+			// branch this is the same soft failure as any other: the worktree is
+			// what was asked for, and the ticket was going to enrich it.
+			fmt.Fprintln(os.Stderr, unclaimedTicketAdvice(repoPath, opts.ticket))
+			if opts.branch == "" {
+				os.Exit(1)
+			}
 		case ferr != nil && opts.branch == "":
 			fmt.Fprintf(os.Stderr, "Couldn't read %s: %v\n", opts.ticket, ferr)
 			os.Exit(1)
 		case ferr != nil:
 			fmt.Fprintf(os.Stderr, "Couldn't read %s: %v — creating the worktree anyway.\n", opts.ticket, ferr)
 		default:
-			ticket = &t
+			tkt = &t
 			fmt.Fprintf(os.Stderr, "Fetched %s — %s\n", t.Identifier, t.Title)
 			if opts.branch == "" {
-				opts.branch = linear.BranchNameFor(t.Identifier, t.Title)
+				opts.branch = ticket.BranchNameFor(t.Identifier, t.Title)
 				if msg := workspace.ValidateBranchName(opts.branch); msg != "" {
 					fmt.Fprintf(os.Stderr, "Derived branch %q is not valid: %s\n", opts.branch, msg)
 					os.Exit(1)
@@ -373,20 +398,21 @@ func runWorktree(args []string) {
 
 	// Phase B: past this point the worktree exists, so nothing may exit
 	// non-zero — same contract as the two file copies above.
-	if ticket != nil {
+	if tkt != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		res, merr := linear.Materialize(ctx, linear.Opts{
+		res, merr := ticketing.Materialize(ctx, repoPath, ticket.Opts{
 			WorktreePath: info.Path,
-			Identifier:   ticket.Identifier,
-			MoveState:    cfg.IsLinearTicketStartEnabled() && !opts.noTicketStart,
+			Identifier:   tkt.Identifier,
+			Provider:     tkt.Provider,
+			MoveState:    cfg.IsTicketStartStateEnabled() && !opts.noTicketStart,
 		})
 		cancel()
 		if merr != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't materialize %s: %v\n", ticket.Identifier, merr)
+			fmt.Fprintf(os.Stderr, "Couldn't materialize %s: %v\n", tkt.Identifier, merr)
 		} else {
 			fmt.Fprintf(os.Stderr, "Wrote %s (%s)\n", res.RelDir, describeTicketFiles(res))
 			if res.StateMoved != "" {
-				fmt.Fprintf(os.Stderr, "Moved %s to its team's started state\n", res.Identifier)
+				fmt.Fprintf(os.Stderr, "Moved %s to %s\n", res.Identifier, res.StateMoved)
 			}
 			if prompt == "" {
 				prompt = res.Prompt
@@ -515,9 +541,30 @@ func accountAllowed(email string, allowed []string) bool {
 	return slices.Contains(allowed, email)
 }
 
+// unclaimedTicketAdvice explains why no provider would read this identifier,
+// naming the gate that actually failed.
+func unclaimedTicketAdvice(repoPath, id string) string {
+	key, _, _ := strings.Cut(strings.ToUpper(strings.TrimSpace(id)), "-")
+
+	if p, ok := ticketing.ClaimedBy(repoPath, id); ok {
+		// The repo names this key; the tracker just is not connected.
+		return fmt.Sprintf("This repo tracks %s in %s, but %s isn't connected.\n"+
+			"Connect it in the TUI (Ctrl+K → Connect %s), or set its environment variables.",
+			key, p.Name(), p.Name(), p.Name())
+	}
+	// Both forms, because this branch fires when NO provider claims the key —
+	// so the reader is as likely to be a Linear user as a Jira one, and this
+	// line is the only thing telling them what to write. A single Jira example
+	// invites a Linear user to put a team key under a "jira" block, which then
+	// fails a second time and less legibly.
+	return fmt.Sprintf("No tracker in this repo claims %s.\n"+
+		"Name its Linear team or Jira project in .fleet.local.json, e.g.\n"+
+		"  {\"linear\": {\"team\": %q}}   or   {\"jira\": {\"project\": %q}}", id, key, key)
+}
+
 // describeTicketFiles summarizes what landed on disk, so the echo-back is
 // specific rather than a bare "wrote it".
-func describeTicketFiles(r linear.Result) string {
+func describeTicketFiles(r ticket.Result) string {
 	if r.Images == 0 {
 		return "ticket.md, no images"
 	}

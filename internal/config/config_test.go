@@ -523,3 +523,40 @@ func TestGetAccountUsageStyle(t *testing.T) {
 		})
 	}
 }
+
+// TestTicketStartStateHonoursTheLegacyKey pins the migration that deliberately
+// isn't one.
+//
+// linear_ticket_start was renamed to ticket_start_state when Jira arrived,
+// because the consent it records — "fleet may write to my board" — is not a
+// thing anyone means differently about Linear and Jira. It is superseded rather
+// than rewritten: a user who turned this off before Jira existed must not
+// silently get it back on, for either tracker, and rewriting their config file
+// to rename a key they set deliberately is a bigger intrusion than reading two
+// names.
+func TestTicketStartStateHonoursTheLegacyKey(t *testing.T) {
+	yes, no := true, false
+
+	cases := []struct {
+		name   string
+		cfg    Config
+		want   bool
+		reason string
+	}{
+		{"unset defaults on", Config{}, true,
+			"creating a worktree from a ticket is an unambiguous \"I'm starting this\""},
+		{"legacy off is honoured", Config{LinearTicketStart: &no}, false,
+			"a user who turned this off before Jira existed must not get it back on"},
+		{"legacy on is honoured", Config{LinearTicketStart: &yes}, true, ""},
+		{"current key wins over legacy", Config{TicketStartState: &no, LinearTicketStart: &yes}, false,
+			"the current key is the one the user last set deliberately"},
+		{"current on over legacy off", Config{TicketStartState: &yes, LinearTicketStart: &no}, true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.cfg.IsTicketStartStateEnabled(); got != c.want {
+				t.Errorf("IsTicketStartStateEnabled = %v, want %v — %s", got, c.want, c.reason)
+			}
+		})
+	}
+}

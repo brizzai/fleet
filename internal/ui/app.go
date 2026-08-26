@@ -32,7 +32,6 @@ import (
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
-	"github.com/brizzai/fleet/internal/linear"
 	"github.com/brizzai/fleet/internal/naming"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/proc"
@@ -41,6 +40,8 @@ import (
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/skill"
 	"github.com/brizzai/fleet/internal/termkeys"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/vterm"
 	"github.com/brizzai/fleet/internal/workspace"
@@ -452,6 +453,7 @@ type Home struct {
 	accountUsage   atomic.Pointer[map[string]claudeaccount.Usage]
 	accountsDialog *AccountsDialog
 	connectLinear  *ConnectLinearDialog
+	connectJira    *ConnectJiraDialog
 
 	// pendingTicketID is set when a ticket was picked from the palette and the
 	// worktree dialog is being opened for it. Consumed when that dialog shows,
@@ -610,6 +612,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	h.accounts = claudeaccount.Load()
 	h.accountsDialog = NewAccountsDialog()
 	h.connectLinear = NewConnectLinearDialog()
+	h.connectJira = NewConnectJiraDialog()
 	// Fleet identifies as itself to Anthropic, not as claude-code. Measured
 	// 2026-08-04: the messages endpoint serves fleet/<version> identically, so
 	// there is nothing to gain by impersonating the CLI.
@@ -725,27 +728,31 @@ func (h *Home) Init() tea.Cmd {
 		h.tick(),
 		h.previewTick(),
 		h.loadReleaseNotes(), // compute the What's New badge without opening the dialog
-		warmLinear(),         // resolve the Linear credential off the Update goroutine
+		warmTickets(),        // resolve tracker credentials off the Update goroutine
 	)
 }
 
-// warmLinear resolves the stored Linear credential once, at startup.
+// warmTickets resolves every stored tracker credential once, at startup.
 //
-// It has to happen here rather than lazily because linear.Available() is
-// consulted from the Update goroutine — branch inference asks it on every
-// session creation — and it must never be the thing that reads a keychain. So
-// the keychain read is done once, here, and Available() afterwards is two atomic
-// loads. Reading the workspace behind it is the same story one level up: the
-// Connect dialog and the team-key display want it, and neither is a good place
-// to discover you need a network round trip.
-func warmLinear() tea.Cmd {
+// It has to happen here rather than lazily because a provider's Available() is
+// consulted from the Update goroutine — the worktree dialog asks it while a
+// frame is being built — and it must never be the thing that reads a keychain.
+// So the keychain reads are done once, here, and Available() afterwards is two
+// atomic loads. Reading the account behind each one is the same story one level
+// up: the Connect dialogs and the tracker-key display want it, and neither is a
+// good place to discover you need a network round trip.
+func warmTickets() tea.Cmd {
 	return func() tea.Msg {
-		linear.Warm()
-		if linear.Available() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if _, err := linear.FetchWorkspace(ctx); err != nil {
-				debuglog.Logger.Debug("linear: could not read workspace at startup", "error", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		ticketing.Warm(ctx)
+		for _, p := range ticketing.All() {
+			if !p.Available() {
+				continue
+			}
+			if _, err := p.FetchAccount(ctx); err != nil {
+				debuglog.Logger.Debug("ticket: could not read account at startup",
+					"provider", p.Kind(), "error", err)
 			}
 		}
 		return nil
@@ -864,6 +871,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.sessionCreateDialog.SetSize(msg.Width, msg.Height)
 		h.accountsDialog.SetSize(msg.Width, msg.Height)
 		h.connectLinear.SetSize(msg.Width, msg.Height)
+		h.connectJira.SetSize(msg.Width, msg.Height)
 		h.consentDialog.SetSize(msg.Width, msg.Height)
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
@@ -1554,7 +1562,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return true
 			})
 		}
-		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.linearTeams, msg.branches)
+		h.worktreeDialog.Show(msg.workspaces, h.sessions, msg.provider, msg.repoPath, msg.defaultBranch, msg.bound, msg.branches)
 		if id := h.pendingTicketID; id != "" {
 			// Consumed here and nowhere else, so a ticket picked once cannot
 			// leak into the next unrelated `w`.
@@ -1632,11 +1640,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		branch := msg.branch
 		baseBranch := msg.baseBranch
 		copyClaudeSettings := h.cfg.IsCopyClaudeSettingsEnabled() && !provider.IsCustom()
-		ticket := msg.ticket
-		moveState := h.cfg.IsLinearTicketStartEnabled()
+		tkt := msg.ticket
+		moveState := h.cfg.IsTicketStartStateEnabled()
+		tracker := ""
+		if tkt != nil {
+			if p, ok := ticketing.ByKind(tkt.Provider); ok {
+				tracker = p.Name()
+			}
+		}
 		return h, tea.Batch(func() tea.Msg {
 			info, err := provider.Create(repoPath, name, branch, baseBranch)
-			var tres *linear.Result
+			var tres *ticket.Result
 			var terr error
 			if err == nil && info != nil && info.Path != "" {
 				if copyClaudeSettings {
@@ -1645,15 +1659,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				workspace.CopyConfiguredFiles(repoPath, info.Path)
 				// Third file step, same posture as the two above: advisory
 				// only. Once the worktree exists the session always starts, so
-				// a Linear outage costs the prompt, never the worktree.
-				tres, terr = materializeTicket(info.Path, ticket, moveState)
+				// a tracker outage costs the prompt, never the worktree.
+				tres, terr = materializeTicket(repoPath, info.Path, tkt, moveState)
 			} else if err == nil && info != nil && info.Path == "" {
 				debuglog.Logger.Debug("workspace create returned empty path — skipping file copies",
 					"repo", repoPath, "name", name)
 			}
 			return workspaceCreateResultMsg{
 				info: info, err: err, pendingID: pendingID, repoPath: repoPath,
-				ticket: tres, ticketErr: terr,
+				ticket: tres, ticketErr: terr, ticketTracker: tracker,
 			}
 		}, spinnerTickCmd)
 
@@ -1695,7 +1709,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.clearPendingFork()
 			return h, h.dispatchForkToWorktree(ctx, msg.info.Path, msg.info.Name)
 		}
-		if line := ticketStatusLine(msg.ticket, msg.ticketErr); line != "" {
+		if line := ticketStatusLine(msg.ticketTracker, msg.ticket, msg.ticketErr); line != "" {
 			h.setInfo(line)
 		}
 		prompt := ""
@@ -1714,7 +1728,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// routeToModal only carries key and paste messages, so a tea.Cmd result
 		// reaches a dialog only if Update forwards it.
 		if msg.err != nil {
-			debuglog.Logger.Debug("linear: could not list assigned issues", "error", msg.err)
+			debuglog.Logger.Debug("ticket: could not list assigned issues", "error", msg.err)
 			h.commandPalette.SetTickets(nil)
 			return h, nil
 		}
@@ -1744,6 +1758,20 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		dialog, cmd := h.connectLinear.Update(msg)
 		h.connectLinear = dialog
 		h.setInfo("Linear connected — " + msg.workspace.Name)
+		return h, cmd
+	case jiraDisconnectedMsg:
+		h.connectJira.Show() // re-reads the (now empty) credential state
+		dialog, cmd := h.connectJira.Update(msg)
+		h.connectJira = dialog
+		return h, cmd
+	case jiraConnectedMsg:
+		dialog, cmd := h.connectJira.Update(msg)
+		h.connectJira = dialog
+		h.setInfo("Jira connected — " + msg.account.Name)
+		return h, cmd
+	case jiraConnectFailedMsg:
+		dialog, cmd := h.connectJira.Update(msg)
+		h.connectJira = dialog
 		return h, cmd
 	case linearConnectFailedMsg:
 		// Routed here rather than through routeToModal, which only carries key
@@ -2274,6 +2302,7 @@ func (h *Home) modalOpen() bool {
 		h.sessionCreateDialog.IsVisible() ||
 		h.accountsDialog.IsVisible() ||
 		h.connectLinear.IsVisible() ||
+		h.connectJira.IsVisible() ||
 		h.newDialog.IsVisible() ||
 		h.confirmDialog.IsVisible() ||
 		h.renameDialog.IsVisible() ||
@@ -2317,6 +2346,9 @@ func (h *Home) renderBody() string {
 	}
 	if h.sessionCreateDialog.IsVisible() {
 		return h.sessionCreateDialog.View()
+	}
+	if h.connectJira.IsVisible() {
+		return h.connectJira.View()
 	}
 	if h.connectLinear.IsVisible() {
 		return h.connectLinear.View()
@@ -2643,6 +2675,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.sessionCreateDialog.IsVisible():
 		dialog, cmd := h.sessionCreateDialog.Update(cmdMsg)
 		h.sessionCreateDialog = dialog
+		return cmd, true
+	case h.connectJira.IsVisible():
+		dialog, cmd := h.connectJira.Update(msg)
+		h.connectJira = dialog
 		return cmd, true
 	case h.connectLinear.IsVisible():
 		dialog, cmd := h.connectLinear.Update(msg)
@@ -3079,8 +3115,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		// Straight to the tickets tab: `t` means "show me my tickets", not
 		// "show me everything and let me cycle".
-		if !linear.Available() {
-			h.setInfo("Linear isn't connected — Ctrl+K → Connect Linear")
+		if !ticketing.Available() {
+			h.setInfo("No ticket tracker connected — Ctrl+K → Connect Linear or Connect Jira")
 			return h, nil
 		}
 		h.commandPalette.ShowOnTab(h.buildPaletteItems(), h.recentPaletteIDs, PaletteTabTickets)
@@ -7211,16 +7247,14 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		workspaces, err := provider.List(repoPath)
 		// Resolved here, on the worker goroutine, so the dialog never touches the
 		// filesystem from Update(). Empty when nothing is connected or the repo
-		// names no Linear team, which makes every ticket surface in the dialog
-		// inert — those are the two gates, and both must hold.
-		var linearTeams []string
-		if linear.Available() {
-			linearTeams = linear.TeamKeys(repoPath)
-		}
+		// names no team and no project, which makes every ticket surface in the
+		// dialog inert — those are the two gates, and both must hold, per
+		// provider.
+		bound := ticketing.For(repoPath)
 		return workspaceListMsg{
 			workspaces: workspaces, provider: provider, repoPath: repoPath,
-			defaultBranch: defaultBranch, originKey: originKey, linearTeams: linearTeams,
-			branches: branches, err: err,
+			defaultBranch: defaultBranch, originKey: originKey,
+			bound: bound, branches: branches, err: err,
 		}
 	}
 }
@@ -8312,7 +8346,8 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
 		{Kind: PaletteKindCommand, ID: "connect_linear", Name: "Connect Linear"},
-		{Kind: PaletteKindCommand, ID: "my_tickets", Name: "My Linear Tickets", Shortcut: "t"},
+		{Kind: PaletteKindCommand, ID: "connect_jira", Name: "Connect Jira"},
+		{Kind: PaletteKindCommand, ID: "my_tickets", Name: "My Tickets", Shortcut: "t"},
 		{Kind: PaletteKindCommand, ID: "new_repo", Name: "New Session (Any Repo)", Shortcut: "n"},
 		{Kind: PaletteKindCommand, ID: "new_worktree", Name: "New Worktree Session", Shortcut: "w"},
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
@@ -8517,18 +8552,26 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
 	case "my_tickets":
-		if !linear.Available() {
-			h.setInfo("Linear isn't connected — Ctrl+K → Connect Linear")
+		if !ticketing.Available() {
+			h.setInfo("No ticket tracker connected — Ctrl+K → Connect Linear or Connect Jira")
 			return h, nil
 		}
 		h.commandPalette.ShowOnTab(h.buildPaletteItems(), h.recentPaletteIDs, PaletteTabTickets)
 		return h, h.maybeLoadPaletteTickets()
+	case "connect_jira":
+		h.actionLog.Add("connect jira", "", true)
+		// Shares tipConnectTicketsID with Connect Linear: the tip offers both,
+		// so either one being used is the tip having done its job.
+		h.cfg.NoteFeatureUsed(tipConnectTicketsID, tipLearnedThreshold)
+		h.connectJira.Show()
+		return h, nil
+
 	case "connect_linear":
 		h.actionLog.Add("connect linear", "", true)
 		// Opening the dialog is the feature the tip teaches, so this is where
 		// it retires — reaching the dialog is the whole ask, whether or not the
 		// user goes on to paste a key today.
-		h.cfg.NoteFeatureUsed(tipConnectLinearID, tipLearnedThreshold)
+		h.cfg.NoteFeatureUsed(tipConnectTicketsID, tipLearnedThreshold)
 		h.connectLinear.Show()
 		return h, nil
 	case "new_repo":

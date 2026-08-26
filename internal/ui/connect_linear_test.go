@@ -9,6 +9,7 @@ import (
 
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/linear"
+	"github.com/brizzai/fleet/internal/ticket"
 )
 
 func connectDialog(t *testing.T) *ConnectLinearDialog {
@@ -197,7 +198,7 @@ func TestPersistFailureStillReportsConnected(t *testing.T) {
 	d.stage = connectWorking
 
 	d, _ = d.Update(linearConnectedMsg{
-		workspace:  linear.Workspace{Name: "Brizz", TeamKeys: []string{"BRZ"}},
+		workspace:  ticket.Account{Name: "Brizz", Keys: []string{"BRZ"}},
 		via:        "API key",
 		persistErr: errors.New("keychain write failed: signal: killed"),
 	})
@@ -218,5 +219,34 @@ func TestPersistFailureStillReportsConnected(t *testing.T) {
 	}
 	if !strings.Contains(got, linear.APIKeyEnvVar) {
 		t.Errorf("it must name the way out that needs no keychain:\n%s", got)
+	}
+}
+
+// TestLinearEscCancelsKeyVerification covers the half abortSignIn never did.
+//
+// abortSignIn cancels the loopback listener for the BROWSER path only, so
+// escaping while a pasted key was being verified left the round trip running —
+// and a verification that finished afterwards stored the key. Same bug as the
+// Jira dialog's, in a file that already had the machinery for the other flow.
+func TestLinearEscCancelsKeyVerification(t *testing.T) {
+	d := connectDialog(t)
+	d.stage = connectPasting
+	d.input.Focus()
+	d.input.SetValue("lin_api_something")
+
+	d = pressConnect(d, "enter")
+	if d.stage != connectWorking {
+		t.Fatalf("verification did not start: stage=%v", d.stage)
+	}
+	if d.cancelVerify == nil {
+		t.Fatal("the dialog must hold the cancel func, or esc has nothing to cancel")
+	}
+
+	d = pressConnect(d, "esc")
+	if d.IsVisible() {
+		t.Error("esc from the spinner should hide the dialog")
+	}
+	if d.cancelVerify != nil {
+		t.Error("Hide must clear the cancel func after calling it")
 	}
 }

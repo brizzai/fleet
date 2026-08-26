@@ -58,7 +58,7 @@ Make fleet reactive to external events:
 
 - CI fails on a branch → automatically start a fix session
 - PR gets review comments → start a session to address them
-- New ticket assigned in Linear → start a session with the ticket context
+- New ticket assigned in Linear or Jira → start a session with the ticket context
 
 Agents spawn automatically. You wake up to work already in progress.
 

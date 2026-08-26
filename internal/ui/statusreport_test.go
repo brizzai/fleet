@@ -129,6 +129,46 @@ func TestBuildStatusReportBody_NeverLeaksLinearKey(t *testing.T) {
 	}
 }
 
+// TestBuildStatusReportBody_NeverLeaksJiraToken is the same guard again, and it
+// needs two patterns rather than one.
+//
+// An Atlassian API token carries an ATATT prefix, which the prefix rule catches
+// wherever the token appears verbatim. But Jira's credential travels as
+// base64(email:token) in an Authorization header — where the prefix is encoded
+// away — so a header that reached a log line or a pane excerpt would survive
+// every prefix rule intact. Both shapes are asserted, because catching only the
+// first is the version of this guard that looks like it works.
+func TestBuildStatusReportBody_NeverLeaksJiraToken(t *testing.T) {
+	const token = "ATATT3xFfGF0T4kL9mNoPqRsTuVwXyZ0123456789abcdefgh=="
+	const header = "Basic eW91QGV4YW1wbGUuY29tOkFUQVRUM3hGZkdGMFQ0a0w5bU5vUHFSc1R1Vnc="
+	// The scheme is case-insensitive per RFC 7235, and what this scans is a
+	// pane excerpt — arbitrary terminal text, including a curl someone typed
+	// with a lowercase header.
+	const lower = "basic eW91QGV4YW1wbGUuY29tOkFUQVRUM3hGZkdGMFQ0a0w5bU5vUHFSc1R1Vnc="
+
+	f := statusFormFixture()
+	f.snap.paneClean = "❯ paste your API token:\n" + token + "\n" +
+		"$ curl -H 'authorization: " + lower + "' …\n"
+	f.snap.debugTail = "time=... msg=\"jira request\" authorization=\"" + header + "\""
+	r := &diagnostics.Report{Version: "v2.30.3", OS: "darwin", Arch: "arm64"}
+
+	for _, includeContent := range []bool{true, false} {
+		f.includeContent = includeContent
+		body := buildStatusReportBody("jira never connects", session.StatusWaiting, f, r)
+		if strings.Contains(body, token) {
+			t.Fatalf("issue body leaked a Jira API token (includeContent=%v):\n%s", includeContent, body)
+		}
+		if strings.Contains(body, header) {
+			t.Fatalf("issue body leaked a Basic auth header (includeContent=%v) — "+
+				"the ATATT prefix is base64-encoded away in that form:\n%s", includeContent, body)
+		}
+		if strings.Contains(body, lower) {
+			t.Fatalf("a lowercase scheme slipped past the redactor (includeContent=%v) — "+
+				"HTTP auth schemes are case-insensitive:\n%s", includeContent, body)
+		}
+	}
+}
+
 func TestBuildStatusReportBody_AlwaysCarriesSignals(t *testing.T) {
 	f := statusFormFixture()
 	f.includeContent = false
