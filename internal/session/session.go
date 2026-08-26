@@ -141,6 +141,11 @@ type Session struct {
 	// Reset whenever a new hook arrives (see UpdateHookStatus).
 	waitingPaneConfirmed bool
 
+	// paneFinishedFrames counts consecutive pane captures that read finished while
+	// no hook data is available. A running session is only demoted once this
+	// reaches paneFinishedConfirmFrames — see updateStatusFromPane.
+	paneFinishedFrames int
+
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 
 	// Transcript tiebreaker cache. conversationActivePastHook runs on the ~500ms fast
@@ -796,6 +801,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		s.lastContentChangeAt = time.Time{}
 		s.hookOverriddenAt = time.Time{} // allow fresh evaluation of new hook
 		s.waitingPaneConfirmed = false   // re-observe the prompt before trusting a pane spinner
+		s.paneFinishedFrames = 0         // a fresh hook supersedes any half-confirmed pane demotion
 		// A non-dead hook means Claude is alive again. Re-arm the crash-dump
 		// trigger so the NEXT real death gets a dump even if a prior false
 		// transition (e.g. brief stale-hook flash before this fresh hook
@@ -1629,6 +1635,12 @@ const finishedHoldMaxAge = 5 * time.Second
 // status prematurely.
 const waitingHookRenderBackstop = 5 * time.Second
 
+// paneFinishedConfirmFrames is how many consecutive finished readings the pane
+// must give before a running session with no hook data is demoted. Two: the
+// frame this guards against is a single repaint, and anything higher would delay
+// every genuine finish for no further protection.
+const paneFinishedConfirmFrames = 2
+
 // conversationActiveWindow bounds how recent the last lead-conversation transcript
 // entry must be for conversationActivePastHook to count the agent as actively
 // working. Sized above the longest observed gap between lead entries during silent
@@ -1727,10 +1739,36 @@ func (s *Session) updateStatusFromPane(oldStatus Status, log *slog.Logger) {
 	case StatusRunning:
 		s.Status = StatusRunning
 		s.Acknowledged = false
+		s.paneFinishedFrames = 0
 	case StatusWaiting:
 		s.Status = StatusWaiting
 		s.Acknowledged = false
+		s.paneFinishedFrames = 0
 	case StatusFinished:
+		// One frame is not enough to demote a running session. Claude repaints the
+		// input box as the user types into it, and on that frame the activity line
+		// is briefly absent — leaving `❯ <typed text>`, which detectFinished reads
+		// as an idle prompt. That reading is deliberate and must stay: it is the
+		// only thing that clears a stale waiting hook when the user escapes a
+		// permission prompt and starts typing in default mode, where there is no
+		// `⏵⏵` mode bar to fall back on (see applyHookWaiting).
+		//
+		// With hook data the hook holds the session running through the blink, and
+		// applyHookFinished has its own guards for the same between-bursts frame.
+		// Here there is no hook at all, so the pane is the only vote and a single
+		// bad frame decides everything — it demoted a working session to finished,
+		// which also dropped it off the ~500ms fast pass onto the round-robin,
+		// where the wrong status then stood for ~18s and pulled the Space rotation
+		// onto a session that was busy. So the demotion has to be seen twice.
+		//
+		// Costs one extra pass (~500ms, since a running session is on the fast
+		// pass) before a genuine finish shows.
+		s.paneFinishedFrames++
+		if oldStatus == StatusRunning && s.paneFinishedFrames < paneFinishedConfirmFrames {
+			log.Debug("pane read finished while running — holding for confirmation",
+				"frames", s.paneFinishedFrames, "need", paneFinishedConfirmFrames)
+			return
+		}
 		if s.Acknowledged {
 			s.Status = StatusIdle
 		} else {

@@ -1212,3 +1212,86 @@ func TestScenarioNBSPPromptClearsStaleWaiting(t *testing.T) {
 		},
 	})
 }
+
+// TestScenarioTypedPromptBlinkDoesNotDemoteRunning pins the no-hook half of the
+// between-bursts frame that applyHookFinished already guards for hook-driven
+// sessions.
+//
+// Captured live (snapshot 2026-08-26T12-38-45): a Claude session in plan mode was
+// working — `✳ Sock-hopping… (33s · ↓ 1.6k tokens · thinking with xhigh effort)`
+// — while the user typed a slash command into the input box. On one repaint the
+// activity line was absent, leaving `❯<nbsp>/ren` four lines from the bottom.
+// detectFinished reads that as an idle prompt, which is correct and deliberate
+// (TestScenarioNBSPPromptClearsStaleWaiting depends on it), but this session had
+// no hook data at all — its hook command pointed at a deleted worktree's binary —
+// so the pane was the only vote and that one frame demoted it to finished. Being
+// finished then dropped it off the ~500ms fast pass onto the round-robin, where
+// the wrong status stood for 18s and pulled the Space rotation onto a busy
+// session.
+//
+// Note there is no `⏵⏵` mode bar here: plan mode renders `⏸`, so detectFinished's
+// idlePatterns fallback does not fire and the prompt line is the whole signal.
+func TestScenarioTypedPromptBlinkDoesNotDemoteRunning(t *testing.T) {
+	const nbsp = " "
+
+	const chrome = "───────── missing-artifact-investigation ─\n" +
+		"❯" + nbsp + "/ren\n" +
+		"─────────\n" +
+		"  Opus 5 (1M context) | 8% | brz-3374-analytics-autoscaler\n" +
+		"  ⏸ plan mode on (shift+tab to cycle) · ← for agents\n"
+
+	const head = "⏺ Plan mode active — read-only from here. Launching parallel exploration.\n\n"
+	const tip = "  ⎿  Tip: Use --agent <agent_name> to directly start a conversation with a subagent\n\n"
+
+	// The agent is working: the activity line sits above the input box.
+	const working = head + "✽ Sock-hopping… (33s · ↓ 1.6k tokens · thinking with xhigh effort)\n" + tip + chrome
+	// The same pane one repaint later, activity line not drawn.
+	const blink = head + tip + chrome
+
+	runScenario(t, Scenario{
+		Name: "no hook + typed prompt on a single blink frame → stays running",
+		Events: []ScenarioEvent{
+			{At: 0, Pane: working},
+			{At: 500 * time.Millisecond, Pane: blink},
+			{At: 1 * time.Second, Pane: working},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 500 * time.Millisecond, Expected: StatusRunning}, // before fix: finished
+			{At: 1 * time.Second, Expected: StatusRunning},
+		},
+	})
+}
+
+// TestScenarioSustainedIdlePromptStillFinishes is the counterweight: the
+// confirmation above must delay a demotion by one pass, never prevent one.
+// Guards against "fixing" the blink by pinning a running session forever.
+func TestScenarioSustainedIdlePromptStillFinishes(t *testing.T) {
+	const nbsp = " "
+
+	const chrome = "───────── missing-artifact-investigation ─\n" +
+		"❯" + nbsp + "/ren\n" +
+		"─────────\n" +
+		"  Opus 5 (1M context) | 8% | brz-3374-analytics-autoscaler\n" +
+		"  ⏸ plan mode on (shift+tab to cycle) · ← for agents\n"
+
+	const head = "⏺ Plan mode active — read-only from here. Launching parallel exploration.\n\n"
+	const tip = "  ⎿  Tip: Use --agent <agent_name> to directly start a conversation with a subagent\n\n"
+
+	const working = head + "✽ Sock-hopping… (33s · ↓ 1.6k tokens · thinking with xhigh effort)\n" + tip + chrome
+	const idle = head + tip + chrome
+
+	runScenario(t, Scenario{
+		Name: "no hook + idle prompt held for two passes → finished",
+		Events: []ScenarioEvent{
+			{At: 0, Pane: working},
+			{At: 500 * time.Millisecond, Pane: idle},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 500 * time.Millisecond, Expected: StatusRunning},
+			// Same pane on the next pass — the turn really did end.
+			{At: 1 * time.Second, Expected: StatusFinished},
+		},
+	})
+}
