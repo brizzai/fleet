@@ -54,6 +54,7 @@ const (
 	// existing user has already dismissed and reset everyone's learned count.
 	// Only the Go identifier changed.
 	tipConnectTicketsID = "connect_linear"
+	tipHooksRepairedID  = "hooks_repaired"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -67,6 +68,23 @@ const (
 
 // tipRegistry is the catalog of contextual tips. Add new tips here.
 var tipRegistry = []Tip{
+	{
+		// Above the TCC tip: a TCC-blocked folder breaks sessions in one place,
+		// a dead hook command breaks status reporting for every session at once,
+		// and unlike TCC it is invisible — the sidebar keeps showing a status,
+		// just one derived from pane scraping alone.
+		ID:       tipHooksRepairedID,
+		Policy:   tipRecurring,
+		Priority: 130,
+		active: func(h *Home) bool {
+			return h.hooksRepaired.Load() && h.countSessionsMissingHooks() > 0
+		},
+		text: func(h *Home) string {
+			return fmt.Sprintf("Claude's hooks pointed at a deleted fleet binary, so status came from screen scraping alone. "+
+				"Repaired — but %d running session(s) won't report status until you restart them (`r`).",
+				h.countSessionsMissingHooks())
+		},
+	},
 	{
 		// Highest priority: a TCC-blocked folder makes every session/shell there
 		// unusable, so it outranks the reload-failed hint.
@@ -175,6 +193,24 @@ func findTip(id string) *Tip {
 // countSessionsByStatus returns how many sessions are currently in st. Runs on
 // the Update goroutine, so reading h.sessions is safe (same contract as
 // rebuildFlatItems).
+// countSessionsMissingHooks counts sessions that should be reporting hook status
+// and are not. Suspended sessions are excluded — clearHookState wipes their hook
+// on purpose — as are Starting ones, which simply haven't fired SessionStart yet.
+// Drives the hooks-repaired tip, so it must stay cheap: in-memory reads only.
+func (h *Home) countSessionsMissingHooks() int {
+	n := 0
+	for _, s := range h.sessions {
+		switch s.GetStatus() {
+		case session.StatusSuspended, session.StatusStarting:
+			continue
+		}
+		if s.GetHookStatus() == "" {
+			n++
+		}
+	}
+	return n
+}
+
 func (h *Home) countSessionsByStatus(st session.Status) int {
 	n := 0
 	for _, s := range h.sessions {
