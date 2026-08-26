@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.31.0] - 2026-08-25
+
+### Added
+
+- **Prompt `fleet add`** — `fleet add [path] -p "<task>"` now starts the session already working on it, the same as `fleet worktree -p`. `-p -` reads stdin, `--agent` and `--account` pick the agent and Claude subscription, and the path defaults to the current directory.
+- **Pick the model per session** — `fleet add` and `fleet worktree` now take `--model` and `--effort`, so a session can start on `opus` at `xhigh` without touching your defaults. `--effort` is Claude and Codex only; OpenCode has no equivalent flag, so fleet tells you instead of dropping it silently.
+
+### Improved
+
+- **Base branch autocomplete** — the `w` dialog's Base branch field now suggests your branches. `↓` walks them, `⏎` picks one, `tab` moves to the next field.
+
+### Fixed
+
+- **Question prompts stay waiting.** A session parked on a single-question `AskUserQuestion` dialog no longer flips to running — and no longer flaps between the two as you arrow between options.
+- **Scrolling after detach.** Attaching to a session used to leave your terminal sending mouse events to fleet, so the next scroll pinned it at 250% CPU until you stopped. Detaching now puts the terminal back.
+- **`fleet add` no longer strands an upgrade** — running it before any other command could leave your old `brizz-code` sessions and settings unreachable. They now carry over as they should.
+- **Scrolling no longer pegs the CPU.** fleet put your terminal into mouse-reporting mode but never handled a mouse event, so a trackpad scroll over the TUI fired ~300 ignored redraws a second and held fleet at 220% CPU until you stopped. Drag-select now works without holding a modifier.
+- **Escaped prompts recover.** You can press `Esc` on a permission prompt and start typing a different instruction without the session staying stuck on `waiting`.
+- **Finished sessions stay finished.** Your session no longer sticks on waiting because its own output quoted a permission prompt — a numbered menu, or `n to add notes` and `Esc to cancel` in a sentence, read as a live prompt until the text scrolled away.
+- **Countdown survives zero.** A spent account used to drop its reset countdown at the moment it hit zero, leaving a bare red `100%`. It now reads `100%(now)` and refreshes in ~2s instead of up to 3 minutes.
+
 ## [2.30.3] - 2026-08-23
 
 ### Improved
@@ -584,7 +605,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.30.3...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.31.0...HEAD
+[2.31.0]: https://github.com/brizzai/fleet/releases/tag/v2.31.0
 [2.30.3]: https://github.com/brizzai/fleet/releases/tag/v2.30.3
 [2.30.2]: https://github.com/brizzai/fleet/releases/tag/v2.30.2
 [2.30.1]: https://github.com/brizzai/fleet/releases/tag/v2.30.1

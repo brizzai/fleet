@@ -296,3 +296,77 @@ func mustEqual(t *testing.T, got, want string) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// #274: `fleet worktree` takes the same launch overrides `fleet add` does, and
+// under the same rules — validated at parse time, and refused alongside
+// --no-session, which starts nothing for them to shape.
+func TestParseWorktreeArgsModelAndEffort(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantModel  string
+		wantEffort string
+		wantErr    string
+	}{
+		{
+			name:       "both set",
+			args:       []string{"my-branch", "--model", "opus", "--effort", "xhigh"},
+			wantModel:  "opus",
+			wantEffort: "xhigh",
+		},
+		{
+			name:      "provider-qualified model",
+			args:      []string{"my-branch", "--model", "anthropic/claude-sonnet-5"},
+			wantModel: "anthropic/claude-sonnet-5",
+		},
+		{
+			name:    "shell metacharacter in model is rejected",
+			args:    []string{"my-branch", "--model", "opus`id`"},
+			wantErr: "invalid --model",
+		},
+		{
+			name:    "shell metacharacter in effort is rejected",
+			args:    []string{"my-branch", "--effort", "high; rm -rf ~"},
+			wantErr: "invalid --effort",
+		},
+		{
+			name:    "effort with opencode is rejected",
+			args:    []string{"my-branch", "--agent", "opencode", "--effort", "high"},
+			wantErr: "--effort has no effect on opencode sessions",
+		},
+		{
+			name:      "model with opencode is fine",
+			args:      []string{"my-branch", "--agent", "opencode", "--model", "anthropic/claude-sonnet-5"},
+			wantModel: "anthropic/claude-sonnet-5",
+		},
+		{
+			name:    "model with --no-session",
+			args:    []string{"my-branch", "--no-session", "--model", "opus"},
+			wantErr: "--model has no effect with --no-session",
+		},
+		{
+			name:    "effort with --no-session",
+			args:    []string{"my-branch", "--no-session", "--effort", "high"},
+			wantErr: "--effort has no effect with --no-session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseWorktreeArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseWorktreeArgs(%q) error = %v, want it to contain %q", tt.args, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseWorktreeArgs(%q) unexpected error: %v", tt.args, err)
+			}
+			if got.model != tt.wantModel || got.effort != tt.wantEffort {
+				t.Errorf("parseWorktreeArgs(%q) model/effort = %q/%q, want %q/%q",
+					tt.args, got.model, got.effort, tt.wantModel, tt.wantEffort)
+			}
+		})
+	}
+}

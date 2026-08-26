@@ -105,3 +105,115 @@ func TestBinaryAndDisplayName(t *testing.T) {
 		t.Errorf("unexpected DisplayName(): claude=%q codex=%q opencode=%q", Claude.DisplayName(), Codex.DisplayName(), OpenCode.DisplayName())
 	}
 }
+
+// The three agents spell reasoning effort three different ways, and Codex does
+// not spell it as a flag at all. Getting one of them wrong launches an agent
+// that either ignores the setting or refuses the flag and exits, leaving a live
+// pane at a shell prompt.
+func TestBuildLaunchCmdModelAndEffortPerAgent(t *testing.T) {
+	tests := []struct {
+		name string
+		ag   Type
+		o    LaunchOpts
+		want string
+	}{
+		{"claude model", Claude, LaunchOpts{Model: "opus"}, "claude --model opus"},
+		{"claude effort", Claude, LaunchOpts{Effort: "xhigh"}, "claude --effort xhigh"},
+		{"claude both", Claude, LaunchOpts{Model: "claude-opus-5", Effort: "high"}, "claude --model claude-opus-5 --effort high"},
+		{"codex effort is a config override", Codex, LaunchOpts{Model: "gpt-5.1-codex-max", Effort: "high"}, "codex --model gpt-5.1-codex-max -c model_reasoning_effort=high"},
+		{"opencode takes a model but never an effort", OpenCode, LaunchOpts{Model: "anthropic/claude-sonnet-5", Effort: "max"}, "opencode --model anthropic/claude-sonnet-5"},
+		{"neither set changes nothing", Claude, LaunchOpts{}, "claude"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.ag.BuildLaunchCmd(tt.o); got != tt.want {
+				t.Errorf("BuildLaunchCmd() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The prompt argument ends option parsing (`--`), so anything appended after it
+// stops being read as a flag and is handed to the agent as prompt text instead.
+func TestModelAndEffortPrecedeThePrompt(t *testing.T) {
+	for _, ag := range []Type{Claude, Codex, OpenCode} {
+		cmd := ag.BuildLaunchCmd(LaunchOpts{Model: "opus", Effort: "high", Prompt: "do the thing"})
+		promptAt := strings.Index(cmd, PromptEnvVar)
+		if promptAt < 0 {
+			t.Fatalf("%s: prompt missing from %q", ag, cmd)
+		}
+		want := []string{"opus"}
+		if ag.SupportsEffort() {
+			want = append(want, "high")
+		}
+		for _, flag := range want {
+			if at := strings.Index(cmd, flag); at < 0 || at > promptAt {
+				t.Errorf("%s: %q must precede the prompt argument, got %q", ag, flag, cmd)
+			}
+		}
+	}
+}
+
+// Model and effort are the only launch values embedded in the command string,
+// which tmux send-keys types into the pane's *shell*. A value carrying a shell
+// metacharacter would be executed by it, so the validator is the whole defence
+// and every real-world value has to survive it.
+func TestValidateLaunchValue(t *testing.T) {
+	ok := []string{
+		"opus", "sonnet", "haiku", "fable",
+		"claude-opus-5", "claude-sonnet-5", "gpt-5.1-codex-max",
+		"anthropic/claude-sonnet-5", "openai/gpt-5",
+		"low", "medium", "high", "xhigh", "max", "ultracode", "minimal",
+		"model.v1.2",
+	}
+	for _, v := range ok {
+		if err := ValidateLaunchValue("model", v); err != nil {
+			t.Errorf("ValidateLaunchValue(%q) = %v, want nil", v, err)
+		}
+	}
+
+	bad := []string{
+		"", " ", "opus; rm -rf ~", "$(whoami)", "`id`", "a|b", "a&b", "a>b",
+		"a b", "a\nb", "-opus", "--model", "a'b", `a"b`, "a$b", "a\\b", "a(b)",
+	}
+	for _, v := range bad {
+		if err := ValidateLaunchValue("model", v); err == nil {
+			t.Errorf("ValidateLaunchValue(%q) = nil, want an error", v)
+		}
+	}
+}
+
+// OpenCode has the concept of a reasoning effort but no way to accept one on
+// the command fleet launches: `--variant` is declared on the `run` subcommand,
+// while fleet runs the default `$0 [project]` command, whose builder declares
+// only project/prompt/network options — and OpenCode's root parser is yargs in
+// .strict() mode, so an unknown option prints the command list and exits.
+//
+// fleet shipped `--variant` here briefly. The cost of getting it wrong is not a
+// dropped setting: it is a session fleet reports as created, row saved and repo
+// pinned, whose pane is a shell prompt with no agent in it.
+func TestOpenCodeNeverReceivesAnEffortFlag(t *testing.T) {
+	if OpenCode.SupportsEffort() {
+		t.Fatal("OpenCode.SupportsEffort() = true, want false")
+	}
+	for _, ag := range []Type{Claude, Codex} {
+		if !ag.SupportsEffort() {
+			t.Errorf("%s.SupportsEffort() = false, want true", ag)
+		}
+	}
+
+	// BuildLaunchCmd guards too, so a caller that forgets to reject the flag
+	// drops it rather than launching a command OpenCode refuses outright.
+	for _, o := range []LaunchOpts{
+		{Effort: "high"},
+		{Effort: "max", Model: "anthropic/claude-sonnet-5"},
+		{Effort: "minimal", ResumeID: "abc", Prompt: "x"},
+	} {
+		cmd := OpenCode.BuildLaunchCmd(o)
+		for _, banned := range []string{"--variant", "--effort", "model_reasoning_effort", o.Effort} {
+			if strings.Contains(cmd, banned) {
+				t.Errorf("opencode command %q must not carry %q", cmd, banned)
+			}
+		}
+	}
+}
