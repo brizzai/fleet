@@ -38,6 +38,11 @@ type ScenarioEvent struct {
 	ActivityAge time.Duration // simulate tmux window_activity this long ago (0 = no activity data)
 	HookAge     time.Duration // backdate the hook's UpdatedAt by this much (0 = now); simulates a stale hook
 	ConvActive  *bool         // inject conversationActivePastHook result; nil = leave unchanged
+	// Sleep blocks for real before the event is applied. The engine replays a
+	// timeline in an instant, which is fine for everything keyed off an injected
+	// timestamp but not for a guard that reads the wall clock directly — see
+	// paneFinishedConfirmDelay. Keep the durations small.
+	Sleep time.Duration
 }
 
 // ScenarioCheck asserts the session status at a point in time.
@@ -104,6 +109,10 @@ func runScenario(t *testing.T, sc Scenario) {
 	for _, entry := range timeline {
 		if entry.event != nil {
 			e := entry.event
+
+			if e.Sleep > 0 {
+				time.Sleep(e.Sleep)
+			}
 
 			// Apply hook status change.
 			if e.Hook != "" {
@@ -1282,16 +1291,100 @@ func TestScenarioSustainedIdlePromptStillFinishes(t *testing.T) {
 	const idle = head + tip + chrome
 
 	runScenario(t, Scenario{
-		Name: "no hook + idle prompt held for two passes → finished",
+		Name: "no hook + idle prompt held past the confirm delay → finished",
 		Events: []ScenarioEvent{
 			{At: 0, Pane: working},
 			{At: 500 * time.Millisecond, Pane: idle},
+			// A real pause, so the confirming reading is a genuinely later frame
+			// rather than the same one read twice (paneFinishedConfirmDelay).
+			{At: 1 * time.Second, Sleep: paneFinishedConfirmDelay + 50*time.Millisecond},
 		},
 		Checks: []ScenarioCheck{
 			{At: 0, Expected: StatusRunning},
 			{At: 500 * time.Millisecond, Expected: StatusRunning},
-			// Same pane on the next pass — the turn really did end.
+			// Same pane, a full pass later — the turn really did end.
 			{At: 1 * time.Second, Expected: StatusFinished},
+		},
+	})
+}
+
+// blinkPanes returns the three pane shapes the typed-prompt blink cycles through:
+// the agent working, the same pane with the activity line not drawn, and a pane
+// detectStatus cannot classify at all.
+func blinkPanes() (working, blink, unclassified string) {
+	const nbsp = " "
+	const chrome = "───────── missing-artifact-investigation ─\n" +
+		"❯" + nbsp + "/ren\n" +
+		"─────────\n" +
+		"  Opus 5 (1M context) | 8% | brz-3374-analytics-autoscaler\n" +
+		"  ⏸ plan mode on (shift+tab to cycle) · ← for agents\n"
+	const head = "⏺ Plan mode active — read-only from here. Launching parallel exploration.\n\n"
+	const tip = "  ⎿  Tip: Use --agent <agent_name> to directly start a conversation with a subagent\n\n"
+
+	working = head + "✽ Sock-hopping… (33s · ↓ 1.6k tokens · thinking with xhigh effort)\n" + tip + chrome
+	blink = head + tip + chrome
+	unclassified = "⏺ Reading config…\n\nsome output with no prompt, no menu and no activity line\n"
+	return
+}
+
+// TestScenarioOneFrameReadTwiceDoesNotConfirm pins the time floor.
+//
+// A reading is not a frame. statusWorkerCycle runs on its 500ms ticker OR on any
+// statusTrigger kick — a hook change on any session, attach exit, reload-all —
+// and tmux.Session.CapturePane serves a 400ms cache verbatim (with fewer than two
+// active sessions seedActiveCaptures does not re-capture at all). Two cycles
+// inside that window read the SAME pane, so counting readings alone lets one
+// blink frame confirm itself and demote a working session — the exact bug the
+// confirmation exists to prevent, and likeliest on a busy fleet where
+// hook-driven kicks are frequent.
+//
+// The replay engine models this for free: it runs checks back to back in real
+// time, so two consecutive checks with no Sleep are two readings microseconds
+// apart.
+func TestScenarioOneFrameReadTwiceDoesNotConfirm(t *testing.T) {
+	working, blink, _ := blinkPanes()
+
+	runScenario(t, Scenario{
+		Name: "no hook + one blink frame read twice inside the capture cache → stays running",
+		Events: []ScenarioEvent{
+			{At: 0, Pane: working},
+			{At: 500 * time.Millisecond, Pane: blink},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			// Two readings of the one blink frame, no wall-clock gap between them.
+			{At: 500 * time.Millisecond, Expected: StatusRunning},
+			{At: 600 * time.Millisecond, Expected: StatusRunning}, // before fix: finished
+			{At: 700 * time.Millisecond, Expected: StatusRunning},
+		},
+	})
+}
+
+// TestScenarioUnclassifiedFrameBreaksTheConfirmation pins that the readings must
+// be consecutive, which is what the field doc promises.
+//
+// detectStatus returning "" is the common case, not a quiet vote for finished.
+// Without a reset in the default branch, a blink, then a long stretch of
+// unclassified frames, then another blink would demote a running session on two
+// frames far apart — and the wall-clock floor would be satisfied by the gap
+// itself, so the time check alone does not cover this.
+func TestScenarioUnclassifiedFrameBreaksTheConfirmation(t *testing.T) {
+	working, blink, unclassified := blinkPanes()
+
+	runScenario(t, Scenario{
+		Name: "no hook + blink, unclassified, blink → stays running",
+		Events: []ScenarioEvent{
+			{At: 0, Pane: working},
+			{At: 500 * time.Millisecond, Pane: blink},
+			{At: 1 * time.Second, Pane: unclassified, Sleep: paneFinishedConfirmDelay + 50*time.Millisecond},
+			// Far enough past the first blink that the delay alone would pass.
+			{At: 2 * time.Second, Pane: blink, Sleep: paneFinishedConfirmDelay + 50*time.Millisecond},
+		},
+		Checks: []ScenarioCheck{
+			{At: 0, Expected: StatusRunning},
+			{At: 500 * time.Millisecond, Expected: StatusRunning},
+			{At: 1 * time.Second, Expected: StatusRunning},
+			{At: 2 * time.Second, Expected: StatusRunning}, // before fix: finished
 		},
 	})
 }

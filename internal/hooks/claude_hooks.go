@@ -2,7 +2,9 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -446,10 +448,18 @@ func hookBinaryMissing(hooks map[string]json.RawMessage) bool {
 				if bin == "" || !filepath.IsAbs(bin) {
 					continue
 				}
-				if _, err := os.Stat(bin); err != nil {
+				// Strictly "not there", never "could not tell". EACCES, ELOOP, a
+				// stalled network mount or a parent dir that lost +x all report an
+				// error while the binary may be perfectly fine — and treating those
+				// as deleted would rewrite settings.json every cycle forever and
+				// reopen the cross-instance fight this function exists to avoid.
+				if _, err := os.Stat(bin); errors.Is(err, fs.ErrNotExist) {
 					debuglog.Logger.Warn("claude hooks: hook command no longer exists",
 						"event", cfg.Event, "binary", bin)
 					return true
+				} else if err != nil {
+					debuglog.Logger.Warn("claude hooks: could not stat hook command; assuming it is fine",
+						"event", cfg.Event, "binary", bin, "err", err)
 				}
 			}
 		}
@@ -497,10 +507,15 @@ func RepairClaudeHooks(configDir string) (bool, error) {
 
 	debuglog.Logger.Warn("claude hooks: repairing a hook command that no longer exists",
 		"path", settingsPath, "newCommand", GetHookCommand())
-	if _, err := InjectClaudeHooks(configDir); err != nil {
+	// Report what was actually written, not what we set out to write.
+	// InjectClaudeHooks re-reads settings.json, so a sibling instance that
+	// repaired it between our read and its own leaves nothing to do — and
+	// claiming a repair we did not make latches the caller's tip on for good.
+	wrote, err := InjectClaudeHooks(configDir)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return wrote, nil
 }
 
 // hooksNeedUpdate checks if the hook command path has changed (e.g., after rebuild).

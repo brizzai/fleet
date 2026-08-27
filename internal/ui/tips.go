@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/ticketing"
@@ -81,7 +82,7 @@ var tipRegistry = []Tip{
 		},
 		text: func(h *Home) string {
 			return fmt.Sprintf("Claude's hooks pointed at a deleted fleet binary, so status came from screen scraping alone. "+
-				"Repaired — but %d running session(s) won't report status until you restart them (`r`).",
+				"Repaired — but %d session(s) won't report status until you restart them (`r`).",
 				h.countSessionsMissingHooks())
 		},
 	},
@@ -197,9 +198,24 @@ func findTip(id string) *Tip {
 // and are not. Suspended sessions are excluded — clearHookState wipes their hook
 // on purpose — as are Starting ones, which simply haven't fired SessionStart yet.
 // Drives the hooks-repaired tip, so it must stay cheap: in-memory reads only.
+//
+// Claude only, because that is all maybeRepairClaudeHooks repairs. Codex and
+// OpenCode bake the same binary path (InjectCodexHooks builds its entries through
+// the shared mergeHookEvent -> GetHookCommand, and InjectOpenCodePlugin embeds
+// FleetBinaryPath in the generated .ts), so one deleted binary silences all three
+// — but a hookless Codex session is pinned to StatusIdle and would land in this
+// count, under a tip promising that `r` restores its status. It would not:
+// ~/.codex/hooks.json still names the dead path. Counting only what the repair
+// actually fixed keeps the tip's promise true; the other two need their own
+// repair, which is deliberately not in scope here.
+//
+// An empty Agent is legacy Claude, the same fallback agentGlyph makes.
 func (h *Home) countSessionsMissingHooks() int {
 	n := 0
 	for _, s := range h.sessions {
+		if s.Agent != agent.Claude && s.Agent != "" {
+			continue
+		}
 		switch s.GetStatus() {
 		case session.StatusSuspended, session.StatusStarting:
 			continue

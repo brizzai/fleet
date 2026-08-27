@@ -2,6 +2,8 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -757,5 +759,86 @@ func TestRepairClaudeHooksIgnoresAMissingSettingsFile(t *testing.T) {
 	}
 	if repaired {
 		t.Error("expected no repair when settings.json does not exist")
+	}
+}
+
+func TestRepairClaudeHooksLeavesAnUnstattableCommandAlone(t *testing.T) {
+	// Only "not there" justifies an unprompted write. A path we merely cannot
+	// stat — EACCES here, but equally ELOOP, a stalled network mount, or a parent
+	// that lost +x — must not read as deleted: RepairClaudeHooks runs on a timer,
+	// so a wrong answer rewrites settings.json every cycle forever and puts two
+	// instances from different worktrees back into the fight this function exists
+	// to avoid.
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+
+	// A binary inside a directory with no +x: Stat returns EACCES, not ENOENT.
+	sealed := filepath.Join(t.TempDir(), "sealed")
+	if err := os.MkdirAll(sealed, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bin := filepath.Join(sealed, "fleet")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+	if err := os.Chmod(sealed, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0755) })
+
+	if _, err := os.Stat(bin); errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("test setup produced ENOENT, not the permission error it needs: %v", err)
+	}
+
+	path := writeHookSettings(t, dir, shellQuote(bin)+" hook-handler "+fleetHookArg)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+
+	repaired, err := RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if repaired {
+		t.Error("repaired a hook command that could not be stat'd — only ENOENT may trigger a repair")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Error("settings.json was rewritten for a command that is not known to be missing")
+	}
+}
+
+func TestRepairClaudeHooksReportsWhatWasWritten(t *testing.T) {
+	// The bool must describe this process's own write. InjectClaudeHooks re-reads
+	// settings.json, so a sibling instance that repaired the file first leaves
+	// nothing to do — and reporting a repair we did not make latches the caller's
+	// tip on permanently.
+	dir := t.TempDir()
+	gone := filepath.Join(t.TempDir(), "deleted-worktree", "build", "fleet")
+	writeHookSettings(t, dir, shellQuote(gone)+" hook-handler "+fleetHookArg)
+
+	repaired, err := RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if !repaired {
+		t.Fatal("expected the first call to report the repair it performed")
+	}
+
+	// Second call: the path now resolves, so there is nothing to repair and
+	// nothing to report.
+	repaired, err = RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if repaired {
+		t.Error("reported a repair on an already-healthy settings.json")
 	}
 }

@@ -4752,24 +4752,41 @@ const hookRepairInterval = 60 * time.Second
 // merely differs from ours — otherwise two instances launched from different
 // worktrees would rewrite each other's settings.json every minute.
 //
-// Only ~/.claude is repaired. Per-account config dirs get settings.json copied
-// from it by claudeaccount.Provision on each session launch, so the repair
-// reaches them the same way the hooks did.
+// Both the active config dir and the literal ~/.claude are repaired, and the
+// second one is not redundant. GetClaudeConfigDir honours $CLAUDE_CONFIG_DIR,
+// which sessionEnv sets to a per-account dir — and fleet is very often launched
+// from inside a fleet session, so the "active" dir is routinely an account dir.
+// claudeaccount.Provision mirrors settings.json out of the real ~/.claude on
+// every session launch, so repairing only the account dir would be copied back
+// over within minutes: the blackout would survive its own fix, in exactly the
+// setup that produces it. Repairing ~/.claude alone is not enough either — a user
+// may have set CLAUDE_CONFIG_DIR themselves, and that dir is the one their
+// sessions read. Each call is a read that writes nothing when healthy, so doing
+// both costs a stat.
 func (h *Home) maybeRepairClaudeHooks() {
 	if !h.lastHookRepairAt.IsZero() && time.Since(h.lastHookRepairAt) < hookRepairInterval {
 		return
 	}
 	h.lastHookRepairAt = time.Now()
 
-	repaired, err := hooks.RepairClaudeHooks(hooks.GetClaudeConfigDir())
-	if err != nil {
-		debuglog.Logger.Error("hook repair failed", "err", err)
-		return
+	dirs := []string{hooks.GetClaudeConfigDir()}
+	if home, err := os.UserHomeDir(); err == nil {
+		if real := filepath.Join(home, ".claude"); real != dirs[0] {
+			dirs = append(dirs, real)
+		}
 	}
-	if repaired {
-		h.hooksRepaired.Store(true)
-		debuglog.Logger.Info("claude hooks re-pointed at the running binary",
-			"command", hooks.GetHookCommand())
+
+	for _, dir := range dirs {
+		repaired, err := hooks.RepairClaudeHooks(dir)
+		if err != nil {
+			debuglog.Logger.Error("hook repair failed", "dir", dir, "err", err)
+			continue
+		}
+		if repaired {
+			h.hooksRepaired.Store(true)
+			debuglog.Logger.Info("claude hooks re-pointed at the running binary",
+				"dir", dir, "command", hooks.GetHookCommand())
+		}
 	}
 }
 
