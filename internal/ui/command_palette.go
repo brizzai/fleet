@@ -64,6 +64,13 @@ type PaletteItem struct {
 	// badge column for tickets: is this in fleet, or not.
 	SessionStatus session.Status
 	HasSession    bool
+
+	// TicketStarted marks a ticket already in a started state — "In Progress",
+	// "In Review", "In Dev". It is the normalized category, not the state name,
+	// because the name is whatever a team called it and cannot be compared;
+	// carried as a bool rather than the whole StateType because "is it started"
+	// is the only question anything here asks of it.
+	TicketStarted bool
 }
 
 // PaletteTab restricts which kinds of items show in the palette.
@@ -103,6 +110,16 @@ type CommandPaletteDialog struct {
 	// from one that genuinely has nothing — the difference between "wait" and
 	// "you're done", which an empty list alone cannot say.
 	ticketsLoaded bool
+
+	// ticketTodoOnly narrows the tickets tab to work you have not started.
+	//
+	// Deliberately NOT reset by Show: a queue you are picking your next task
+	// out of is the state you want most of the time, and re-pressing it on
+	// every open would make it a chore rather than a mode. It stays visible
+	// while it is on — the tickets chip renders the scope in the tab bar from
+	// every tab, not only from the one that can toggle it — and it is not
+	// persisted to config, so a restart clears it.
+	ticketTodoOnly bool
 }
 
 type scoredItem struct {
@@ -190,6 +207,38 @@ func itemMatchesTab(it PaletteItem, tab PaletteTab) bool {
 	}
 }
 
+// scopedOut reports whether the todo-only scope drops this row from tab.
+//
+// The test is "is it started", not "is it todo": excluding rather than
+// allowlisting means a state neither provider maps — Linear's StateOther, a
+// category fleet has not seen — stays visible rather than silently vanishing
+// from a list the user believes is complete.
+//
+// Scoped to the tickets tab, like that tab's other dedicated furniture: the
+// chip that names the scope lives on the tickets label, so a mixed `all` list
+// quietly holding fewer tickets than its own count claims would be a filter
+// with nothing on screen to explain it.
+func (d *CommandPaletteDialog) scopedOut(it PaletteItem, tab PaletteTab) bool {
+	return d.ticketTodoOnly && tab == PaletteTabTickets && it.TicketStarted
+}
+
+// ticketOnlyKeyLive reports whether ctrl+o acts from where the user is
+// standing. The footer hint renders on exactly this condition, so the key is
+// advertised only where it works — the rule the context menu's dimmed rows
+// keep, applied to a footer that has no way to dim anything.
+func (d *CommandPaletteDialog) ticketOnlyKeyLive() bool {
+	return d.activeTab == PaletteTabTickets || d.ticketTodoOnly
+}
+
+// toggleTodoOnly flips the scope. The cursor goes home because the row under it
+// is usually one of the rows that just left.
+func (d *CommandPaletteDialog) toggleTodoOnly() {
+	d.ticketTodoOnly = !d.ticketTodoOnly
+	d.cursor = 0
+	d.scrollOff = 0
+	d.rebuildFiltered()
+}
+
 // cycleTab advances to the next/previous tab and rebuilds the filtered list.
 func (d *CommandPaletteDialog) cycleTab(delta int) {
 	n := len(paletteTabOrder)
@@ -228,7 +277,7 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 	tabItems := make([]PaletteItem, 0, len(d.items))
 	haystacks := make([]string, 0, len(d.items))
 	for _, it := range d.items {
-		if !itemMatchesTab(it, d.activeTab) {
+		if !itemMatchesTab(it, d.activeTab) || d.scopedOut(it, d.activeTab) {
 			continue
 		}
 		tabItems = append(tabItems, it)
@@ -349,6 +398,19 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.C
 	case "shift+tab":
 		d.cycleTab(-1)
 		return d, nil
+	case "ctrl+o":
+		// Arming needs the tickets tab; clearing does not. The two presses are
+		// not the same act: arming has an effect you can only see where the
+		// rows are, while the chip it lights renders from every tab — and a
+		// mode you can see but cannot reach from where you are standing is
+		// worse than one you cannot see at all. There is exactly one scope, so
+		// turning it off is never ambiguous. Where the key is not live it
+		// falls through to the input, which binds it no more than the palette
+		// does, so it stays a no-op rather than a swallowed key.
+		if d.ticketOnlyKeyLive() {
+			d.toggleTodoOnly()
+			return d, nil
+		}
 	case "up":
 		if d.cursor > 0 {
 			d.cursor--
@@ -396,7 +458,7 @@ func (d *CommandPaletteDialog) View() string {
 	b.WriteString("\n\n")
 
 	if len(d.filtered) == 0 {
-		b.WriteString(DimStyle.Render("  No matches"))
+		b.WriteString(DimStyle.Render("  " + d.emptyLine()))
 		b.WriteString("\n")
 	} else {
 		// Scroll indicators.
@@ -580,9 +642,53 @@ func (d *CommandPaletteDialog) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(DimStyle.Render("↑↓ nav  tab: switch tab  enter: select  esc: close"))
+	// The hint names the press's destination, not the current state — the tab
+	// chip already carries the state.
+	//
+	// Two words, and this is the whole budget rather than a slice of it: the
+	// box's inner width is min(term-8, 96) - 6, so the 50-column footer this
+	// grew from cleared a 64-column terminal and the 64-column one clears 78
+	// (77 for the shorter "ctrl+o: all", which is what other tabs render).
+	// Between 64 and 77 the footer now wraps to a second line and the box
+	// grows a row — accepted, because an 80-column floor is assumed throughout
+	// this dialog and naming the key is worth more than the two rows.
+	scope := ""
+	if d.ticketOnlyKeyLive() {
+		scope = "  ctrl+o: todo"
+		if d.ticketTodoOnly {
+			scope = "  ctrl+o: all"
+		}
+	}
+	b.WriteString(DimStyle.Render("↑↓ nav  tab: switch tab" + scope + "  enter: select  esc: close"))
 
 	return d.boxed(b.String())
+}
+
+// emptyLine says why the list is empty, when the scope is why.
+//
+// The palette renders one flat "No matches" for every empty case, which is
+// survivable while empty is an edge case — and the todo-only scope makes it
+// routine: with ticket_start_state moving your active work to In Progress,
+// "everything I am assigned is started" is the ordinary outcome of pressing
+// ctrl+o, and it looked exactly like a fetch that had failed, with only a
+// `tickets · todo 0` chip to tell them apart.
+//
+// Claimed only when rows were really scoped out and nothing is typed. With a
+// query, or with nothing hidden, the scope is not the reason the list is empty
+// and naming it would be a guess dressed as an explanation.
+func (d *CommandPaletteDialog) emptyLine() string {
+	if !d.ticketTodoOnly || d.activeTab != PaletteTabTickets {
+		return "No matches"
+	}
+	if strings.TrimSpace(d.filterInput.Value()) != "" {
+		return "No matches"
+	}
+	for _, it := range d.items {
+		if d.scopedOut(it, PaletteTabTickets) {
+			return "Nothing unstarted — ctrl+o shows all"
+		}
+	}
+	return "No matches"
 }
 
 // renderTabs renders the tab bar with the active tab highlighted.
@@ -592,7 +698,7 @@ func (d *CommandPaletteDialog) renderTabs() string {
 	for _, tab := range []PaletteTab{PaletteTabAll, PaletteTabActions, PaletteTabPlaces, PaletteTabTickets} {
 		haystacks := make([]string, 0, len(d.items))
 		for _, it := range d.items {
-			if !itemMatchesTab(it, tab) {
+			if !itemMatchesTab(it, tab) || d.scopedOut(it, tab) {
 				continue
 			}
 			if query == "" {
@@ -619,7 +725,14 @@ func (d *CommandPaletteDialog) renderTabs() string {
 	// belongs to the selected row alone. See docs/design-system.md.
 	parts := make([]string, 0, len(paletteTabOrder))
 	for _, t := range paletteTabOrder {
-		label := fmt.Sprintf("%s %d", t.Label, counts[t.Tab])
+		name := t.Label
+		if t.Tab == PaletteTabTickets && d.ticketTodoOnly {
+			// The scope rides the chip it scopes rather than taking a chip of
+			// its own: one thing lit means one thing, and the count beside it
+			// is already the scoped count.
+			name += " · todo"
+		}
+		label := fmt.Sprintf("%s %d", name, counts[t.Tab])
 		if t.Tab == d.activeTab {
 			parts = append(parts, ModeOn().Render(label))
 		} else {

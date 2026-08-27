@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brizzai/fleet/internal/analytics"
@@ -551,5 +552,167 @@ func TestFilteredTicketsTabDoesNotDoubleThePriority(t *testing.T) {
 	}
 	if !strings.Contains(row, "In Progress") {
 		t.Errorf("a filtered row must still carry its state: %q", row)
+	}
+}
+
+// scopedTicketsPalette opens the tickets tab over one started and two
+// not-started rows — the shape the todo-only scope exists to cut.
+func scopedTicketsPalette(t *testing.T) *Home {
+	t.Helper()
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
+		{Identifier: "BRZ-3013", Title: "TS sdk spanprocessor", StateName: "Todo", State: ticket.StateUnstarted},
+		{Identifier: "BRZ-3201", Title: "Revisit snooze presets", StateName: "Backlog", State: ticket.StateBacklog},
+	}))
+	return h
+}
+
+func pressCtrlO(h *Home) {
+	h.commandPalette, _ = h.commandPalette.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+}
+
+// TestTodoScopeHidesStartedWork is the whole feature: ctrl+o drops what you are
+// already in the middle of, and leaves everything you have not started —
+// including backlog, which is a separate category in Linear and does not exist
+// at all in Jira.
+func TestTodoScopeHidesStartedWork(t *testing.T) {
+	h := scopedTicketsPalette(t)
+
+	if got := renderedPalette(t, h); !strings.Contains(got, "BRZ-2644") {
+		t.Fatalf("precondition: started row should be listed:\n%s", got)
+	}
+
+	pressCtrlO(h)
+	got := renderedPalette(t, h)
+	if strings.Contains(got, "BRZ-2644") {
+		t.Errorf("todo-only must drop started work:\n%s", got)
+	}
+	for _, id := range []string{"BRZ-3013", "BRZ-3201"} {
+		if !strings.Contains(got, id) {
+			t.Errorf("todo-only must keep %s — unstarted AND backlog are both not-started:\n%s", id, got)
+		}
+	}
+
+	pressCtrlO(h)
+	if got := renderedPalette(t, h); !strings.Contains(got, "BRZ-2644") {
+		t.Errorf("ctrl+o must toggle back:\n%s", got)
+	}
+}
+
+// TestTodoScopeCountFollowsTheList: the tab bar's count is computed on its own
+// pass over the items, so a scope applied to only one of the two makes the bar
+// state a number the list contradicts — and the chip that names the scope is on
+// that very label.
+func TestTodoScopeCountFollowsTheList(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	pressCtrlO(h)
+
+	got := renderedPalette(t, h)
+	if !strings.Contains(got, "tickets · todo 2") {
+		t.Errorf("the tickets chip must name the scope and count the scoped rows:\n%s", got)
+	}
+}
+
+// TestTodoScopeStaysOnItsOwnTab: the scope is the tickets tab's, and only the
+// tickets chip says so. A mixed `all` list quietly holding fewer tickets than
+// its own count claims would be a filter with nothing on screen explaining it.
+func TestTodoScopeStaysOnItsOwnTab(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	pressCtrlO(h)
+	h.commandPalette.activeTab = PaletteTabAll
+	h.commandPalette.rebuildFiltered()
+
+	// The filtered list, not the render: the all tab leads with commands and
+	// pushes the ticket rows below the visible window, so a render check here
+	// would pass for the wrong reason.
+	found := false
+	for _, it := range h.commandPalette.filtered {
+		if it.ID == "BRZ-2644" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the all tab must keep every ticket")
+	}
+}
+
+// TestTodoScopeCannotBeArmedOffItsOwnTab: arming has an effect you can only see
+// where the rows are, so ctrl+o falls through to the text input elsewhere
+// rather than silently scoping a tab the user is not looking at. Clearing is
+// the asymmetric half — see TestTodoScopeClearsFromAnyTab.
+func TestTodoScopeCannotBeArmedOffItsOwnTab(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	h.commandPalette.activeTab = PaletteTabAll
+	h.commandPalette.rebuildFiltered()
+
+	pressCtrlO(h)
+	if h.commandPalette.ticketTodoOnly {
+		t.Error("ctrl+o armed the scope from a tab that cannot show it")
+	}
+}
+
+// TestTodoScopeClearsFromAnyTab is the other half of the asymmetry: the chip
+// the scope lights renders from every tab, so the key that clears it has to
+// reach as far as the chip does. A mode you can see and cannot reach from
+// where you are standing is worse than one you cannot see.
+func TestTodoScopeClearsFromAnyTab(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	pressCtrlO(h)
+	if !h.commandPalette.ticketTodoOnly {
+		t.Fatal("precondition: scope should be armed")
+	}
+
+	h.commandPalette.activeTab = PaletteTabAll
+	h.commandPalette.rebuildFiltered()
+
+	// Advertised here because it works here — checked while armed, since
+	// clearing it takes the key back out of reach and the hint with it.
+	if got := renderedPalette(t, h); !strings.Contains(got, "ctrl+o: all") {
+		t.Errorf("the hint must render wherever the key is live, so no dead key is advertised:\n%s", got)
+	}
+
+	pressCtrlO(h)
+	if h.commandPalette.ticketTodoOnly {
+		t.Error("an armed scope must be clearable from the tab its chip is visible on")
+	}
+	if got := renderedPalette(t, h); strings.Contains(got, "ctrl+o:") {
+		t.Errorf("cleared, the key is inert here and must stop advertising itself:\n%s", got)
+	}
+}
+
+// TestScopedEmptyTabSaysWhy: with ticket_start_state moving active work to In
+// Progress, "everything I am assigned is started" is the routine outcome of
+// this scope — and a flat "No matches" makes it look exactly like a fetch that
+// failed.
+func TestScopedEmptyTabSaysWhy(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
+	}))
+	pressCtrlO(h)
+
+	if got := renderedPalette(t, h); !strings.Contains(got, "Nothing unstarted") {
+		t.Errorf("an empty scoped tab must say the scope is why:\n%s", got)
+	}
+}
+
+// TestUnscopedEmptyTabStaysGeneric: the scoped line is a claim about why, so it
+// is made only when rows were really hidden. A tracker that returned nothing is
+// not "nothing unstarted", and saying so would be a guess dressed as a reason.
+func TestUnscopedEmptyTabStaysGeneric(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(nil)
+	h.commandPalette.ticketTodoOnly = true
+	h.commandPalette.rebuildFiltered()
+
+	if got := renderedPalette(t, h); strings.Contains(got, "Nothing unstarted") {
+		t.Errorf("no tickets at all is not the scope's doing:\n%s", got)
 	}
 }
