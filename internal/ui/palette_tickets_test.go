@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brizzai/fleet/internal/analytics"
@@ -551,5 +552,103 @@ func TestFilteredTicketsTabDoesNotDoubleThePriority(t *testing.T) {
 	}
 	if !strings.Contains(row, "In Progress") {
 		t.Errorf("a filtered row must still carry its state: %q", row)
+	}
+}
+
+// scopedTicketsPalette opens the tickets tab over one started and two
+// not-started rows — the shape the todo-only scope exists to cut.
+func scopedTicketsPalette(t *testing.T) *Home {
+	t.Helper()
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
+		{Identifier: "BRZ-3013", Title: "TS sdk spanprocessor", StateName: "Todo", State: ticket.StateUnstarted},
+		{Identifier: "BRZ-3201", Title: "Revisit snooze presets", StateName: "Backlog", State: ticket.StateBacklog},
+	}))
+	return h
+}
+
+func pressCtrlO(h *Home) {
+	h.commandPalette, _ = h.commandPalette.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+}
+
+// TestTodoScopeHidesStartedWork is the whole feature: ctrl+o drops what you are
+// already in the middle of, and leaves everything you have not started —
+// including backlog, which is a separate category in Linear and does not exist
+// at all in Jira.
+func TestTodoScopeHidesStartedWork(t *testing.T) {
+	h := scopedTicketsPalette(t)
+
+	if got := renderedPalette(t, h); !strings.Contains(got, "BRZ-2644") {
+		t.Fatalf("precondition: started row should be listed:\n%s", got)
+	}
+
+	pressCtrlO(h)
+	got := renderedPalette(t, h)
+	if strings.Contains(got, "BRZ-2644") {
+		t.Errorf("todo-only must drop started work:\n%s", got)
+	}
+	for _, id := range []string{"BRZ-3013", "BRZ-3201"} {
+		if !strings.Contains(got, id) {
+			t.Errorf("todo-only must keep %s — unstarted AND backlog are both not-started:\n%s", id, got)
+		}
+	}
+
+	pressCtrlO(h)
+	if got := renderedPalette(t, h); !strings.Contains(got, "BRZ-2644") {
+		t.Errorf("ctrl+o must toggle back:\n%s", got)
+	}
+}
+
+// TestTodoScopeCountFollowsTheList: the tab bar's count is computed on its own
+// pass over the items, so a scope applied to only one of the two makes the bar
+// state a number the list contradicts — and the chip that names the scope is on
+// that very label.
+func TestTodoScopeCountFollowsTheList(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	pressCtrlO(h)
+
+	got := renderedPalette(t, h)
+	if !strings.Contains(got, "tickets · todo 2") {
+		t.Errorf("the tickets chip must name the scope and count the scoped rows:\n%s", got)
+	}
+}
+
+// TestTodoScopeStaysOnItsOwnTab: the scope is the tickets tab's, and only the
+// tickets chip says so. A mixed `all` list quietly holding fewer tickets than
+// its own count claims would be a filter with nothing on screen explaining it.
+func TestTodoScopeStaysOnItsOwnTab(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	pressCtrlO(h)
+	h.commandPalette.activeTab = PaletteTabAll
+	h.commandPalette.rebuildFiltered()
+
+	// The filtered list, not the render: the all tab leads with commands and
+	// pushes the ticket rows below the visible window, so a render check here
+	// would pass for the wrong reason.
+	found := false
+	for _, it := range h.commandPalette.filtered {
+		if it.ID == "BRZ-2644" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the all tab must keep every ticket")
+	}
+}
+
+// TestTodoScopeIsInertOffTheTicketsTab: ctrl+o falls through to the text input
+// elsewhere. It is bound by neither, so the guard is that it stays a no-op
+// rather than silently arming a scope whose chip is on another tab.
+func TestTodoScopeIsInertOffTheTicketsTab(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	h.commandPalette.activeTab = PaletteTabAll
+	h.commandPalette.rebuildFiltered()
+
+	pressCtrlO(h)
+	if h.commandPalette.ticketTodoOnly {
+		t.Error("ctrl+o armed the scope from a tab that cannot show it")
 	}
 }

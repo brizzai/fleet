@@ -13,10 +13,17 @@ import (
 	"github.com/brizzai/fleet/internal/ticketing"
 )
 
-// ticketListLimit caps the "my tickets" fetch, per tracker. Fifty covers a real
-// backlog while keeping one query well inside Linear's per-query complexity
-// budget and one page of Jira's JQL search.
-const ticketListLimit = 50
+// ticketListLimit caps the "my tickets" fetch, per tracker.
+//
+// A hundred, which is also what both providers fall back to when handed no
+// limit at all. It is one page either way — Linear takes `first` up to 250 and
+// this projection (eight scalar fields and one nested state) stays far inside
+// the per-query complexity budget, and Jira's /search/jql accepts it in a
+// single POST. The tail matters because the fetch is ordered by updatedAt and
+// the cut therefore falls on RECENCY, not on state: a fifty-row cap silently
+// truncated exactly the untouched backlog the tickets tab's todo-only scope
+// exists to show.
+const ticketListLimit = 100
 
 // ticketListTimeout bounds the fetch. It runs while the palette is already
 // open and usable, so a slow answer costs the ticket rows and nothing else.
@@ -159,6 +166,10 @@ func (h *Home) ticketPaletteItems(tickets []ticket.Ticket) []PaletteItem {
 			// repeated on every row. The right column carries what fleet knows
 			// instead — and stays empty when there is nothing to say.
 			Group: t.StateName,
+			// The category, beside the name: the name is what the team called
+			// the state and cannot be compared, and this is what the tickets
+			// tab's todo-only scope filters on.
+			TicketStarted: t.State == ticket.StateStarted,
 			// Haystack must be exactly Name + " " + <right column>, because the
 			// renderer maps matched haystack indexes back onto those two
 			// strings by offset. Composing it any other way lights up the
