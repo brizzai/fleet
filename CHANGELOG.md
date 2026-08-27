@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.33.0] - 2026-08-27
+
+### Added
+
+- **Todo-only tickets.** `Ctrl+O` in the tickets tab (`t`) hides what you've already started, leaving everything you haven't — todo, backlog and triage alike. The tab chip reads `tickets · todo` while it's on.
+- **More of your backlog.** The tickets tab now fetches 100 issues per tracker instead of 50 — the cut was ordered by recency, so it was truncating exactly the untouched backlog.
+
+### Fixed
+
+- **Status stops going dark.** Every session could lose status detection at once, silently, if the `fleet` binary that installed the hooks was later deleted or upgraded away — the sidebar kept showing a status, just a guessed one. fleet now repairs the hooks within a minute and names the sessions to restart.
+- **Busy sessions stay busy.** Starting a message while the agent was still working could mark it finished for ~18s — long enough for `Space` to jump you onto a session that was mid-run.
+
 ## [2.32.0] - 2026-08-26
 
 ### Highlights
@@ -615,7 +627,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.32.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.33.0...HEAD
+[2.33.0]: https://github.com/brizzai/fleet/releases/tag/v2.33.0
 [2.32.0]: https://github.com/brizzai/fleet/releases/tag/v2.32.0
 [2.31.0]: https://github.com/brizzai/fleet/releases/tag/v2.31.0
 [2.30.3]: https://github.com/brizzai/fleet/releases/tag/v2.30.3
