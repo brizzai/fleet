@@ -639,10 +639,11 @@ func TestTodoScopeStaysOnItsOwnTab(t *testing.T) {
 	}
 }
 
-// TestTodoScopeIsInertOffTheTicketsTab: ctrl+o falls through to the text input
-// elsewhere. It is bound by neither, so the guard is that it stays a no-op
-// rather than silently arming a scope whose chip is on another tab.
-func TestTodoScopeIsInertOffTheTicketsTab(t *testing.T) {
+// TestTodoScopeCannotBeArmedOffItsOwnTab: arming has an effect you can only see
+// where the rows are, so ctrl+o falls through to the text input elsewhere
+// rather than silently scoping a tab the user is not looking at. Clearing is
+// the asymmetric half — see TestTodoScopeClearsFromAnyTab.
+func TestTodoScopeCannotBeArmedOffItsOwnTab(t *testing.T) {
 	h := scopedTicketsPalette(t)
 	h.commandPalette.activeTab = PaletteTabAll
 	h.commandPalette.rebuildFiltered()
@@ -650,5 +651,68 @@ func TestTodoScopeIsInertOffTheTicketsTab(t *testing.T) {
 	pressCtrlO(h)
 	if h.commandPalette.ticketTodoOnly {
 		t.Error("ctrl+o armed the scope from a tab that cannot show it")
+	}
+}
+
+// TestTodoScopeClearsFromAnyTab is the other half of the asymmetry: the chip
+// the scope lights renders from every tab, so the key that clears it has to
+// reach as far as the chip does. A mode you can see and cannot reach from
+// where you are standing is worse than one you cannot see.
+func TestTodoScopeClearsFromAnyTab(t *testing.T) {
+	h := scopedTicketsPalette(t)
+	pressCtrlO(h)
+	if !h.commandPalette.ticketTodoOnly {
+		t.Fatal("precondition: scope should be armed")
+	}
+
+	h.commandPalette.activeTab = PaletteTabAll
+	h.commandPalette.rebuildFiltered()
+
+	// Advertised here because it works here — checked while armed, since
+	// clearing it takes the key back out of reach and the hint with it.
+	if got := renderedPalette(t, h); !strings.Contains(got, "ctrl+o: all") {
+		t.Errorf("the hint must render wherever the key is live, so no dead key is advertised:\n%s", got)
+	}
+
+	pressCtrlO(h)
+	if h.commandPalette.ticketTodoOnly {
+		t.Error("an armed scope must be clearable from the tab its chip is visible on")
+	}
+	if got := renderedPalette(t, h); strings.Contains(got, "ctrl+o:") {
+		t.Errorf("cleared, the key is inert here and must stop advertising itself:\n%s", got)
+	}
+}
+
+// TestScopedEmptyTabSaysWhy: with ticket_start_state moving active work to In
+// Progress, "everything I am assigned is started" is the routine outcome of
+// this scope — and a flat "No matches" makes it look exactly like a fetch that
+// failed.
+func TestScopedEmptyTabSaysWhy(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(h.ticketPaletteItems([]ticket.Ticket{
+		{Identifier: "BRZ-2644", Title: "Storage optimization", StateName: "In Progress", State: ticket.StateStarted},
+	}))
+	pressCtrlO(h)
+
+	if got := renderedPalette(t, h); !strings.Contains(got, "Nothing unstarted") {
+		t.Errorf("an empty scoped tab must say the scope is why:\n%s", got)
+	}
+}
+
+// TestUnscopedEmptyTabStaysGeneric: the scoped line is a claim about why, so it
+// is made only when rows were really hidden. A tracker that returned nothing is
+// not "nothing unstarted", and saying so would be a guess dressed as a reason.
+func TestUnscopedEmptyTabStaysGeneric(t *testing.T) {
+	h := ticketHome(t)
+	h.commandPalette.SetSize(120, 40)
+	h.commandPalette.ShowOnTab(h.buildPaletteItems(), nil, PaletteTabTickets)
+	h.commandPalette.SetTickets(nil)
+	h.commandPalette.ticketTodoOnly = true
+	h.commandPalette.rebuildFiltered()
+
+	if got := renderedPalette(t, h); strings.Contains(got, "Nothing unstarted") {
+		t.Errorf("no tickets at all is not the scope's doing:\n%s", got)
 	}
 }
