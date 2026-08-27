@@ -235,10 +235,17 @@ type Home struct {
 	viewOffset int
 
 	isAttaching atomic.Bool
-	err         error
-	errTime     time.Time
-	infoMsg     string
-	infoTime    time.Time
+
+	// hooksRepaired latches once maybeRepairClaudeHooks has re-pointed a hook
+	// command that had been deleted. Written on the worker, read by the tip on
+	// the Update tick, hence atomic. Latched rather than sent as a message: the
+	// repair happens at most once in a launch, and worker sends are dropped
+	// during an attach — losing that one send would lose the tip for good.
+	hooksRepaired atomic.Bool
+	err           error
+	errTime       time.Time
+	infoMsg       string
+	infoTime      time.Time
 
 	newDialog             *NewSessionDialog
 	confirmDialog         *ConfirmDialog
@@ -307,6 +314,9 @@ type Home struct {
 	// lastAdoptSweepAt throttles the externally-created-session sweep, mirroring
 	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
 	lastAdoptSweepAt time.Time
+	// lastHookRepairAt throttles the hook-command existence check, mirroring
+	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
+	lastHookRepairAt time.Time
 
 	// groupSnooze maps a sidebar group key ("origin:<key>" or a checkout path)
 	// to its umbrella snooze deadline. Read only while building the sidebar
@@ -4721,6 +4731,65 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 	}
 }
 
+// hookRepairInterval throttles the hook-command existence check. Slow on purpose:
+// the condition it catches (the injected command's binary deleted out from under
+// a running fleet) changes at most once in a session's life, and the check reads
+// settings.json and stats a path.
+const hookRepairInterval = 60 * time.Second
+
+// maybeRepairClaudeHooks re-points Claude's hooks when the command they name no
+// longer exists on disk.
+//
+// Hooks are injected once, at launch, against the running binary's own path —
+// which in a dev checkout is a worktree's build/fleet. Delete that worktree and
+// every hook in ~/.claude/settings.json silently fails: no status file is ever
+// written, every session falls back to pane capture, and nothing anywhere says
+// so. Measured on a real fleet: 19 hours and 37 live sessions with not one hook
+// firing. Launch-time injection cannot cover it, because the path is clobbered
+// by a *sibling* fleet instance and then deleted while this one keeps running.
+//
+// RepairClaudeHooks writes only when the path is actually missing, never when it
+// merely differs from ours — otherwise two instances launched from different
+// worktrees would rewrite each other's settings.json every minute.
+//
+// Both the active config dir and the literal ~/.claude are repaired, and the
+// second one is not redundant. GetClaudeConfigDir honours $CLAUDE_CONFIG_DIR,
+// which sessionEnv sets to a per-account dir — and fleet is very often launched
+// from inside a fleet session, so the "active" dir is routinely an account dir.
+// claudeaccount.Provision mirrors settings.json out of the real ~/.claude on
+// every session launch, so repairing only the account dir would be copied back
+// over within minutes: the blackout would survive its own fix, in exactly the
+// setup that produces it. Repairing ~/.claude alone is not enough either — a user
+// may have set CLAUDE_CONFIG_DIR themselves, and that dir is the one their
+// sessions read. Each call is a read that writes nothing when healthy, so doing
+// both costs a stat.
+func (h *Home) maybeRepairClaudeHooks() {
+	if !h.lastHookRepairAt.IsZero() && time.Since(h.lastHookRepairAt) < hookRepairInterval {
+		return
+	}
+	h.lastHookRepairAt = time.Now()
+
+	dirs := []string{hooks.GetClaudeConfigDir()}
+	if home, err := os.UserHomeDir(); err == nil {
+		if real := filepath.Join(home, ".claude"); real != dirs[0] {
+			dirs = append(dirs, real)
+		}
+	}
+
+	for _, dir := range dirs {
+		repaired, err := hooks.RepairClaudeHooks(dir)
+		if err != nil {
+			debuglog.Logger.Error("hook repair failed", "dir", dir, "err", err)
+			continue
+		}
+		if repaired {
+			h.hooksRepaired.Store(true)
+			debuglog.Logger.Info("claude hooks re-pointed at the running binary",
+				"dir", dir, "command", hooks.GetHookCommand())
+		}
+	}
+}
+
 // adoptSweepInterval throttles the externally-created-session sweep to its own
 // cadence inside the ~2s heavy worker pass. Re-reading the sessions table every
 // heavy cycle would buy nothing: the payoff is a CLI-created session showing up
@@ -6536,6 +6605,11 @@ drainPriority:
 	// why it lives here rather than on the Update loop. Also called on the
 	// empty-fleet early-return path above — the throttle makes that safe.
 	h.maybeAdoptExternalSessions(sessions)
+
+	// 5d. Re-point Claude's hooks if the command they name has been deleted.
+	// Self-throttled; stats a file and may rewrite settings.json, which is why it
+	// lives here rather than on the Update loop.
+	h.maybeRepairClaudeHooks()
 
 	// 5. Git+PR refresh used to run here, inline. It now lives on its own
 	// goroutine (gitWorker) — see the comment there for why sharing this

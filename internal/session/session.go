@@ -141,6 +141,15 @@ type Session struct {
 	// Reset whenever a new hook arrives (see UpdateHookStatus).
 	waitingPaneConfirmed bool
 
+	// paneFinishedFrames counts consecutive pane captures that read finished while
+	// a running session has no hook data, and paneFinishedFirstAt stamps the first
+	// of them. A running session is only demoted once the count reaches
+	// paneFinishedConfirmFrames AND paneFinishedConfirmDelay has elapsed — see
+	// updateStatusFromPane. Both are cleared by any reading that does not agree,
+	// including an unclassified one and a failed capture, so "consecutive" holds.
+	paneFinishedFrames  int
+	paneFinishedFirstAt time.Time
+
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 
 	// Transcript tiebreaker cache. conversationActivePastHook runs on the ~500ms fast
@@ -796,6 +805,8 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		s.lastContentChangeAt = time.Time{}
 		s.hookOverriddenAt = time.Time{} // allow fresh evaluation of new hook
 		s.waitingPaneConfirmed = false   // re-observe the prompt before trusting a pane spinner
+		s.paneFinishedFrames = 0         // a fresh hook supersedes any half-confirmed pane demotion
+		s.paneFinishedFirstAt = time.Time{}
 		// A non-dead hook means Claude is alive again. Re-arm the crash-dump
 		// trigger so the NEXT real death gets a dump even if a prior false
 		// transition (e.g. brief stale-hook flash before this fresh hook
@@ -1629,6 +1640,26 @@ const finishedHoldMaxAge = 5 * time.Second
 // status prematurely.
 const waitingHookRenderBackstop = 5 * time.Second
 
+// paneFinishedConfirmFrames is how many consecutive finished readings the pane
+// must give before a running session with no hook data is demoted. Two: the
+// frame this guards against is a single repaint, and anything higher would delay
+// every genuine finish for no further protection.
+const paneFinishedConfirmFrames = 2
+
+// paneFinishedConfirmDelay is the minimum time that must separate the first
+// finished reading from the demotion. Counting readings alone is not enough,
+// because a reading is not the same thing as a frame: statusWorkerCycle runs on
+// its 500ms ticker OR on any statusTrigger kick (a hook change on any session,
+// attach exit, reload-all), and tmux.Session.CapturePane serves a 400ms cache
+// verbatim — with fewer than two active sessions seedActiveCaptures does not even
+// re-capture. Two cycles inside that window therefore read the SAME pane, and a
+// bare count would confirm one blink against itself.
+//
+// Matched to tmux's captureCacheTTL so the confirming reading is provably a fresh
+// capture. It costs nothing in practice: the fast pass is 500ms, so a genuine
+// finish still lands on the next pass.
+const paneFinishedConfirmDelay = 400 * time.Millisecond
+
 // conversationActiveWindow bounds how recent the last lead-conversation transcript
 // entry must be for conversationActivePastHook to count the agent as actively
 // working. Sized above the longest observed gap between lead entries during silent
@@ -1707,6 +1738,13 @@ func (s *Session) applyHookFinished(paneStatus Status, convActive bool, log *slo
 	}
 }
 
+// resetPaneFinishedConfirmLocked drops a part-built finished confirmation. Caller
+// holds s.mu.
+func (s *Session) resetPaneFinishedConfirmLocked() {
+	s.paneFinishedFrames = 0
+	s.paneFinishedFirstAt = time.Time{}
+}
+
 // updateStatusFromPane detects status from pane capture when no hook data is available.
 func (s *Session) updateStatusFromPane(oldStatus Status, log *slog.Logger) {
 	log.Debug("no hook data, falling back to pane capture")
@@ -1714,6 +1752,11 @@ func (s *Session) updateStatusFromPane(oldStatus Status, log *slog.Logger) {
 	content, err := s.getCapturer().CapturePane()
 	if err != nil {
 		log.Warn("pane capture failed", "err", err)
+		// A frame we could not read is not a frame that agreed. Drop any
+		// half-built confirmation rather than letting it bridge the gap.
+		s.mu.Lock()
+		s.resetPaneFinishedConfirmLocked()
+		s.mu.Unlock()
 		return // Keep previous status on capture failure.
 	}
 
@@ -1727,16 +1770,58 @@ func (s *Session) updateStatusFromPane(oldStatus Status, log *slog.Logger) {
 	case StatusRunning:
 		s.Status = StatusRunning
 		s.Acknowledged = false
+		s.resetPaneFinishedConfirmLocked()
 	case StatusWaiting:
 		s.Status = StatusWaiting
 		s.Acknowledged = false
+		s.resetPaneFinishedConfirmLocked()
 	case StatusFinished:
+		// One frame is not enough to demote a running session. Claude repaints the
+		// input box as the user types into it, and on that frame the activity line
+		// is briefly absent — leaving `❯ <typed text>`, which detectFinished reads
+		// as an idle prompt. That reading is deliberate and must stay: it is the
+		// only thing that clears a stale waiting hook when the user escapes a
+		// permission prompt and starts typing in default mode, where there is no
+		// `⏵⏵` mode bar to fall back on (see applyHookWaiting).
+		//
+		// With hook data the hook holds the session running through the blink, and
+		// applyHookFinished has its own guards for the same between-bursts frame.
+		// Here there is no hook at all, so the pane is the only vote and a single
+		// bad frame decides everything — it demoted a working session to finished,
+		// which also dropped it off the ~500ms fast pass onto the round-robin,
+		// where the wrong status then stood for ~18s and pulled the Space rotation
+		// onto a session that was busy. So the demotion has to be seen twice.
+		//
+		// Costs one extra pass (~500ms, since a running session is on the fast
+		// pass) before a genuine finish shows.
+		if oldStatus == StatusRunning {
+			now := time.Now()
+			if s.paneFinishedFrames == 0 {
+				s.paneFinishedFirstAt = now
+			}
+			s.paneFinishedFrames++
+			// Both gates, because neither alone is sufficient: the count rejects a
+			// lone reading, and the delay rejects two readings of one cached frame.
+			if s.paneFinishedFrames < paneFinishedConfirmFrames ||
+				now.Sub(s.paneFinishedFirstAt) < paneFinishedConfirmDelay {
+				log.Debug("pane read finished while running — holding for confirmation",
+					"frames", s.paneFinishedFrames, "need", paneFinishedConfirmFrames,
+					"since", now.Sub(s.paneFinishedFirstAt).Round(time.Millisecond),
+					"needSince", paneFinishedConfirmDelay)
+				return
+			}
+		}
+		s.resetPaneFinishedConfirmLocked()
 		if s.Acknowledged {
 			s.Status = StatusIdle
 		} else {
 			s.Status = StatusFinished
 		}
 	default:
+		// An unclassified pane is the common case, not a quiet vote for finished.
+		// Without this a blink, then minutes of no-match, then another blink would
+		// demote a running session on two frames far apart.
+		s.resetPaneFinishedConfirmLocked()
 		log.Debug("no pattern matched, keeping previous status", "status", s.Status)
 	}
 

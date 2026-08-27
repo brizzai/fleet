@@ -2,7 +2,9 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -183,7 +185,8 @@ func InjectClaudeHooks(configDir string) (bool, error) {
 		existingHooks = make(map[string]json.RawMessage)
 	}
 
-	if hooksAlreadyInstalled(existingHooks) && !hooksNeedUpdate(existingHooks) && !hasStaleHookEvents(existingHooks) {
+	if hooksAlreadyInstalled(existingHooks) && !hooksNeedUpdate(existingHooks) &&
+		!hasStaleHookEvents(existingHooks) && !hookBinaryMissing(existingHooks) {
 		debuglog.Logger.Debug("claude hooks: already installed and up to date")
 		return false, nil
 	}
@@ -390,6 +393,129 @@ func hooksAlreadyInstalled(hooks map[string]json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+// fleetHookBinary extracts the binary path from a fleet hook command. The
+// command is built by GetHookCommand as `<shell-quoted path> hook-handler
+// --fleet-hook`, so cutting at " hook-handler" recovers the path whatever the
+// binary is named. Returns "" when there is nothing to recover.
+func fleetHookBinary(command string) string {
+	path, _, ok := strings.Cut(strings.TrimSpace(command), " hook-handler")
+	if !ok {
+		return ""
+	}
+	path = strings.TrimSpace(path)
+	if len(path) >= 2 && strings.HasPrefix(path, "'") && strings.HasSuffix(path, "'") {
+		path = strings.ReplaceAll(path[1:len(path)-1], `'\''`, "'")
+	}
+	return path
+}
+
+// hookBinaryMissing reports whether a fleet hook names an absolute path that is
+// no longer on disk.
+//
+// This is the failure mode that silences status detection completely and says
+// nothing: the hook still fires, Claude runs a command that doesn't resolve, no
+// status file is written, and every session falls back to pane capture with
+// nothing anywhere reporting why. It is reachable in ordinary use because the
+// injected path routinely points inside a git worktree's build/ — run fleet from
+// a worktree once and the path it writes outlives the worktree's removal.
+// FleetBinaryPath already guards the sibling case (a `go run` binary that
+// vanishes at exit) for exactly this reason; a deleted worktree is the same
+// invariant broken a different way.
+//
+// A bare or relative name is left alone: there is nothing absolute to stat, and
+// PATH is resolved by the shell when the hook fires.
+func hookBinaryMissing(hooks map[string]json.RawMessage) bool {
+	for _, cfg := range hookEventConfigs {
+		raw, ok := hooks[cfg.Event]
+		if !ok {
+			continue
+		}
+		var matchers []claudeHookMatcher
+		if err := json.Unmarshal(raw, &matchers); err != nil {
+			continue
+		}
+		for _, m := range matchers {
+			if cfg.Matcher != "" && m.Matcher != cfg.Matcher {
+				continue
+			}
+			for _, h := range m.Hooks {
+				if !isFleetHook(h.Command) {
+					continue
+				}
+				bin := fleetHookBinary(h.Command)
+				if bin == "" || !filepath.IsAbs(bin) {
+					continue
+				}
+				// Strictly "not there", never "could not tell". EACCES, ELOOP, a
+				// stalled network mount or a parent dir that lost +x all report an
+				// error while the binary may be perfectly fine — and treating those
+				// as deleted would rewrite settings.json every cycle forever and
+				// reopen the cross-instance fight this function exists to avoid.
+				if _, err := os.Stat(bin); errors.Is(err, fs.ErrNotExist) {
+					debuglog.Logger.Warn("claude hooks: hook command no longer exists",
+						"event", cfg.Event, "binary", bin)
+					return true
+				} else if err != nil {
+					debuglog.Logger.Warn("claude hooks: could not stat hook command; assuming it is fine",
+						"event", cfg.Event, "binary", bin, "err", err)
+				}
+			}
+		}
+	}
+	return false
+}
+
+// RepairClaudeHooks re-injects fleet's hooks when the command they name no
+// longer exists on disk, and writes nothing otherwise.
+//
+// Safe to call on a timer, which InjectClaudeHooks is not: that one also
+// rewrites a path that merely *differs* from this process's own, so two fleet
+// instances running from different worktrees would overwrite each other's
+// settings.json on every call. A path that resolves works whoever wrote it —
+// hook-handler writes into one global status-file directory, not an
+// instance-scoped one — so "missing" is the only condition worth acting on
+// unprompted, and it is also the only one that actually breaks anything.
+//
+// Returns true when a repair was made.
+func RepairClaudeHooks(configDir string) (bool, error) {
+	settingsPath := filepath.Join(configDir, "settings.json")
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read settings.json: %w", err)
+	}
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		return false, fmt.Errorf("parse settings.json: %w", err)
+	}
+	raw, ok := rawSettings["hooks"]
+	if !ok {
+		return false, nil
+	}
+	var existingHooks map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &existingHooks); err != nil {
+		return false, fmt.Errorf("parse hooks section: %w", err)
+	}
+	if !hookBinaryMissing(existingHooks) {
+		return false, nil
+	}
+
+	debuglog.Logger.Warn("claude hooks: repairing a hook command that no longer exists",
+		"path", settingsPath, "newCommand", GetHookCommand())
+	// Report what was actually written, not what we set out to write.
+	// InjectClaudeHooks re-reads settings.json, so a sibling instance that
+	// repaired it between our read and its own leaves nothing to do — and
+	// claiming a repair we did not make latches the caller's tip on for good.
+	wrote, err := InjectClaudeHooks(configDir)
+	if err != nil {
+		return false, err
+	}
+	return wrote, nil
 }
 
 // hooksNeedUpdate checks if the hook command path has changed (e.g., after rebuild).

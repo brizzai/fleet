@@ -2,6 +2,8 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -627,4 +629,216 @@ func TestInjectAndRemoveClaudeHooks(t *testing.T) {
 			t.Error("expected true for settings with all hooks")
 		}
 	})
+}
+
+func TestFleetHookBinary(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"quoted path", "'/Users/dev/code/fleet/build/fleet' hook-handler --fleet-hook", "/Users/dev/code/fleet/build/fleet"},
+		{"unquoted path", "/usr/local/bin/fleet hook-handler --fleet-hook", "/usr/local/bin/fleet"},
+		{"legacy command without the marker arg", "'/usr/local/bin/fleet' hook-handler", "/usr/local/bin/fleet"},
+		{"bare PATH fallback", "fleet hook-handler --fleet-hook", "fleet"},
+		// shellQuote escapes an embedded quote as '\'' — the path has to come
+		// back out intact or the stat below it checks the wrong file.
+		{"path containing a quote", `'/Users/o'\''brien/build/fleet' hook-handler --fleet-hook`, "/Users/o'brien/build/fleet"},
+		{"not a hook command", "/usr/local/bin/fleet chrome-host", ""},
+		{"empty", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fleetHookBinary(c.command); got != c.want {
+				t.Errorf("fleetHookBinary(%q) = %q, want %q", c.command, got, c.want)
+			}
+		})
+	}
+}
+
+// writeHookSettings writes a settings.json whose SessionStart carries one fleet
+// hook running cmd, and returns the path.
+func writeHookSettings(t *testing.T, dir, cmd string) string {
+	t.Helper()
+	settings := map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{
+				map[string]any{
+					"hooks": []any{
+						map[string]any{"type": "command", "command": cmd, "async": true},
+					},
+				},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	return path
+}
+
+func TestRepairClaudeHooksHealsADeletedCommand(t *testing.T) {
+	// The failure this exists for: fleet injects its own binary path, which in a
+	// dev checkout lives inside a git worktree's build/. Remove that worktree and
+	// every hook silently fails — Claude runs a path that doesn't resolve, no
+	// status file is written, and nothing anywhere reports it.
+	dir := t.TempDir()
+	gone := filepath.Join(t.TempDir(), "deleted-worktree", "build", "fleet")
+	path := writeHookSettings(t, dir, shellQuote(gone)+" hook-handler "+fleetHookArg)
+
+	repaired, err := RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if !repaired {
+		t.Fatal("expected a repair when the hook command no longer exists")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if strings.Contains(string(data), gone) {
+		t.Errorf("settings still name the deleted binary %q", gone)
+	}
+	if !strings.Contains(string(data), GetHookCommand()) {
+		t.Errorf("settings do not name the current hook command %q", GetHookCommand())
+	}
+}
+
+func TestRepairClaudeHooksLeavesAResolvablePathAlone(t *testing.T) {
+	// The reason RepairClaudeHooks exists separately from InjectClaudeHooks.
+	// InjectClaudeHooks also rewrites a path that merely DIFFERS from this
+	// process's own, which is correct once at launch and ruinous on a timer: two
+	// fleet instances launched from different worktrees would overwrite each
+	// other's settings.json every cycle. A path that resolves works whoever wrote
+	// it — hook-handler writes into one global status-file dir — so only a
+	// missing path may be acted on unprompted.
+	dir := t.TempDir()
+	sibling := filepath.Join(t.TempDir(), "fleet")
+	if err := os.WriteFile(sibling, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("write sibling binary: %v", err)
+	}
+	cmd := shellQuote(sibling) + " hook-handler " + fleetHookArg
+	path := writeHookSettings(t, dir, cmd)
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+
+	repaired, err := RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if repaired {
+		t.Error("repaired a hook command that resolves — instances would fight over settings.json")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Error("settings.json was rewritten despite the hook command resolving")
+	}
+}
+
+func TestRepairClaudeHooksIgnoresAMissingSettingsFile(t *testing.T) {
+	// A machine that has never run Claude Code has no settings.json. That is not
+	// a broken hook, and the timer must not create one behind the user's back —
+	// InjectClaudeHooks at launch is what owns first install.
+	repaired, err := RepairClaudeHooks(t.TempDir())
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if repaired {
+		t.Error("expected no repair when settings.json does not exist")
+	}
+}
+
+func TestRepairClaudeHooksLeavesAnUnstattableCommandAlone(t *testing.T) {
+	// Only "not there" justifies an unprompted write. A path we merely cannot
+	// stat — EACCES here, but equally ELOOP, a stalled network mount, or a parent
+	// that lost +x — must not read as deleted: RepairClaudeHooks runs on a timer,
+	// so a wrong answer rewrites settings.json every cycle forever and puts two
+	// instances from different worktrees back into the fight this function exists
+	// to avoid.
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+
+	// A binary inside a directory with no +x: Stat returns EACCES, not ENOENT.
+	sealed := filepath.Join(t.TempDir(), "sealed")
+	if err := os.MkdirAll(sealed, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bin := filepath.Join(sealed, "fleet")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+	if err := os.Chmod(sealed, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0755) })
+
+	if _, err := os.Stat(bin); errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("test setup produced ENOENT, not the permission error it needs: %v", err)
+	}
+
+	path := writeHookSettings(t, dir, shellQuote(bin)+" hook-handler "+fleetHookArg)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+
+	repaired, err := RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if repaired {
+		t.Error("repaired a hook command that could not be stat'd — only ENOENT may trigger a repair")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Error("settings.json was rewritten for a command that is not known to be missing")
+	}
+}
+
+func TestRepairClaudeHooksReportsWhatWasWritten(t *testing.T) {
+	// The bool must describe this process's own write. InjectClaudeHooks re-reads
+	// settings.json, so a sibling instance that repaired the file first leaves
+	// nothing to do — and reporting a repair we did not make latches the caller's
+	// tip on permanently.
+	dir := t.TempDir()
+	gone := filepath.Join(t.TempDir(), "deleted-worktree", "build", "fleet")
+	writeHookSettings(t, dir, shellQuote(gone)+" hook-handler "+fleetHookArg)
+
+	repaired, err := RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if !repaired {
+		t.Fatal("expected the first call to report the repair it performed")
+	}
+
+	// Second call: the path now resolves, so there is nothing to repair and
+	// nothing to report.
+	repaired, err = RepairClaudeHooks(dir)
+	if err != nil {
+		t.Fatalf("RepairClaudeHooks failed: %v", err)
+	}
+	if repaired {
+		t.Error("reported a repair on an already-healthy settings.json")
+	}
 }

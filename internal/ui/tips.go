@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/ticketing"
@@ -54,6 +55,7 @@ const (
 	// existing user has already dismissed and reset everyone's learned count.
 	// Only the Go identifier changed.
 	tipConnectTicketsID = "connect_linear"
+	tipHooksRepairedID  = "hooks_repaired"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -67,6 +69,23 @@ const (
 
 // tipRegistry is the catalog of contextual tips. Add new tips here.
 var tipRegistry = []Tip{
+	{
+		// Above the TCC tip: a TCC-blocked folder breaks sessions in one place,
+		// a dead hook command breaks status reporting for every session at once,
+		// and unlike TCC it is invisible — the sidebar keeps showing a status,
+		// just one derived from pane scraping alone.
+		ID:       tipHooksRepairedID,
+		Policy:   tipRecurring,
+		Priority: 130,
+		active: func(h *Home) bool {
+			return h.hooksRepaired.Load() && h.countSessionsMissingHooks() > 0
+		},
+		text: func(h *Home) string {
+			return fmt.Sprintf("Claude's hooks pointed at a deleted fleet binary, so status came from screen scraping alone. "+
+				"Repaired — but %d session(s) won't report status until you restart them (`r`).",
+				h.countSessionsMissingHooks())
+		},
+	},
 	{
 		// Highest priority: a TCC-blocked folder makes every session/shell there
 		// unusable, so it outranks the reload-failed hint.
@@ -175,6 +194,39 @@ func findTip(id string) *Tip {
 // countSessionsByStatus returns how many sessions are currently in st. Runs on
 // the Update goroutine, so reading h.sessions is safe (same contract as
 // rebuildFlatItems).
+// countSessionsMissingHooks counts sessions that should be reporting hook status
+// and are not. Suspended sessions are excluded — clearHookState wipes their hook
+// on purpose — as are Starting ones, which simply haven't fired SessionStart yet.
+// Drives the hooks-repaired tip, so it must stay cheap: in-memory reads only.
+//
+// Claude only, because that is all maybeRepairClaudeHooks repairs. Codex and
+// OpenCode bake the same binary path (InjectCodexHooks builds its entries through
+// the shared mergeHookEvent -> GetHookCommand, and InjectOpenCodePlugin embeds
+// FleetBinaryPath in the generated .ts), so one deleted binary silences all three
+// — but a hookless Codex session is pinned to StatusIdle and would land in this
+// count, under a tip promising that `r` restores its status. It would not:
+// ~/.codex/hooks.json still names the dead path. Counting only what the repair
+// actually fixed keeps the tip's promise true; the other two need their own
+// repair, which is deliberately not in scope here.
+//
+// An empty Agent is legacy Claude, the same fallback agentGlyph makes.
+func (h *Home) countSessionsMissingHooks() int {
+	n := 0
+	for _, s := range h.sessions {
+		if s.Agent != agent.Claude && s.Agent != "" {
+			continue
+		}
+		switch s.GetStatus() {
+		case session.StatusSuspended, session.StatusStarting:
+			continue
+		}
+		if s.GetHookStatus() == "" {
+			n++
+		}
+	}
+	return n
+}
+
 func (h *Home) countSessionsByStatus(st session.Status) int {
 	n := 0
 	for _, s := range h.sessions {
