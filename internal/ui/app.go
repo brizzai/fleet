@@ -2974,7 +2974,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			h.newDialog.Show()
 			return h, nil
 		}
-		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()), h.sessionCreateAccountRows(repoPath))
 		return h, nil
 	case "n":
 		// New session at any repo path.
@@ -3430,6 +3430,16 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		msg.account = account
+	} else if !accountAllowedFor(msg.account, h.allowedAccountsFor(msg.path)) {
+		// An explicit account skips resolveAccount, and with it the per-origin
+		// allowlist. The `A` dialog already refuses one it dimmed, but the
+		// policy has to hold at the chokepoint too: the CLI makes exactly this
+		// check for an explicit --account (resolveLaunchAccount), and a policy
+		// enforced in one surface and not the other is worse than not having
+		// one — the cost of a miss here is billing work to the wrong
+		// subscription.
+		h.setError(fmt.Errorf("%s is not in allowed_accounts for this repo", h.accountLabel(msg.account)))
+		return h, nil
 	}
 	// A conflicting ambient credential outranks the per-session login, so the
 	// session would run on that credential while every fleet surface claimed it
@@ -3484,13 +3494,7 @@ func (h *Home) resolveAccount(ag agent.Type, path string) (string, string) {
 	allowed := h.allowedAccountsFor(path)
 	usage := h.accountUsageSnapshot()
 
-	acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
-		Accounts: h.accounts.List(),
-		Usage:    usage,
-		Strategy: strategy,
-		Manual:   h.cfg.DefaultAccount,
-		Allowed:  allowed,
-	})
+	acct, ok := h.selectAccountFor(path)
 	if !ok {
 		// Select's one false answer covers two situations that want opposite
 		// responses — see claudeaccount.AllowedConfigured. An allowlist naming
@@ -3515,6 +3519,73 @@ func (h *Home) resolveAccount(ag agent.Type, path string) (string, string) {
 		"allowed", allowed, "candidates", h.accounts.Len(),
 		"usage_known", len(usage), "chosen_five_hour_pct", usage[acct.Email].FiveHourPct)
 	return acct.Email, ""
+}
+
+// selectAccountFor returns the account the configured strategy would give a new
+// session at path, and whether it could choose one at all.
+//
+// Shared by resolveAccount, which acts on the answer, and the `A` dialog's
+// Account cycler, which only previews it under "Auto". Two hand-built SelectOpts
+// would eventually disagree, and a label naming a different account than the one
+// that gets billed is exactly the lie the account labelling exists to stop
+// telling.
+func (h *Home) selectAccountFor(path string) (claudeaccount.Account, bool) {
+	return claudeaccount.Select(claudeaccount.SelectOpts{
+		Accounts: h.accounts.List(),
+		Usage:    h.accountUsageSnapshot(),
+		Strategy: h.cfg.GetAccountStrategy(),
+		Manual:   h.cfg.DefaultAccount,
+		Allowed:  h.allowedAccountsFor(path),
+	})
+}
+
+// sessionCreateAccountRows builds the Account cycler offered by the `A` dialog
+// for a new session at repoPath: an "Auto" head naming what account_strategy
+// would pick, then every configured account with its 5-hour quota.
+//
+// Nil below two accounts — with one or none every session runs on the same
+// credential, so the row would be a constant. Same rule previewAccountLabel
+// applies to the preview footer, and the same reason.
+//
+// Modelled on openAccountPicker, minus its "current" clause: there is no session
+// yet, so no account is the one being moved off.
+func (h *Home) sessionCreateAccountRows(repoPath string) []accountPickerRow {
+	if h.accounts == nil || h.accounts.Len() < 2 {
+		return nil
+	}
+	usage := h.accountUsageSnapshot()
+
+	// "Auto" carries the resolved account's own quota, so the default option
+	// answers "and what would that get me" without being cycled off.
+	auto := accountPickerRow{label: "Auto", enabled: true}
+	if acct, ok := h.selectAccountFor(repoPath); ok {
+		auto.label = "Auto — " + acct.Name()
+		auto.usage = usage[acct.Email]
+	}
+	rows := make([]accountPickerRow, 0, h.accounts.Len()+1)
+	rows = append(rows, auto)
+
+	// The same per-origin allowlist every other assignment path applies. An
+	// explicit pick skips resolveAccount, so without this the `A` dialog would
+	// be the one surface that could bill an origin's work to an account its
+	// owner had excluded.
+	allowed := h.allowedAccountsFor(repoPath)
+	for _, a := range h.accounts.List() {
+		r := accountPickerRow{email: a.Email, label: a.Name(), usage: usage[a.Email], enabled: true}
+		switch {
+		case usage[a.Email].LoggedOut:
+			// Starting a session on an account nobody is logged into would open
+			// a pane that cannot answer.
+			r.enabled, r.note = false, "logged out"
+		case !accountAllowedFor(a.Email, allowed):
+			// Dimmed rather than dropped from the cycle: an option that vanishes
+			// reads as a missing account, where a disabled one with its reason
+			// teaches the policy the user set.
+			r.enabled, r.note = false, "not allowed here"
+		}
+		rows = append(rows, r)
+	}
+	return rows
 }
 
 // accountUnusableReason says why a session's pinned account cannot run it right
@@ -8621,7 +8692,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 			h.newDialog.Show()
 			return h, nil
 		}
-		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()), h.sessionCreateAccountRows(repoPath))
 		return h, nil
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
