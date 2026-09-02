@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -442,5 +443,117 @@ func TestPickedAccountFollowsTheTargetNotTheCursor(t *testing.T) {
 	}
 	if beta.Account != "first@x.com" {
 		t.Errorf("beta was moved to %q; the picker never named it", beta.Account)
+	}
+}
+
+// The `A` dialog's Account cycler is an assignment path like the move picker,
+// so the per-origin allowlist has to hold here too — and for the same reason it
+// had to be added to the picker: a mistake bills client work to the wrong
+// subscription with nothing on screen to say so.
+func TestCreateRowsRefuseAnAccountTheOriginDisallows(t *testing.T) {
+	h, s := moveHome(t, map[string]claudeaccount.Usage{
+		"first@x.com":  knownUsage(90),
+		"second@x.com": knownUsage(5),
+	})
+	h.writeGitInfo(func(m map[string]*git.RepoInfo) bool {
+		m[s.ProjectPath] = &git.RepoInfo{OriginKey: "github.com/acme/api"}
+		return true
+	})
+	h.cfg.AllowedAccounts = map[string][]string{
+		OriginExpandKey("github.com/acme/api"): {"first@x.com"},
+	}
+
+	rows := h.sessionCreateAccountRows(s.ProjectPath)
+	var found bool
+	for _, r := range rows {
+		if r.email != "second@x.com" {
+			continue
+		}
+		found = true
+		if r.enabled {
+			t.Error("the create dialog offered an account this origin's allowlist excludes")
+		}
+		if r.note == "" {
+			t.Error("the disallowed option gives no reason")
+		}
+	}
+	if !found {
+		t.Error("the disallowed account was dropped from the cycle instead of dimmed")
+	}
+}
+
+// Below two accounts every session runs on the same credential, so the row
+// would be a constant — the rule previewAccountLabel applies to the preview
+// footer, kept here so `A` is untouched for everyone who never set up a second
+// subscription.
+func TestCreateRowsAreSilentBelowTwoAccounts(t *testing.T) {
+	h, s := moveHome(t, map[string]claudeaccount.Usage{"first@x.com": knownUsage(10)})
+	h.accounts.Remove("second@x.com")
+	if rows := h.sessionCreateAccountRows(s.ProjectPath); rows != nil {
+		t.Errorf("offered an Account row with %d account(s) configured: %+v", h.accounts.Len(), rows)
+	}
+}
+
+// The Auto option previews what account_strategy would pick, and resolveAccount
+// is what actually picks it. If the two ever build their SelectOpts separately
+// they will drift, and a label naming a different account than the one billed is
+// exactly the lie the account labelling exists to stop telling.
+func TestAutoOptionNamesTheAccountResolveWouldPick(t *testing.T) {
+	h, s := moveHome(t, map[string]claudeaccount.Usage{
+		"first@x.com":  knownUsage(90),
+		"second@x.com": knownUsage(5),
+	})
+
+	chosen, blocked := h.resolveAccount(agent.Claude, s.ProjectPath)
+	if blocked != "" {
+		t.Fatalf("resolveAccount refused: %s", blocked)
+	}
+	rows := h.sessionCreateAccountRows(s.ProjectPath)
+	if len(rows) == 0 {
+		t.Fatal("no Account row was offered")
+	}
+	if rows[0].email != "" {
+		t.Errorf("the first option must be Auto (empty email), got %q", rows[0].email)
+	}
+	if !strings.Contains(rows[0].label, chosen) {
+		t.Errorf("Auto reads %q but resolveAccount picks %q", rows[0].label, chosen)
+	}
+}
+
+// An explicit account skips resolveAccount, and with it the allowlist. The
+// dialog refuses one it dimmed, but the policy has to hold at the chokepoint
+// too — the same check the CLI makes for an explicit --account.
+func TestCreateRefusesAnExplicitAccountTheOriginDisallows(t *testing.T) {
+	h, s := moveHome(t, map[string]claudeaccount.Usage{
+		"first@x.com":  knownUsage(90),
+		"second@x.com": knownUsage(5),
+	})
+	h.writeGitInfo(func(m map[string]*git.RepoInfo) bool {
+		m[s.ProjectPath] = &git.RepoInfo{OriginKey: "github.com/acme/api"}
+		return true
+	})
+	h.cfg.AllowedAccounts = map[string][]string{
+		OriginExpandKey("github.com/acme/api"): {"first@x.com"},
+	}
+	// handleSessionCreate refuses an uninstalled agent before it reaches the
+	// account policy, which would pass this test for the wrong reason.
+	if _, err := exec.LookPath(agent.Claude.Binary()); err != nil {
+		t.Skip("claude is not on PATH; handleSessionCreate returns before the account check")
+	}
+
+	before := len(h.sessions)
+	_, cmd := h.handleSessionCreate(sessionCreateMsg{
+		path: s.ProjectPath, title: "new", agent: agent.Claude, account: "second@x.com",
+	})
+	if cmd != nil {
+		t.Error("a session was started on an account the origin's allowlist excludes")
+	}
+	if len(h.sessions) != before {
+		t.Errorf("session list grew from %d to %d", before, len(h.sessions))
+	}
+	if h.err == nil {
+		t.Error("the refusal was silent — nothing on screen says why nothing happened")
+	} else if !strings.Contains(h.err.Error(), "allowed_accounts") {
+		t.Errorf("the error must name the policy that refused, got %q", h.err)
 	}
 }
