@@ -125,10 +125,14 @@ func (d *SessionCreateDialog) Update(msg tea.Msg) (*SessionCreateDialog, tea.Cmd
 	switch keyMsg.String() {
 	case "esc", "q":
 		d.Hide()
-	case "up", "k", "shift+tab":
+	case "up", "k":
 		d.moveFocus(-1)
-	case "down", "j", "tab":
+	case "down", "j":
 		d.moveFocus(1)
+	case "shift+tab":
+		d.tab(-1)
+	case "tab":
+		d.tab(1)
 	case "left", "h":
 		d.cycle(-1)
 	case "right", "l":
@@ -146,6 +150,22 @@ func (d *SessionCreateDialog) Update(msg tea.Msg) (*SessionCreateDialog, tea.Cmd
 		}
 	}
 	return d, nil
+}
+
+// tab advances to the next thing the user can change: the next row when there
+// are two, and the Agent row's own value when the Account row is absent.
+//
+// That second half is not a flourish. On master `tab` was bound to
+// cycleAgent(1), and routing it straight to moveFocus made it do nothing at all
+// for everyone with fewer than two accounts — the majority — with no footer
+// hint to signal the key had changed meaning. ↑↓/j/k are pure row navigation
+// and stay inert there instead, which regresses nothing: they were never bound.
+func (d *SessionCreateDialog) tab(delta int) {
+	if !d.accountRowActive() {
+		d.cycleAgent(delta)
+		return
+	}
+	d.moveFocus(delta)
 }
 
 // moveFocus walks between the rows that can actually be changed. With no
@@ -212,7 +232,23 @@ const (
 	// sessionCreateLabelW is the label column, sized to the longer of the two
 	// labels so both rows' arrows start in the same place.
 	sessionCreateLabelW = len("Account")
+	// The pieces a cycler row spends outside its value cell. Named so the budget
+	// in accountValue and the line built in renderRow measure the same thing.
+	sessionCreateGap   = "   " // between the label and the lead arrow
+	sessionCreateLead  = "◂ "
+	sessionCreateTrail = " ▸"
 )
+
+// sessionCreateRowChrome is how many COLUMNS a cycler row spends before its
+// value: the label column plus the gap and both arrows.
+//
+// lipgloss.Width, never len: ◂ and ▸ are 3-byte runes but one column each, so a
+// byte count budgets the value cell 4 columns narrower than the row it is laid
+// into — the account label loses that much truncation headroom, and its ▸ stops
+// short of the column the rest of the box uses. It is also the one measurement
+// in this file that was not already going through lipgloss.Width.
+var sessionCreateRowChrome = sessionCreateLabelW +
+	lipgloss.Width(sessionCreateGap+sessionCreateLead+sessionCreateTrail)
 
 // View renders the dialog.
 func (d *SessionCreateDialog) View() string {
@@ -242,19 +278,36 @@ func (d *SessionCreateDialog) View() string {
 	b.WriteString("\n\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", min(34, inner))))
 	b.WriteString("\n")
-	// The footer names what ⏎ does now, so a refused account replaces it rather
-	// than sitting beside it claiming ⏎ creates.
-	footer := sessionCreateFooterOnly
-	if d.accountRowActive() {
-		footer = sessionCreateFooter
-	}
-	if blocker := d.submitBlocker(); blocker != "" {
-		footer = blocker + " — ←→ pick another"
-	}
-	b.WriteString(DimStyle.Render(ansi.Truncate(footer, inner, "…")))
+	b.WriteString(DimStyle.Render(ansi.Truncate(d.footer(), inner, "…")))
 
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center,
 		DialogStyle.Width(boxW).Render(b.String()))
+}
+
+// footer names what ⏎ does now, and how to reach whatever is stopping it.
+//
+// The blocked form replaces the whole hint rather than sitting beside it: a
+// footer that still read "⏎ create" while ⏎ refused is exactly the disagreement
+// submitBlocker exists to prevent, which is also why the swap is deliberately
+// NOT gated on focus — the blocked account is still the one that would be used
+// wherever the highlight happens to be.
+//
+// But it must name a key that works from where the highlight IS. With focus on
+// the Agent row, "←→ pick another" pointed at the agent cycler, and dropping the
+// ↑↓ half left nothing on screen saying how to get back to the row the message
+// was about. So the route changes with the focus, the same rule the context
+// menu's shortcuts keep.
+func (d *SessionCreateDialog) footer() string {
+	if blocker := d.submitBlocker(); blocker != "" {
+		if d.focus == focusCreateAccount {
+			return blocker + " — ←→ pick another"
+		}
+		return blocker + " — ↓ then ←→ pick another"
+	}
+	if d.accountRowActive() {
+		return sessionCreateFooter
+	}
+	return sessionCreateFooterOnly
 }
 
 // accountValue lays the highlighted account's name and state across the value
@@ -284,7 +337,7 @@ func (d *SessionCreateDialog) accountValue(inner int) string {
 	// The value cell is what's left after the label, the two arrows and their
 	// spaces. Budget off raw text and pad before styling — padding a styled
 	// string counts the ANSI bytes and the columns come out ragged.
-	width := max(inner-sessionCreateLabelW-len("   ")-len("◂ ")-len(" ▸"), 1)
+	width := max(inner-sessionCreateRowChrome, 1)
 	const gap = 2
 	nameW := max(width-lipgloss.Width(state)-gap, 1)
 	name := r.label
@@ -315,9 +368,9 @@ func (d *SessionCreateDialog) renderRow(label, value string, inner int, focused,
 		arrowStyle = DimStyle
 		valueStyle = DimStyle
 	}
-	line := labelStyle.Render(label) + "   " +
-		arrowStyle.Render("◂") + " " +
-		valueStyle.Render(value) + " " +
-		arrowStyle.Render("▸")
+	line := labelStyle.Render(label) + sessionCreateGap +
+		arrowStyle.Render(sessionCreateLead) +
+		valueStyle.Render(value) +
+		arrowStyle.Render(sessionCreateTrail)
 	return ansi.Truncate(line, inner, "…")
 }

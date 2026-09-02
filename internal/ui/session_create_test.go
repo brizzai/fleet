@@ -143,22 +143,61 @@ func TestCreateDialogRefusesAnAccountThatCannotRun(t *testing.T) {
 // while the footer claims enter creates.
 func TestCreateDialogFooterAndEnterAgree(t *testing.T) {
 	rows := createRows()
-	for i := range rows {
-		d := showCreate(t, rows)
-		tap(&d, "down")
-		for range i {
-			tap(&d, "right")
+	// Both focus states. submitBlocker is focus-independent — the blocked account
+	// is still the one that would be used wherever the highlight sits — so the
+	// footer has to hold up on the Agent row too. Testing only the Account row is
+	// what let the footer ship pointing ←→ at the agent cycler.
+	for _, focus := range []sessionCreateFocus{focusCreateAccount, focusCreateAgent} {
+		for i := range rows {
+			d := showCreate(t, rows)
+			tap(&d, "down")
+			for range i {
+				tap(&d, "right")
+			}
+			if focus == focusCreateAgent {
+				tap(&d, "up")
+			}
+			if d.focus != focus {
+				t.Fatalf("option %d: focus is %d, want %d", i, d.focus, focus)
+			}
+
+			blocked := d.submitBlocker() != ""
+			view := ansi.Strip(d.View())
+			if saysCreate := strings.Contains(view, "⏎ create"); blocked == saysCreate {
+				t.Errorf("focus=%d option %d (%s): blocked=%v but the footer offers ⏎ create=%v",
+					focus, i, rows[i].label, blocked, saysCreate)
+			}
+			// The route it names has to work from where the highlight is: on the
+			// Agent row ←→ cycles the agent, so "←→ pick another" would be a lie.
+			if blocked && focus == focusCreateAgent && !strings.Contains(view, "↓ then ←→") {
+				t.Errorf("option %d (%s): the blocked footer points at ←→ while the highlight is on Agent:\n%s",
+					i, rows[i].label, view)
+			}
+			if fired := tap(&d, "enter") != nil; fired == blocked {
+				t.Errorf("focus=%d option %d (%s): enter fired=%v while blocked=%v",
+					focus, i, rows[i].label, fired, blocked)
+			}
 		}
-		blocked := d.submitBlocker() != ""
-		saysCreate := strings.Contains(ansi.Strip(d.View()), "⏎ create")
-		if blocked == saysCreate {
-			t.Errorf("option %d (%s): blocked=%v but the footer offers ⏎ create=%v",
-				i, rows[i].label, blocked, saysCreate)
-		}
-		if fired := tap(&d, "enter") != nil; fired == blocked {
-			t.Errorf("option %d (%s): enter fired=%v while blocked=%v",
-				i, rows[i].label, fired, blocked)
-		}
+	}
+}
+
+// A blocked footer must never leave the user without a route back to the row it
+// is talking about: it replaces the whole hint, so the hint it replaces it with
+// has to be reachable from wherever the highlight sits.
+func TestCreateDialogBlockedFooterNamesAReachableKey(t *testing.T) {
+	d := showCreate(t, createRows())
+	tap(&d, "down")
+	tap(&d, "right")
+	tap(&d, "right") // dead@x.com, logged out
+	if d.submitBlocker() == "" {
+		t.Fatal("expected a blocked option")
+	}
+	if got := ansi.Strip(d.View()); !strings.Contains(got, "logged out — ←→ pick another") {
+		t.Errorf("on the Account row the footer should name ←→:\n%s", got)
+	}
+	tap(&d, "up") // highlight moves to Agent; ←→ now cycles the agent
+	if got := ansi.Strip(d.View()); !strings.Contains(got, "logged out — ↓ then ←→ pick another") {
+		t.Errorf("on the Agent row the footer must route back to the Account row first:\n%s", got)
 	}
 }
 
@@ -235,6 +274,39 @@ func TestCreateDialogHasNoAccountRowBelowTwoAccounts(t *testing.T) {
 	}
 }
 
+// `tab` advances the agent on master. Routing it through moveFocus made it do
+// nothing at all here — for the majority of users, with no footer hint to signal
+// the key had changed meaning. It has to keep advancing the only cycler on
+// screen. (↑↓/j/k going inert is fine: they were never bound.)
+func TestCreateDialogTabStillCyclesTheAgentBelowTwoAccounts(t *testing.T) {
+	d := showCreate(t, nil)
+	if d.agent != agent.Claude {
+		t.Fatalf("opened on %q, want claude", d.agent)
+	}
+	tap(&d, "tab")
+	if d.agent != agent.Codex {
+		t.Errorf("tab left the agent on %q; on master it advanced to codex", d.agent)
+	}
+	tap(&d, "shift+tab")
+	if d.agent != agent.Claude {
+		t.Errorf("shift+tab left the agent on %q, want claude", d.agent)
+	}
+}
+
+// With the Account row present, tab means "next row" — the idiom every other
+// multi-field dialog here uses.
+func TestCreateDialogTabMovesRowsWithTwoAccounts(t *testing.T) {
+	d := showCreate(t, createRows())
+	before := d.agent
+	tap(&d, "tab")
+	if d.focus != focusCreateAccount {
+		t.Error("tab did not move to the Account row")
+	}
+	if d.agent != before {
+		t.Errorf("tab changed the agent to %q while moving rows", d.agent)
+	}
+}
+
 // A dialog is fixed size: the box must not grow or shrink as the highlight
 // moves, the agent cycles, or the footer swaps to a refusal. And no line may
 // exceed the box — lipgloss v2's Width is border-inclusive, so an over-budget
@@ -283,5 +355,44 @@ func TestCreateDialogFitsANarrowTerminal(t *testing.T) {
 		if w := lipgloss.Width(line); w > narrow {
 			t.Errorf("line %d is %d cols wide on a %d-col terminal", n, w, narrow)
 		}
+	}
+}
+
+// The value cell's budget has to match what renderRow actually spends, in
+// COLUMNS. ◂ and ▸ are 3-byte runes but one column each, so budgeting them with
+// len() reserved 4 columns that do not exist: the account label lost that much
+// truncation headroom and the row's ▸ stopped short of the box's own width.
+func TestCreateDialogRowChromeIsMeasuredInColumns(t *testing.T) {
+	d := showCreate(t, createRows())
+	const value = "0123456789"
+	line := ansi.Strip(d.renderRow("Account", value, 200, true, true))
+	if got, want := lipgloss.Width(line), sessionCreateRowChrome+lipgloss.Width(value); got != want {
+		t.Errorf("a row is %d columns wide but the budget reserves %d — the value cell is off by %d",
+			got, want, want-got)
+	}
+}
+
+// The consequence the budget bug had on screen: the Account row's trailing ▸
+// must reach the same column the box's own width implies, not stop short of it.
+func TestCreateDialogAccountArrowReachesTheBoxWidth(t *testing.T) {
+	d := showCreate(t, createRows())
+	d.focus = focusCreateAccount
+	var agentRow, accountRow string
+	for _, line := range strings.Split(ansi.Strip(d.View()), "\n") {
+		if strings.Contains(line, "Account   ") {
+			accountRow = strings.TrimRight(line, " │")
+		}
+		if strings.Contains(line, "Agent     ") {
+			agentRow = strings.TrimRight(line, " │")
+		}
+	}
+	if accountRow == "" || agentRow == "" {
+		t.Fatal("could not find both rows")
+	}
+	// The Account row is padded to a fixed value cell, so it is the wider of the
+	// two; it must not exceed the inner width the box budgets.
+	inner := sessionCreateWidth - sessionCreateChrome
+	if w := lipgloss.Width(strings.TrimLeft(accountRow, " │")); w > inner {
+		t.Errorf("the Account row is %d columns, past the %d-column inner width", w, inner)
 	}
 }
