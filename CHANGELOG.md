@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.34.0] - 2026-09-02
+
+### Added
+
+- **Pick the subscription up front.** `Shift+A` now carries an `Account` row beside `Agent`, so a new session starts on the Claude subscription you choose instead of whichever one `account_strategy` ranks first. Each option shows its 5-hour quota, `Auto` stays the default, and the row only appears once you have two accounts.
+
 ## [2.33.0] - 2026-08-27
 
 ### Added
@@ -627,7 +633,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.33.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.34.0...HEAD
+[2.34.0]: https://github.com/brizzai/fleet/releases/tag/v2.34.0
 [2.33.0]: https://github.com/brizzai/fleet/releases/tag/v2.33.0
 [2.32.0]: https://github.com/brizzai/fleet/releases/tag/v2.32.0
 [2.31.0]: https://github.com/brizzai/fleet/releases/tag/v2.31.0
