@@ -109,6 +109,13 @@ func (h *Home) drawerAnimTick() tea.Cmd {
 
 // drawerStep advances the slide one frame; returns true while still animating.
 func (h *Home) drawerStep() bool {
+	// Unlike the other animations, this one cannot simply stop: drawerProgress
+	// feeds the panel's height, so a suppressed tick would strand the drawer
+	// half-open forever. Jump to the end state instead.
+	if FreezeAnim {
+		h.drawerProgress = h.drawerTarget
+		return false
+	}
 	switch {
 	case h.drawerProgress < h.drawerTarget:
 		h.drawerProgress += drawerSlideStep

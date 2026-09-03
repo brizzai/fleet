@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"os"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -423,6 +424,34 @@ var (
 	ChevronStyle       = "triangle"               // "triangle" (▾▸) or "plusminus" (−+)
 	SidebarDensity     = "normal"                 // "normal" (gap between groups) or "compact"
 )
+
+// FreezeAnim stops every self-rescheduling animation, so two screen captures
+// taken a moment apart are byte-identical. Set FLEET_FREEZE_ANIM=1.
+//
+// This exists for automated screen capture (see demo/drive.sh), where the
+// settle test is "two consecutive frames match" — a test a 60ms shimmer or a
+// 100ms spinner never passes, leaving the harness to fall back on a blind
+// sleep and photograph a half-drawn frame.
+//
+// It lives here rather than on Home because several render entry points are
+// package-level funcs with no Home to read (RenderSidebar, RenderSplash,
+// renderWhatsNewBadge), and a harness driving those directly would see an
+// unset flag. Deliberately not in ApplyDisplayConfig either: that re-runs on
+// every Appearance change and takes a *config.Config, which would imply this
+// is a user setting. It is not — it is a testing seam.
+var FreezeAnim = envIsTruthy("FLEET_FREEZE_ANIM")
+
+// envIsTruthy mirrors the helper in internal/tmux. Copied rather than exported
+// from there: internal/ui already imports internal/tmux, but exporting a
+// general-purpose env helper *from* the tmux package for the UI's benefit
+// inverts what that dependency is supposed to mean.
+func envIsTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
 
 // ApplyDisplayConfig syncs all sidebar display flags from config. Must be called
 // on the main goroutine (Bubble Tea Update/View), like ApplyPalette.

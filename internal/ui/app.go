@@ -210,6 +210,9 @@ type (
 )
 
 func spinnerTickCmd() tea.Msg {
+	if FreezeAnim {
+		return nil
+	}
 	time.Sleep(100 * time.Millisecond)
 	return spinnerTickMsg{}
 }
@@ -218,6 +221,9 @@ func spinnerTickCmd() tea.Msg {
 // while the badge is visible (see the whatsNewTickMsg handler), so it burns no
 // CPU when the badge is hidden.
 func whatsNewTickCmd() tea.Cmd {
+	if FreezeAnim {
+		return nil
+	}
 	return tea.Tick(whatsNewTickInterval, func(time.Time) tea.Msg { return whatsNewTickMsg{} })
 }
 
@@ -3168,6 +3174,9 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // matching splashTick). Self-rescheduled by Update while `quitting`, until the
 // teardown command emits tea.Quit and the program exits.
 func (h *Home) shutdownTick() tea.Cmd {
+	if FreezeAnim {
+		return nil
+	}
 	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return shutdownFrameMsg(t)
 	})
@@ -6219,6 +6228,9 @@ func (h *Home) bootProgress() float64 {
 
 // splashTick schedules the next splash-spinner advance (~80ms cadence).
 func (h *Home) splashTick() tea.Cmd {
+	if FreezeAnim {
+		return nil
+	}
 	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return splashFrameMsg(t)
 	})
