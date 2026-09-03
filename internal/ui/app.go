@@ -1992,9 +1992,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		// Load pinned repos from storage.
+		// Load pinned repos from storage. Honor the demo screenshot filter so
+		// pinned-but-empty regular repos don't leak into a FLEET_DEMO_PREFIX run.
 		if pinnedPaths, err := h.storage.LoadPinnedRepos(); err == nil {
 			for _, p := range pinnedPaths {
+				if !demoPathVisible(p) {
+					continue
+				}
 				h.pinnedRepos[p] = true
 			}
 		}
@@ -7979,6 +7983,15 @@ func (h *Home) syncViewport() {
 	}
 }
 
+// demoPathVisible reports whether a repo/session path should be shown given the
+// optional FLEET_DEMO_PREFIX screenshot filter. An empty prefix (the default)
+// shows everything. Shared by the session filter and the pinned-repo load so the
+// two can't drift and leak regular repos into a demo run.
+func demoPathVisible(path string) bool {
+	prefix := os.Getenv("FLEET_DEMO_PREFIX")
+	return prefix == "" || strings.HasPrefix(path, prefix)
+}
+
 func (h *Home) loadSessions() tea.Msg {
 	rows, err := h.storage.LoadSessions()
 	if err != nil {
@@ -7992,10 +8005,10 @@ func (h *Home) loadSessions() tea.Msg {
 	}
 
 	// Demo mode: only show sessions under the specified path prefix.
-	if prefix := os.Getenv("FLEET_DEMO_PREFIX"); prefix != "" {
+	if os.Getenv("FLEET_DEMO_PREFIX") != "" {
 		filtered := make([]*session.Session, 0, len(sessions))
 		for _, s := range sessions {
-			if strings.HasPrefix(s.ProjectPath, prefix) {
+			if demoPathVisible(s.ProjectPath) {
 				filtered = append(filtered, s)
 			}
 		}
