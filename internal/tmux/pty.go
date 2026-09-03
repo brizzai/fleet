@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -48,6 +49,27 @@ func findCtrlQ(buf []byte) (int, int) {
 	return idx, length
 }
 
+// clientEnv returns the parent environment with tmux's own client variables
+// stripped. A tmux client refuses to attach to a session on the server it is
+// already inside — "sessions should be nested with care, unset $TMUX to force"
+// — so a fleet launched from within tmux would hand that variable to every
+// attach and Enter would do nothing at all. The error goes to the child's
+// stderr, which here is the PTY we immediately put into raw mode, so it never
+// reaches the TUI or the log: a silent dead key on fleet's primary action.
+// Unsetting is exactly what tmux's message asks for. TMUX_PANE goes with it —
+// it names a pane on the outer server and means nothing to the new client.
+func clientEnv() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_PANE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // Attach attaches to the tmux session with full PTY support.
 // Ctrl+Q detaches and returns to the caller. Ctrl+b d also works (tmux native).
 func (s *Session) Attach(ctx context.Context) error {
@@ -60,6 +82,7 @@ func (s *Session) Attach(ctx context.Context) error {
 
 	// Start tmux attach with PTY.
 	cmd := exec.CommandContext(ctx, "tmux", "attach-session", "-t", s.Name)
+	cmd.Env = clientEnv()
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to start pty: %w", err)

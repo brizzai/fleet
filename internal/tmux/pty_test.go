@@ -2,7 +2,10 @@
 
 package tmux
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFindCtrlQ(t *testing.T) {
 	tests := []struct {
@@ -31,5 +34,33 @@ func TestFindCtrlQ(t *testing.T) {
 					tt.in, gotIdx, gotLength, tt.wantIdx, tt.wantLength)
 			}
 		})
+	}
+}
+
+// A tmux client refuses to attach to a session on the server it is already
+// inside, so an attach launched from a fleet running under tmux must not carry
+// $TMUX. The failure is silent — the error lands on the PTY, not the TUI — so
+// nothing but this test stands between a regression and a dead Enter key.
+func TestClientEnvDropsTmuxVars(t *testing.T) {
+	t.Setenv("TMUX", "/private/tmp/tmux-501/default,12345,0")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("FLEET_KEEP_ME", "yes")
+
+	var sawKeeper bool
+	for _, kv := range clientEnv() {
+		switch {
+		case strings.HasPrefix(kv, "TMUX="):
+			t.Errorf("clientEnv() kept %q; tmux refuses a nested attach while it is set", kv)
+		case strings.HasPrefix(kv, "TMUX_PANE="):
+			t.Errorf("clientEnv() kept %q; it names a pane on the outer server", kv)
+		case kv == "FLEET_KEEP_ME=yes":
+			sawKeeper = true
+		}
+	}
+
+	// Guard against the opposite bug: an over-eager filter that drops
+	// everything would pass every assertion above while breaking the attach.
+	if !sawKeeper {
+		t.Error("clientEnv() dropped an unrelated variable; it must only strip the tmux ones")
 	}
 }
