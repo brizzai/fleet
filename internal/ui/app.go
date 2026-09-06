@@ -290,7 +290,15 @@ type Home struct {
 	// running. Quit drains both this list and pendingDeletes so an in-flight
 	// kill isn't lost when fleet exits mid-cleanup.
 	finalizingDeletes []PendingDelete
-	pinnedRepos       map[string]bool // pinned repo paths (persist in SQLite)
+	pinnedRepos       map[string]bool            // pinned repo paths (persist in SQLite)
+	reviewQueue       []github.ReviewRequest     // PRs awaiting review, from the last fetch
+	reviewFiles       map[int]github.PRFiles     // changed files per reviewed PR
+	reviewFilesAt     map[int]time.Time          // when each was fetched, for the TTL
+	reviewShowFolded  bool                       // `f` — show the demoted files inline
+	reviewShowPane    bool                       // `v` — show the agent pane instead of the diff
+	reader            ReaderDialog               // full-screen diff reader
+	reviewRead        map[int]map[string]bool    // fleet's own record of files read, per PR
+	reviewComments    map[int][]reviewCommentMsg // pending comments, per PR
 
 	// failedWorktreeRemovals holds worktree repo paths whose destroy failed
 	// (something is still holding the directory). Such repos are re-pinned and
@@ -1733,6 +1741,47 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prompt:        prompt,
 		})
 
+	case paletteReviewsMsg:
+		// Routed here for the same reason paletteTicketsMsg is: routeToModal
+		// carries only key and paste messages, so a tea.Cmd result reaches a
+		// dialog only if Update forwards it.
+		if msg.err != nil {
+			// Surfaced, not swallowed: an empty tab and a failed fetch look
+			// identical on screen, and "reviews 0" is a confident lie about a
+			// queue that actually has 48 things in it.
+			debuglog.Logger.Debug("reviews: could not list review requests", "error", msg.err)
+			h.setError(fmt.Errorf("reviews: %w", msg.err))
+			h.commandPalette.SetReviews(nil)
+			return h, nil
+		}
+		h.reviewQueue = msg.reviews
+		h.commandPalette.SetReviews(h.reviewPaletteItems(msg.reviews))
+		return h, nil
+
+	case reviewWorktreeMsg:
+		return h.handleReviewWorktree(msg)
+
+	case reviewFilesMsg:
+		return h.handleReviewFiles(msg)
+
+	case reviewCommentMsg:
+		// Queued locally, not posted. Submitting the batch is its own step and
+		// its own confirmation — a comment reaching a teammate's PR must never
+		// be a side effect of pressing enter in a text box.
+		//
+		// The reader renders the comment inline the moment it is saved, so this
+		// exists to survive the reader closing, not to tell the user anything
+		// they cannot already see. Hence no toast: the box is on screen.
+		if h.reviewComments == nil {
+			h.reviewComments = map[int][]reviewCommentMsg{}
+		}
+		h.reviewComments[msg.pr] = append(h.reviewComments[msg.pr], msg)
+		return h, nil
+
+	case paletteOpenInBrowserMsg:
+		h.actionLog.Add("review in browser", msg.url, true)
+		return h, openInChrome(msg.url, "reviews")
+
 	case paletteTicketsMsg:
 		// Routed here for the same reason the worktree dialog's messages are:
 		// routeToModal only carries key and paste messages, so a tea.Cmd result
@@ -2300,7 +2349,8 @@ func overlayAt(top, base string, x, y int) string {
 // Mirrors the early-returns in renderBody (plus the command-palette overlay) so
 // a sticky bottom-right tip is never composited on top of a dialog.
 func (h *Home) modalOpen() bool {
-	return h.consentDialog.IsVisible() ||
+	return h.reader.Visible() ||
+		h.consentDialog.IsVisible() ||
 		h.onboardingDialog.IsVisible() ||
 		h.helpOverlay.IsVisible() ||
 		h.releaseNotes.IsVisible() ||
@@ -2325,6 +2375,12 @@ func (h *Home) modalOpen() bool {
 }
 
 func (h *Home) renderBody() string {
+	// The reader owns the whole screen when open, above every dialog: it is a
+	// full-screen surface like attach, not an overlay something can sit on.
+	if h.reader.Visible() {
+		h.reader.SetSize(h.width, h.height)
+		return h.reader.View()
+	}
 	// Modals take priority. Consent goes first — it gates analytics init
 	// and must be the user's first interaction with the TUI.
 	if h.consentDialog.IsVisible() {
@@ -2453,7 +2509,7 @@ func (h *Home) renderBody() string {
 		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, "Sessions", statusTitle, h.width, sidebarHeight, h.focusMode))
 		b.WriteString("\n\n")
 
-		s, content := h.selectedPreview()
+		s, content := h.selectedPreview(innerW, previewHeight-2)
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
 		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
@@ -2512,7 +2568,7 @@ func (h *Home) renderBody() string {
 			previewInnerH = 1
 		}
 
-		s, content := h.selectedPreview()
+		s, content := h.selectedPreview(previewInnerW, previewInnerH)
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
 		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
@@ -2616,6 +2672,25 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	}
 
 	switch {
+	case h.reader.Visible():
+		// The reader keeps the RAW key, not the layout-normalized one: its
+		// comment box takes text, and a Hebrew comment must stay Hebrew. Its
+		// movement keys are the price, and `esc` always works.
+		km, ok := msg.(tea.KeyPressMsg)
+		if !ok {
+			return nil, true
+		}
+		pr := h.reader.PR()
+		dialog, cmd := h.reader.Update(km)
+		h.reader = *dialog
+		if !h.reader.Visible() {
+			// The reader owns the comments while it is open — it is where they
+			// are edited and deleted — so closing it is the moment its copy
+			// becomes the record. Appending as they were written instead would
+			// keep every comment the user deleted.
+			h.syncReviewComments(pr, dialog.Comments())
+		}
+		return cmd, true
 	case h.helpOverlay.IsVisible():
 		overlay, cmd := h.helpOverlay.Update(cmdMsg)
 		h.helpOverlay = overlay
@@ -2919,6 +2994,13 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s := h.selectedSession(); s != nil && s.GetStatus() == session.StatusSuspended {
 			return h, h.resumeSelected(s)
 		}
+		// A review row reads rather than attaches: reading is what you opened
+		// it for, and the agent is one key away inside the reader. Placed above
+		// the split-mode branch for the same reason the suspended check is —
+		// on a review row, reading is what Enter means in both modes.
+		if pr := reviewPRNumber(h.selectedSession()); pr != 0 {
+			return h, h.openReader(pr)
+		}
 		if h.cfg.GetEnterMode() == "split" {
 			return h, h.enterFocusMode()
 		}
@@ -2989,6 +3071,20 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		h.worktreeDialog.ShowLoading()
 		return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
+	case "v":
+		// Contextual: only a review row has two things to show. Elsewhere it
+		// is a no-op rather than a surprise.
+		if reviewPRNumber(h.selectedSession()) == 0 {
+			return h, nil
+		}
+		h.reviewShowPane = !h.reviewShowPane
+		return h, nil
+	case "s":
+		if reviewPRNumber(h.selectedSession()) == 0 {
+			return h, nil
+		}
+		h.reviewShowFolded = !h.reviewShowFolded
+		return h, nil
 	case "f":
 		return h, h.forkSelected()
 	case "F":
@@ -3132,6 +3228,22 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.commandPalette.ShowOnTab(h.buildPaletteItems(), h.recentPaletteIDs, PaletteTabTickets)
 		analytics.Track(analytics.EventCommandPalette, nil)
 		return h, h.maybeLoadPaletteTickets()
+	case "c":
+		// Straight to the reviews tab, mirroring `t`: `c` means "show me the
+		// code reviews I owe", not "open everything and cycle to them".
+		if !github.IsGHAvailable() {
+			h.setInfo("Reviews need the gh CLI — brew install gh")
+			return h, nil
+		}
+		h.commandPalette.ShowOnTab(h.buildPaletteItems(), h.recentPaletteIDs, PaletteTabReviews)
+		analytics.Track(analytics.EventCommandPalette, nil)
+		return h, h.maybeLoadPaletteReviews()
+	case "C":
+		// Jump to this origin's reviews folder. Note: unreachable on caseless
+		// layouts (Hebrew, Arabic) where `ש` and `Shift+ש` are identical bytes
+		// — `c` then the palette is the escape hatch there.
+		h.actionLog.Add("jump to reviews", "", true)
+		return h.jumpToReviewsGroup()
 	case "S":
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
@@ -4016,6 +4128,14 @@ func (h *Home) deleteAtCursor() tea.Cmd {
 		item := h.flatItems[h.cursor]
 		if item.IsOriginHeader {
 			return h.confirmDeleteOrigin(item)
+		}
+		if isReviewGroup(item.RepoPath) {
+			// The reviews node is a folder of many worktrees, not a checkout,
+			// so the ordinary header delete would neither describe nor do the
+			// right thing. Refused rather than guessed: delete reviews one row
+			// at a time, where the confirm names the one you meant.
+			h.setInfo("Delete reviews one at a time — d on a review row")
+			return nil
 		}
 		return h.confirmDeleteHeader(item)
 	}
@@ -5569,25 +5689,32 @@ func (h *Home) openPRInBrowser() tea.Cmd {
 		return nil
 	}
 
-	prURL := info.PR.URL
-	repoName := filepath.Base(repo)
+	return openInChrome(info.PR.URL, filepath.Base(repo))
+}
 
+// openInChrome opens url through the Chrome extension, reusing an existing tab,
+// and falls back to the system browser when the extension is unreachable.
+//
+// Extracted from openPRInBrowser so the reviews tab opens a PR by exactly the
+// path `p` already takes — tab reuse included — rather than growing a second
+// copy that drifts from it.
+func openInChrome(url, group string) tea.Cmd {
 	return func() tea.Msg {
 		// Try Chrome extension first.
 		client := &chrome.Client{}
 		cmd := &chrome.Command{
 			ID:     fmt.Sprintf("pr-%d", time.Now().UnixNano()),
 			Action: chrome.ActionOpenOrFocus,
-			URL:    prURL,
-			Group:  repoName,
+			URL:    url,
+			Group:  group,
 		}
 
 		_, err := client.Send(cmd)
 		if err != nil {
 			// Fallback to opening in the default browser (open / xdg-open).
 			debuglog.Logger.Debug("chrome extension unavailable, falling back to browser (open/xdg-open)", "err", err)
-			if openErr := openURL(prURL); openErr != nil {
-				debuglog.Logger.Error("failed to open PR in browser", "url", prURL, "err", openErr)
+			if openErr := openURL(url); openErr != nil {
+				debuglog.Logger.Error("failed to open PR in browser", "url", url, "err", openErr)
 				return openPRMsg{err: fmt.Errorf("open PR: %w", openErr)}
 			}
 		}
@@ -6004,6 +6131,11 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	default: // worker busy, skip
 	}
 
+	// The file list is what a review row's pane shows, so it has to be on its
+	// way before it is asked for. Self-throttled by the TTL, and a no-op on
+	// every row that is not a review.
+	filesCmd := h.maybeLoadReviewFiles(h.selectedSession())
+
 	// Wake anything whose snooze has expired. Self-throttled, and it rebuilds
 	// the tree itself when something changed — so it runs before the
 	// unconditional rebuild below rather than after, and the woken rows are
@@ -6027,7 +6159,7 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	// Re-arm the badge shimmer if it should be running but isn't (e.g. it
 	// stopped while a modal was open, and the modal has since closed).
-	return h, tea.Batch(h.tick(), h.ensureWhatsNewShimmer())
+	return h, tea.Batch(h.tick(), h.ensureWhatsNewShimmer(), filesCmd)
 }
 
 // bootstrapRepoSet returns the union of repo roots derived from sessions and
@@ -7669,10 +7801,16 @@ func (h *Home) selectedSession() *session.Session {
 	return h.flatItems[h.cursor].Session
 }
 
-func (h *Home) selectedPreview() (*session.Session, string) {
+func (h *Home) selectedPreview(w, height int) (*session.Session, string) {
 	s := h.selectedSession()
 	if s == nil {
 		return nil, ""
+	}
+	// A review session's pane shows the agent working; what you came for is
+	// the diff. The file list wins by default and `v` flips back — you can
+	// always reach the agent itself with Enter.
+	if pr := reviewPRNumber(s); pr != 0 && !h.reviewShowPane {
+		return s, renderReviewFiles(pr, h.reviewFiles[pr], h.reviewShowFolded, w, height)
 	}
 	content := h.previewCache[s.ID]
 	return s, content
@@ -8516,6 +8654,9 @@ func (h *Home) dispatchPaletteSelection(msg commandPaletteMsg) (tea.Model, tea.C
 	switch msg.kind {
 	case PaletteKindTicket:
 		return h.openTicketFromPalette(msg.id)
+	case PaletteKindReview:
+		h.actionLog.Add("palette review", msg.id, true)
+		return h.openReviewFromPalette(msg.id)
 	case PaletteKindRepo, PaletteKindWorktree:
 		h.actionLog.Add("palette jump", msg.id, true)
 		return h.jumpToRepoHeader(msg.id)

@@ -97,13 +97,14 @@ var (
 	HelpSepStyle  lipgloss.Style
 
 	// Git info styles.
-	BranchStyle    lipgloss.Style
-	DirtyStyle     lipgloss.Style
-	PROpenStyle    lipgloss.Style
-	PRFailStyle    lipgloss.Style
-	PRPendingStyle lipgloss.Style
-	PRMergedStyle  lipgloss.Style
-	PRDraftStyle   lipgloss.Style
+	BranchStyle      lipgloss.Style
+	DirtyStyle       lipgloss.Style
+	PROpenStyle      lipgloss.Style
+	PRFailStyle      lipgloss.Style
+	PRPendingStyle   lipgloss.Style
+	PRMergedStyle    lipgloss.Style
+	ReviewGroupStyle lipgloss.Style
+	PRDraftStyle     lipgloss.Style
 
 	// Slot badge style (RTS-style quick-access hotkey).
 	SlotBadgeStyle lipgloss.Style
@@ -140,6 +141,10 @@ func ApplyPalette(p Palette) {
 	ColorWhite = p.Text
 	ColorOrange = p.Orange
 	ColorPurple = p.Purple
+
+	// The review reader's diff tints and syntax colors are derived from the
+	// palette above — see design_review.go.
+	applyReviewPalette(p)
 
 	// 2. Rebuild all styles (lipgloss copies colors by value at construction).
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
@@ -181,6 +186,9 @@ func ApplyPalette(p Palette) {
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
 	PRMergedStyle = lipgloss.NewStyle().Foreground(ColorPurple)
 	PRDraftStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+	// Blue like every worktree row, because that is what the folder holds. The
+	// brackets do the distinguishing, so the hue does not have to.
+	ReviewGroupStyle = lipgloss.NewStyle().Foreground(ColorBlue)
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
 	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)

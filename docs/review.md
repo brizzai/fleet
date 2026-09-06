@@ -1,0 +1,211 @@
+# Code review in fleet — build plan
+
+Replacing the GitHub review tab. Decisions are settled; this is the order.
+
+**Shape:** a review is an ordinary fleet session, grouped under a `reviews` folder
+inside its repo. No new row kind, no new mode, no full-screen surface.
+
+**Decided**
+
+| | |
+|---|---|
+| Terminal width | 318 cols measured — preview pane is ~250. Full-screen room not needed. |
+| Where reviews live | `reviews` folder in the repo group, `c` to open the queue |
+| Worktree per review | One each, no dependency install (128 MB), deleted when done |
+| Multi-account bugs first | No — build review first |
+| Claude posting | Small stuff only; blockers wait for you |
+| Claude's identity | Your account with a marker, for now |
+| Diff rendering in fleet | Done — two panels, tinted rows, syntax, word diff |
+| Unstarted reviews in `Space` | No. Only reviews you've opened |
+
+---
+
+## 1 · The queue — DONE
+
+- [x] `internal/github/reviews.go` — `ReviewsRequested` over GraphQL search
+- [x] Bot detection on `author.__typename == "Bot"` (REST search's `is_bot` reports false for dependabot[bot])
+- [x] `internal/ui/palette_reviews.go` — rows grouped by author, bots folded into one counted row
+- [x] `PaletteKindReview` + `PaletteTabReviews` + `SetReviews`/`ReviewsLoaded`
+- [x] `c` opens the palette straight onto the reviews tab
+- [x] GraphQL search, not `gh search prs` — REST search allows 30 req/**minute**; GraphQL is 5000/hour and serves more fields
+- [x] 60s cache so repeated `c` presses cost nothing
+- [x] Fetch errors surface instead of rendering as "reviews 0"
+- [x] `⏎` starts the review, `ctrl+p` opens Chrome (plain `p` is filter text in the palette)
+- [x] Keybinding registered in `keybindings.go` and CLAUDE.md
+- [ ] Tests: bot folding, author grouping, age rendering, empty/error states
+- [ ] Prefetch on the worker so the first `c` is instant (cold fetch is ~4.7s)
+- [ ] Changelog fragment
+
+## 2 · Launch the review session — DONE
+
+- [x] `internal/git/review.go` — fetch `pull/<n>/head` onto `fleet-review-<n>`, worktree at `<repo>-reviews/<n>/`
+- [x] Existence check runs **before** the fetch: git refuses to fetch into a branch checked out in a worktree, so re-opening a started review failed
+- [x] Idempotent — second open is 65ms vs 3.3s cold
+- [x] No dependency install (153MB per review worktree, measured)
+- [x] `review_prompt` config, `{pr}` substituted, empty by default
+- [x] Repo resolved from the PR's `owner/name` via fleet's existing origin keys
+- [ ] Tests: path derivation, reuse, IsReviewWorktree
+- [ ] Delete the worktree when the review is done, with the usual undo window
+
+## 3 · Reviews folder in the sidebar — DONE
+
+- [x] Sessions under `<repo>-reviews/` fold into one `reviews` node instead of a group each
+- [x] The node's origin resolves from a real worktree inside it — the folder has no remote of its own
+- [x] Sorts last in its origin, so your own branches stay one contiguous run
+- [x] Hidden entirely when you have no reviews
+- [x] Collapsing it hides every review in one keystroke; `z` mutes them all (both free — it is an ordinary group key)
+- [x] `⏎` on a PR you already started jumps to that session instead of refetching
+- [x] `d` on the node is refused with a reason — it is a folder of worktrees, not a checkout
+- [x] Tests: grouping, origin inheritance, no-empty-row
+- [x] Visually distinct: `⌘` in accent carries the identity, label stays dim — no new hue, since every hue in the sidebar already means a status (U+2318 — Neutral width, verified present in Menlo's cmap)
+- [x] Carries a status pill like every other checkout, so a collapsed node still says whether a review wants you
+- [x] `C` jumps to this origin's reviews folder
+- [ ] Expand the bot fold on `⏎` — never a batch-approve verb
+- [ ] `d` on a review session should also remove its 153MB worktree (today it leaks)
+
+## 4 · The diff surface — file list DONE, patches next
+
+- [x] `internal/github/files.go` — files + viewed state in one GraphQL call
+- [x] `internal/github/salience.go` — deterministic demotion: lockfiles by exact basename, vendored dirs, generated suffixes, snapshots, tests
+- [x] Preview pane shows the file list for a review row; `v` flips to the agent pane
+- [x] Fold names what it hid and why ("23 tests"), never just a count; `s` unhides
+- [x] `viewerViewedState` read and shown as `n/N viewed` — **never written** (no mutation restores DISMISSED)
+- [x] Biggest file first — the only ordering signal available without a model
+- [x] Fetched on the tick with a 3-minute TTL, off the Update goroutine
+- [x] Tests: 14 classification cases incl. `package.json` vs `package-lock.json`, order preservation
+- [x] Patch text per file — switched to REST (`pulls/N/files`); GraphQL serves no patch
+- [x] `--paginate` returns one array PER PAGE, so a plain Unmarshal silently drops every page but the first
+- [x] Measured: PR 4959 goes 34 files → 11 shown, 23 tests folded; ~70KB of patch
+
+## 5 · The reader — DONE
+
+Decisions: **A1** full screen · **B1** stream · **C1** ⏎ reads · **D1** inline comment
+· **E4** no agent findings in the reader · **F3** fleet's own read marks · **G1** fold.
+
+- [x] `internal/review/stream.go` — patches flattened into one scrollable line stream
+- [x] No selection anywhere: a scroll position plus jump targets, hunk's model
+- [x] `↑↓` row · `⇧↑↓` hunk · `⇧←→` file · `pgdn/pgup` page · `⌃d/⌃u` half · `g/G` ends (`jk ][ .,` are aliases)
+- [x] Jumps land the target 2 rows from the top, not wherever scrolling left it
+- [x] Jumps hold at the ends rather than wrapping into a file you already read
+- [x] Two panels: file tree left, diff right — the tree answers "where am I", the diff "what changed"
+- [x] Tree collapses single-child directories (`pkg/shared/`, not `pkg/` then `shared/`) like GitHub's
+- [x] Tree follows the diff, never leads; both ordered by path so they agree
+- [x] Tree drops entirely below 90 columns rather than truncating to nothing
+- [x] `⌃q` quits, matching attach — `esc` also works
+- [x] `m` marks read (was `x`, which said nothing) and the footer names every key
+- [x] `c` comments on the line under the cursor — refused on headers, which GitHub cannot anchor
+- [x] Comments queue locally; posting is its own step with its own confirm
+- [x] `x` marks a file read — fleet's own record, GitHub's checkbox untouched
+- [x] Caret on every row kind, including headers, where `.`/`,` leave you
+- [x] Tabs expanded to 4 so the gutter stays a column
+- [x] Full-screen surface: `modalOpen`, `routeToModal` (raw keys — the comment box takes text), `renderBody`
+- [x] Tests: line numbering incl. blank context rows, no-patch files, jump bounds, hunk header parsing
+- [ ] Persist read marks and pending comments to SQLite (in memory today — lost on restart)
+- [ ] Submit the batch to GitHub
+
+## 5b · The reader, second pass — DONE
+
+Measured against [tuicr](https://tuicr.dev/) and [lumen](https://github.com/jnsahaj/lumen).
+Decisions: **A3** both layouts · **B3** tint + word diff · **C2** chroma ·
+**D3** inline typed comments · **E2** bordered panels · **F2** expand from the
+worktree · **G2** search · **H1** no commits pane yet.
+
+- [x] **Two colour channels.** Background says added/deleted, foreground says what the
+      code is. Painting the foreground green to mean *added* spent the only channel that
+      could carry syntax, and made word diff impossible. See `docs/design-system.md` §5.
+- [x] `internal/ui/design_review.go` — every diff tint and syntax colour **derived** from
+      the palette, so all six themes work and a seventh gets one free
+- [x] `internal/review/syntax.go` — chroma, per file and per side, never per line
+      (a lexer is a state machine; line-by-line reopens every multi-line string)
+- [x] chroma and not tree-sitter: tree-sitter needs cgo, and fleet ships pure Go on
+      purpose — `modernc.org/sqlite` is in `go.mod` for the same reason
+- [x] `internal/review/worddiff.go` — word-level diff on paired −/+ lines, LCS over
+      identifier/whitespace/punctuation tokens, refused below 34% similarity
+- [x] `internal/review/doc.go` — one owner for patches, expansions and comments, because
+      row indexes are only meaningful against a single consistent flattening
+- [x] **Expansion reads the review worktree**, not the API: the PR is already checked out
+      at `<repo>-reviews/<pr>/`, so widening a hunk is a file read — instant and offline.
+      `⏎` steps 20 lines each way, `+` opens the gap
+- [x] Side-by-side above 160 columns, unified below, `|` overrides and pins the choice
+- [x] Deletions paired with the additions that replaced them, padded so the sides stay level
+- [x] Comments render **in the stream at their anchor**, typed (issue/nit/question/
+      suggestion, `⇥` cycles), composed in place, `e` edits and `d` deletes
+- [x] Comments survive closing the reader; the reader's copy is authoritative on close,
+      so a deleted one stays deleted
+- [x] Refused on expanded context, with the reason — GitHub anchors inside the diff it was sent
+- [x] `/` search with `n`/`N`, wrapping (a search is a set you asked for; a hunk jump is not)
+- [x] Mode pill + live key hints + toast in the footer; hints change with the row and
+      whole hints drop before `⌃q quit` does
+- [x] `s` really does toggle the folded files now — the tree footer advertised that key
+      and nothing handled it
+- [x] `space` marks the file read and jumps to the next **unread** one — the verb you press
+      most. Idempotent, never a toggle; `m` is the toggle-in-place correction
+- [x] `?` opens the full key sheet, two columns, any key closes
+- [x] `⇥` moves the keyboard between the tree and the diff — the sidebar-and-preview
+      relationship, not a second cursor: the tree's selection scrolls the diff as it moves,
+      so the two panels can never disagree about which file you are on. The accent border
+      follows the keyboard (design-system §4), `⏎` hands it back, `esc` steps back one
+      level before it leaves, `⌃q` always quits
+- [x] The tree uses the **session list's two selection states, verbatim**: `SelectionPill`
+      accent-filled while it holds the keyboard, muted band when it does not — so the tree
+      keeps showing which file you are in without competing with the diff, exactly as the
+      sidebar does while the preview is focused
+- [x] Directories fold: `⏎` or `←`/`→` on a folder, `←` on a file climbs to its folder.
+      Uses `chevronGlyph`, so a folded directory looks like a folded sidebar group and
+      honours the user's triangle/plus-minus setting
+- [x] The fold state restores the selection by **identity**, not index — folding shifts
+      every row below it, so an index would leave you standing on something else
+- [x] Taking focus unfolds whatever is hiding the file you were reading, rather than
+      dropping the selection somewhere else
+- [x] **The tree and the diff never disagree.** Scrolling the diff by any means drags the
+      tree's selection along; selecting a directory carries the diff to the first file
+      under it. The left panel is a picture of where you are, not a stale one you have to
+      press `⇥` to refresh
+- [x] The diff's cursor row is highlighted across the **whole line**, not marked in the
+      gutter — a highlight that stops after the line numbers marks a column. The tint is
+      derived by lifting whatever tint the row already carries toward `ColorBorder`, so an
+      added line under the cursor is still visibly added (hue kept, luminance raised)
+- [x] **Bug found:** the tree budgeted filenames against 4 fixed columns when a row has 5,
+      so the change count truncated — `+11` rendered as `+1`. A wrong number is worse than
+      a shortened name. Indent is one space per level (BuildTree already collapses
+      single-child dirs, so two spent a quarter of a narrow panel on whitespace)
+- [x] **Second instance of the same bug:** `space` was bound as `case " "`, which
+      `String()` never produces, so it had done nothing since it was written
+- [x] Filename inset in the panel border instead of a row that scrolls away
+- [x] **Bug found:** `KeyPressMsg.String()` returns `"space"` for the space bar, so the
+      old `len(s)==1` test dropped every space typed into a comment. Reads `msg.Text` now,
+      which also fixes non-Latin comments
+- [x] Tests: exact width/height at five terminal sizes, the two colour channels, word-diff
+      runs, tint derivation in all six themes, expansion from a real worktree, comment
+      anchoring and wrapping, spaces and chords in the composer
+- [ ] `e` to hand a comment to `$EDITOR` (today it edits inline)
+- [ ] A commits pane, scoping the diff to a revision range (**H2**, deferred)
+
+## 5 · The tour
+
+- [ ] fleet makes its own Claude call when a review is opened — independent of how you review
+- [ ] Writes a tour file; cache keyed on the PR head SHA or it regenerates every visit
+- [ ] Renders as ordered steps over the diff
+
+## 6 · Comment and post
+
+- [ ] Comment on a line, `e` hands off to `$EDITOR`
+- [ ] Submit the batch, choose the verdict
+
+## 7 · Since you last looked
+
+- [ ] Record the reviewed SHA; show only what moved when the author pushes
+- [ ] The refresh that `PrepareReviewWorktree` deliberately does not do on revisit
+
+## Cheap wins, any order
+
+- [ ] Widen the `reviewThreads` GraphQL query — bodies/authors/positions already cross the wire in `getUnresolvedThreadCount` and get reduced to an int
+- [ ] `P` opens Chrome at the exact file and line; `y` yanks a permalink
+- [ ] `fleet review <url>` + a "Review in fleet" button in the Chrome extension
+
+## Not doing
+
+Separate review mode · shared review worktree · tree-sitter (needs cgo) ·
+guessing where comments moved after a force-push · inline images ·
+request-changes gates · snooze-until-CI · a tour file format with its own schema ·
+tuicr's agent handoff loop (it is for self-review; you review other people's PRs)

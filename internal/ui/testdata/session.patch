@@ -1,0 +1,25 @@
+@@ -141,6 +141,15 @@ type Session struct {
+ 	// Reset whenever a new hook arrives (see UpdateHookStatus).
+ 	waitingPaneConfirmed bool
+ 
++	// paneFinishedFrames counts consecutive pane captures that read finished while
++	// a running session has no hook data, and paneFinishedFirstAt stamps the first
++	// of them. A running session is only demoted once the count reaches
++	// paneFinishedConfirmFrames AND paneFinishedConfirmDelay has elapsed — see
++	// updateStatusFromPane. Both are cleared by any reading that does not agree,
++	// including an unclassified one and a failed capture, so "consecutive" holds.
++	paneFinishedFrames  int
++	paneFinishedFirstAt time.Time
++
+ 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
+ 
+ 	// Transcript tiebreaker cache. conversationActivePastHook runs on the ~500ms fast
+@@ -796,6 +805,8 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
+ 		s.lastContentChangeAt = time.Time{}
+ 		s.hookOverriddenAt = time.Time{} // allow fresh evaluation of new hook
+ 		s.waitingPaneConfirmed = false   // re-observe the prompt before trusting a pane spinner
++		s.paneFinishedFrames = 0         // a fresh hook supersedes any half-confirmed pane demotion
++		s.paneFinishedFirstAt = time.Time{}
+ 		// A non-dead hook means Claude is alive again. Re-arm the crash-dump
+ 		// trigger so the NEXT real death gets a dump even if a prior false
+ 		// transition (e.g. brief stale-hook flash before this fresh hook

@@ -101,6 +101,23 @@ func labelForOrigin(originKey string) string {
 // originOf maps each repo root to its origin key. isWorktreeOf reports whether
 // a checkout is a git worktree (so main clones sort before worktrees inside
 // an origin).
+// sidebarGroupPath maps a checkout to the row it appears under.
+//
+// Review worktrees collapse onto their shared parent folder, so ten reviews of
+// brizzai are one `reviews` node rather than ten checkout headers wedged among
+// your own branches. Every other path is its own group, unchanged.
+func sidebarGroupPath(repoRoot string) string {
+	if git.IsReviewWorktree(repoRoot) {
+		return filepath.Dir(repoRoot)
+	}
+	return repoRoot
+}
+
+// isReviewGroup reports whether a group row is the reviews folder itself.
+func isReviewGroup(path string) bool {
+	return strings.HasSuffix(filepath.Base(path), git.ReviewWorktreeDir)
+}
+
 func BuildFlatItems(
 	sessions []*session.Session,
 	pending []*PendingWorkspace,
@@ -125,21 +142,35 @@ func BuildFlatItems(
 
 	// Collect all checkouts (repo roots) we know about — from sessions,
 	// pending workspaces, and pinned repos.
+	// groupOrigin remembers the origin each group belongs to, resolved from a
+	// REAL checkout inside it. The reviews folder is a plain directory with no
+	// remote of its own, so asking originOf about it would answer
+	// "local:brizzai-reviews" and strand the node in an origin group of one.
 	checkouts := make(map[string]struct{})
+	groupOrigin := make(map[string]string)
+	note := func(repoRoot string) {
+		group := sidebarGroupPath(repoRoot)
+		checkouts[group] = struct{}{}
+		if _, ok := groupOrigin[group]; !ok {
+			if o := originOf(repoRoot); o != "" {
+				groupOrigin[group] = o
+			}
+		}
+	}
 	for _, s := range sessions {
-		checkouts[session.GetRepoRoot(s.ProjectPath)] = struct{}{}
+		note(session.GetRepoRoot(s.ProjectPath))
 	}
 	for _, pw := range pending {
-		checkouts[pw.RepoPath] = struct{}{}
+		note(pw.RepoPath)
 	}
 	for repo := range pinnedRepos {
-		checkouts[repo] = struct{}{}
+		note(repo)
 	}
 
 	// Bucket checkouts by origin.
 	originCheckouts := make(map[string][]string)
 	for repo := range checkouts {
-		origin := originOf(repo)
+		origin := groupOrigin[repo]
 		if origin == "" {
 			origin = "local:" + filepath.Base(repo)
 		}
@@ -147,10 +178,16 @@ func BuildFlatItems(
 	}
 
 	// Sessions / pending indexed by checkout for fast lookup.
-	sessionsBy := session.GroupByRepo(sessions)
+	// Keyed by group path so every review session lands under the one reviews
+	// row rather than under its own worktree.
+	sessionsBy := make(map[string][]*session.Session)
+	for _, s := range sessions {
+		g := sidebarGroupPath(session.GetRepoRoot(s.ProjectPath))
+		sessionsBy[g] = append(sessionsBy[g], s)
+	}
 	pendingBy := make(map[string][]*PendingWorkspace)
 	for _, pw := range pending {
-		pendingBy[pw.RepoPath] = append(pendingBy[pw.RepoPath], pw)
+		pendingBy[sidebarGroupPath(pw.RepoPath)] = append(pendingBy[sidebarGroupPath(pw.RepoPath)], pw)
 	}
 
 	// Sort origins alphabetically by their visible label.
@@ -175,6 +212,13 @@ func BuildFlatItems(
 		// alphabetically by path. Worktrees without resolved git info fall
 		// back into the "main" bucket and will re-sort once info loads.
 		sort.Slice(repos, func(i, j int) bool {
+			// Reviews last, always: your own branches stay one contiguous
+			// alphabetical run and other people's work reads as a footer
+			// rather than interleaving with it.
+			ri, rj := isReviewGroup(repos[i]), isReviewGroup(repos[j])
+			if ri != rj {
+				return !ri
+			}
 			wi, wj := isWorktreeOf(repos[i]), isWorktreeOf(repos[j])
 			if wi != wj {
 				return !wi // false (main) < true (worktree)
@@ -619,19 +663,50 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 // a git repo — just the folder name in dim, no branch glyph or PR badge.
 func renderCheckoutHeaderNonGit(item SidebarItem, selected bool) string {
 	name := filepath.Base(item.RepoPath)
+	review := isReviewGroup(item.RepoPath)
+	if review {
+		// "brizzai-reviews" is the directory; "reviews" is what it is. The
+		// repo name is already on the origin header directly above.
+		//
+		// ReviewGlyph carries the identity, the way the per-agent sigils do on
+		// session rows: shape says what a thing is, so the row is legible in a
+		// theme where the hue lands differently, and in a screenshot.
+		name = "reviews"
+	}
 	chevron := chevronGlyph(item.Expanded)
-	failMark := ""
+	suffix := ""
+	if review && ShowStatusPills {
+		// Reviews earn the same pill every other checkout gets: with the node
+		// collapsed it is the only thing saying whether a review wants you.
+		if pill := renderStatusSummary(item.StatusCounts); pill != "" {
+			suffix = "  " + pill
+		}
+	}
 	if item.RemovalFailed {
-		failMark = "  " + ErrorStyle.Render("✕ removal failed — d to retry")
+		suffix += "  " + ErrorStyle.Render("✕ removal failed — d to retry")
 	}
 	if selected {
 		icon := SelectionMarker(true).Render(chevron)
-		nameStyled := selTitle().Render(" " + name + " ")
-		return fmt.Sprintf("  %s %s", icon, nameStyled) + failMark
+		inner := " " + name + " "
+		if review {
+			inner = " [" + name + "] "
+		}
+		nameStyled := selTitle().Render(inner)
+		return fmt.Sprintf("  %s %s", icon, nameStyled) + suffix
 	}
 	icon := DimStyle.Render(chevron)
 	nameStyled := DimStyle.Render(name)
-	return fmt.Sprintf("  %s %s", icon, nameStyled) + failMark
+	if review {
+		// Brackets, and nothing else.
+		//
+		// Earlier passes each ADDED a token — a glyph, then a rail, then both —
+		// until the row carried four where every other header carries two, and
+		// that density was the thing that read as wrong. Brackets distinguish
+		// it inside the space the word already occupies, so the row stays the
+		// same shape as its neighbours. ASCII, so no width or font question.
+		nameStyled = ReviewGroupStyle.Render("[" + name + "]")
+	}
+	return fmt.Sprintf("  %s %s", icon, nameStyled) + suffix
 }
 
 // renderSessionItem → "  │ <status> <agent> title [slot] <snooze>"  (under a checkout)
