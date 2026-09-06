@@ -64,3 +64,55 @@ func TestClientEnvDropsTmuxVars(t *testing.T) {
 		t.Error("clientEnv() dropped an unrelated variable; it must only strip the tmux ones")
 	}
 }
+
+// $TMUX names the server AND marks the nesting. clientEnv drops the marker, so
+// the socket has to be carried some other way or the attach silently retargets
+// the default server — where Exists() never looked and the session is not.
+func TestAttachArgsKeepsTheInheritedSocket(t *testing.T) {
+	t.Run("inside tmux, -S names the inherited socket", func(t *testing.T) {
+		t.Setenv("TMUX", "/private/tmp/tmux-501/work,62039,14")
+		got := attachArgs("fleet_demo_abc")
+		want := []string{"-S", "/private/tmp/tmux-501/work", "attach-session", "-t", "fleet_demo_abc"}
+		if strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("attachArgs() = %v, want %v", got, want)
+		}
+		// tmux parses server options before the command, so a -S appended after
+		// attach-session would be read as an argument to it and ignored.
+		if got[0] != "-S" {
+			t.Errorf("-S must precede the command; got %v", got)
+		}
+	})
+
+	t.Run("outside tmux, no -S at all", func(t *testing.T) {
+		t.Setenv("TMUX", "")
+		got := attachArgs("fleet_demo_abc")
+		for _, a := range got {
+			if a == "-S" {
+				t.Fatalf("attachArgs() added -S with no $TMUX: %v", got)
+			}
+		}
+	})
+}
+
+func TestSocketFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		tmux string
+		want string
+	}{
+		{"standard three-field value", "/tmp/tmux-501/default,123,0", "/tmp/tmux-501/default"},
+		{"named socket", "/tmp/tmux-501/work,1,2", "/tmp/tmux-501/work"},
+		{"unset", "", ""},
+		// tmux has used a bare socket path historically; take the whole value
+		// rather than returning nothing and silently retargeting the default.
+		{"no comma", "/tmp/tmux-501/default", "/tmp/tmux-501/default"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TMUX", tt.tmux)
+			if got := socketFromEnv(); got != tt.want {
+				t.Errorf("socketFromEnv() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
