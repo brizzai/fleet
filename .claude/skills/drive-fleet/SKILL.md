@@ -22,7 +22,10 @@ closes that gap: boot a seeded fleet in a sandbox, press keys, read the screen.
 
 The whole surface is `demo/drive.sh`. It drives a throwaway fleet under
 `/private/tmp/fleet-drive` on its own tmux server — never the user's real
-sessions.
+sessions. That holds when you are yourself running inside a tmux pane, which
+you usually are: the script clears `$TMUX` before every tmux call, because
+`$TMUX` names a server and outranks `TMUX_TMPDIR`, and `down` verifies the
+socket it is about to kill lives under the sandbox.
 
 ## Step 1: Bring it up
 

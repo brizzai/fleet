@@ -38,7 +38,17 @@ cd "$ROOT_DIR"
 # colliding with a real session, and RefreshSessionCache enumerating the
 # user's real panes every tick.
 tmux_() {
-    TMUX_TMPDIR="$DRIVE_DIR/tmux" tmux "$@"
+    # `env -u TMUX -u TMUX_PANE` is load-bearing, not tidiness. $TMUX names a
+    # socket and tmux prefers it over TMUX_TMPDIR — verified: with TMUX_TMPDIR
+    # pointing at an empty directory and $TMUX set, `tmux ls` still answered
+    # from the $TMUX server. So without this, TMUX_TMPDIR is inert and every
+    # command here lands on the caller's server: `down` would kill-server the
+    # user's real tmux, and the fixture panes would be created among their real
+    # sessions for their running fleet to adopt.
+    #
+    # This is the normal case, not an edge one: agent sessions run inside tmux
+    # panes, so anything driving this script has $TMUX set.
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$DRIVE_DIR/tmux" tmux "$@"
 }
 
 # Helper: the environment every fleet process in the sandbox must inherit.
@@ -454,9 +464,26 @@ do_status() {
 }
 
 do_down() {
-    # One command, and only safe because the server is private: kill-server on
-    # a shared server would take the user's real sessions with it.
-    tmux_ kill-server 2>/dev/null || true
+    # kill-server is irreversible and takes every session on whichever server it
+    # reaches, so verify the target rather than trusting that the environment
+    # came out right. An earlier version asserted this isolation in a comment
+    # and was wrong for exactly one reason ($TMUX outranking TMUX_TMPDIR); a
+    # comment cannot fail a run, and this can.
+    local sock
+    sock=$(tmux_ display-message -p '#{socket_path}' 2>/dev/null || true)
+    case "$sock" in
+        "$DRIVE_DIR"/*)
+            tmux_ kill-server 2>/dev/null || true
+            ;;
+        "")
+            : # No server to kill; `down` stays idempotent.
+            ;;
+        *)
+            echo "drive: refusing to kill-server — socket is $sock, outside $DRIVE_DIR." >&2
+            echo "drive: that socket is not this sandbox's. Nothing was killed." >&2
+            exit 3
+            ;;
+    esac
     if [ "${1:-}" = "--purge" ]; then
         rm -rf "$DRIVE_DIR"
         echo "Torn down and purged $DRIVE_DIR."
