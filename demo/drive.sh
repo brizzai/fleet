@@ -123,6 +123,19 @@ ensure_build() {
 
 # Helper: the sandbox HOME. Every line here buys one specific thing.
 ensure_sandbox() {
+    # $DRIVE_DIR lives under /tmp, which is world-writable, so another process
+    # can pre-create it. A symlink there would point the whole sandbox — and
+    # the kill-server target below — somewhere else while every textual path
+    # check still passed. Refuse rather than follow it.
+    if [ -L "$DRIVE_DIR" ] || [ -L "$DRIVE_DIR/tmux" ]; then
+        echo "drive: $DRIVE_DIR is a symlink; refusing to use it." >&2
+        echo "drive: remove it and re-run, or set DRIVE_DIR elsewhere." >&2
+        exit 2
+    fi
+    mkdir -p -m 700 "$DRIVE_DIR"
+    # -m only applies on creation, so a directory someone else made first would
+    # keep its own mode. Set it either way.
+    chmod 700 "$DRIVE_DIR" 2>/dev/null || true
     mkdir -p "$SANDBOX/.config/fleet" "$SANDBOX/bin" "$DRIVE_DIR/tmux" "$DRIVE_DIR/tmp"
 
     # Without this marker, the first launch runs migration, which renames
@@ -473,8 +486,18 @@ do_down() {
     # came out right. An earlier version asserted this isolation in a comment
     # and was wrong for exactly one reason ($TMUX outranking TMUX_TMPDIR); a
     # comment cannot fail a run, and this can.
-    local sock
+    local sock sockdir
     sock=$(tmux_ display-message -p '#{socket_path}' 2>/dev/null || true)
+    # Compare resolved paths, not strings. tmux reports the socket path it was
+    # given, symlinks intact, so a symlinked component would let a socket that
+    # textually sits under $DRIVE_DIR actually live on the user's real server —
+    # and this check would then authorise precisely what it exists to prevent.
+    if [ -n "$sock" ]; then
+        sockdir=$(cd "$(dirname "$sock")" 2>/dev/null && pwd -P) || sockdir=""
+        if [ -n "$sockdir" ]; then
+            sock="$sockdir/$(basename "$sock")"
+        fi
+    fi
     case "$sock" in
         "$DRIVE_DIR"/*)
             tmux_ kill-server 2>/dev/null || true
