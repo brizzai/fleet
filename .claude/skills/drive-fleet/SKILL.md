@@ -124,6 +124,13 @@ default. Try `79` and `49` for the stacked and single layouts.
 character grid — `awk '{print length($0)}'`, `cut -c`, and `grep -n` all mean
 what you expect. A PNG cannot answer "is this column aligned".
 
+**A PNG is not authoritative for glyphs.** `freeze`'s font lacks a few of the
+codepoints fleet uses, so `✻` (Claude), `◐` (waiting) and `☾` (snooze) render as
+tofu boxes in an image while being perfectly fine in the terminal. Colors,
+spacing, alignment and layout are faithful; glyph identity is not. Check glyphs
+with `snap`, and never report a boxed glyph as a bug without confirming it in
+the text first.
+
 **Use `-e` for color questions only.** Colors carry meaning in fleet's design
 system (focus > selection > mode), so if the change touched a status color or an
 accent fill, capture ANSI and check the escape codes rather than guessing.

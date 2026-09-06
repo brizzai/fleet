@@ -448,6 +448,10 @@ do_png() {
     require_up
     local raw="$DRIVE_DIR/tmp/frame.ansi"
     wait_stable "yes" "" > "$raw"
+    # Default font only. --font.family with a system font name (Menlo, SF Mono,
+    # Andale Mono were all tried) exits 0 and writes a near-blank image — three
+    # different names produced byte-identical 170KB files against 717KB for the
+    # default. A silent wrong answer is worse than the missing glyphs below.
     freeze --language ansi -o "$out" "$raw" >/dev/null
     echo "$out"
 }
