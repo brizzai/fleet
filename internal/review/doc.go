@@ -331,6 +331,24 @@ func (d *Doc) Pending() int {
 	return n
 }
 
+// MarkSent records that every pending comment has reached GitHub.
+//
+// The comments stay in the document rather than being cleared: what you just
+// sent is the most useful thing to still see while you finish reading, and the
+// rows already render a sent comment as read-only.
+func (d *Doc) MarkSent() {
+	changed := false
+	for i := range d.comments {
+		if !d.comments[i].Sent {
+			d.comments[i].Sent = true
+			changed = true
+		}
+	}
+	if changed {
+		d.Rebuild()
+	}
+}
+
 // AddComment files a comment and returns its id.
 func (d *Doc) AddComment(c Comment) int {
 	d.nextID++

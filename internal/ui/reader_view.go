@@ -55,12 +55,22 @@ func (d *ReaderDialog) View() string {
 
 	out := d.header() + "\n" + body + "\n" + d.footer()
 	if d.help {
-		sheet := d.helpSheet()
-		x := max((d.width-lipgloss.Width(sheet))/2, 0)
-		y := max((d.height-lipgloss.Height(sheet))/2, 0)
-		return overlayAt(sheet, dimBackdrop(out), x, y)
+		return centreOverlay(d.helpSheet(), out, d.width, d.height)
+	}
+	if d.mode == modeSubmit {
+		// Centred and over a dimmed backdrop, because this is the one action in
+		// the reader that reaches another person's pull request: it takes the
+		// whole screen's attention rather than sitting in a corner of it.
+		return centreOverlay(d.submitSheet(), out, d.width, d.height)
 	}
 	return out
+}
+
+// centreOverlay drops a panel in the middle of a dimmed screen.
+func centreOverlay(panel, under string, width, height int) string {
+	x := max((width-lipgloss.Width(panel))/2, 0)
+	y := max((height-lipgloss.Height(panel))/2, 0)
+	return overlayAt(panel, dimBackdrop(under), x, y)
 }
 
 // readerKeys is every key the reader answers to, grouped by what you are doing.
@@ -94,6 +104,11 @@ var readerKeys = []struct {
 		{"⌃j", "newline inside a comment"},
 		{"⏎", "save · esc discards"},
 		{"e  d", "edit / delete the comment under the cursor"},
+	}},
+	{"Submit", [][2]string{
+		{"S", "send the review to GitHub"},
+		{"⇥ ←→", "comment / approve / request changes"},
+		{"⏎", "submit · esc sends nothing"},
 	}},
 	{"Find", [][2]string{
 		{"/", "search the code"},
@@ -147,6 +162,122 @@ func (d *ReaderDialog) helpSheet() string {
 
 // helpKeyCol is the width of the key column, sized to the widest chord.
 const helpKeyCol = 10
+
+// submitSheetWidth is wide enough for a path, a line number and the start of a
+// comment on one row, and no wider: this is a confirmation, not a second reader.
+const submitSheetWidth = 76
+
+// submitSheetComments is how many comment rows the sheet lists before counting
+// the rest. The list is here to let you recognise what you wrote, not to read it
+// again — the comments are still on screen behind this box.
+const submitSheetComments = 6
+
+// submitSheet is the confirmation that posts the review.
+//
+// It exists because submitting is the one thing the reader does that another
+// person sees. Everything else here is a local act you can undo by pressing the
+// key again; this one arrives as a notification on someone's pull request, so it
+// states the verdict, counts what goes with it, and refuses until the summary
+// GitHub requires is actually there.
+func (d *ReaderDialog) submitSheet() string {
+	inner := min(submitSheetWidth, max(d.width-6, 30)) - 4
+	pending := d.pendingComments()
+
+	var body []string
+
+	// The verdict, as three words with the chosen one carrying the selection —
+	// the same two-state pill the file tree and the session list use, so "this
+	// is what is selected" reads identically wherever it appears.
+	var verdict []string
+	for i, label := range submitLabels {
+		if i == d.submitEvent {
+			verdict = append(verdict, SelectionPill(true).Render(" "+label+" "))
+			continue
+		}
+		verdict = append(verdict, DimStyle.Render(" "+label+" "))
+	}
+	body = append(body, " "+strings.Join(verdict, " "), "")
+
+	if len(pending) == 0 {
+		body = append(body, " "+DimStyle.Render("no comments — the summary goes on its own"))
+	} else {
+		body = append(body, " "+SessionItemStyle.Render(plural(len(pending), "comment")))
+		for i, c := range pending {
+			if i >= submitSheetComments {
+				body = append(body, "   "+DimStyle.Render("… "+plural(len(pending)-i, "more")))
+				break
+			}
+			body = append(body, "   "+d.submitCommentRow(c, inner-3))
+		}
+	}
+	body = append(body, "")
+
+	// The summary. Labelled even when empty, because an unlabelled empty row is
+	// indistinguishable from the box simply having nothing in it.
+	body = append(body, " "+DimStyle.Render("Summary"))
+	for _, line := range d.submitBodyRows(inner - 2) {
+		body = append(body, " "+line)
+	}
+
+	if d.submitErr != "" {
+		// GitHub's own words, not ours: "line must be part of the diff" names a
+		// thing to fix, and paraphrasing it would lose that.
+		body = append(body, "", " "+PRFailStyle.Render("✕ "+ansi.Truncate(d.submitErr, max(inner-2, 8), "…")))
+	}
+
+	foot := keyHints("⏎", "submit", "⇥", "verdict", "esc", "cancel")
+	if reason := d.submitBlocker(); reason != "" {
+		// The footer names what is missing rather than the key that is dead —
+		// an unexplained refusal on a key the sheet advertises reads as a bug.
+		foot = DimStyle.Render("  " + reason)
+	}
+
+	title := "Submit review"
+	right := d.repo + " #" + itoa(d.pr)
+	return RenderBorderedPanelInsets(strings.Join(body, "\n"),
+		title, right, foot, "", inner+4, len(body)+2, true)
+}
+
+// submitCommentRow is one queued comment: where it lands, and how it opens.
+func (d *ReaderDialog) submitCommentRow(c review.Comment, width int) string {
+	at := c.File + ":" + itoa(c.Line)
+	// The path is cut from the LEFT for the reason it always is here: the
+	// basename identifies the file, and every row shares the leading segments.
+	at = truncFront(at, max(width/2, 12))
+	head := strings.SplitN(c.Payload(), "\n", 2)[0]
+	room := width - lipgloss.Width(at) - 2
+	if room < 4 {
+		return DiffNumStyle.Render(at)
+	}
+	return DiffNumStyle.Render(at) + "  " + DimStyle.Render(ansi.Truncate(head, room, "…"))
+}
+
+// submitBodyRows is the typed summary, wrapped, with the caret on the end.
+//
+// Always at least one row: a field that collapses to nothing when empty makes
+// the box change height on the first keystroke.
+func (d *ReaderDialog) submitBodyRows(width int) []string {
+	var out []string
+	for _, para := range strings.Split(d.submitBody, "\n") {
+		rows := wrapTo(width, para)
+		if len(rows) == 0 {
+			rows = []string{""}
+		}
+		out = append(out, rows...)
+	}
+	if len(out) == 0 {
+		out = []string{""}
+	}
+	if d.submitting {
+		return []string{DimStyle.Render("posting to GitHub…")}
+	}
+	last := len(out) - 1
+	out[last] = SessionItemStyle.Render(out[last]) + FocusCaret().Render("▏")
+	for i := 0; i < last; i++ {
+		out[i] = SessionItemStyle.Render(out[i])
+	}
+	return out
+}
 
 // joinHelpColumns lays the sections out in n columns, splitting where the
 // running height first passes half — so the two columns come out level rather
@@ -845,6 +976,8 @@ func (d *ReaderDialog) footer() string {
 	switch d.mode {
 	case modeCompose:
 		keys = keyHints("⇥", "type", "⏎", "save", "⌃j", "newline", "esc", "discard")
+	case modeSubmit:
+		keys = keyHints("⇥", "verdict", "type", "summary", "⏎", "submit", "esc", "cancel")
 	case modeSearch:
 		keys = HelpKeyStyle.Render(" /") + SessionItemStyle.Render(d.query) +
 			FocusCaret().Render("▏") + "  " + keyHints("⏎", "keep", "esc", "cancel")
@@ -904,7 +1037,7 @@ func (d *ReaderDialog) keyPairs() []string {
 		}
 		return []string{"↑↓", "file", "⏎", "read it", "←", "folder", "⇥", "back to diff", "?", "keys", "⌃q", "quit"}
 	}
-	base := []string{"↑↓", "scroll", "⇧↑↓", "hunk", "⇧←→", "file", "c", "comment", "space", "read+next", "/", "find", "⇥", "files", "|", "split", "?", "keys", "⌃q", "quit"}
+	base := []string{"↑↓", "scroll", "⇧↑↓", "hunk", "⇧←→", "file", "c", "comment", "S", "submit", "space", "read+next", "/", "find", "⇥", "files", "|", "split", "?", "keys", "⌃q", "quit"}
 	if d.hiddenCount() > 0 || d.showAll {
 		base = append(base[:len(base)-2], append([]string{"s", "folded"}, base[len(base)-2:]...)...)
 	}

@@ -101,7 +101,7 @@ Decisions: **A1** full screen · **B1** stream · **C1** ⏎ reads · **D1** inl
 - [x] Full-screen surface: `modalOpen`, `routeToModal` (raw keys — the comment box takes text), `renderBody`
 - [x] Tests: line numbering incl. blank context rows, no-patch files, jump bounds, hunk header parsing
 - [ ] Persist read marks and pending comments to SQLite (in memory today — lost on restart)
-- [ ] Submit the batch to GitHub
+- [x] Submit the batch to GitHub — `S`, verdict cycler, one POST
 
 ## 5b · The reader, second pass — DONE
 
@@ -189,8 +189,28 @@ worktree · **G2** search · **H1** no commits pane yet.
 
 ## 6 · Comment and post
 
-- [ ] Comment on a line, `e` hands off to `$EDITOR`
-- [ ] Submit the batch, choose the verdict
+- [ ] Comment on a line, `e` hands off to `$EDITOR` (edits inline today)
+- [x] Submit the batch, choose the verdict
+
+`S` raises a sheet: the verdict on `⇥` (comment / approve / request changes),
+the summary typed underneath, `⏎` to send. One
+`POST /repos/{o}/{r}/pulls/{n}/reviews` carrying every queued comment, because a
+review is atomic on GitHub — N separate comment POSTs arrive as N notifications
+and leave half a review behind when the third one fails.
+
+Three decisions worth keeping:
+
+- **COMMENT leads the cycle, not APPROVE.** Approve is the one verdict a stray
+  keypress must not reach, and COMMENT is the one GitHub refuses without a
+  summary — so `S` `⏎` on an untouched sheet does nothing at all.
+- **`commit_id` is sent.** Left off, GitHub anchors to the current head and a
+  push during the review re-points every line number at code nobody read. Sent,
+  an overtaken review renders as outdated, which is true. It rides the queue's
+  GraphQL query as `headRefOid`, so it costs no round trip.
+- **The reader asks, the app posts.** The reader owns the comments and the sheet
+  and nothing else — it does not know the head SHA, does not hold the queue, and
+  must never shell out to `gh` from the Update goroutine. Same shape as
+  `reviewCommentMsg`.
 
 ## 7 · Since you last looked
 

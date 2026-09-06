@@ -318,6 +318,83 @@ func (h *Home) findReviewByNumber(pr int) (github.ReviewRequest, bool) {
 	return github.ReviewRequest{}, false
 }
 
+// submitReview posts the reader's queued comments as one GitHub review.
+//
+// The reader asked; the app answers, because this is the layer that knows the
+// owner/repo and the commit the diff was read at. It also keeps the gh
+// subprocess off the reader, which runs on the Update goroutine.
+func (h *Home) submitReview(msg reviewSubmitRequestMsg) (tea.Model, tea.Cmd) {
+	r, ok := h.findReviewByNumber(msg.pr)
+	if !ok || r.Repo == "" {
+		h.reader.SubmitDone(fmt.Errorf("no GitHub repo known for #%d", msg.pr), 0)
+		return h, nil
+	}
+
+	sub := buildSubmission(r, msg.event, msg.body, h.reader.pendingComments())
+	pr, event, count, repo := msg.pr, msg.event, len(sub.Comments), r.Repo
+	return h, func() tea.Msg {
+		err := github.SubmitReview(context.Background(), repo, pr, sub)
+		return reviewSubmitResultMsg{pr: pr, event: event, count: count, err: err}
+	}
+}
+
+// buildSubmission turns the reader's queue into the payload GitHub takes.
+//
+// Pure, and separate from the call that posts it, because this is where the
+// review's whole meaning is decided — the kind prefix, which side of the diff a
+// line refers to, and which commit it is anchored to. A mistake in any of those
+// posts to a teammate's pull request and cannot be tested through a subprocess.
+func buildSubmission(r github.ReviewRequest, event github.ReviewEvent, body string, cs []review.Comment) github.ReviewSubmission {
+	sub := github.ReviewSubmission{
+		// The commit the reader actually rendered. If the author has pushed
+		// since, GitHub marks the review outdated — which is true — instead of
+		// silently re-pointing every line number at code nobody read.
+		CommitID: r.HeadSHA,
+		Body:     body,
+		Event:    event,
+	}
+	for _, c := range cs {
+		sub.Comments = append(sub.Comments, github.ReviewComment{
+			Path: c.File,
+			Line: c.Line,
+			// RIGHT always: the reader only lets a comment anchor to a line of
+			// the new side, so there is no LEFT case to represent.
+			Side: "RIGHT",
+			// Payload and not Body: the kind is a prefix people already type by
+			// hand ("nit: "), so it has to ship in the text or a nit arrives on
+			// GitHub indistinguishable from a blocking objection.
+			Body: c.Payload(),
+		})
+	}
+	return sub
+}
+
+// handleReviewSubmitted records the outcome.
+//
+// The pending comments are dropped only on success: a failed submit leaves them
+// exactly where they were, because the fix is usually to retry, and a review
+// that was refused must not also have been thrown away.
+func (h *Home) handleReviewSubmitted(msg reviewSubmitResultMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		debuglog.Logger.Debug("review submit: failed", "pr", msg.pr, "err", msg.err)
+		h.reader.SubmitDone(msg.err, 0)
+		if !h.reader.Visible() {
+			// The sheet carries the reason while the reader is open. Closed, it
+			// has nowhere to land but the main screen's error line.
+			h.setError(msg.err)
+		}
+		return h, nil
+	}
+
+	delete(h.reviewComments, msg.pr)
+	h.reader.SubmitDone(nil, msg.count)
+	h.actionLog.Add("submit review", strconv.Itoa(msg.pr), true)
+	if !h.reader.Visible() {
+		h.setInfo(fmt.Sprintf("Submitted review on #%d", msg.pr))
+	}
+	return h, nil
+}
+
 // syncReviewComments replaces the app's record of a PR's pending comments with
 // the reader's, which is authoritative while the reader is open.
 //
@@ -341,9 +418,18 @@ func (h *Home) syncReviewComments(pr int, cs []review.Comment) {
 		repo = r.Repo
 	}
 	for _, c := range cs {
+		// A submitted comment is not pending. Carrying it here would re-seed it
+		// as unsent on the next open and offer to post it a second time.
+		if c.Sent {
+			continue
+		}
 		out = append(out, reviewCommentMsg{
 			pr: pr, repo: repo, file: c.File, line: c.Line, kind: c.Kind, body: c.Body,
 		})
+	}
+	if len(out) == 0 {
+		delete(h.reviewComments, pr)
+		return
 	}
 	h.reviewComments[pr] = out
 }

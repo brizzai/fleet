@@ -41,6 +41,7 @@ query($q: String!, $limit: Int!) {
         title
         url
         isDraft
+        headRefOid
         updatedAt
         additions
         deletions
@@ -67,6 +68,11 @@ type ReviewRequest struct {
 	Decision     string // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, ""
 	UpdatedAt    time.Time
 	IsDraft      bool
+	// HeadSHA is the commit the diff was read at. Carried on the queue rather
+	// than fetched at submit time because it rides this query for free, and a
+	// second round trip to learn it would sit between pressing submit and the
+	// review landing.
+	HeadSHA string
 }
 
 type ghReviewNode struct {
@@ -74,6 +80,7 @@ type ghReviewNode struct {
 	Title        string    `json:"title"`
 	URL          string    `json:"url"`
 	IsDraft      bool      `json:"isDraft"`
+	HeadRefOid   string    `json:"headRefOid"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 	Additions    int       `json:"additions"`
 	Deletions    int       `json:"deletions"`
@@ -190,6 +197,7 @@ func ReviewsRequested(ctx context.Context) ([]ReviewRequest, error) {
 			Decision:     n.Decision,
 			UpdatedAt:    n.UpdatedAt,
 			IsDraft:      n.IsDraft,
+			HeadSHA:      n.HeadRefOid,
 		})
 	}
 

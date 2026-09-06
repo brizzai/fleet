@@ -1764,6 +1764,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewFilesMsg:
 		return h.handleReviewFiles(msg)
 
+	case reviewSubmitRequestMsg:
+		return h.submitReview(msg)
+
+	case reviewSubmitResultMsg:
+		return h.handleReviewSubmitted(msg)
+
 	case reviewCommentMsg:
 		// Queued locally, not posted. Submitting the batch is its own step and
 		// its own confirmation — a comment reaching a teammate's PR must never

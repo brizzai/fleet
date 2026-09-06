@@ -23,6 +23,26 @@ type reviewCommentMsg struct {
 	body string
 }
 
+// reviewSubmitRequestMsg asks the app to post the review.
+//
+// The reader owns the comments and the sheet, and nothing else: it does not
+// know the head SHA, does not hold the queue, and must never shell out to gh
+// from the Update goroutine. It says what the user chose; the app knows where
+// that goes, exactly as reviewCommentMsg already works.
+type reviewSubmitRequestMsg struct {
+	pr    int
+	event github.ReviewEvent
+	body  string
+}
+
+// reviewSubmitResultMsg carries the outcome back.
+type reviewSubmitResultMsg struct {
+	pr    int
+	event github.ReviewEvent
+	count int
+	err   error
+}
+
 // splitMinWidth is where side-by-side starts being readable.
 //
 // Two code columns plus a file tree plus four borders leaves ~55 columns a
@@ -40,6 +60,7 @@ const (
 	modeNormal readerMode = iota
 	modeCompose
 	modeSearch
+	modeSubmit
 )
 
 func (m readerMode) String() string {
@@ -48,9 +69,23 @@ func (m readerMode) String() string {
 		return "COMMENT"
 	case modeSearch:
 		return "SEARCH"
+	case modeSubmit:
+		return "SUBMIT"
 	}
 	return "NORMAL"
 }
+
+// submitEvents is the verdict cycle, and COMMENT leads it deliberately.
+//
+// Approve is the most consequential of the three and the one a stray keypress
+// must not reach: COMMENT refuses to send without a summary, so `S` followed by
+// `⏎` on an untouched sheet does nothing at all.
+var submitEvents = []github.ReviewEvent{
+	github.EventComment, github.EventApprove, github.EventRequestChanges,
+}
+
+// submitLabels are those events in the words a person uses.
+var submitLabels = []string{"comment", "approve", "request changes"}
 
 // dispRow is one rendered row of the diff panel.
 //
@@ -149,6 +184,16 @@ type ReaderDialog struct {
 	hits   []int
 	hitIdx int
 
+	// The submit sheet. submitEvent indexes submitEvents; submitBody is the
+	// review summary. submitErr is why the last attempt was refused — held on
+	// the sheet rather than shown as a toast, because the fix (type a summary,
+	// pick another verdict) happens on the sheet and a notice that vanished
+	// behind the next keystroke would take the reason with it.
+	submitEvent int
+	submitBody  string
+	submitting  bool
+	submitErr   string
+
 	// toast is the last thing that happened, shown bottom-right. One slot: a
 	// second event replaces the first, because a stack of notices in a footer
 	// is a log, and a log nobody asked for.
@@ -176,6 +221,7 @@ func (d *ReaderDialog) Show(pr int, title, author, repo, worktree string,
 	d.draft = review.Comment{}
 	d.editingID = 0
 	d.query, d.hits, d.hitIdx = "", nil, 0
+	d.resetSubmit()
 	d.toast = ""
 	d.read = read
 	if d.read == nil {
@@ -423,6 +469,8 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 		return d.updateCompose(msg)
 	case modeSearch:
 		return d.updateSearch(msg)
+	case modeSubmit:
+		return d.updateSubmit(msg)
 	}
 
 	if d.help {
@@ -578,6 +626,8 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 		d.editComment()
 	case "d":
 		d.deleteComment()
+	case "S":
+		d.openSubmit()
 
 	case "/":
 		d.mode = modeSearch
@@ -1028,6 +1078,138 @@ func (d *ReaderDialog) deleteComment() {
 	d.doc.DeleteComment(l.Comment.ID)
 	d.rebuildRows()
 	d.toast = "comment deleted"
+}
+
+// openSubmit raises the submit sheet.
+//
+// Refused without an owner/repo, which is the state a PR fleet never saw in the
+// review queue is in: there is nowhere to post to, and finding that out after
+// typing a summary is worse than being told now.
+func (d *ReaderDialog) openSubmit() {
+	if d.repo == "" {
+		d.toast = "no GitHub repo for this review — nothing to submit to"
+		return
+	}
+	d.mode = modeSubmit
+	d.submitErr = ""
+}
+
+// resetSubmit clears the sheet.
+func (d *ReaderDialog) resetSubmit() {
+	d.submitEvent, d.submitBody = 0, ""
+	d.submitting, d.submitErr = false, ""
+}
+
+// submitEvent is the verdict currently chosen.
+func (d *ReaderDialog) chosenEvent() github.ReviewEvent {
+	return submitEvents[d.submitEvent%len(submitEvents)]
+}
+
+// submitBlocker is why ⏎ will not send, or "".
+//
+// One function consulted by both the key handler and the sheet's own footer, so
+// the key can never act on a state the footer calls unready — the same rule the
+// bug-report dialog's submit follows.
+func (d *ReaderDialog) submitBlocker() string {
+	if d.submitting {
+		return "posting…"
+	}
+	if d.chosenEvent().NeedsBody() && strings.TrimSpace(d.submitBody) == "" {
+		// GitHub refuses these two without one. Saying so here means the
+		// refusal arrives while the caret is still in the box, rather than as a
+		// 422 after the keystroke that was meant to end the review.
+		return "a " + submitLabels[d.submitEvent] + " review needs a summary"
+	}
+	return ""
+}
+
+// pendingComments is what would be posted.
+func (d *ReaderDialog) pendingComments() []review.Comment {
+	if d.doc == nil {
+		return nil
+	}
+	var out []review.Comment
+	for _, c := range d.doc.Comments() {
+		if !c.Sent {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// updateSubmit handles keys while the submit sheet is up.
+func (d *ReaderDialog) updateSubmit(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
+	if d.submitting {
+		// The request is already on its way to GitHub; nothing typed here can
+		// recall it, and letting esc close the sheet would leave the user
+		// believing they cancelled a review that is about to land.
+		return d, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		d.mode = modeNormal
+		d.resetSubmit()
+		d.toast = "nothing submitted"
+
+	case "tab", "right":
+		d.submitEvent = (d.submitEvent + 1) % len(submitEvents)
+		d.submitErr = ""
+	case "shift+tab", "left":
+		d.submitEvent = (d.submitEvent + len(submitEvents) - 1) % len(submitEvents)
+		d.submitErr = ""
+
+	case "ctrl+j":
+		d.submitBody += "\n"
+
+	case "enter":
+		if reason := d.submitBlocker(); reason != "" {
+			d.submitErr = reason
+			return d, nil
+		}
+		d.submitting, d.submitErr = true, ""
+		pr, event, body := d.pr, d.chosenEvent(), strings.TrimSpace(d.submitBody)
+		return d, func() tea.Msg {
+			return reviewSubmitRequestMsg{pr: pr, event: event, body: body}
+		}
+
+	case "backspace":
+		if n := len([]rune(d.submitBody)); n > 0 {
+			d.submitBody = string([]rune(d.submitBody)[:n-1])
+		}
+
+	default:
+		// Text and never String(), for the same reason the comment box reads
+		// it: a summary you cannot put a space in is not a summary.
+		if t := typedText(msg); t != "" {
+			d.submitBody += t
+		}
+	}
+	return d, nil
+}
+
+// SubmitDone reports the outcome of a submission back to the sheet.
+//
+// A failure keeps the sheet open with the reason on it: a rate limit or a line
+// GitHub would not anchor are both things you retry after a change, and closing
+// the sheet would throw away the summary that has to be retyped.
+func (d *ReaderDialog) SubmitDone(err error, count int) {
+	d.submitting = false
+	if err != nil {
+		d.submitErr = err.Error()
+		return
+	}
+	label := submitLabels[d.submitEvent]
+	d.mode = modeNormal
+	d.resetSubmit()
+	if d.doc != nil {
+		d.doc.MarkSent()
+		d.rebuildRows()
+	}
+	d.toast = label + " submitted"
+	if count > 0 {
+		d.toast = label + " submitted with " + plural(count, "comment")
+	}
 }
 
 // updateCompose handles keys while the comment box is open.
