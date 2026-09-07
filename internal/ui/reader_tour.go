@@ -10,10 +10,23 @@ import (
 	"github.com/brizzai/fleet/internal/review"
 )
 
+// tourPanelWidth is how wide the left panel may grow while the route is
+// showing. See treeWidth for why the file tree's own cap is wrong here.
+const tourPanelWidth = 48
+
 // tourTitleLines caps how tall one step's row may grow. A route is meant to be
 // readable at a glance; a step whose title needs four lines has stopped being a
 // title.
 const tourTitleLines = 2
+
+// tourBandMeasure is the reading width of the narration.
+//
+// Wrapped to the panel instead, it ran to about 190 columns on a wide terminal —
+// roughly three times the measure prose stays readable at, which is what turned
+// a short paragraph into one endless line. The box stops where the text stops,
+// so it reads as a note attached to the code rather than a banner across the
+// screen.
+const tourBandMeasure = 76
 
 // tourBandLines caps the narration above the code. The band explains where you
 // are; the code is what you came for, and on an 80×24 terminal every line the
@@ -77,9 +90,9 @@ func (d *ReaderDialog) tourItemLines(i, width int) []string {
 		return d.tourAnchorLines(st.Anchors[it.anchor], width, selected)
 	}
 
-	// The number is the route's spine — it is how "step 2 of 5" in the band
-	// and the row you are standing on refer to the same thing.
-	num := strconv.Itoa(it.step+1) + " "
+	// The number is the route's spine — it is how "step 2 of 5" in the band and
+	// the row you are standing on refer to the same thing.
+	num := strconv.Itoa(it.step+1) + "  "
 	body := wrapTo(max(width-len(num)-2, 6), st.Title)
 	if len(body) > tourTitleLines {
 		body = body[:tourTitleLines]
@@ -87,6 +100,12 @@ func (d *ReaderDialog) tourItemLines(i, width int) []string {
 	}
 
 	var out []string
+	// A blank row before every step but the first. The route is a list of ideas
+	// and the eye needs somewhere to break; without it seven wrapped titles run
+	// together into one grey block, which is what made the panel unreadable.
+	if it.step > 0 {
+		out = append(out, "")
+	}
 	for j, text := range body {
 		lead := num
 		if j > 0 {
@@ -100,36 +119,46 @@ func (d *ReaderDialog) tourItemLines(i, width int) []string {
 			out = append(out, SelectionPill(d.treeFocus).Render(ansi.Truncate(raw, width, "")))
 			continue
 		}
-		style := DimStyle
-		if j == 0 {
-			style = SessionItemStyle
-		}
-		out = append(out, style.Render(ansi.Truncate(raw, width, "…")))
+		// The continuation of a title is still the title. Dimming it, as this
+		// did, made every wrapped step look like a heading with a caption.
+		out = append(out, SessionItemStyle.Render(ansi.Truncate(raw, width, "…")))
 	}
 	return out
 }
 
-// tourAnchorLines renders one stop: where it is, and a handful of words on why.
+// tourAnchorLines renders one stop on ONE line: where it is, and why.
+//
+// One line and not two, which is what it was. A stop split across a path row and
+// a note row doubled the height of every step and left the panel with no shape —
+// four greyish rows per stop, none of them clearly the heading of the others.
 func (d *ReaderDialog) tourAnchorLines(a review.Anchor, width int, selected bool) []string {
 	where := shortPath(a.File)
 	if a.Line > 0 {
 		where += ":" + strconv.Itoa(a.Line)
 	}
-	// Indented under its step, and cut from the LEFT like every other path in
-	// this reader — the basename is what identifies a file.
-	where = truncFront(where, max(width-6, 8))
+	// The path gets at most half, so a deep monorepo path cannot crowd out the
+	// words that say why you are being sent there. Cut from the LEFT like every
+	// other path in this reader — the basename is what identifies a file.
+	const lead = "     "
+	pathW := max((width-len(lead))/2, 10)
+	where = truncFront(where, pathW)
 
-	raw := "   " + where
+	raw := lead + where
+	if a.Note != "" {
+		pad := strings.Repeat(" ", max(pathW-lipgloss.Width(where)+1, 1))
+		raw += pad + ansi.Truncate(a.Note, max(width-lipgloss.Width(raw)-len(pad)-1, 4), "…")
+	}
 	if selected {
 		raw += strings.Repeat(" ", max(width-lipgloss.Width(raw), 0))
 		return []string{SelectionPill(d.treeFocus).Render(ansi.Truncate(raw, width, ""))}
 	}
-	out := []string{DiffNumStyle.Render(ansi.Truncate(raw, width, "…"))}
+	// Styled in parts: the path is a location and the note is prose, and
+	// painting them one colour is what made the panel a wall.
+	styled := DiffNumStyle.Render(lead + where)
 	if a.Note != "" {
-		note := ansi.Truncate("     "+a.Note, width, "…")
-		out = append(out, DimStyle.Render(note))
+		styled += DimStyle.Render(raw[len(lead)+len(where):])
 	}
-	return out
+	return []string{ansi.Truncate(styled, width, "…")}
 }
 
 // shortPath keeps the last two segments, which is what identifies a file
@@ -165,7 +194,11 @@ func (d *ReaderDialog) tourBand(width int) []string {
 
 	label := strconv.Itoa(d.tourStepIndex()+1) + "/" + strconv.Itoa(len(d.tour.Steps)) +
 		" · " + st.Title
-	inner := width - 4
+	// The box stops where the text stops rather than spanning the panel: at 190
+	// columns the same paragraph was one unreadable line, and a border stretched
+	// across the whole screen reads as a banner rather than as a note about the
+	// code underneath it.
+	inner := min(width-4, tourBandMeasure)
 	if inner < 16 {
 		return nil
 	}

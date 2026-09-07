@@ -380,8 +380,16 @@ func (d *ReaderDialog) treeWidth() int {
 		return 0
 	}
 	w := d.width / 4
-	if w > 34 {
-		w = 34
+	// 34 is sized for FILENAMES. A step title is a sentence fragment, and at 34
+	// every one of them wrapped — which reads as breakage rather than as a
+	// list, and left no room to put an anchor's note beside its path. The cap
+	// only bites on a wide terminal: at 160 columns a quarter is already 40.
+	limit := 34
+	if d.tourMode {
+		limit = tourPanelWidth
+	}
+	if w > limit {
+		w = limit
 	}
 	if w < 22 {
 		return 0

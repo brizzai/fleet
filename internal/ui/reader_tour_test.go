@@ -196,3 +196,47 @@ func TestAFailedRegenerationKeepsTheOldTour(t *testing.T) {
 		t.Error("the surviving tour is no longer reachable")
 	}
 }
+
+// The narration used to wrap to the diff panel's full width — about 190 columns
+// on a wide terminal, roughly three times the measure prose stays readable at.
+// That is what turned a short paragraph into one endless line.
+func TestTourBandStaysAtAReadingMeasure(t *testing.T) {
+	d := readerWithTour(t, 240, 40)
+	readerPress(t, d, "t")
+	readerPress(t, d, "down") // a step with anchors, so the band renders over code
+
+	band := d.tourBand(d.diffWidth() - 2)
+	if len(band) == 0 {
+		t.Fatal("no band rendered")
+	}
+	for i, l := range band {
+		if w := lipgloss.Width(l); w > tourBandMeasure+4 {
+			t.Errorf("band row %d is %d columns, over the %d measure (+ borders) — "+
+				"the box must stop where the text stops, not span the panel",
+				i, w, tourBandMeasure)
+			break
+		}
+	}
+	// And it must genuinely wrap rather than truncate: the words all survive.
+	joined := strings.Join(band, " ")
+	for _, want := range []string{"One owner", "flattening"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the band lost %q — it should wrap, not cut", want)
+		}
+	}
+}
+
+// The panel is capped for filenames at 34, which made every step title wrap.
+func TestTourWidensTheLeftPanel(t *testing.T) {
+	d := readerWithTour(t, 240, 40)
+	files := d.treeWidth()
+	readerPress(t, d, "t")
+	tour := d.treeWidth()
+	if tour <= files {
+		t.Errorf("tour panel is %d columns, file tree is %d — a step title is a "+
+			"sentence, and at the file-tree width every one of them wrapped", tour, files)
+	}
+	if tour != tourPanelWidth {
+		t.Errorf("tour panel is %d, want the %d cap at this width", tour, tourPanelWidth)
+	}
+}
