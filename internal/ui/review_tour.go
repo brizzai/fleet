@@ -52,6 +52,18 @@ func (h *Home) maybeStartTour(k reviewKey, files github.PRFiles) tea.Cmd {
 		return nil
 	}
 
+	// One call per pull request at a time. The reader resets its own state
+	// every time it opens, so without this, closing a review and reopening it
+	// starts a second identical call — real money, twice, for one answer that
+	// is already on its way.
+	if h.tourInFlight == nil {
+		h.tourInFlight = map[reviewKey]bool{}
+	}
+	if h.tourInFlight[k] {
+		h.reader.TourWorking()
+		return nil
+	}
+
 	r, _ := h.findReviewByKey(k)
 	title := r.Title
 	if title == "" {
@@ -61,7 +73,10 @@ func (h *Home) maybeStartTour(k reviewKey, files github.PRFiles) tea.Cmd {
 	dir := h.tourAccountDir(k)
 	headSHA := files.HeadSHA
 
+	h.tourInFlight[k] = true
 	h.reader.TourWorking()
+	debuglog.Logger.Info("review tour: asking", "repo", k.repo, "pr", k.pr,
+		"dir", dir, "input_bytes", len(input), "head", headSHA)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), tourTimeout)
 		defer cancel()
@@ -129,6 +144,7 @@ func (h *Home) tourAccountDir(k reviewKey) string {
 
 // handleReviewTour installs a generated tour and caches it.
 func (h *Home) handleReviewTour(msg reviewTourMsg) (tea.Model, tea.Cmd) {
+	delete(h.tourInFlight, msg.key)
 	if msg.err != nil {
 		debuglog.Logger.Debug("review tour: failed", "pr", msg.key.pr, "err", msg.err)
 		h.reader.SetTour(nil, msg.err)

@@ -297,6 +297,7 @@ type Home struct {
 	reviewShowFolded  bool                             // `f` — show the demoted files inline
 	reviewShowPane    bool                             // `v` — show the agent pane instead of the diff
 	reader            ReaderDialog                     // full-screen diff reader
+	tourInFlight      map[reviewKey]bool               // one tour call per PR at a time
 	reviewRead        map[reviewKey]map[string]bool    // fleet's own record of files read, per PR
 	reviewComments    map[reviewKey][]reviewCommentMsg // pending comments, per PR
 
