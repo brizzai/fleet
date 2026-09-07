@@ -48,6 +48,51 @@ func IsReviewWorktree(path string) bool {
 	return strings.HasSuffix(parent, ReviewWorktreeDir)
 }
 
+// MainRepoForReviewWorktree is the inverse of ReviewWorktreePath: given
+// ~/code/brizzai-reviews/5163 it returns ~/code/brizzai.
+//
+// Pure string work, deliberately — it is called after the worktree directory
+// has already been removed, when asking git anything about that path would
+// fail. Returns "" for a path that is not a review worktree.
+func MainRepoForReviewWorktree(path string) string {
+	parent := filepath.Dir(path)
+	base := filepath.Base(parent)
+	if !strings.HasSuffix(base, ReviewWorktreeDir) || base == ReviewWorktreeDir {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(parent), strings.TrimSuffix(base, ReviewWorktreeDir))
+}
+
+// RemoveReviewBranch deletes the local branch a removed review worktree sat on.
+//
+// `git worktree remove` leaves the branch behind, so without this every review
+// you ever opened stays in `git branch` forever. Safe to force-delete: the
+// branch is in fleet's own fleet-review- namespace, holds nothing but a fetched
+// copy of someone else's PR head, and is re-fetched with --force if the review
+// is opened again.
+//
+// Best-effort. A branch that is checked out in some other worktree makes git
+// refuse, which is the correct answer and not worth reporting to the user — the
+// directory, which is what actually cost them 150MB, is already gone.
+func RemoveReviewBranch(worktreePath string) {
+	main := MainRepoForReviewWorktree(worktreePath)
+	pr := filepath.Base(worktreePath)
+	if main == "" || pr == "" {
+		return
+	}
+	if _, err := strconv.Atoi(pr); err != nil {
+		return
+	}
+	branch := ReviewBranchPrefix + pr
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "git", "-C", main, "branch", "-D", branch).CombinedOutput(); err != nil {
+		debuglog.Logger.Debug("review branch not removed", "branch", branch, "err", strings.TrimSpace(string(out)))
+		return
+	}
+	debuglog.Logger.Info("review branch removed", "branch", branch)
+}
+
 // PrepareReviewWorktree fetches a pull request's head and checks it out into
 // the repo's reviews folder, returning the worktree path.
 //

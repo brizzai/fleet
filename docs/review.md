@@ -61,7 +61,7 @@ inside its repo. No new row kind, no new mode, no full-screen surface.
 - [x] Carries a status pill like every other checkout, so a collapsed node still says whether a review wants you
 - [x] `C` jumps to this origin's reviews folder
 - [ ] Expand the bot fold on `⏎` — never a batch-approve verb
-- [ ] `d` on a review session should also remove its 153MB worktree (today it leaks)
+- [x] `d` on a review session removes its 153MB worktree and its `fleet-review-*` branch
 
 ## 4 · The diff surface — file list DONE, patches next
 

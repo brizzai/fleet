@@ -4171,14 +4171,27 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 
 	id := s.ID
 	repoPath := session.GetRepoRoot(s.ProjectPath)
+	last := h.countSessionsForRepo(repoPath) == 1
+
+	// A review's worktree goes with its last session, and the row delete is the
+	// ONLY place it can: the reviews node is a folder of many worktrees and its
+	// header delete refuses by design, so there is no header to send anyone to.
+	// Every review deleted before this leaked its checkout — ~150MB of someone
+	// else's branch — with nothing in the UI even hinting it was still there.
+	//
+	// Safe to take without asking twice, unlike your own worktree: fleet created
+	// it, it holds a fetched copy of a pull request and no work of yours, and
+	// re-opening the review builds it again in seconds.
+	if last && git.IsReviewWorktree(repoPath) {
+		return h.confirmDeleteReview(s, repoPath)
+	}
 
 	details := []string{
 		"Press u to undo within 5s",
 	}
 	// Discoverability nudge: when this is the last session in a destroyable
 	// worktree, the worktree dir is kept — point the user at the header.
-	if s.WorkspaceName != "" && h.countSessionsForRepo(repoPath) == 1 &&
-		workspace.ResolveProvider(repoPath).CanDestroy() {
+	if s.WorkspaceName != "" && last && workspace.ResolveProvider(repoPath).CanDestroy() {
 		details = append(details, "Worktree kept — press d on its header to remove it")
 	}
 
@@ -4186,6 +4199,45 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 		return sessionDeleteMsg{id: id}
 	})
 	return nil
+}
+
+// confirmDeleteReview deletes a review session and the checkout it was reading.
+//
+// It states what goes rather than burying it: the directory is the expensive
+// part, and a confirm that said only "Delete Session?" would be describing half
+// of what the key does.
+func (h *Home) confirmDeleteReview(s *session.Session, repoPath string) tea.Cmd {
+	id := s.ID
+	name := s.WorkspaceName
+	if name == "" {
+		// destroyWorktree matches on the path, but finalizeDelete guards on a
+		// non-empty name; the directory is the PR number either way.
+		name = filepath.Base(repoPath)
+	}
+
+	details := append([]string{"Removes the review checkout too"},
+		h.worktreeDeleteWarnings(repoPath)...)
+	details = append(details, "Comments you have not sent are kept", "Press u to undo within 5s")
+
+	h.actionLog.Add("delete review", s.Title, true)
+	h.confirmDialog.ShowDanger("Delete Review?", s.Title, details, func() tea.Msg {
+		return sessionDeleteMsg{
+			id: id, destroyWorkspace: true, workspaceName: name,
+			// Unpinned as well: the checkout is about to stop existing, and a
+			// pin outliving it leaves an "(empty)" row pointing at nothing.
+			unpinRepo: true, repoPath: repoPath,
+		}
+	})
+
+	// Same async holder scan the worktree header runs — a review is where you
+	// are most likely to have started a dev server to try the branch out.
+	gen := h.nextHolderScanGen()
+	h.confirmDialog.StartScan(gen, "Checking for running processes…")
+	editor := h.cfg.GetEditor()
+	return func() tea.Msg {
+		holders, _ := proc.FindHolders(repoPath, []string{editor})
+		return worktreeHoldersScannedMsg{gen: gen, holders: holders}
+	}
 }
 
 // worktreeHoldersScannedMsg carries the result of the async process scan that
@@ -5927,6 +5979,14 @@ func (h *Home) finalizeDelete(pd PendingDelete) tea.Cmd {
 		attempted := pd.DestroyWS && pd.WorkspaceName != ""
 		if attempted {
 			remaining, workspaceErr = destroyWorktree(pd.RepoPath, pd.WorkspaceName, editor, 2*time.Second)
+			if workspaceErr == nil && git.IsReviewWorktree(pd.RepoPath) {
+				// `git worktree remove` leaves the branch, so without this every
+				// review ever opened accumulates in `git branch`. Only after the
+				// directory is actually gone: git refuses to delete a branch that
+				// is still checked out, and reporting that as a failure would be
+				// noise about a leftover ref.
+				git.RemoveReviewBranch(pd.RepoPath)
+			}
 		}
 		return deleteCleanupDoneMsg{
 			sessionID:        pd.Session.ID,
