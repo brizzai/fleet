@@ -12,7 +12,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/posthog/posthog-go v1.17.5
 	github.com/sahilm/fuzzy v0.1.2
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.22.0
 	golang.org/x/term v0.42.0
 	modernc.org/sqlite v1.48.0
 )
