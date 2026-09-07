@@ -238,6 +238,35 @@ two quotas. Otherwise the ordinary strategy decides, honouring the origin's
 allowlist — a call fleet makes for itself is still a call on someone's
 subscription. No `--model` flag: the account's own default.
 
+### Three tabs
+
+`1` tour · `2` diff · `3` session. `t` survives as the 1↔2 toggle it was.
+
+- **A tab, not a mode**, by the design system's own test: switching one does not
+  move the keyboard — only `⏎` on the session tab hands it over. So the bar
+  renders as a selection.
+- **The diff is the default view.** The tour takes tens of seconds to arrive, and
+  opening onto "reading the pull request…" puts a wait in front of the thing you
+  came for.
+- **`1` refuses while there is no tour, and says why.** A digit that silently
+  does nothing is indistinguishable from an unbound key.
+- **The session tab is the drawer's machinery**, not a capture: tmux
+  control-mode `%output` into the vterm emulator, seeded with `capture-pane`
+  before attach (control mode replays nothing, so an idle pane would stay blank
+  forever), resized in lockstep with the panel, wakes coalesced through a CAS
+  latch. Torn down whenever the tab is not the visible view — a terminal nobody
+  is looking at is a `tmux -C attach` and a PTY held open for nothing.
+- **The reader keeps its own stream state rather than sharing the drawer's.** The
+  two can be pointed at different panes at the same time, so one set of fields
+  would have them fighting over the emulator. The *sequence* is the drawer's,
+  because that is the one proven against real panes — the duplication is worth
+  revisiting once this settles.
+- **It takes the whole width.** A pane is not a list of anything, and one
+  squeezed into three quarters wraps differently from what the agent drew.
+- **No agent is the common case** — most reviews are read without ever starting
+  one — so the tab is usually an offer, and `⏎` routes through the same
+  `startReview` the `c` queue uses.
+
 Open: `n`/`p` to walk the route from the diff panel without focusing the tour
 (`n` is taken by search).
 

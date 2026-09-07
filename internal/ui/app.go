@@ -424,9 +424,18 @@ type Home struct {
 	shellReader        *tmux.OutputReader
 	shellTerm          *vterm.Terminal
 	shellStreamTarget  string
-	shellStreamPending string      // target of an in-flight async attach ("" = none); dedups dispatches
-	shellReseedPending bool        // a capture-pane re-seed of a blank emulator is in flight
-	shellWake          atomic.Bool // coalesces output→render wakes (true = one shellOutputMsg in flight)
+	shellStreamPending string // target of an in-flight async attach ("" = none); dedups dispatches
+	shellReseedPending bool   // a capture-pane re-seed of a blank emulator is in flight
+
+	// The reader's session tab holds its own stream: the drawer and the reader
+	// can be looking at different panes at once, so one set of fields would
+	// have them fighting over the emulator.
+	readerReader        *tmux.OutputReader
+	readerTerm          *vterm.Terminal
+	readerStreamTarget  string
+	readerStreamPending string
+	readerWake          atomic.Bool
+	shellWake           atomic.Bool // coalesces output→render wakes (true = one shellOutputMsg in flight)
 
 	// Slot hotkeys (RTS-style quick access: digit=jump, double-digit=attach, alt+digit or =<digit>=bind).
 	slotBindings      map[int]string // slot (0-9) -> session ID
@@ -1770,6 +1779,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewTourMsg:
 		return h.handleReviewTour(msg)
 
+	case reviewSessionMsg:
+		return h.handleReviewSession(msg)
+
+	case readerStreamReadyMsg:
+		h.applyReaderStream(msg)
+		return h, nil
+
+	case readerOutputMsg:
+		// The pane wrote; clear the latch so the next burst can wake a frame.
+		h.readerWake.Store(false)
+		return h, nil
+
 	case reviewSubmitRequestMsg:
 		return h.submitReview(msg)
 
@@ -2708,6 +2729,7 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 			// instead would keep every comment the user deleted.
 			h.syncReviewComments(key, dialog.Comments())
 			h.saveReviewRead(key)
+			h.teardownReaderStream()
 		}
 		return cmd, true
 	case h.helpOverlay.IsVisible():
@@ -6223,6 +6245,11 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 
 	h.rebuildFlatItems()
 	h.refreshTips(!h.modalOpen())
+
+	// Keep the reader's session tab attached to the right pane, and detached
+	// whenever it is not the view on screen — a terminal nobody is looking at
+	// is a `tmux -C attach` and a PTY held open for nothing.
+	h.syncReaderStream()
 
 	// Daily-active heartbeat: no-op until the calendar day rolls over (or the
 	// client is disabled), so this is cheap to call every tick. Keeps DAU

@@ -39,6 +39,18 @@ func (d *ReaderDialog) View() string {
 	// The accent border marks which panel has the keyboard — the only
 	// border-level focus signal fleet has (design-system §4), and the same one
 	// the sidebar and preview use on the main screen.
+	// The session takes the whole width. There is no navigation to put beside a
+	// terminal — the pane is not a list of anything — and a pane squeezed into
+	// three quarters of the screen wraps differently from the one the agent is
+	// actually drawing into.
+	if d.tab == tabSession {
+		return d.header() + "\n" + d.tabBar() + "\n" +
+			RenderBorderedPanelTopRight(
+				strings.Join(d.renderSession(d.width-2, rows), "\n"),
+				d.sessionTitle(d.width), d.sessionStatus(),
+				d.width, rows+2, true) + "\n" + d.footer()
+	}
+
 	right, rightTitle, rightStatus := d.rightPanel(diffW, rows)
 	diff := RenderBorderedPanelTopRight(
 		strings.Join(right, "\n"), rightTitle, rightStatus,
@@ -47,7 +59,7 @@ func (d *ReaderDialog) View() string {
 	body := diff
 	if treeW > 0 {
 		left, leftTitle := d.renderTree(treeW-2, rows), "Files"
-		if d.tourMode {
+		if d.tourMode() {
 			left, leftTitle = d.renderTourPanel(treeW-2, rows), "Tour"
 		}
 		tree := RenderBorderedPanelInsets(
@@ -57,7 +69,7 @@ func (d *ReaderDialog) View() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, tree, diff)
 	}
 
-	out := d.header() + "\n" + body + "\n" + d.footer()
+	out := d.header() + "\n" + d.tabBar() + "\n" + body + "\n" + d.footer()
 	if d.help {
 		return centreOverlay(d.helpSheet(), out, d.width, d.height)
 	}
@@ -77,6 +89,31 @@ func centreOverlay(panel, under string, width, height int) string {
 	return overlayAt(panel, dimBackdrop(under), x, y)
 }
 
+// tabBar names the three views and which one you are in.
+//
+// A row of its own rather than squeezed into the header: the header already
+// carries the pull request's identity and its counts, and a bar that has to
+// share space with them is a bar that disappears on a narrow terminal — which
+// is where a reminder that there are two other views is worth the most.
+//
+// Rendered as a SELECTION and not as a mode, per the design system's test:
+// switching a tab does not move the keyboard. The digit leads each label
+// because the digit is how you get there.
+func (d *ReaderDialog) tabBar() string {
+	var b strings.Builder
+	for _, t := range readerTabs {
+		label := " " + t.digit + " " + t.label + " "
+		if t.tab == d.tab {
+			b.WriteString(SelectionPill(true).Render(label))
+			continue
+		}
+		b.WriteString(HelpKeyStyle.Render(" "+t.digit) + DimStyle.Render(" "+t.label+" "))
+	}
+	bar := " " + b.String()
+	pad := max(d.width-lipgloss.Width(bar), 0)
+	return bar + strings.Repeat(" ", pad)
+}
+
 // rightPanel is the diff, or the narration above it, or a step that has nowhere
 // to send you at all.
 //
@@ -85,7 +122,7 @@ func centreOverlay(panel, under string, width, height int) string {
 // file it could have pointed at, and a diagram needs the wide side of the
 // screen rather than the quarter.
 func (d *ReaderDialog) rightPanel(diffW, rows int) (lines []string, title, status string) {
-	if d.tourMode {
+	if d.tourMode() {
 		if st, an, ok := d.tourSelection(); ok && an == nil && len(st.Anchors) == 0 {
 			return d.renderTourOverview(st, diffW-2, rows), "Tour",
 				fmt.Sprintf("step %d/%d", d.tourStepIndex()+1, len(d.tour.Steps))
@@ -94,7 +131,7 @@ func (d *ReaderDialog) rightPanel(diffW, rows int) (lines []string, title, statu
 
 	title, status = d.diffTitle(diffW), d.diffStatus()
 	var band []string
-	if d.tourMode {
+	if d.tourMode() {
 		band = d.tourBand(diffW - 2)
 	}
 	// The band comes out of the diff's rows, never on top of them: this panel
@@ -131,6 +168,11 @@ var readerKeys = []struct {
 		{"m", "mark read / unread, stay where you are"},
 		{"s", "show / fold the files salience hid"},
 		{"|", "side-by-side ↔ unified"},
+	}},
+	{"Tabs", [][2]string{
+		{"1", "the tour — fleet's route through the change"},
+		{"2", "the diff, with the file tree"},
+		{"3", "the agent working on this review"},
 	}},
 	{"Tour", [][2]string{
 		{"t", "fleet's route through the change ↔ the file list"},
@@ -426,7 +468,7 @@ func (d *ReaderDialog) diffStatus() string {
 }
 
 func (d *ReaderDialog) treeFooter() string {
-	if d.tourMode {
+	if d.tourMode() {
 		return "t · files"
 	}
 	// The tour's own state lives here while it is being built, because this is
@@ -1081,10 +1123,16 @@ func (d *ReaderDialog) normalKeys() string {
 
 // keyPairs is the key list for the current row, most relevant first.
 func (d *ReaderDialog) keyPairs() []string {
+	if d.tab == tabSession {
+		if !d.session.Present {
+			return []string{"⏎", "start an agent", "①②", "back to the review", "?", "keys", "⌃q", "quit"}
+		}
+		return []string{"⏎", "attach", "①②", "back to the review", "?", "keys", "⌃q", "quit"}
+	}
 	if d.treeFocus {
 		// The footer names what ⏎ does NOW, and ⏎ means two different things
 		// depending on whether a folder or a file carries the selection.
-		if d.tourMode {
+		if d.tourMode() {
 			if _, an, ok := d.tourSelection(); ok && an == nil {
 				return []string{"↑↓", "route", "⏎ →", "its stops", "t", "files", "⇥", "back to diff", "?", "keys", "⌃q", "quit"}
 			}

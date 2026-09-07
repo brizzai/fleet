@@ -44,18 +44,18 @@ func readerWithTour(t *testing.T, w, h int) *ReaderDialog {
 // you asked to be led, so the panel that leads gets the arrows.
 func TestTourTakesTheKeyboardWhenItOpens(t *testing.T) {
 	d := readerWithTour(t, 160, 40)
-	if d.tourMode {
+	if d.tourMode() {
 		t.Fatal("the tour is showing before it was asked for")
 	}
 	readerPress(t, d, "t")
-	if !d.tourMode || !d.treeFocus {
-		t.Fatalf("t left tourMode=%v treeFocus=%v — both should be on", d.tourMode, d.treeFocus)
+	if !d.tourMode() || !d.treeFocus {
+		t.Fatalf("t left tourMode=%v treeFocus=%v — both should be on", d.tourMode(), d.treeFocus)
 	}
 	if !strings.Contains(d.View(), "Tour") {
 		t.Error("the panel is not titled Tour")
 	}
 	readerPress(t, d, "t")
-	if d.tourMode {
+	if d.tourMode() {
 		t.Error("t did not toggle back to the file list")
 	}
 }
@@ -65,7 +65,7 @@ func TestTourTakesTheKeyboardWhenItOpens(t *testing.T) {
 func TestTourKeySaysWhyThereIsNone(t *testing.T) {
 	d := newDemoReader(t, 160, 40)
 	readerPress(t, d, "t")
-	if d.tourMode {
+	if d.tourMode() {
 		t.Fatal("opened a tour that does not exist")
 	}
 	if !strings.Contains(d.toast, "no tour") {
@@ -192,7 +192,7 @@ func TestAFailedRegenerationKeepsTheOldTour(t *testing.T) {
 		t.Fatal("a failed refresh threw away a working tour")
 	}
 	readerPress(t, d, "t")
-	if !d.tourMode {
+	if !d.tourMode() {
 		t.Error("the surviving tour is no longer reachable")
 	}
 }
@@ -238,5 +238,85 @@ func TestTourWidensTheLeftPanel(t *testing.T) {
 	}
 	if tour != tourPanelWidth {
 		t.Errorf("tour panel is %d, want the %d cap at this width", tour, tourPanelWidth)
+	}
+}
+
+// The digits are the whole point of the bar, and one of them must refuse: the
+// tour is genuinely absent for the first half-minute of every review, and a
+// digit that silently does nothing reads as an unbound key.
+func TestTabsSwitchAndTourRefusesUntilItExists(t *testing.T) {
+	d := newDemoReader(t, 160, 40)
+	if d.tab != tabDiff {
+		t.Fatalf("opened on tab %v — the diff is what you came for; the tour "+
+			"takes tens of seconds and would be an empty panel", d.tab)
+	}
+
+	readerPress(t, d, "1")
+	if d.tab != tabDiff {
+		t.Error("switched to a tour that does not exist")
+	}
+	if !strings.Contains(d.toast, "no tour") {
+		t.Errorf("toast %q does not say why 1 did nothing", d.toast)
+	}
+
+	readerPress(t, d, "3")
+	if d.tab != tabSession {
+		t.Fatalf("3 landed on %v, want the session tab", d.tab)
+	}
+	readerPress(t, d, "2")
+	if d.tab != tabDiff {
+		t.Fatalf("2 landed on %v, want the diff", d.tab)
+	}
+
+	d.SetTour(demoTour(), nil)
+	readerPress(t, d, "1")
+	if d.tab != tabTour || !d.treeFocus {
+		t.Errorf("with a tour present, 1 gave tab=%v focus=%v — the route should "+
+			"take the keyboard, since being led is why you pressed it", d.tab, d.treeFocus)
+	}
+}
+
+// Every tab must still fill the screen exactly, including the one holding a
+// terminal and the one offering to start one.
+func TestEveryTabKeepsTheScreenExact(t *testing.T) {
+	for _, tc := range []struct{ w, h int }{{160, 40}, {124, 30}, {80, 24}} {
+		d := readerWithTour(t, tc.w, tc.h)
+		for _, tab := range []string{"1", "2", "3"} {
+			readerPress(t, d, tab)
+			lines := strings.Split(d.View(), "\n")
+			if len(lines) != tc.h {
+				t.Errorf("%dx%d tab %s: %d rows, want %d", tc.w, tc.h, tab, len(lines), tc.h)
+				break
+			}
+			for i, l := range lines {
+				if got := lipgloss.Width(l); got != tc.w {
+					t.Errorf("%dx%d tab %s: row %d is %d columns, want %d",
+						tc.w, tc.h, tab, i, got, tc.w)
+					break
+				}
+			}
+		}
+	}
+}
+
+// Most reviews have no agent, so the third tab is usually an offer. Enter there
+// must ask to start one rather than silently doing nothing.
+func TestSessionTabOffersToStartOne(t *testing.T) {
+	d := readerWithTour(t, 160, 40)
+	readerPress(t, d, "3")
+	if !strings.Contains(d.View(), "No agent on this review") {
+		t.Error("the empty session tab does not say what it is empty of")
+	}
+	cmd := readerPress(t, d, "enter")
+	if cmd == nil {
+		t.Fatal("enter on an empty session tab did nothing")
+	}
+	msg, ok := cmd().(reviewSessionMsg)
+	if !ok || !msg.start {
+		t.Errorf("enter produced %#v, want a request to START a session", cmd())
+	}
+	// And it must not fire twice while the first is still coming up.
+	if second := readerPress(t, d, "enter"); second != nil {
+		t.Error("a second enter asked for another session while one was starting")
 	}
 }

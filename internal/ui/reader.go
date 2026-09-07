@@ -55,6 +55,36 @@ type reviewTourMsg struct {
 	err     error
 }
 
+// readerTab is which of the three views the reader is showing.
+//
+// A tab and not a mode, by the design system's own test: switching one does not
+// move the keyboard — the tour and the diff both leave it wherever it was, and
+// the session tab hands it over only when you ask with ⏎. So they render as a
+// selection, not as a mode indicator.
+type readerTab int
+
+const (
+	tabTour readerTab = iota
+	tabDiff
+	tabSession
+)
+
+// readerTabs is the bar, in the order the digits address them.
+//
+// The tour leads because it is the answer to "where do I start", which is the
+// question you have when the reader opens. The diff is where the work happens
+// and the session is where the agent is, so they sit either side of it in the
+// order you reach for them.
+var readerTabs = []struct {
+	tab   readerTab
+	digit string
+	label string
+}{
+	{tabTour, "1", "tour"},
+	{tabDiff, "2", "diff"},
+	{tabSession, "3", "session"},
+}
+
 // tourState is how far along the one Claude call fleet makes for itself is.
 type tourState int
 
@@ -218,13 +248,22 @@ type ReaderDialog struct {
 	hitIdx int
 
 	// The tour: fleet's own reading of the pull request, and where you are in
-	// it. tourMode swaps the left panel between the file tree and the route.
+	// it. The tab decides whether the left panel shows the route or the files.
 	tour      *review.Tour
 	tourState tourState
 	tourErr   string
-	tourMode  bool
 	tourItems []tourItem
 	tourCur   int
+
+	// session is what the app knows about the agent working on this pull
+	// request, refreshed while the third tab is showing.
+	session readerSession
+
+	// tab is which of the three views is showing. Diff by default: the tour
+	// takes tens of seconds to arrive, and opening onto an empty panel that
+	// says "reading the pull request…" would put a wait in front of the thing
+	// you already asked for.
+	tab readerTab
 
 	// The submit sheet. submitEvent indexes submitEvents; submitBody is the
 	// review summary. submitErr is why the last attempt was refused — held on
@@ -264,7 +303,8 @@ func (d *ReaderDialog) Show(pr int, title, author, repo, worktree string,
 	d.editingID = 0
 	d.query, d.hits, d.hitIdx = "", nil, 0
 	d.tour, d.tourState, d.tourErr = nil, tourAbsent, ""
-	d.tourMode, d.tourItems, d.tourCur = false, nil, 0
+	d.tab, d.tourItems, d.tourCur = tabDiff, nil, 0
+	d.session = readerSession{}
 	d.resetSubmit()
 	d.toast = ""
 	d.read = read
@@ -326,6 +366,55 @@ func (d *ReaderDialog) Hide() {
 
 func (d *ReaderDialog) Visible() bool { return d.visible }
 
+// tourMode reports whether the left panel is showing the route.
+func (d *ReaderDialog) tourMode() bool { return d.tab == tabTour }
+
+// setTab switches views, refusing a tab that has nothing behind it yet.
+//
+// A refusal states why, because a digit that silently does nothing is
+// indistinguishable from a key that is not bound — and the tour genuinely is
+// not there for the first half-minute of every review.
+func (d *ReaderDialog) setTab(t readerTab) {
+	if t == d.tab {
+		return
+	}
+	if t == tabTour {
+		switch {
+		case d.tourState == tourWorking:
+			d.toast = "still reading the pull request…"
+			return
+		case d.tourState == tourFailed:
+			d.toast = ansi.Truncate("no tour — "+d.tourErr, max(d.width-24, 20), "…")
+			return
+		case d.tour == nil || len(d.tour.Steps) == 0:
+			d.toast = "no tour for this pull request"
+			return
+		}
+	}
+	d.tab = t
+	switch t {
+	case tabTour:
+		// The route takes the keyboard: you switched to it to be led.
+		d.treeFocus = true
+		d.rebuildTourItems()
+		d.showTourItem()
+	case tabDiff:
+		d.treeFocus = false
+	}
+}
+
+// SessionTabActive reports whether the agent's pane is the view on screen. The
+// app polls this to decide whether to hold a tmux stream open at all — a
+// terminal nobody is looking at is a subprocess and a PTY for nothing.
+func (d *ReaderDialog) SessionTabActive() bool { return d.visible && d.tab == tabSession }
+
+// SessionPaneSize is the panel the pane is rendered into, so the emulator and
+// the real tmux pane can be resized to the same shape. Wrapping at a different
+// width than the agent drew at is what makes a pane look corrupted.
+func (d *ReaderDialog) SessionPaneSize() (int, int) {
+	return max(d.width-2, 1), max(d.body(), 1)
+}
+
 // key identifies the pull request being read. The reader already holds both
 // halves; naming them together keeps every message it emits addressable.
 func (d *ReaderDialog) key() reviewKey { return reviewKey{repo: d.repo, pr: d.pr} }
@@ -355,8 +444,9 @@ func (d *ReaderDialog) SetSize(w, h int) {
 
 // body is how many rows of diff fit inside the panel border.
 func (d *ReaderDialog) body() int {
-	// One header row, one footer row, and the panel's own two border rows.
-	n := d.height - 4
+	// One header row, one tab bar, one footer row, and the panel's own two
+	// border rows.
+	n := d.height - 5
 	if n < 1 {
 		return 1
 	}
@@ -385,7 +475,7 @@ func (d *ReaderDialog) treeWidth() int {
 	// list, and left no room to put an anchor's note beside its path. The cap
 	// only bites on a wide terminal: at 160 columns a quarter is already 40.
 	limit := 34
-	if d.tourMode {
+	if d.tourMode() {
 		limit = tourPanelWidth
 	}
 	if w > limit {
@@ -598,7 +688,7 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 		// ←/→ fold and unfold, the way every file tree does. Free here because
 		// the diff panel puts its file jumps on SHIFT+arrows. In the tour they
 		// mean the same shape of thing: out to the step, in to its stops.
-		if d.treeFocus && d.tourMode {
+		if d.treeFocus && d.tourMode() {
 			d.stepOutOfAnchor()
 			break
 		}
@@ -606,7 +696,7 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 			d.collapseAtCursor(true)
 		}
 	case "right", "l":
-		if d.treeFocus && d.tourMode {
+		if d.treeFocus && d.tourMode() {
 			d.stepIntoAnchor()
 			break
 		}
@@ -638,7 +728,19 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 		}
 
 	case "enter":
-		if d.treeFocus && d.tourMode {
+		if d.tab == tabSession {
+			// Attach when there is one, start one when there is not. Both are
+			// the same gesture from here: ⏎ means "put me with the agent".
+			key, start := d.key(), !d.session.Present
+			if start && d.session.Starting {
+				break
+			}
+			if start {
+				d.session.Starting = true
+			}
+			return d, func() tea.Msg { return reviewSessionMsg{key: key, start: start} }
+		}
+		if d.treeFocus && d.tourMode() {
 			// On a step, ⏎ goes to its first stop; on a stop it hands the
 			// keyboard to the diff. Same promise as the file tree: you picked
 			// it, now read it.
@@ -696,7 +798,17 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 			}
 		}
 
+	case "1":
+		d.setTab(tabTour)
+	case "2":
+		d.setTab(tabDiff)
+	case "3":
+		d.setTab(tabSession)
+
 	case "t":
+		// Kept as the toggle it was before the bar existed: it is muscle memory
+		// now, and it is still the fastest way between the two views you swap
+		// between most.
 		d.toggleTour()
 
 	case "c":
@@ -1195,8 +1307,8 @@ func (d *ReaderDialog) TourWorking() {
 // same relationship the file tree already has, which is why the tour costs no
 // new movement keys at all.
 func (d *ReaderDialog) toggleTour() {
-	if d.tourMode {
-		d.tourMode = false
+	if d.tourMode() {
+		d.setTab(tabDiff)
 		d.toast = "files"
 		return
 	}
@@ -1215,14 +1327,14 @@ func (d *ReaderDialog) toggleTour() {
 		d.toast = "no tour for this pull request"
 		return
 	}
-	d.tourMode, d.treeFocus = true, true
+	d.tab, d.treeFocus = tabTour, true
 	d.rebuildTourItems()
 	d.showTourItem()
 }
 
 // moveLeftPanel walks whichever list the left panel is showing.
 func (d *ReaderDialog) moveLeftPanel(delta int) {
-	if d.tourMode {
+	if d.tourMode() {
 		d.moveTour(delta)
 		return
 	}
