@@ -68,6 +68,9 @@ func (h *Home) maybeStartTour(k reviewKey, files github.PRFiles) tea.Cmd {
 
 		out, err := claudeaccount.Ask(ctx, dir, review.TourInstruction, input)
 		if err != nil {
+			// The config dir is in the log because the first failure could not
+			// be diagnosed without knowing which subscription it went to.
+			debuglog.Logger.Debug("review tour: call failed", "pr", k.pr, "dir", dir, "err", err)
 			return reviewTourMsg{key: k, headSHA: headSHA, err: err}
 		}
 		t, err := review.ParseTour(out)
@@ -77,26 +80,43 @@ func (h *Home) maybeStartTour(k reviewKey, files github.PRFiles) tea.Cmd {
 
 // tourAccountDir picks which subscription pays for the tour.
 //
-// The session already reviewing this pull request wins, when there is one: the
-// tour is part of the same piece of work, and running it elsewhere would split
-// one review across two quotas for no reason. Otherwise the ordinary strategy
-// decides, honouring the origin's allowlist — that is policy about which
-// subscription may be spent on which repo, and a call fleet makes for itself is
-// still a call on someone's account.
+// The session already reviewing this pull request wins, when there is one and
+// when it can actually answer: the tour is part of the same piece of work, and
+// running it elsewhere would split one review across two quotas for no reason.
+//
+// The "can actually answer" half is not a nicety. A session is allowed to sit
+// on a spent account because a person waits and the window resets; a tour is
+// fired once when the reader opens and never retried, so handing it a spent
+// account is not a delay, it is the feature silently not existing. Select
+// filters exhausted accounts for exactly this reason, and preferring the
+// session's pin ahead of Select was quietly opting out of that check — which is
+// how a tour ended up going, every time, to the one subscription that was at
+// 100%.
+//
+// Otherwise the ordinary strategy decides, honouring the origin's allowlist:
+// that is policy about which subscription may be spent on which repo, and a
+// call fleet makes for itself is still a call on someone's account.
 func (h *Home) tourAccountDir(k reviewKey) string {
 	if h.accounts == nil || h.accounts.Len() == 0 {
 		return ""
 	}
+	usage := h.accountUsageSnapshot()
+	now := time.Now()
 	for _, s := range h.sessions {
-		if kk, ok := h.reviewKeyFor(s); ok && kk == k && s.Account != "" {
-			if dir := h.accounts.ConfigDirFor(s.Account); dir != "" {
-				return dir
-			}
+		kk, ok := h.reviewKeyFor(s)
+		if !ok || kk != k || s.Account == "" {
+			continue
+		}
+		if u, seen := usage[s.Account]; seen && u.Exhausted(now) {
+			break
+		}
+		if dir := h.accounts.ConfigDirFor(s.Account); dir != "" {
+			return dir
 		}
 	}
 	acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
 		Accounts: h.accounts.List(),
-		Usage:    h.accountUsageSnapshot(),
+		Usage:    usage,
 		Strategy: h.cfg.GetAccountStrategy(),
 		Manual:   h.cfg.DefaultAccount,
 		Allowed:  h.allowedAccountsFor(h.repoForOrigin(k.repo)),
