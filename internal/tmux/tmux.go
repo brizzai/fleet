@@ -32,6 +32,10 @@ const (
 	// likely to be busy — and an unbounded fork here blocked the Bubble Tea
 	// Update goroutine for 500ms+, which reads as the whole UI freezing.
 	hasSessionTimeout = 2 * time.Second
+	// blurTimeout caps the two tmux calls BlurIfUnattended makes. Both are cheap
+	// (a format query and a three-byte send-keys); the cap only keeps an
+	// unresponsive server from stalling a `fleet send` or the Y key's worker.
+	blurTimeout = 2 * time.Second
 )
 
 // Session represents a tmux session managed by fleet.
@@ -849,6 +853,60 @@ func (s *Session) SendLiteralKeys(text string) error {
 	return nil
 }
 
+// focusOutHex is ESC [ O — xterm's "terminal lost focus" report (DEC mode 1004),
+// spelled as the hex bytes `send-keys -H` takes. Sent as raw bytes rather than a
+// key name because tmux has no key name for it: this is a report the terminal
+// normally originates, not a key anybody can press.
+var focusOutHex = []string{"1b", "5b", "4f"}
+
+// BlurIfUnattended tells the pane's application that the terminal lost focus,
+// but only when no client is attached.
+//
+// Agents infer presence from keystrokes. Claude Code marks the user focused on
+// *any* key it receives, reasoning that you cannot type into a window you are
+// not looking at — airtight for a human at a terminal, and false for every key
+// fleet sends. `tmux send-keys` into a detached pane is byte-for-byte a
+// keypress: no client attached, `#{pane_focused}` 0, and no focus event
+// alongside it to say otherwise.
+//
+// The consequence is silent and durable. Claude suppresses PushNotification
+// while it believes you are present ("Not sent because you're active in this
+// terminal"), and only a real ESC[O clears that belief. tmux emits one solely on
+// an attach → detach transition, which never comes for a pane nobody ever
+// attached to — so one `fleet send` can cost that session every push for the
+// rest of its life, on exactly the sessions nobody is watching, which are the
+// only ones worth a notification.
+//
+// Sending the byte ourselves states what tmux already believes rather than
+// disabling the agent's check, so a session you *are* attached to still stays
+// quiet. Honest for every agent, not just Claude: with no client, the pane
+// genuinely does not have focus.
+//
+// Best-effort by design — it runs after the message has landed, and a session
+// that fails to be told it is unfocused is no worse off than it was before.
+func (s *Session) BlurIfUnattended() {
+	ctx, cancel := context.WithTimeout(context.Background(), blurTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", s.Name,
+		"#{session_attached}").Output()
+	if err != nil {
+		debuglog.Logger.Debug("tmux attached check failed; leaving focus alone",
+			"session", s.Name, "err", err)
+		return
+	}
+	// Anything but zero means someone is looking at this pane, and an agent that
+	// stays quiet for them is correct.
+	if strings.TrimSpace(string(out)) != "0" {
+		return
+	}
+
+	args := append([]string{"send-keys", "-t", s.Name, "-H"}, focusOutHex...)
+	if err := exec.CommandContext(ctx, "tmux", args...).Run(); err != nil {
+		debuglog.Logger.Debug("tmux focus-out send failed", "session", s.Name, "err", err)
+	}
+}
+
 // sendBufferSeq distinguishes concurrent PasteAndSubmit calls within one
 // process; the pid in the name separates them across processes.
 var sendBufferSeq atomic.Uint64
@@ -892,7 +950,15 @@ func (s *Session) PasteAndSubmit(text string) error {
 		return fmt.Errorf("tmux paste-buffer failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
-	return s.SendKeys("Enter")
+	if err := s.SendKeys("Enter"); err != nil {
+		return err
+	}
+
+	// The paste and its Enter just impersonated a human typing at the pane.
+	// Take that back, or the agent spends the rest of the session believing
+	// someone is sitting here. See BlurIfUnattended.
+	s.BlurIfUnattended()
+	return nil
 }
 
 // CapturePaneFresh invalidates the cache before capturing, ensuring fresh output.
