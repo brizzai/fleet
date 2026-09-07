@@ -20,6 +20,10 @@ type reviewCommentMsg struct {
 	line int
 	kind review.CommentKind
 	body string
+	// headSHA is filled in by the app, which knows which commit the diff on
+	// screen came from. The reader does not, and giving it that fact would make
+	// it the second place the anchor lives.
+	headSHA string
 }
 
 // reviewSubmitRequestMsg asks the app to post the review.

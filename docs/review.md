@@ -225,9 +225,9 @@ Three decisions worth keeping:
 - **A kind persists as its NAME.** `CommentKinds` is an iota, so storing the
   ordinal would silently reinterpret every saved row the day a fifth kind is
   added in the middle. `ParseCommentKind` falls back to Issue.
-- **`head_sha` is recorded but not yet read.** It is the anchor step 7 needs: a
-  read mark with no commit behind it cannot answer "did this change since I
-  looked", so a mark stored without one is a mark step 7 would have to discard.
+- **`head_sha` is the submit anchor**, and the anchor for step 7's "what moved".
+  A read mark or a draft with no commit behind it cannot answer what it refers
+  to.
 - **Comments save on every change; read marks save on reader close.** The reader
   owns the read map while it is open and mutates it directly, so close is the
   moment the app learns anything moved. A crash mid-review costs that sitting's
@@ -235,9 +235,37 @@ Three decisions worth keeping:
 - **A submit clears the table**, or the review would come back as a draft on the
   next launch and offer to post itself twice.
 
-Open: `buildSubmission` still anchors to the queue's *current* head SHA, not the
-SHA the comments were written against. Those differ if the author pushes
-mid-review. The stored `head_sha` is what would fix it.
+### Anchoring
+
+**The comments decide which commit a review is anchored to, not the head.** Their
+line numbers were read off one particular diff, and that is the only commit they
+are true against. A draft written before a push and submitted after it lands as
+an *outdated* comment on the code it was actually about, instead of silently on
+whatever occupies that line now.
+
+- **The SHA comes from the files fetch, never from the review queue.** The queue
+  is a cache of a different age, and a pull request drops out of it once you
+  have reviewed it — so it goes empty exactly when someone returns for a second
+  round.
+- **`FetchPRFiles` reads the head SHA FIRST, then the patches.** No endpoint
+  serves both (the files route carries no SHA; GraphQL, which does, serves no
+  patch text), so there is a ~1s window in which the author can push. Reading
+  the SHA first leaves an *old* sha with *new* line numbers, which GitHub renders
+  as outdated — visibly wrong. The other order leaves a new sha with old line
+  numbers, which lands silently. Both are wrong; only one says so. That window
+  is dwarfed by the minutes the reader then holds those patches, which is the
+  staleness the SHA exists to record.
+- **A comment carries its own anchor** (`review.Comment.HeadSHA`), set by the app
+  and never by the reader, so a draft survives a restart and several pushes with
+  the commit it belongs to. `reviewAnchor` uses it when the batch agrees, and
+  falls back to the loaded diff's SHA when it does not — GitHub takes one commit
+  per review, so a mixed batch has no right answer.
+- **An empty anchor is survivable**: GitHub falls back to the current head, which
+  is what it did before any of this was recorded.
+
+Not built: telling the user on the submit sheet that they are anchoring to
+something behind the current head. That is step 7's job — "since you last
+looked" is the feature that notices a push.
 
 ## 7 · Since you last looked
 

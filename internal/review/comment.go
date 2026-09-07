@@ -84,6 +84,16 @@ type Comment struct {
 	Body   string
 	Author string // empty means you; set for a comment an agent wrote
 	Sent   bool   // already submitted to GitHub
+
+	// HeadSHA is the commit whose diff this line number was read off. It is the
+	// only commit the comment is true against, so it is what a submit anchors
+	// to — and it has to travel with the comment, because a draft can outlive
+	// the pull request's head by a restart and several pushes.
+	//
+	// The reader never sets it and never needs to: it carries whatever it was
+	// seeded with, and the app stamps a fresh comment with the SHA of the diff
+	// currently on screen.
+	HeadSHA string
 }
 
 // Payload is the body as it will appear on GitHub.

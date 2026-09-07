@@ -326,7 +326,13 @@ func (h *Home) reviewWorktree(k reviewKey) string {
 func (h *Home) seedComments(k reviewKey) []review.Comment {
 	out := make([]review.Comment, 0, len(h.reviewComments[k]))
 	for _, c := range h.reviewComments[k] {
-		out = append(out, review.Comment{File: c.file, Line: c.line, Kind: c.kind, Body: c.body})
+		out = append(out, review.Comment{
+			File: c.file, Line: c.line, Kind: c.kind, Body: c.body,
+			// Carried, not recomputed: a comment written three pushes ago is
+			// still true about the commit it was written against, and stamping
+			// it with today's head would be the exact lie this field prevents.
+			HeadSHA: c.headSHA,
+		})
 	}
 	return out
 }
@@ -353,17 +359,44 @@ func (h *Home) submitReview(msg reviewSubmitRequestMsg) (tea.Model, tea.Cmd) {
 		h.reader.SubmitDone(fmt.Errorf("no GitHub repo known for #%d", k.pr), 0)
 		return h, nil
 	}
-	// The queue supplies only the head SHA here, and its absence is survivable:
-	// GitHub then anchors to the current head, which is what it would have done
-	// without the field at all.
-	r, _ := h.findReviewByKey(k)
-
-	sub := buildSubmission(r, msg.event, msg.body, h.reader.pendingComments())
+	cs := h.reader.pendingComments()
+	sub := buildSubmission(reviewAnchor(cs, h.reviewFiles[k].HeadSHA), msg.event, msg.body, cs)
 	event, count := msg.event, len(sub.Comments)
 	return h, func() tea.Msg {
 		err := github.SubmitReview(context.Background(), k.repo, k.pr, sub)
 		return reviewSubmitResultMsg{key: k, event: event, count: count, err: err}
 	}
+}
+
+// reviewAnchor is the commit a submission should be anchored to.
+//
+// The comments decide, not the current head: their line numbers were read off
+// one particular diff, and that is the only commit they are true against. A
+// draft written before a push and submitted after it therefore lands as an
+// outdated comment on the code it was actually about, rather than silently on
+// whatever occupies that line now.
+//
+// falls back to the loaded diff's own SHA when the comments cannot agree —
+// which happens only if the file list refreshed mid-review and more comments
+// were written after it. GitHub takes exactly one commit per review, so a mixed
+// batch has no right answer; the newest diff is the one on screen, and it is at
+// least the commit the user was last looking at. An approve with no comments at
+// all uses it too, for want of anything better to mean.
+func reviewAnchor(cs []review.Comment, loadedSHA string) string {
+	sha := ""
+	for _, c := range cs {
+		if c.HeadSHA == "" {
+			continue
+		}
+		if sha != "" && sha != c.HeadSHA {
+			return loadedSHA
+		}
+		sha = c.HeadSHA
+	}
+	if sha == "" {
+		return loadedSHA
+	}
+	return sha
 }
 
 // buildSubmission turns the reader's queue into the payload GitHub takes.
@@ -372,12 +405,12 @@ func (h *Home) submitReview(msg reviewSubmitRequestMsg) (tea.Model, tea.Cmd) {
 // review's whole meaning is decided — the kind prefix, which side of the diff a
 // line refers to, and which commit it is anchored to. A mistake in any of those
 // posts to a teammate's pull request and cannot be tested through a subprocess.
-func buildSubmission(r github.ReviewRequest, event github.ReviewEvent, body string, cs []review.Comment) github.ReviewSubmission {
+func buildSubmission(anchorSHA string, event github.ReviewEvent, body string, cs []review.Comment) github.ReviewSubmission {
 	sub := github.ReviewSubmission{
 		// The commit the reader actually rendered. If the author has pushed
 		// since, GitHub marks the review outdated — which is true — instead of
 		// silently re-pointing every line number at code nobody read.
-		CommitID: r.HeadSHA,
+		CommitID: anchorSHA,
 		Body:     body,
 		Event:    event,
 	}
@@ -437,17 +470,16 @@ func (h *Home) saveReviewComments(k reviewKey) {
 	if h.storage == nil || k.repo == "" {
 		return
 	}
-	headSHA := ""
-	if r, ok := h.findReviewByKey(k); ok {
-		headSHA = r.HeadSHA
-	}
 	rows := make([]session.ReviewComment, 0, len(h.reviewComments[k]))
 	for _, c := range h.reviewComments[k] {
 		rows = append(rows, session.ReviewComment{
 			Repo: k.repo, PR: k.pr, Path: c.file, Line: c.line,
 			// The NAME, so reordering CommentKinds cannot silently reinterpret
 			// a saved question as a nit.
-			Kind: c.kind.String(), Body: c.body, HeadSHA: headSHA,
+			Kind: c.kind.String(), Body: c.body,
+			// Each comment's OWN anchor, so a draft that has sat through a push
+			// still submits against the commit it was written against.
+			HeadSHA: c.headSHA,
 		})
 	}
 	if err := h.storage.SaveReviewComments(k.repo, k.pr, rows); err != nil {
@@ -465,10 +497,7 @@ func (h *Home) saveReviewRead(k reviewKey) {
 	if h.storage == nil || k.repo == "" {
 		return
 	}
-	headSHA := ""
-	if r, ok := h.findReviewByKey(k); ok {
-		headSHA = r.HeadSHA
-	}
+	headSHA := h.reviewFiles[k].HeadSHA
 	var paths []string
 	for path, read := range h.reviewRead[k] {
 		if read {
@@ -506,7 +535,7 @@ func (h *Home) loadReviewState() {
 			k := reviewKey{repo: c.Repo, pr: c.PR}
 			h.reviewComments[k] = append(h.reviewComments[k], reviewCommentMsg{
 				key: k, file: c.Path, line: c.Line,
-				kind: review.ParseCommentKind(c.Kind), body: c.Body,
+				kind: review.ParseCommentKind(c.Kind), body: c.Body, headSHA: c.HeadSHA,
 			})
 		}
 	}
@@ -537,8 +566,14 @@ func (h *Home) syncReviewComments(k reviewKey, cs []review.Comment) {
 		if c.Sent {
 			continue
 		}
+		// A comment with no anchor is one written in this sitting, against the
+		// diff currently loaded. One that already has an anchor keeps it.
+		sha := c.HeadSHA
+		if sha == "" {
+			sha = h.reviewFiles[k].HeadSHA
+		}
 		out = append(out, reviewCommentMsg{
-			key: k, file: c.File, line: c.Line, kind: c.Kind, body: c.Body,
+			key: k, file: c.File, line: c.Line, kind: c.Kind, body: c.Body, headSHA: sha,
 		})
 	}
 	if len(out) == 0 {

@@ -119,3 +119,87 @@ func TestSubmittingClearsTheStoredComments(t *testing.T) {
 		t.Errorf("a submitted comment came back from the database: %+v", got)
 	}
 }
+
+// The commit a review anchors to is decided by the comments, not by whatever
+// the pull request points at now.
+func TestReviewAnchorFollowsTheComments(t *testing.T) {
+	at := func(shas ...string) []review.Comment {
+		var cs []review.Comment
+		for _, s := range shas {
+			cs = append(cs, review.Comment{File: "a.go", Line: 1, HeadSHA: s})
+		}
+		return cs
+	}
+
+	if got := reviewAnchor(at("aaa", "aaa"), "bbb"); got != "aaa" {
+		t.Errorf("anchor = %q, want the commit the comments were written against — "+
+			"anchoring at the new head puts old line numbers on new code", got)
+	}
+	// Mixed: the file list refreshed mid-review and more comments followed.
+	// GitHub takes one commit per review, so there is no right answer; the diff
+	// on screen is at least what the user was last looking at.
+	if got := reviewAnchor(at("aaa", "bbb"), "ccc"); got != "ccc" {
+		t.Errorf("mixed anchors gave %q, want the loaded diff's own SHA", got)
+	}
+	// An approve with nothing queued, and a comment from before anchors were
+	// recorded, both fall back rather than sending an empty commit id.
+	if got := reviewAnchor(nil, "ccc"); got != "ccc" {
+		t.Errorf("empty batch gave %q, want the loaded SHA", got)
+	}
+	if got := reviewAnchor(at(""), "ccc"); got != "ccc" {
+		t.Errorf("an unanchored comment gave %q, want the loaded SHA", got)
+	}
+}
+
+// The case the stored SHA exists for: write a comment, close fleet, the author
+// pushes, come back. The comment must still be about the code it was written
+// about.
+func TestADraftOutlivesAPushAndKeepsItsAnchor(t *testing.T) {
+	h := homeWithDB(t)
+	k := reviewKey{repo: "brizzai/fleet", pr: 283}
+
+	// Sitting one: the diff is at aaa.
+	h.reviewFiles = map[reviewKey]github.PRFiles{k: {HeadSHA: "aaa"}}
+	h.syncReviewComments(k, []review.Comment{
+		{File: "internal/ui/reader.go", Line: 412, Body: "this races"},
+	})
+
+	// Sitting two, after a restart and a push: the diff refetches at bbb.
+	next := &Home{
+		storage:        h.storage,
+		actionLog:      NewActionLog(100),
+		toasts:         NewToastStack(),
+		reviewRead:     map[reviewKey]map[string]bool{},
+		reviewComments: map[reviewKey][]reviewCommentMsg{},
+		reviewFiles:    map[reviewKey]github.PRFiles{k: {HeadSHA: "bbb"}},
+	}
+	next.loadReviewState()
+
+	seeded := next.seedComments(k)
+	if len(seeded) != 1 || seeded[0].HeadSHA != "aaa" {
+		t.Fatalf("seeded %+v, want the comment still anchored at aaa", seeded)
+	}
+	if got := reviewAnchor(seeded, next.reviewFiles[k].HeadSHA); got != "aaa" {
+		t.Errorf("submit would anchor at %q — line 412 of aaa is the code this "+
+			"comment is about; at bbb it may be something else entirely", got)
+	}
+
+	// And a re-save must not quietly restamp it with today's head.
+	next.syncReviewComments(k, seeded)
+	if got := next.reviewComments[k][0].headSHA; got != "aaa" {
+		t.Errorf("re-saving moved the anchor to %q", got)
+	}
+}
+
+// A comment written in this sitting has no anchor of its own yet, so it takes
+// the SHA of the diff it was written against.
+func TestAFreshCommentTakesTheLoadedSHA(t *testing.T) {
+	h := homeWithDB(t)
+	k := reviewKey{repo: "brizzai/fleet", pr: 283}
+	h.reviewFiles = map[reviewKey]github.PRFiles{k: {HeadSHA: "aaa"}}
+
+	h.syncReviewComments(k, []review.Comment{{File: "a.go", Line: 1, Body: "new"}})
+	if got := h.reviewComments[k][0].headSHA; got != "aaa" {
+		t.Errorf("a fresh comment stored anchor %q, want the loaded diff's aaa", got)
+	}
+}

@@ -168,12 +168,11 @@ func TestFailedSubmitKeepsTheSheet(t *testing.T) {
 // What GitHub receives is decided here: the kind prefix, the side of the diff,
 // and the commit the lines were read at.
 func TestBuildSubmissionCarriesKindSideAndCommit(t *testing.T) {
-	r := github.ReviewRequest{Number: 283, Repo: "brizzai/fleet", HeadSHA: "deadbeef"}
 	cs := []review.Comment{
 		{File: "internal/ui/app.go", Line: 12, Kind: review.CommentNit, Body: "spelling"},
 		{File: "internal/ui/app.go", Line: 40, Kind: review.CommentIssue, Body: "this races"},
 	}
-	sub := buildSubmission(r, github.EventRequestChanges, "two things", cs)
+	sub := buildSubmission("deadbeef", github.EventRequestChanges, "two things", cs)
 
 	if sub.CommitID != "deadbeef" {
 		t.Errorf("commit_id = %q — without it GitHub re-anchors every line at the "+
