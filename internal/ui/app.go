@@ -5508,6 +5508,9 @@ func (h *Home) quickApproveSelected() tea.Cmd {
 		// (Y/n) and (y/N) prompts accept "y" as approval, Enter submits.
 		_ = ts.SendKeys("y")
 		err := ts.SendKeys("Enter")
+		// Those two keys read to the agent as the user typing at the pane, when
+		// the user is over here in the sidebar. See tmux.Session.BlurIfUnattended.
+		ts.BlurIfUnattended()
 		return quickApproveMsg{err: err}
 	}
 }
