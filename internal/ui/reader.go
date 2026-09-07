@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/review"
@@ -1196,7 +1197,10 @@ func (d *ReaderDialog) toggleTour() {
 		d.toast = "still reading the pull request…"
 		return
 	case tourFailed:
-		d.toast = "no tour — " + d.tourErr
+		// Truncated at the door: the footer is one line, and an error long
+		// enough to wrap would push the keys off the screen — including the
+		// one that gets you out.
+		d.toast = ansi.Truncate("no tour — "+d.tourErr, max(d.width-24, 20), "…")
 		return
 	}
 	if d.tour == nil || len(d.tour.Steps) == 0 {

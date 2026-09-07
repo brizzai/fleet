@@ -48,22 +48,68 @@ func Ask(ctx context.Context, dir, instruction, input string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("claude timed out")
 		}
-		debuglog.Logger.Debug("claude ask failed", "err", err, "stderr", msg)
-		if msg != "" {
-			return "", fmt.Errorf("claude: %s", firstLine(msg))
-		}
-		return "", fmt.Errorf("claude: %w", err)
+		out, errOut := strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+		debuglog.Logger.Debug("claude ask failed", "err", err, "stdout", out, "stderr", errOut)
+		return "", fmt.Errorf("claude: %s", askFailureReason(out, errOut, err))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
+// askFailureReason works out what actually went wrong, and STDOUT is where it
+// looks first.
+//
+// Measured, not assumed: `claude -p` on a spent subscription exits 1, prints
+// "You've hit your session limit · resets 3:50pm" on stdout, and puts only
+// warnings on stderr — a settings.json permission rule it dislikes, a note
+// about the shell's working directory. Reading stderr first therefore reported
+// a permission rule as the cause of a quota refusal, which is a false statement
+// about the user's setup and sends them to fix a file that was never the
+// problem. `claude auth status` has the same shape (see parseAuthStatus): the
+// answer is on stdout even when the exit code is 1.
+//
+// Truncated because this reaches a one-line toast in a footer, and claude's
+// warnings run to a full paragraph.
+func askFailureReason(stdout, stderr string, runErr error) string {
+	for _, s := range []string{stdout, stderr} {
+		if line := firstUsefulLine(s); line != "" {
+			return trimTo(line, askReasonMax)
+		}
 	}
-	return s
+	return runErr.Error()
+}
+
+// askReasonMax is what fits a footer without pushing the keys off it.
+const askReasonMax = 90
+
+// firstUsefulLine skips the notes claude prints on its way to the real answer.
+func firstUsefulLine(s string) string {
+	for line := range strings.SplitSeq(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || isClaudeNote(line) {
+			continue
+		}
+		return line
+	}
+	return ""
+}
+
+// isClaudeNote recognises claude's own advisories, which are printed alongside
+// a failure rather than being one. A settings file it dislikes is a real thing
+// to tell the user about — but not while they are asking why their tour is
+// missing, and not as the reason it is.
+func isClaudeNote(line string) bool {
+	return strings.HasPrefix(line, "Permission allow rule") ||
+		strings.HasPrefix(line, "Shell cwd was reset") ||
+		strings.HasPrefix(line, "Warning: no stdin data received")
+}
+
+func trimTo(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
