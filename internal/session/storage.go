@@ -275,6 +275,53 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	// A review in progress: which files you have read, and the comments you
+	// have written but not yet sent.
+	//
+	// Keyed on (repo, pr) and never on the number alone — PR #12 exists in most
+	// repos, and a key that collided would hand one repo's queued comments to
+	// another's pull request. head_sha records the commit the diff was read at,
+	// so a later pass can tell what moved underneath you.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS review_read (
+			repo     TEXT NOT NULL,
+			pr       INTEGER NOT NULL,
+			path     TEXT NOT NULL,
+			head_sha TEXT NOT NULL DEFAULT '',
+			read_at  INTEGER NOT NULL,
+			PRIMARY KEY (repo, pr, path)
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create review_read table", "error", err)
+		return err
+	}
+
+	// Comments carry their kind as a NAME, not the iota's ordinal: reordering
+	// CommentKinds would otherwise reinterpret every saved row in silence.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS review_comments (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo       TEXT NOT NULL,
+			pr         INTEGER NOT NULL,
+			path       TEXT NOT NULL,
+			line       INTEGER NOT NULL,
+			kind       TEXT NOT NULL,
+			body       TEXT NOT NULL,
+			head_sha   TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create review_comments table", "error", err)
+		return err
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_review_comments_pr ON review_comments(repo, pr)`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create idx_review_comments_pr", "error", err)
+		return err
+	}
+
 	// Shells: plain non-agent terminals (dev servers, logs, scratch shells)
 	// shown in the bottom drawer, scoped to a repo/worktree checkout. Wholly
 	// independent of sessions — no FK, no hooks, no auto-naming.
@@ -714,6 +761,138 @@ func (s *StateDB) LoadSnoozedGroups() (map[string]time.Time, error) {
 			return nil, err
 		}
 		out[key] = unixToTime(until)
+	}
+	return out, rows.Err()
+}
+
+// ReviewReadMark is one file you have finished reading in a pull request.
+type ReviewReadMark struct {
+	Repo    string // owner/name
+	PR      int
+	Path    string
+	HeadSHA string
+}
+
+// ReviewComment is one queued review note, as it sits on disk.
+//
+// Deliberately not internal/review's Comment: that one carries an in-memory id
+// and a Sent flag, and a comment that has been sent is not queued any more — it
+// lives on GitHub. What survives a restart is only what has not gone yet.
+type ReviewComment struct {
+	Repo    string // owner/name
+	PR      int
+	Path    string
+	Line    int
+	Kind    string // the kind's NAME, never its ordinal
+	Body    string
+	HeadSHA string
+}
+
+// SaveReviewComments replaces one pull request's queued comments.
+//
+// Replace and not append, matching the way the reader hands them back: it is
+// where a comment is edited and deleted, so appending would resurrect every one
+// the user threw away and offer it to the next submit.
+func (s *StateDB) SaveReviewComments(repo string, pr int, cs []ReviewComment) error {
+	if repo == "" || pr == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		debuglog.Logger.Error("failed to begin review comment save", "repo", repo, "pr", pr, "error", err)
+		return err
+	}
+	// One transaction, because the delete and the inserts are one replacement:
+	// a crash between them would leave the pull request with no comments at all.
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec("DELETE FROM review_comments WHERE repo = ? AND pr = ?", repo, pr); err != nil {
+		debuglog.Logger.Error("failed to clear review comments", "repo", repo, "pr", pr, "error", err)
+		return err
+	}
+	now := time.Now().Unix()
+	for _, c := range cs {
+		_, err := tx.Exec(`
+			INSERT INTO review_comments (repo, pr, path, line, kind, body, head_sha, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			repo, pr, c.Path, c.Line, c.Kind, c.Body, c.HeadSHA, now)
+		if err != nil {
+			debuglog.Logger.Error("failed to insert review comment", "repo", repo, "pr", pr, "error", err)
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// LoadReviewComments returns every queued comment, oldest first.
+func (s *StateDB) LoadReviewComments() ([]ReviewComment, error) {
+	rows, err := s.db.Query(`
+		SELECT repo, pr, path, line, kind, body, head_sha
+		FROM review_comments ORDER BY id`)
+	if err != nil {
+		debuglog.Logger.Error("failed to load review comments", "error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ReviewComment
+	for rows.Next() {
+		var c ReviewComment
+		if err := rows.Scan(&c.Repo, &c.PR, &c.Path, &c.Line, &c.Kind, &c.Body, &c.HeadSHA); err != nil {
+			debuglog.Logger.Error("failed to scan review comment row", "error", err)
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SaveReviewRead replaces one pull request's read marks.
+func (s *StateDB) SaveReviewRead(repo string, pr int, headSHA string, paths []string) error {
+	if repo == "" || pr == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		debuglog.Logger.Error("failed to begin review read save", "repo", repo, "pr", pr, "error", err)
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec("DELETE FROM review_read WHERE repo = ? AND pr = ?", repo, pr); err != nil {
+		debuglog.Logger.Error("failed to clear review read marks", "repo", repo, "pr", pr, "error", err)
+		return err
+	}
+	now := time.Now().Unix()
+	for _, path := range paths {
+		_, err := tx.Exec(`
+			INSERT INTO review_read (repo, pr, path, head_sha, read_at)
+			VALUES (?, ?, ?, ?, ?)`, repo, pr, path, headSHA, now)
+		if err != nil {
+			debuglog.Logger.Error("failed to insert review read mark", "repo", repo, "pr", pr, "error", err)
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// LoadReviewRead returns every file marked read, across every pull request.
+func (s *StateDB) LoadReviewRead() ([]ReviewReadMark, error) {
+	rows, err := s.db.Query("SELECT repo, pr, path, head_sha FROM review_read")
+	if err != nil {
+		debuglog.Logger.Error("failed to load review read marks", "error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ReviewReadMark
+	for rows.Next() {
+		var m ReviewReadMark
+		if err := rows.Scan(&m.Repo, &m.PR, &m.Path, &m.HeadSHA); err != nil {
+			debuglog.Logger.Error("failed to scan review read row", "error", err)
+			return nil, err
+		}
+		out = append(out, m)
 	}
 	return out, rows.Err()
 }

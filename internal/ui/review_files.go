@@ -24,9 +24,20 @@ import (
 // refetching every time the cursor passes over the row.
 const reviewFilesTTL = 3 * time.Minute
 
+// reviewKey identifies a pull request across every repo fleet knows about.
+//
+// A bare number is not an identity: PR #12 exists in most repositories, so maps
+// keyed on the number alone hand one repo's diff — and one repo's queued
+// comments — to another. That was survivable while the maps died with the
+// process; it is a wrong-target post now that they are on disk.
+type reviewKey struct {
+	repo string // owner/name
+	pr   int
+}
+
 // reviewFilesMsg carries a fetched file list back to Update.
 type reviewFilesMsg struct {
-	pr    int
+	key   reviewKey
 	files github.PRFiles
 	err   error
 }
@@ -50,13 +61,30 @@ func reviewPRNumber(s *session.Session) int {
 	return n
 }
 
+// reviewKeyFor identifies the pull request a session is reviewing.
+//
+// Returns false for a session that is not a review, and for one whose origin
+// fleet cannot map to an owner/name — which is the same condition that already
+// stops the file list from loading, so nothing new becomes unreachable.
+func (h *Home) reviewKeyFor(s *session.Session) (reviewKey, bool) {
+	pr := reviewPRNumber(s)
+	if pr == 0 {
+		return reviewKey{}, false
+	}
+	repo := ownerRepoFromOrigin(h.originKeyFor(session.GetRepoRoot(s.ProjectPath)))
+	if repo == "" {
+		return reviewKey{}, false
+	}
+	return reviewKey{repo: repo, pr: pr}, true
+}
+
 // loadReviewFiles fetches a PR's changed files off the Update goroutine.
-func loadReviewFiles(ownerRepo string, pr int) tea.Cmd {
+func loadReviewFiles(k reviewKey) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), reviewListTimeout)
 		defer cancel()
-		files, err := github.FetchPRFiles(ctx, ownerRepo, pr)
-		return reviewFilesMsg{pr: pr, files: files, err: err}
+		files, err := github.FetchPRFiles(ctx, k.repo, k.pr)
+		return reviewFilesMsg{key: k, files: files, err: err}
 	}
 }
 
@@ -67,25 +95,20 @@ func loadReviewFiles(ownerRepo string, pr int) tea.Cmd {
 // shows, so it has to be on its way before you ask for it, or every review you
 // land on starts with an empty pane.
 func (h *Home) maybeLoadReviewFiles(s *session.Session) tea.Cmd {
-	pr := reviewPRNumber(s)
-	if pr == 0 {
+	k, ok := h.reviewKeyFor(s)
+	if !ok {
 		return nil
 	}
-	if at, ok := h.reviewFilesAt[pr]; ok && time.Since(at) < reviewFilesTTL {
-		return nil
-	}
-	origin := h.originKeyFor(session.GetRepoRoot(s.ProjectPath))
-	ownerRepo := ownerRepoFromOrigin(origin)
-	if ownerRepo == "" {
+	if at, ok := h.reviewFilesAt[k]; ok && time.Since(at) < reviewFilesTTL {
 		return nil
 	}
 	if h.reviewFilesAt == nil {
-		h.reviewFilesAt = map[int]time.Time{}
+		h.reviewFilesAt = map[reviewKey]time.Time{}
 	}
 	// Stamped before the fetch, not after: the cursor sits on a row for many
 	// ticks, and without this every one of them starts another request.
-	h.reviewFilesAt[pr] = time.Now()
-	return loadReviewFiles(ownerRepo, pr)
+	h.reviewFilesAt[k] = time.Now()
+	return loadReviewFiles(k)
 }
 
 // ownerRepoFromOrigin turns "github.com/brizzai/brizzai" into "brizzai/brizzai".
@@ -216,16 +239,16 @@ func pluralize(reason string, n int) string {
 // handleReviewFiles stores a fetched list.
 func (h *Home) handleReviewFiles(msg reviewFilesMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		debuglog.Logger.Debug("review files: fetch failed", "pr", msg.pr, "err", msg.err)
+		debuglog.Logger.Debug("review files: fetch failed", "pr", msg.key.pr, "err", msg.err)
 		// Cleared so the next pass retries rather than backing off forever on
 		// a failure the user can fix (a network blip, a token that expired).
-		delete(h.reviewFilesAt, msg.pr)
+		delete(h.reviewFilesAt, msg.key)
 		return h, nil
 	}
 	if h.reviewFiles == nil {
-		h.reviewFiles = map[int]github.PRFiles{}
+		h.reviewFiles = map[reviewKey]github.PRFiles{}
 	}
-	h.reviewFiles[msg.pr] = msg.files
+	h.reviewFiles[msg.key] = msg.files
 	return h, nil
 }
 
@@ -235,10 +258,10 @@ func (h *Home) handleReviewFiles(msg reviewFilesMsg) (tea.Model, tea.Cmd) {
 // sitting on the row is what fetched them — so this is instant. When they are
 // not (the fetch is still in flight, or failed) it says so rather than opening
 // an empty reader that looks like a PR with no changes.
-func (h *Home) openReader(pr int) tea.Cmd {
-	files, ok := h.reviewFiles[pr]
+func (h *Home) openReader(k reviewKey) tea.Cmd {
+	files, ok := h.reviewFiles[k]
 	if !ok || len(files.Files) == 0 {
-		h.setInfo("Still loading #" + strconv.Itoa(pr) + "…")
+		h.setInfo("Still loading #" + strconv.Itoa(k.pr) + "…")
 		return nil
 	}
 
@@ -259,20 +282,24 @@ func (h *Home) openReader(pr int) tea.Cmd {
 	sort.SliceStable(shown, func(i, j int) bool { return shown[i].Path < shown[j].Path })
 
 	if h.reviewRead == nil {
-		h.reviewRead = map[int]map[string]bool{}
+		h.reviewRead = map[reviewKey]map[string]bool{}
 	}
-	if h.reviewRead[pr] == nil {
-		h.reviewRead[pr] = map[string]bool{}
+	if h.reviewRead[k] == nil {
+		h.reviewRead[k] = map[string]bool{}
 	}
 
-	title, author, repo := "", "", ""
-	if r, ok := h.findReviewByNumber(pr); ok {
-		title, author, repo = r.Title, r.Author, r.Repo
+	// The queue is where the title and author come from, but the key already
+	// knows the repo — so a PR fleet has since dropped from the queue still
+	// opens, and still submits, with only its heading looking bare.
+	title, author := "", ""
+	if r, ok := h.findReviewByKey(k); ok {
+		title, author = r.Title, r.Author
 	}
 
 	h.reader.SetSize(h.width, h.height)
-	h.reader.Show(pr, title, author, repo, h.reviewWorktree(pr), shown, files.Files, h.reviewRead[pr], h.seedComments(pr))
-	h.actionLog.Add("read review", strconv.Itoa(pr), true)
+	h.reader.Show(k.pr, title, author, k.repo, h.reviewWorktree(k), shown, files.Files,
+		h.reviewRead[k], h.seedComments(k))
+	h.actionLog.Add("read review", strconv.Itoa(k.pr), true)
 	return nil
 }
 
@@ -282,16 +309,12 @@ func (h *Home) openReader(pr int) tea.Cmd {
 // expansion a file read, and handing the reader a path to nothing would draw
 // fold markers that refuse to open. Reviews opened without ever pressing Enter
 // have no worktree yet, and that is the common case on the first look.
-func (h *Home) reviewWorktree(pr int) string {
-	r, ok := h.findReviewByNumber(pr)
-	if !ok {
-		return ""
-	}
-	repo := h.repoForOrigin(r.Repo)
+func (h *Home) reviewWorktree(k reviewKey) string {
+	repo := h.repoForOrigin(k.repo)
 	if repo == "" {
 		return ""
 	}
-	path := git.ReviewWorktreePath(repo, pr)
+	path := git.ReviewWorktreePath(repo, k.pr)
 	if st, err := os.Stat(path); err != nil || !st.IsDir() {
 		return ""
 	}
@@ -300,18 +323,19 @@ func (h *Home) reviewWorktree(pr int) string {
 
 // seedComments hands the reader back what was written on an earlier visit, so
 // closing it is not the same as discarding a review in progress.
-func (h *Home) seedComments(pr int) []review.Comment {
-	out := make([]review.Comment, 0, len(h.reviewComments[pr]))
-	for _, c := range h.reviewComments[pr] {
+func (h *Home) seedComments(k reviewKey) []review.Comment {
+	out := make([]review.Comment, 0, len(h.reviewComments[k]))
+	for _, c := range h.reviewComments[k] {
 		out = append(out, review.Comment{File: c.file, Line: c.line, Kind: c.kind, Body: c.body})
 	}
 	return out
 }
 
-// findReviewByNumber looks a PR up in the queue for its title and author.
-func (h *Home) findReviewByNumber(pr int) (github.ReviewRequest, bool) {
+// findReviewByKey looks a pull request up in the queue for its title, author
+// and head SHA. Matched on repo AND number: two repos routinely have a #12.
+func (h *Home) findReviewByKey(k reviewKey) (github.ReviewRequest, bool) {
 	for _, r := range h.reviewQueue {
-		if r.Number == pr {
+		if r.Number == k.pr && r.Repo == k.repo {
 			return r, true
 		}
 	}
@@ -324,17 +348,21 @@ func (h *Home) findReviewByNumber(pr int) (github.ReviewRequest, bool) {
 // owner/repo and the commit the diff was read at. It also keeps the gh
 // subprocess off the reader, which runs on the Update goroutine.
 func (h *Home) submitReview(msg reviewSubmitRequestMsg) (tea.Model, tea.Cmd) {
-	r, ok := h.findReviewByNumber(msg.pr)
-	if !ok || r.Repo == "" {
-		h.reader.SubmitDone(fmt.Errorf("no GitHub repo known for #%d", msg.pr), 0)
+	k := msg.key
+	if k.repo == "" || k.pr == 0 {
+		h.reader.SubmitDone(fmt.Errorf("no GitHub repo known for #%d", k.pr), 0)
 		return h, nil
 	}
+	// The queue supplies only the head SHA here, and its absence is survivable:
+	// GitHub then anchors to the current head, which is what it would have done
+	// without the field at all.
+	r, _ := h.findReviewByKey(k)
 
 	sub := buildSubmission(r, msg.event, msg.body, h.reader.pendingComments())
-	pr, event, count, repo := msg.pr, msg.event, len(sub.Comments), r.Repo
+	event, count := msg.event, len(sub.Comments)
 	return h, func() tea.Msg {
-		err := github.SubmitReview(context.Background(), repo, pr, sub)
-		return reviewSubmitResultMsg{pr: pr, event: event, count: count, err: err}
+		err := github.SubmitReview(context.Background(), k.repo, k.pr, sub)
+		return reviewSubmitResultMsg{key: k, event: event, count: count, err: err}
 	}
 }
 
@@ -376,7 +404,7 @@ func buildSubmission(r github.ReviewRequest, event github.ReviewEvent, body stri
 // that was refused must not also have been thrown away.
 func (h *Home) handleReviewSubmitted(msg reviewSubmitResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		debuglog.Logger.Debug("review submit: failed", "pr", msg.pr, "err", msg.err)
+		debuglog.Logger.Debug("review submit: failed", "pr", msg.key.pr, "err", msg.err)
 		h.reader.SubmitDone(msg.err, 0)
 		if !h.reader.Visible() {
 			// The sheet carries the reason while the reader is open. Closed, it
@@ -386,13 +414,102 @@ func (h *Home) handleReviewSubmitted(msg reviewSubmitResultMsg) (tea.Model, tea.
 		return h, nil
 	}
 
-	delete(h.reviewComments, msg.pr)
+	delete(h.reviewComments, msg.key)
+	// Cleared on disk too, in the same breath. A comment that reached GitHub and
+	// stayed in the table would come back as a draft on the next launch and be
+	// offered for posting a second time.
+	h.saveReviewComments(msg.key)
 	h.reader.SubmitDone(nil, msg.count)
-	h.actionLog.Add("submit review", strconv.Itoa(msg.pr), true)
+	h.actionLog.Add("submit review", strconv.Itoa(msg.key.pr), true)
 	if !h.reader.Visible() {
-		h.setInfo(fmt.Sprintf("Submitted review on #%d", msg.pr))
+		h.setInfo(fmt.Sprintf("Submitted review on #%d", msg.key.pr))
 	}
 	return h, nil
+}
+
+// saveReviewComments writes a pull request's queued comments to SQLite.
+//
+// Called at every moment the app's own copy changes — a comment saved, the
+// reader handing its edits back on close, a submit clearing the queue — because
+// those are the only three, and a review in progress that survives everything
+// except a crash at the wrong moment is not one you can rely on.
+func (h *Home) saveReviewComments(k reviewKey) {
+	if h.storage == nil || k.repo == "" {
+		return
+	}
+	headSHA := ""
+	if r, ok := h.findReviewByKey(k); ok {
+		headSHA = r.HeadSHA
+	}
+	rows := make([]session.ReviewComment, 0, len(h.reviewComments[k]))
+	for _, c := range h.reviewComments[k] {
+		rows = append(rows, session.ReviewComment{
+			Repo: k.repo, PR: k.pr, Path: c.file, Line: c.line,
+			// The NAME, so reordering CommentKinds cannot silently reinterpret
+			// a saved question as a nit.
+			Kind: c.kind.String(), Body: c.body, HeadSHA: headSHA,
+		})
+	}
+	if err := h.storage.SaveReviewComments(k.repo, k.pr, rows); err != nil {
+		debuglog.Logger.Error("review: failed to save comments", "repo", k.repo, "pr", k.pr, "err", err)
+	}
+}
+
+// saveReviewRead writes a pull request's read marks to SQLite.
+//
+// Only on reader close, not per keypress: the reader owns the map while it is
+// open and mutates it directly, so close is the moment the app learns anything
+// changed. The cost is a crash mid-review losing that sitting's marks — cheaper
+// than a write on every press of the key you press most.
+func (h *Home) saveReviewRead(k reviewKey) {
+	if h.storage == nil || k.repo == "" {
+		return
+	}
+	headSHA := ""
+	if r, ok := h.findReviewByKey(k); ok {
+		headSHA = r.HeadSHA
+	}
+	var paths []string
+	for path, read := range h.reviewRead[k] {
+		if read {
+			paths = append(paths, path)
+		}
+	}
+	// Sorted so the table does not churn on Go's random map order — it makes a
+	// diff of the database legible when something goes wrong.
+	sort.Strings(paths)
+	if err := h.storage.SaveReviewRead(k.repo, k.pr, headSHA, paths); err != nil {
+		debuglog.Logger.Error("review: failed to save read marks", "repo", k.repo, "pr", k.pr, "err", err)
+	}
+}
+
+// loadReviewState restores read marks and queued comments at startup.
+//
+// A row naming a repo fleet no longer knows is kept rather than pruned: the
+// checkout may simply not be open right now, and throwing away someone's
+// half-written review because a directory moved is not a trade worth making.
+func (h *Home) loadReviewState() {
+	if h.storage == nil {
+		return
+	}
+	if marks, err := h.storage.LoadReviewRead(); err == nil {
+		for _, m := range marks {
+			k := reviewKey{repo: m.Repo, pr: m.PR}
+			if h.reviewRead[k] == nil {
+				h.reviewRead[k] = map[string]bool{}
+			}
+			h.reviewRead[k][m.Path] = true
+		}
+	}
+	if cs, err := h.storage.LoadReviewComments(); err == nil {
+		for _, c := range cs {
+			k := reviewKey{repo: c.Repo, pr: c.PR}
+			h.reviewComments[k] = append(h.reviewComments[k], reviewCommentMsg{
+				key: k, file: c.Path, line: c.Line,
+				kind: review.ParseCommentKind(c.Kind), body: c.Body,
+			})
+		}
+	}
 }
 
 // syncReviewComments replaces the app's record of a PR's pending comments with
@@ -401,22 +518,19 @@ func (h *Home) handleReviewSubmitted(msg reviewSubmitResultMsg) (tea.Model, tea.
 // A replace and not an append: the reader is where a comment is edited and
 // deleted, so appending would resurrect every one the user threw away and hand
 // it to whatever eventually submits the batch.
-func (h *Home) syncReviewComments(pr int, cs []review.Comment) {
-	if pr == 0 {
+func (h *Home) syncReviewComments(k reviewKey, cs []review.Comment) {
+	if k.pr == 0 {
 		return
 	}
 	if h.reviewComments == nil {
-		h.reviewComments = map[int][]reviewCommentMsg{}
+		h.reviewComments = map[reviewKey][]reviewCommentMsg{}
 	}
 	if len(cs) == 0 {
-		delete(h.reviewComments, pr)
+		delete(h.reviewComments, k)
+		h.saveReviewComments(k)
 		return
 	}
 	out := make([]reviewCommentMsg, 0, len(cs))
-	repo := ""
-	if r, ok := h.findReviewByNumber(pr); ok {
-		repo = r.Repo
-	}
 	for _, c := range cs {
 		// A submitted comment is not pending. Carrying it here would re-seed it
 		// as unsent on the next open and offer to post it a second time.
@@ -424,12 +538,13 @@ func (h *Home) syncReviewComments(pr int, cs []review.Comment) {
 			continue
 		}
 		out = append(out, reviewCommentMsg{
-			pr: pr, repo: repo, file: c.File, line: c.Line, kind: c.Kind, body: c.Body,
+			key: k, file: c.File, line: c.Line, kind: c.Kind, body: c.Body,
 		})
 	}
 	if len(out) == 0 {
-		delete(h.reviewComments, pr)
-		return
+		delete(h.reviewComments, k)
+	} else {
+		h.reviewComments[k] = out
 	}
-	h.reviewComments[pr] = out
+	h.saveReviewComments(k)
 }

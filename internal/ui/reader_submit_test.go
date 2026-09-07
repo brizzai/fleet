@@ -70,7 +70,7 @@ func TestSubmitApproveNeedsNoSummary(t *testing.T) {
 	if !ok {
 		t.Fatalf("enter produced %T, want reviewSubmitRequestMsg", cmd())
 	}
-	if msg.event != github.EventApprove || msg.pr != 283 {
+	if msg.event != github.EventApprove || msg.key.pr != 283 || msg.key.repo != "brizzai/fleet" {
 		t.Errorf("submitted %+v, want an APPROVE on #283", msg)
 	}
 	if !d.submitting {
@@ -205,18 +205,19 @@ func TestBuildSubmissionCarriesKindSideAndCommit(t *testing.T) {
 
 // A submitted comment must never be offered for submission again.
 func TestSyncDropsSubmittedComments(t *testing.T) {
+	k := reviewKey{repo: "brizzai/fleet", pr: 7}
 	h := &Home{reviewQueue: []github.ReviewRequest{{Number: 7, Repo: "brizzai/fleet"}}}
-	h.syncReviewComments(7, []review.Comment{
+	h.syncReviewComments(k, []review.Comment{
 		{File: "a.go", Line: 1, Body: "sent", Sent: true},
 		{File: "a.go", Line: 2, Body: "not sent"},
 	})
-	got := h.reviewComments[7]
+	got := h.reviewComments[k]
 	if len(got) != 1 || got[0].body != "not sent" {
 		t.Fatalf("pending comments = %+v, want only the unsent one", got)
 	}
 
-	h.syncReviewComments(7, []review.Comment{{File: "a.go", Line: 1, Body: "sent", Sent: true}})
-	if _, ok := h.reviewComments[7]; ok {
+	h.syncReviewComments(k, []review.Comment{{File: "a.go", Line: 1, Body: "sent", Sent: true}})
+	if _, ok := h.reviewComments[k]; ok {
 		t.Error("a PR whose every comment was submitted still has a pending entry — " +
 			"reopening the reader would offer to post them a second time")
 	}

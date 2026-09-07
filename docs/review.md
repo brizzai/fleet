@@ -100,7 +100,7 @@ Decisions: **A1** full screen · **B1** stream · **C1** ⏎ reads · **D1** inl
 - [x] Tabs expanded to 4 so the gutter stays a column
 - [x] Full-screen surface: `modalOpen`, `routeToModal` (raw keys — the comment box takes text), `renderBody`
 - [x] Tests: line numbering incl. blank context rows, no-patch files, jump bounds, hunk header parsing
-- [ ] Persist read marks and pending comments to SQLite (in memory today — lost on restart)
+- [x] Persist read marks and pending comments to SQLite
 - [x] Submit the batch to GitHub — `S`, verdict cycler, one POST
 
 ## 5b · The reader, second pass — DONE
@@ -211,6 +211,33 @@ Three decisions worth keeping:
   and nothing else — it does not know the head SHA, does not hold the queue, and
   must never shell out to `gh` from the Update goroutine. Same shape as
   `reviewCommentMsg`.
+
+### Persistence
+
+`review_read(repo, pr, path, head_sha, read_at)` and
+`review_comments(id, repo, pr, path, line, kind, body, head_sha, created_at)`.
+
+- **The key is (repo, pr), never the number alone.** PR #12 exists in most
+  repositories, so the in-memory maps had to be re-keyed on `reviewKey` too —
+  they were colliding already, handing one repo's diff and one repo's queued
+  comments to another. Survivable while they died with the process; a
+  wrong-target post once they are on disk.
+- **A kind persists as its NAME.** `CommentKinds` is an iota, so storing the
+  ordinal would silently reinterpret every saved row the day a fifth kind is
+  added in the middle. `ParseCommentKind` falls back to Issue.
+- **`head_sha` is recorded but not yet read.** It is the anchor step 7 needs: a
+  read mark with no commit behind it cannot answer "did this change since I
+  looked", so a mark stored without one is a mark step 7 would have to discard.
+- **Comments save on every change; read marks save on reader close.** The reader
+  owns the read map while it is open and mutates it directly, so close is the
+  moment the app learns anything moved. A crash mid-review costs that sitting's
+  marks — cheaper than a write on every press of `space`.
+- **A submit clears the table**, or the review would come back as a draft on the
+  next launch and offer to post itself twice.
+
+Open: `buildSubmission` still anchors to the queue's *current* head SHA, not the
+SHA the comments were written against. Those differ if the author pushes
+mid-review. The stored `head_sha` is what would fix it.
 
 ## 7 · Since you last looked
 

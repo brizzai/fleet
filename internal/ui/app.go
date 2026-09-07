@@ -290,15 +290,15 @@ type Home struct {
 	// running. Quit drains both this list and pendingDeletes so an in-flight
 	// kill isn't lost when fleet exits mid-cleanup.
 	finalizingDeletes []PendingDelete
-	pinnedRepos       map[string]bool            // pinned repo paths (persist in SQLite)
-	reviewQueue       []github.ReviewRequest     // PRs awaiting review, from the last fetch
-	reviewFiles       map[int]github.PRFiles     // changed files per reviewed PR
-	reviewFilesAt     map[int]time.Time          // when each was fetched, for the TTL
-	reviewShowFolded  bool                       // `f` — show the demoted files inline
-	reviewShowPane    bool                       // `v` — show the agent pane instead of the diff
-	reader            ReaderDialog               // full-screen diff reader
-	reviewRead        map[int]map[string]bool    // fleet's own record of files read, per PR
-	reviewComments    map[int][]reviewCommentMsg // pending comments, per PR
+	pinnedRepos       map[string]bool                  // pinned repo paths (persist in SQLite)
+	reviewQueue       []github.ReviewRequest           // PRs awaiting review, from the last fetch
+	reviewFiles       map[reviewKey]github.PRFiles     // changed files per reviewed PR
+	reviewFilesAt     map[reviewKey]time.Time          // when each was fetched, for the TTL
+	reviewShowFolded  bool                             // `f` — show the demoted files inline
+	reviewShowPane    bool                             // `v` — show the agent pane instead of the diff
+	reader            ReaderDialog                     // full-screen diff reader
+	reviewRead        map[reviewKey]map[string]bool    // fleet's own record of files read, per PR
+	reviewComments    map[reviewKey][]reviewCommentMsg // pending comments, per PR
 
 	// failedWorktreeRemovals holds worktree repo paths whose destroy failed
 	// (something is still holding the directory). Such repos are re-pinned and
@@ -599,6 +599,8 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		launchpad:              NewLaunchpad(),
 		bugReport:              NewBugReportDialog(),
 		previewCache:           make(map[string]string),
+		reviewRead:             make(map[reviewKey]map[string]bool),
+		reviewComments:         make(map[reviewKey][]reviewCommentMsg),
 		previewCacheTime:       make(map[string]time.Time),
 		repoLastHotAt:          make(map[string]time.Time),
 		filterInput:            fi,
@@ -1779,9 +1781,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// exists to survive the reader closing, not to tell the user anything
 		// they cannot already see. Hence no toast: the box is on screen.
 		if h.reviewComments == nil {
-			h.reviewComments = map[int][]reviewCommentMsg{}
+			h.reviewComments = map[reviewKey][]reviewCommentMsg{}
 		}
-		h.reviewComments[msg.pr] = append(h.reviewComments[msg.pr], msg)
+		h.reviewComments[msg.key] = append(h.reviewComments[msg.key], msg)
+		h.saveReviewComments(msg.key)
 		return h, nil
 
 	case paletteOpenInBrowserMsg:
@@ -2053,6 +2056,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.pinnedRepos[p] = true
 			}
 		}
+		// Restore a review in progress: what you had read, and what you had
+		// written but not sent. Both die with the process otherwise, which made
+		// closing fleet mid-review the same as abandoning it.
+		h.loadReviewState()
+
 		// Restore persisted collapse state before defaulting — the default
 		// loops below only fill missing keys, so loaded collapses survive.
 		if collapsed, err := h.storage.LoadCollapsedGroups(); err == nil {
@@ -2686,15 +2694,16 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		if !ok {
 			return nil, true
 		}
-		pr := h.reader.PR()
+		key := h.reader.key()
 		dialog, cmd := h.reader.Update(km)
 		h.reader = *dialog
 		if !h.reader.Visible() {
-			// The reader owns the comments while it is open — it is where they
-			// are edited and deleted — so closing it is the moment its copy
-			// becomes the record. Appending as they were written instead would
-			// keep every comment the user deleted.
-			h.syncReviewComments(pr, dialog.Comments())
+			// The reader owns the comments and the read marks while it is open —
+			// it is where they are edited and deleted — so closing it is the
+			// moment its copy becomes the record. Appending as they were written
+			// instead would keep every comment the user deleted.
+			h.syncReviewComments(key, dialog.Comments())
+			h.saveReviewRead(key)
 		}
 		return cmd, true
 	case h.helpOverlay.IsVisible():
@@ -3004,8 +3013,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// it for, and the agent is one key away inside the reader. Placed above
 		// the split-mode branch for the same reason the suspended check is —
 		// on a review row, reading is what Enter means in both modes.
-		if pr := reviewPRNumber(h.selectedSession()); pr != 0 {
-			return h, h.openReader(pr)
+		if k, ok := h.reviewKeyFor(h.selectedSession()); ok {
+			return h, h.openReader(k)
 		}
 		if h.cfg.GetEnterMode() == "split" {
 			return h, h.enterFocusMode()
@@ -7816,7 +7825,13 @@ func (h *Home) selectedPreview(w, height int) (*session.Session, string) {
 	// the diff. The file list wins by default and `v` flips back — you can
 	// always reach the agent itself with Enter.
 	if pr := reviewPRNumber(s); pr != 0 && !h.reviewShowPane {
-		return s, renderReviewFiles(pr, h.reviewFiles[pr], h.reviewShowFolded, w, height)
+		// Keyed lookup, but the DECISION to show this pane still rests on the
+		// number alone: a review whose origin fleet cannot map has no key, and
+		// falling through to the agent pane there would hide the file list on
+		// exactly the session that came for it. It renders "Loading…" instead,
+		// which is what it did before.
+		k, _ := h.reviewKeyFor(s)
+		return s, renderReviewFiles(pr, h.reviewFiles[k], h.reviewShowFolded, w, height)
 	}
 	content := h.previewCache[s.ID]
 	return s, content

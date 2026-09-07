@@ -15,8 +15,7 @@ import (
 // comment leaves it the same way every other dialog result does and the app
 // decides where it goes.
 type reviewCommentMsg struct {
-	pr   int
-	repo string
+	key  reviewKey
 	file string
 	line int
 	kind review.CommentKind
@@ -30,14 +29,14 @@ type reviewCommentMsg struct {
 // from the Update goroutine. It says what the user chose; the app knows where
 // that goes, exactly as reviewCommentMsg already works.
 type reviewSubmitRequestMsg struct {
-	pr    int
+	key   reviewKey
 	event github.ReviewEvent
 	body  string
 }
 
 // reviewSubmitResultMsg carries the outcome back.
 type reviewSubmitResultMsg struct {
-	pr    int
+	key   reviewKey
 	event github.ReviewEvent
 	count int
 	err   error
@@ -281,6 +280,10 @@ func (d *ReaderDialog) Hide() {
 }
 
 func (d *ReaderDialog) Visible() bool { return d.visible }
+
+// key identifies the pull request being read. The reader already holds both
+// halves; naming them together keeps every message it emits addressable.
+func (d *ReaderDialog) key() reviewKey { return reviewKey{repo: d.repo, pr: d.pr} }
 
 // Comments is what the reader has to hand back when it closes.
 func (d *ReaderDialog) Comments() []review.Comment {
@@ -1168,9 +1171,9 @@ func (d *ReaderDialog) updateSubmit(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd
 			return d, nil
 		}
 		d.submitting, d.submitErr = true, ""
-		pr, event, body := d.pr, d.chosenEvent(), strings.TrimSpace(d.submitBody)
+		key, event, body := d.key(), d.chosenEvent(), strings.TrimSpace(d.submitBody)
 		return d, func() tea.Msg {
-			return reviewSubmitRequestMsg{pr: pr, event: event, body: body}
+			return reviewSubmitRequestMsg{key: key, event: event, body: body}
 		}
 
 	case "backspace":
@@ -1249,7 +1252,7 @@ func (d *ReaderDialog) updateCompose(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cm
 		d.rebuildRows()
 		d.toast = strings.ToLower(kind.String()) + " added on line " + itoa(line)
 		return d, func() tea.Msg {
-			return reviewCommentMsg{pr: d.pr, repo: d.repo, file: file, line: line, kind: kind, body: text}
+			return reviewCommentMsg{key: d.key(), file: file, line: line, kind: kind, body: text}
 		}
 
 	case "backspace":

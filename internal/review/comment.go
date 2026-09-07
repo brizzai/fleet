@@ -32,6 +32,21 @@ func (k CommentKind) String() string {
 	return "ISSUE"
 }
 
+// ParseCommentKind reads back what String wrote, defaulting to Issue.
+//
+// Comments persist as their NAME and never as their ordinal: CommentKinds is an
+// iota, so reordering it — adding a fifth kind in the middle, say — would
+// silently reinterpret every row already on disk, turning saved questions into
+// nits with nothing to show it happened.
+func ParseCommentKind(s string) CommentKind {
+	for _, k := range CommentKinds {
+		if k.String() == s {
+			return k
+		}
+	}
+	return CommentIssue
+}
+
 // Prefix is what leads the comment body on GitHub. Lowercase and colon-suffixed
 // because that is the convention already in use; an ISSUE shouts and adds
 // nothing, so it carries no prefix at all.
