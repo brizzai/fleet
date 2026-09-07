@@ -300,7 +300,11 @@ func (h *Home) openReader(k reviewKey) tea.Cmd {
 	h.reader.Show(k.pr, title, author, k.repo, h.reviewWorktree(k), shown, files.Files,
 		h.reviewRead[k], h.seedComments(k))
 	h.actionLog.Add("read review", strconv.Itoa(k.pr), true)
-	return nil
+
+	// The tour rides out on the same keypress, off the Update goroutine. It
+	// takes tens of seconds, so the reader is fully usable the whole time and
+	// the route arrives into a screen you are already reading.
+	return h.maybeStartTour(k, files)
 }
 
 // reviewWorktree is the local checkout of a PR, if one exists.

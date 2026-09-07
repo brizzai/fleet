@@ -1766,6 +1766,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewFilesMsg:
 		return h.handleReviewFiles(msg)
 
+	case reviewTourMsg:
+		return h.handleReviewTour(msg)
+
 	case reviewSubmitRequestMsg:
 		return h.submitReview(msg)
 

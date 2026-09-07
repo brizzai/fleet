@@ -322,6 +322,24 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	// The generated tour of a pull request, cached against the commit it
+	// describes. One row per pull request: a new head makes the old tour wrong
+	// rather than historical, so it is replaced, not accumulated.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS review_tours (
+			repo       TEXT NOT NULL,
+			pr         INTEGER NOT NULL,
+			head_sha   TEXT NOT NULL,
+			tour_json  TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (repo, pr)
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create review_tours table", "error", err)
+		return err
+	}
+
 	// Shells: plain non-agent terminals (dev servers, logs, scratch shells)
 	// shown in the bottom drawer, scoped to a repo/worktree checkout. Wholly
 	// independent of sessions — no FK, no hooks, no auto-naming.
@@ -895,6 +913,36 @@ func (s *StateDB) LoadReviewRead() ([]ReviewReadMark, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// SaveReviewTour caches a generated tour against the commit it describes.
+func (s *StateDB) SaveReviewTour(repo string, pr int, headSHA, tourJSON string) error {
+	if repo == "" || pr == 0 {
+		return nil
+	}
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO review_tours (repo, pr, head_sha, tour_json, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		repo, pr, headSHA, tourJSON, time.Now().Unix())
+	if err != nil {
+		debuglog.Logger.Error("failed to save review tour", "repo", repo, "pr", pr, "error", err)
+	}
+	return err
+}
+
+// LoadReviewTour returns the cached tour for a pull request and the commit it
+// was built from, so the caller can tell a current tour from a stale one.
+//
+// Read on demand rather than swept up at startup, unlike read marks and
+// comments: a tour is a paragraph of JSON per pull request, and there is no
+// question it answers before someone actually opens one.
+func (s *StateDB) LoadReviewTour(repo string, pr int) (headSHA, tourJSON string, ok bool) {
+	row := s.db.QueryRow(
+		"SELECT head_sha, tour_json FROM review_tours WHERE repo = ? AND pr = ?", repo, pr)
+	if err := row.Scan(&headSHA, &tourJSON); err != nil {
+		return "", "", false
+	}
+	return headSHA, tourJSON, true
 }
 
 // SavePRCacheRow upserts a single repo's PR-refresh state. Called per-repo

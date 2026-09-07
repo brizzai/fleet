@@ -39,16 +39,20 @@ func (d *ReaderDialog) View() string {
 	// The accent border marks which panel has the keyboard — the only
 	// border-level focus signal fleet has (design-system §4), and the same one
 	// the sidebar and preview use on the main screen.
+	right, rightTitle, rightStatus := d.rightPanel(diffW, rows)
 	diff := RenderBorderedPanelTopRight(
-		strings.Join(d.renderDiff(diffW-2, rows), "\n"),
-		d.diffTitle(diffW), d.diffStatus(),
+		strings.Join(right, "\n"), rightTitle, rightStatus,
 		diffW, rows+2, !d.treeFocus)
 
 	body := diff
 	if treeW > 0 {
+		left, leftTitle := d.renderTree(treeW-2, rows), "Files"
+		if d.tourMode {
+			left, leftTitle = d.renderTourPanel(treeW-2, rows), "Tour"
+		}
 		tree := RenderBorderedPanelInsets(
-			strings.Join(d.renderTree(treeW-2, rows), "\n"),
-			"Files", "", d.treeFooter(), "",
+			strings.Join(left, "\n"),
+			leftTitle, "", d.treeFooter(), "",
 			treeW, rows+2, d.treeFocus)
 		body = lipgloss.JoinHorizontal(lipgloss.Top, tree, diff)
 	}
@@ -71,6 +75,36 @@ func centreOverlay(panel, under string, width, height int) string {
 	x := max((width-lipgloss.Width(panel))/2, 0)
 	y := max((height-lipgloss.Height(panel))/2, 0)
 	return overlayAt(panel, dimBackdrop(under), x, y)
+}
+
+// rightPanel is the diff, or the narration above it, or a step that has nowhere
+// to send you at all.
+//
+// A tour step with no anchors takes the whole panel: an opening step explaining
+// the shape of a change before any one file makes sense is worth more than a
+// file it could have pointed at, and a diagram needs the wide side of the
+// screen rather than the quarter.
+func (d *ReaderDialog) rightPanel(diffW, rows int) (lines []string, title, status string) {
+	if d.tourMode {
+		if st, an, ok := d.tourSelection(); ok && an == nil && len(st.Anchors) == 0 {
+			return d.renderTourOverview(st, diffW-2, rows), "Tour",
+				fmt.Sprintf("step %d/%d", d.tourStepIndex()+1, len(d.tour.Steps))
+		}
+	}
+
+	title, status = d.diffTitle(diffW), d.diffStatus()
+	var band []string
+	if d.tourMode {
+		band = d.tourBand(diffW - 2)
+	}
+	// The band comes out of the diff's rows, never on top of them: this panel
+	// promises exactly rows lines, and a band that added to them would push the
+	// footer off the bottom of the screen.
+	lines = append(band, d.renderDiff(diffW-2, max(rows-len(band), 1))...)
+	if len(lines) > rows {
+		lines = lines[:rows]
+	}
+	return lines, title, status
 }
 
 // readerKeys is every key the reader answers to, grouped by what you are doing.
@@ -97,6 +131,12 @@ var readerKeys = []struct {
 		{"m", "mark read / unread, stay where you are"},
 		{"s", "show / fold the files salience hid"},
 		{"|", "side-by-side ↔ unified"},
+	}},
+	{"Tour", [][2]string{
+		{"t", "fleet's route through the change ↔ the file list"},
+		{"↑ ↓", "walk the route — the diff follows"},
+		{"→ ←", "into a step's stops, and back out"},
+		{"⏎", "on a stop: keep it and go read"},
 	}},
 	{"Comment", [][2]string{
 		{"c", "comment on this line"},
@@ -386,6 +426,18 @@ func (d *ReaderDialog) diffStatus() string {
 }
 
 func (d *ReaderDialog) treeFooter() string {
+	if d.tourMode {
+		return "t · files"
+	}
+	// The tour's own state lives here while it is being built, because this is
+	// the panel it will appear in — a notice about it anywhere else would be a
+	// notice about nothing the user can see.
+	if st := d.tourStatus(); st != "" {
+		return st
+	}
+	if d.tour != nil {
+		return "t · tour"
+	}
 	if n := d.hiddenCount(); n > 0 {
 		return fmt.Sprintf("⊞ %d folded · s", n)
 	}
@@ -1032,12 +1084,23 @@ func (d *ReaderDialog) keyPairs() []string {
 	if d.treeFocus {
 		// The footer names what ⏎ does NOW, and ⏎ means two different things
 		// depending on whether a folder or a file carries the selection.
+		if d.tourMode {
+			if _, an, ok := d.tourSelection(); ok && an == nil {
+				return []string{"↑↓", "route", "⏎ →", "its stops", "t", "files", "⇥", "back to diff", "?", "keys", "⌃q", "quit"}
+			}
+			return []string{"↑↓", "route", "⏎", "read it", "←", "step", "t", "files", "⇥", "back to diff", "?", "keys", "⌃q", "quit"}
+		}
 		if d.treeCursor < len(d.treeView) && d.treeView[d.treeCursor].IsDir {
 			return []string{"↑↓", "move", "⏎ ←→", "fold", "⇥", "back to diff", "?", "keys", "⌃q", "quit"}
 		}
 		return []string{"↑↓", "file", "⏎", "read it", "←", "folder", "⇥", "back to diff", "?", "keys", "⌃q", "quit"}
 	}
 	base := []string{"↑↓", "scroll", "⇧↑↓", "hunk", "⇧←→", "file", "c", "comment", "S", "submit", "space", "read+next", "/", "find", "⇥", "files", "|", "split", "?", "keys", "⌃q", "quit"}
+	if d.tour != nil || d.tourState == tourWorking {
+		// Advertised only once there is something to show — a key that toasts
+		// "no tour" is a key that taught you nothing.
+		base = append([]string{"t", "tour"}, base...)
+	}
 	if d.hiddenCount() > 0 || d.showAll {
 		base = append(base[:len(base)-2], append([]string{"s", "folded"}, base[len(base)-2:]...)...)
 	}

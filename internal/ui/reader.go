@@ -46,6 +46,35 @@ type reviewSubmitResultMsg struct {
 	err   error
 }
 
+// reviewTourMsg carries a generated tour back to the app.
+type reviewTourMsg struct {
+	key     reviewKey
+	headSHA string
+	tour    *review.Tour
+	err     error
+}
+
+// tourState is how far along the one Claude call fleet makes for itself is.
+type tourState int
+
+const (
+	tourAbsent tourState = iota
+	tourWorking
+	tourReady
+	tourFailed
+)
+
+// tourItem is one row of the tour panel: a step, or one of its anchors.
+//
+// The anchors of the SELECTED step only are ever listed. A tour of five steps
+// with four anchors each is twenty rows in a panel a quarter of the screen
+// wide, which is a file tree again — the point of steps is that you see the
+// route before you see the stops.
+type tourItem struct {
+	step   int
+	anchor int // -1 for the step's own row
+}
+
 // splitMinWidth is where side-by-side starts being readable.
 //
 // Two code columns plus a file tree plus four borders leaves ~55 columns a
@@ -187,6 +216,15 @@ type ReaderDialog struct {
 	hits   []int
 	hitIdx int
 
+	// The tour: fleet's own reading of the pull request, and where you are in
+	// it. tourMode swaps the left panel between the file tree and the route.
+	tour      *review.Tour
+	tourState tourState
+	tourErr   string
+	tourMode  bool
+	tourItems []tourItem
+	tourCur   int
+
 	// The submit sheet. submitEvent indexes submitEvents; submitBody is the
 	// review summary. submitErr is why the last attempt was refused — held on
 	// the sheet rather than shown as a toast, because the fix (type a summary,
@@ -224,6 +262,8 @@ func (d *ReaderDialog) Show(pr int, title, author, repo, worktree string,
 	d.draft = review.Comment{}
 	d.editingID = 0
 	d.query, d.hits, d.hitIdx = "", nil, 0
+	d.tour, d.tourState, d.tourErr = nil, tourAbsent, ""
+	d.tourMode, d.tourItems, d.tourCur = false, nil, 0
 	d.resetSubmit()
 	d.toast = ""
 	d.read = read
@@ -513,13 +553,13 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 
 	case "j", "down":
 		if d.treeFocus {
-			d.moveTree(1)
+			d.moveLeftPanel(1)
 			break
 		}
 		d.moveTo(d.cursor + 1)
 	case "k", "up":
 		if d.treeFocus {
-			d.moveTree(-1)
+			d.moveLeftPanel(-1)
 			break
 		}
 		d.moveTo(d.cursor - 1)
@@ -547,11 +587,20 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 
 	case "left", "h":
 		// ←/→ fold and unfold, the way every file tree does. Free here because
-		// the diff panel puts its file jumps on SHIFT+arrows.
+		// the diff panel puts its file jumps on SHIFT+arrows. In the tour they
+		// mean the same shape of thing: out to the step, in to its stops.
+		if d.treeFocus && d.tourMode {
+			d.stepOutOfAnchor()
+			break
+		}
 		if d.treeFocus {
 			d.collapseAtCursor(true)
 		}
 	case "right", "l":
+		if d.treeFocus && d.tourMode {
+			d.stepIntoAnchor()
+			break
+		}
 		if d.treeFocus {
 			d.collapseAtCursor(false)
 		}
@@ -580,6 +629,17 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 		}
 
 	case "enter":
+		if d.treeFocus && d.tourMode {
+			// On a step, ⏎ goes to its first stop; on a stop it hands the
+			// keyboard to the diff. Same promise as the file tree: you picked
+			// it, now read it.
+			if _, an, ok := d.tourSelection(); ok && an == nil {
+				d.stepIntoAnchor()
+				break
+			}
+			d.treeFocus = false
+			break
+		}
 		if d.treeFocus {
 			// On a directory, Enter folds — the only verb a folder has. On a
 			// file the diff already moved as the selection did, so Enter's job
@@ -626,6 +686,9 @@ func (d *ReaderDialog) Update(msg tea.KeyPressMsg) (*ReaderDialog, tea.Cmd) {
 				d.toast = "marked read"
 			}
 		}
+
+	case "t":
+		d.toggleTour()
 
 	case "c":
 		d.startComment()
@@ -1085,6 +1148,213 @@ func (d *ReaderDialog) deleteComment() {
 	d.doc.DeleteComment(l.Comment.ID)
 	d.rebuildRows()
 	d.toast = "comment deleted"
+}
+
+// SetTour installs a generated tour, or records why there is none.
+func (d *ReaderDialog) SetTour(t *review.Tour, err error) {
+	if err != nil {
+		// A tour already on screen survives a failed regeneration: a route
+		// built against the previous commit still leads somewhere, and blanking
+		// it would cost more than the staleness does.
+		if d.tour == nil {
+			d.tourState, d.tourErr = tourFailed, err.Error()
+		}
+		return
+	}
+	d.tour, d.tourState, d.tourErr = t, tourReady, ""
+	if d.doc != nil {
+		// Bound here rather than at generation, because anchors only mean
+		// anything against the stream the reader is actually showing — which
+		// changes with `s`, and would have to be re-resolved anyway.
+		d.tour.Bind(&d.doc.Stream)
+	}
+	d.tourCur = 0
+	d.rebuildTourItems()
+}
+
+// TourWorking marks the call as in flight, so the panel can say so.
+func (d *ReaderDialog) TourWorking() {
+	if d.tourState == tourAbsent {
+		d.tourState = tourWorking
+	}
+}
+
+// toggleTour swaps the left panel between the file tree and the route.
+//
+// Turning it ON takes the keyboard with it: you pressed `t` because you want to
+// be led, so the panel that leads gets the arrows and the diff follows — the
+// same relationship the file tree already has, which is why the tour costs no
+// new movement keys at all.
+func (d *ReaderDialog) toggleTour() {
+	if d.tourMode {
+		d.tourMode = false
+		d.toast = "files"
+		return
+	}
+	switch d.tourState {
+	case tourWorking:
+		d.toast = "still reading the pull request…"
+		return
+	case tourFailed:
+		d.toast = "no tour — " + d.tourErr
+		return
+	}
+	if d.tour == nil || len(d.tour.Steps) == 0 {
+		d.toast = "no tour for this pull request"
+		return
+	}
+	d.tourMode, d.treeFocus = true, true
+	d.rebuildTourItems()
+	d.showTourItem()
+}
+
+// moveLeftPanel walks whichever list the left panel is showing.
+func (d *ReaderDialog) moveLeftPanel(delta int) {
+	if d.tourMode {
+		d.moveTour(delta)
+		return
+	}
+	d.moveTree(delta)
+}
+
+// stepIntoAnchor moves from a step onto its first stop.
+func (d *ReaderDialog) stepIntoAnchor() {
+	if _, an, ok := d.tourSelection(); !ok || an != nil {
+		return
+	}
+	if d.tourCur+1 < len(d.tourItems) && d.tourItems[d.tourCur+1].anchor == 0 {
+		d.tourCur++
+		d.showTourItem()
+	}
+}
+
+// stepOutOfAnchor moves from a stop back to the step it belongs to.
+func (d *ReaderDialog) stepOutOfAnchor() {
+	if _, an, ok := d.tourSelection(); !ok || an == nil {
+		return
+	}
+	for i := d.tourCur; i >= 0; i-- {
+		if d.tourItems[i].anchor == -1 {
+			d.tourCur = i
+			d.showTourItem()
+			return
+		}
+	}
+}
+
+// rebuildTourItems flattens the route, expanding the selected step's anchors.
+func (d *ReaderDialog) rebuildTourItems() {
+	if d.tour == nil {
+		d.tourItems = nil
+		return
+	}
+	// Which step is selected has to survive the rebuild, or opening a step's
+	// anchors would move the selection off the step that opened them.
+	sel := 0
+	if d.tourCur < len(d.tourItems) {
+		sel = d.tourItems[d.tourCur].step
+	}
+	var items []tourItem
+	cur := 0
+	for i, st := range d.tour.Steps {
+		if i == sel {
+			cur = len(items)
+		}
+		items = append(items, tourItem{step: i, anchor: -1})
+		if i != sel {
+			continue
+		}
+		for a := range st.Anchors {
+			items = append(items, tourItem{step: i, anchor: a})
+		}
+	}
+	// Hold the selection on the same thing it was on: the step row when a step
+	// was selected, the same anchor when one was.
+	if d.tourCur < len(d.tourItems) && d.tourItems[d.tourCur].anchor >= 0 {
+		cur += 1 + d.tourItems[d.tourCur].anchor
+	}
+	d.tourItems = items
+	d.tourCur = min(max(cur, 0), max(len(items)-1, 0))
+}
+
+// moveTour walks the route, re-expanding as the selected step changes.
+func (d *ReaderDialog) moveTour(delta int) {
+	if len(d.tourItems) == 0 {
+		return
+	}
+	next := min(max(d.tourCur+delta, 0), len(d.tourItems)-1)
+	stepChanged := d.tourItems[next].step != d.tourItems[d.tourCur].step
+	d.tourCur = next
+	if stepChanged {
+		// Moving onto a new step opens it and closes the last, so the panel
+		// always shows exactly one step's stops. Rebuilding re-finds the row.
+		step := d.tourItems[next].step
+		d.tourCur = 0
+		d.tourItems = nil
+		d.tourItems = []tourItem{{step: step, anchor: -1}}
+		d.rebuildTourItems()
+		for i, it := range d.tourItems {
+			if it.step == step && it.anchor == -1 {
+				d.tourCur = i
+				break
+			}
+		}
+		// Entering a step from below lands on its last anchor, so ↑ keeps
+		// walking backwards through the route rather than skipping its stops.
+		if delta < 0 {
+			for i := len(d.tourItems) - 1; i >= 0; i-- {
+				if d.tourItems[i].step == step {
+					d.tourCur = i
+					break
+				}
+			}
+		}
+	}
+	d.showTourItem()
+}
+
+// showTourItem scrolls the diff to whatever the route is pointing at.
+//
+// A step with no anchors of its own borrows its first one, so selecting a step
+// still moves the diff — and a step with none at all (an overview) leaves the
+// diff alone, because it takes over the panel itself.
+func (d *ReaderDialog) showTourItem() {
+	st, an, ok := d.tourSelection()
+	if !ok {
+		return
+	}
+	if an != nil {
+		d.jumpStream(an.Row)
+		return
+	}
+	if len(st.Anchors) > 0 {
+		d.jumpStream(st.Anchors[0].Row)
+	}
+}
+
+// tourSelection returns the selected step, and the anchor within it if the
+// selection is on one.
+func (d *ReaderDialog) tourSelection() (*review.Step, *review.Anchor, bool) {
+	if d.tour == nil || d.tourCur >= len(d.tourItems) {
+		return nil, nil, false
+	}
+	it := d.tourItems[d.tourCur]
+	if it.step >= len(d.tour.Steps) {
+		return nil, nil, false
+	}
+	st := &d.tour.Steps[it.step]
+	if it.anchor >= 0 && it.anchor < len(st.Anchors) {
+		return st, &st.Anchors[it.anchor], true
+	}
+	return st, nil, true
+}
+
+// tourStepIndex is which step the route is on, for the "2/5" in the band.
+func (d *ReaderDialog) tourStepIndex() int {
+	if d.tourCur < len(d.tourItems) {
+		return d.tourItems[d.tourCur].step
+	}
+	return 0
 }
 
 // openSubmit raises the submit sheet.

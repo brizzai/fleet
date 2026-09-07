@@ -181,11 +181,65 @@ worktree · **G2** search · **H1** no commits pane yet.
 - [ ] `e` to hand a comment to `$EDITOR` (today it edits inline)
 - [ ] A commits pane, scoping the diff to a revision range (**H2**, deferred)
 
-## 5 · The tour
+## 5 · The tour — DONE
 
-- [ ] fleet makes its own Claude call when a review is opened — independent of how you review
-- [ ] Writes a tour file; cache keyed on the PR head SHA or it regenerates every visit
-- [ ] Renders as ordered steps over the diff
+Decisions: **steps are one idea with several anchors** · **generated on reader
+open, async** · **second mode of the file tree** · **the guide chooses the road,
+you do the reviewing**.
+
+- [x] `internal/review/tour.go` — the route, its parsing, and what makes it safe to render
+- [x] `internal/claudeaccount/ask.go` — one non-interactive `claude -p` call on a chosen account
+- [x] `t` swaps the left panel between the file list and the route; `↑↓` walks it and the diff follows
+- [x] Cached in `review_tours`, keyed on the head SHA; a push is what makes fleet ask again
+- [x] Tests: fenced/prefixed JSON, unsafe diagrams, anchor binding, exact size at four terminal sizes
+
+**The guide chooses the road; you do the reviewing.** The instruction forbids
+praise, concerns, suggestions and verdicts outright, and a test pins that it
+does. A tour that volunteered an opinion before you had read anything would be
+worse than no tour, because you would trust it — the same discipline that keeps
+fleet's read marks its own rather than GitHub's, and stops the reader guessing
+where a comment moved after a force-push.
+
+**A step is one IDEA, not one place.** A design lives across files — the model,
+what flattens it, what hangs off it — so a step carries several anchors and only
+the selected step shows them. One anchor per step would have turned a tour about
+the design into a tour about locations, and twenty rows in a quarter-width panel
+is a file tree again.
+
+**Every anchor is checked against the stream the reader is actually showing**
+(`Tour.Bind`). The model answers about a diff, not about the reader's flattening.
+A line that is not in any hunk snaps to its file's first hunk *and loses its line
+number*, because being sent to the right file is the substance and claiming a
+line would be a lie. A file that is not in the change at all is dropped — there
+is nowhere honest to send you. A step whose anchors all fail keeps its place: it
+still has a title, a brief and possibly a diagram.
+
+**A step with no anchors takes the whole diff panel.** An opening step that
+explains the shape of a change before any one file makes sense is worth more
+than a file it could have pointed at, and a diagram needs the wide side of the
+screen rather than the quarter.
+
+**Diagrams are dropped, never truncated.** A drawing cut at the right edge is not
+a smaller drawing, it is a wrong one — the arrow saying where the data goes is
+the part that gets cut. So `safeDiagram` refuses anything over 72 columns or 24
+lines, or using a glyph outside the box-drawing set fleet already vets for
+width-1 and Menlo coverage. Fixed at 72 because a tour is cached against a
+commit and then has to survive every terminal size after it.
+
+**Instruction in argv, changeset on stdin.** argv is world-readable through
+`ps`, so fleet's own words may go there and other people's code may not — and a
+300KB argument is not something to hand a shell anyway. The input is the
+salience-filtered file list, budgeted, and the model is told when files were
+dropped so the tour never claims to have seen them.
+
+**The reviewing session's account pays**, when there is one: the tour is part of
+the same piece of work, and running it elsewhere would split one review across
+two quotas. Otherwise the ordinary strategy decides, honouring the origin's
+allowlist — a call fleet makes for itself is still a call on someone's
+subscription. No `--model` flag: the account's own default.
+
+Open: `n`/`p` to walk the route from the diff panel without focusing the tour
+(`n` is taken by search).
 
 ## 6 · Comment and post
 

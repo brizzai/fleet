@@ -42,6 +42,7 @@ query($q: String!, $limit: Int!) {
         url
         isDraft
         headRefOid
+        body
         updatedAt
         additions
         deletions
@@ -56,8 +57,12 @@ query($q: String!, $limit: Int!) {
 
 // ReviewRequest is one open pull request waiting on this user's review.
 type ReviewRequest struct {
-	Number       int
-	Title        string
+	Number int
+	Title  string
+	// Body is the author's own description, which is the best context anyone
+	// gets for free — it says what the change is meant to do, which no amount
+	// of reading the diff recovers.
+	Body         string
 	URL          string
 	Repo         string // owner/name
 	Author       string
@@ -81,6 +86,7 @@ type ghReviewNode struct {
 	URL          string    `json:"url"`
 	IsDraft      bool      `json:"isDraft"`
 	HeadRefOid   string    `json:"headRefOid"`
+	Body         string    `json:"body"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 	Additions    int       `json:"additions"`
 	Deletions    int       `json:"deletions"`
@@ -182,6 +188,7 @@ func ReviewsRequested(ctx context.Context) ([]ReviewRequest, error) {
 		out = append(out, ReviewRequest{
 			Number: n.Number,
 			Title:  n.Title,
+			Body:   n.Body,
 			URL:    n.URL,
 			Repo:   n.Repository.NameWithOwner,
 			Author: n.Author.Login,
