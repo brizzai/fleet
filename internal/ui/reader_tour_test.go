@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brizzai/fleet/internal/review"
 )
@@ -318,5 +319,53 @@ func TestSessionTabOffersToStartOne(t *testing.T) {
 	// And it must not fire twice while the first is still coming up.
 	if second := readerPress(t, d, "enter"); second != nil {
 		t.Error("a second enter asked for another session while one was starting")
+	}
+}
+
+// A step's brief is prose written by the same model in the same voice as the
+// pull request description beside it. Rendering one properly and the other as
+// flat text made the tour look like a draft of the page next to it.
+func TestTourOverviewRendersLikeTheDescription(t *testing.T) {
+	d := newDemoReader(t, 160, 40)
+	st := &review.Step{
+		Title:   "Boot work becomes deploy work",
+		Brief:   "Every sweep moves out of `boot` and into one process that will **assert** them.",
+		Diagram: "build ──▶ migrate job ──▶ deploy",
+	}
+	out := strings.Join(d.renderTourOverview(st, 100, 20), "\n")
+
+	for _, marker := range []string{"`", "**"} {
+		if strings.Contains(out, marker) {
+			t.Errorf("the brief kept its %q markers — it is not going through the "+
+				"renderer the description uses:\n%s", marker, out)
+		}
+	}
+	if !strings.Contains(out, "boot") || !strings.Contains(out, "assert") {
+		t.Error("the brief lost text")
+	}
+	// The diagram is a code block: the rule down its left edge separates a
+	// drawing from the prose above it without needing a caption to say so.
+	// Compared with the escapes stripped — the rule and the text are separately
+	// styled, so the two never sit next to each other as literal bytes.
+	if plain := ansi.Strip(out); !strings.Contains(plain, "│ build ──▶ migrate job") {
+		t.Errorf("the diagram is not rendered as a code block:\n%s", plain)
+	}
+}
+
+// The band above the code carries the same prose, so it needs the same
+// treatment — and the same style-then-wrap order, or emphasis around a phrase
+// longer than the measure strands its markers on two lines.
+func TestTourBandRendersInlineMarkdown(t *testing.T) {
+	d := readerWithTour(t, 200, 40)
+	d.tour.Steps[1].Brief = "It replaces `skip_migrations` with a **mode**."
+	readerPress(t, d, "t")
+	readerPress(t, d, "down")
+
+	band := strings.Join(d.tourBand(d.diffWidth()-2), "\n")
+	if strings.Contains(band, "`") || strings.Contains(band, "**") {
+		t.Errorf("the band kept its markers:\n%s", band)
+	}
+	if !strings.Contains(band, "skip_migrations") {
+		t.Error("the band lost the identifier")
 	}
 }

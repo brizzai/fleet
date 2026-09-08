@@ -202,7 +202,10 @@ func (d *ReaderDialog) tourBand(width int) []string {
 	if inner < 16 {
 		return nil
 	}
-	lines := wrapTo(inner, body)
+	// Styled first, then wrapped ANSI-aware — the same order the description
+	// needs, and for the same reason: emphasis around a phrase is longer than
+	// the measure, and wrapping first leaves its markers stranded on two lines.
+	lines := strings.Split(ansi.Wordwrap(renderInlineMarkdown(body), inner, ""), "\n")
 	if len(lines) > tourBandLines {
 		lines = lines[:tourBandLines]
 		lines[tourBandLines-1] = ansi.Truncate(lines[tourBandLines-1], inner, "…")
@@ -215,7 +218,7 @@ func (d *ReaderDialog) tourBand(width int) []string {
 	out := []string{border.Render("╭─ ") + head + border.Render(" "+strings.Repeat("─", fill)+"╮")}
 	for _, l := range lines {
 		pad := strings.Repeat(" ", max(inner-lipgloss.Width(l), 0))
-		out = append(out, border.Render("│ ")+SessionItemStyle.Render(l)+pad+border.Render(" │"))
+		out = append(out, border.Render("│ ")+l+pad+border.Render(" │"))
 	}
 	out = append(out, border.Render("╰"+strings.Repeat("─", inner+2)+"╯"))
 	return out
@@ -240,13 +243,28 @@ func (d *ReaderDialog) renderTourOverview(st *review.Step, width, rows int) []st
 	put("")
 	put("  " + TitleStyle.Render(ansi.Truncate(st.Title, max(width-4, 8), "…")))
 	put("")
-	for _, l := range wrapTo(min(width-6, 76), st.Brief) {
-		put("  " + SessionItemStyle.Render(l))
+
+	// The same renderer the pull request description gets. A step's brief is
+	// prose written by the same model, in the same voice, with the same inline
+	// code and emphasis in it — rendering one properly and the other as flat
+	// text made the tour look like the draft of the page beside it.
+	for _, para := range strings.Split(st.Brief, "\n") {
+		if strings.TrimSpace(para) == "" {
+			put("")
+			continue
+		}
+		for _, l := range renderMDParagraph(para, min(width-4, proseMeasure)) {
+			put("  " + l)
+		}
 	}
+
 	if st.Diagram != "" {
 		put("")
-		for _, l := range strings.Split(st.Diagram, "\n") {
-			put("  " + DiffNumStyle.Render(ansi.Truncate(l, max(width-4, 8), "")))
+		// And the diagram is a code block, because that is what it is: the
+		// rule down its left edge is what separates a drawing from the prose
+		// above it without needing a caption to say so.
+		for _, l := range renderMDCode(strings.Split(st.Diagram, "\n"), max(width-4, 8)) {
+			put("  " + l)
 		}
 	}
 	return out

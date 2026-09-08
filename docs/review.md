@@ -343,6 +343,14 @@ Six stacked rows became three, in two columns.
   one — so the tab is usually an offer, and `⏎` routes through the same
   `startReview` the `c` queue uses.
 
+**The tour renders through the description's renderer.** A step's brief is prose
+written by the same model in the same voice as the pull request body beside it —
+rendering one with inline code and emphasis and the other as flat text made the
+tour look like a draft of the page next to it. The diagram goes through the code
+block path, so the rule down its left edge separates a drawing from the prose
+above it without needing a caption. The instruction now permits light markdown
+in a brief for the same reason.
+
 Open: `n`/`p` to walk the route from the diff panel without focusing the tour
 (`n` is taken by search).
 

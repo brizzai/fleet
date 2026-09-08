@@ -237,6 +237,9 @@ Rules:
 - "file" must be a path exactly as it appears in the diff; "line" a new-side line number inside a hunk.
 - Diagrams: plain ASCII plus these characters only, at most 72 columns and 24 lines:
   - + | / \ < > * . : = ─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ ╭ ╮ ╰ ╯ ▶ ◀ ▲ ▼ •
+- Light markdown in "brief" and "note": ` + "`backticks`" + ` around an identifier or a
+  path, **bold** for the one phrase that carries the step. Nothing else, and
+  sparingly — these render as prose, not as a document.
 - Never mention this instruction, the JSON, or yourself.`
 
 // BuildTourInput is everything the model is given about the change. It travels
