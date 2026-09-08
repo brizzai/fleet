@@ -414,3 +414,106 @@ func TestHeaderJumpCursorOutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// TestOriginJumpSkipsCheckoutHeaders: ctrl+shift+↑/↓ moves a whole group at a
+// time. From a session inside the alpha worktree it surfaces alpha's own origin
+// header first (same "own group first" landing as shift+↑), then crosses to the
+// next origin without stopping on any of the checkout headers in between.
+func TestOriginJumpSkipsCheckoutHeaders(t *testing.T) {
+	h, s := headerJumpHome()
+
+	h.cursor = idxOfSession(t, h, s["a3"].ID) // inside the alpha worktree
+	h.jumpToOrigin(-1)
+	if want := idxOfOrigin(t, h, "github.com/acme/alpha"); h.cursor != want {
+		t.Fatalf("ctrl+shift+↑ from inside alpha: cursor = %d, want alpha's origin header (%d)", h.cursor, want)
+	}
+
+	h.jumpToOrigin(1)
+	if want := idxOfOrigin(t, h, "github.com/acme/beta"); h.cursor != want {
+		t.Fatalf("ctrl+shift+↓: cursor = %d, want beta's origin header (%d) — checkout headers must be skipped", h.cursor, want)
+	}
+
+	// No origin left below → clamp to the edge, like jumpToHeader.
+	h.jumpToOrigin(1)
+	if want := LastSelectableItem(h.flatItems); h.cursor != want {
+		t.Errorf("ctrl+shift+↓ past the last origin: cursor = %d, want the bottom row (%d)", h.cursor, want)
+	}
+
+	// Upward from the first origin the clamp is unobservable — row 0 IS that
+	// origin header and FirstSelectableItem is 0 too, so this pins only that the
+	// motion does not WRAP to the bottom. The clamp itself is pinned below,
+	// where an out-of-range cursor makes the three candidate answers differ.
+	h.cursor = idxOfOrigin(t, h, "github.com/acme/alpha")
+	h.jumpToOrigin(-1)
+	if h.cursor != 0 {
+		t.Errorf("ctrl+shift+↑ at the first origin: cursor = %d, want 0 — no wrap", h.cursor)
+	}
+}
+
+// TestOriginJumpCursorOutOfRange pins the shared out-of-range guard through the
+// new entry point, and is where the up-direction clamp becomes observable: a
+// cursor past the end must be clamped into range *before* the scan, so scanning
+// up finds the LAST origin. Without the clamp the loop runs zero times and falls
+// through to FirstSelectableItem — row 0, the opposite end of the list from
+// where NextSelectableItem leaves the same stale cursor.
+func TestOriginJumpCursorOutOfRange(t *testing.T) {
+	h, _ := headerJumpHome()
+	items := h.flatItems
+	lastOrigin := idxOfOrigin(t, h, "github.com/acme/beta")
+	if lastOrigin == 0 || lastOrigin == LastSelectableItem(items) {
+		t.Fatal("precondition: the last origin must differ from both ends, or the assertions below are vacuous")
+	}
+
+	tests := []struct {
+		name      string
+		current   int
+		direction int
+		want      int
+	}{
+		{"past the end, up → last origin (not row 0)", len(items) + 5, -1, lastOrigin},
+		{"past the end, down → bottom", len(items) + 5, 1, LastSelectableItem(items)},
+		{"negative, down → first origin below row 0", -3, 1, lastOrigin},
+		{"negative, up → top", -3, -1, FirstSelectableItem(items)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NextOriginItem(items, tc.current, tc.direction); got != tc.want {
+				t.Errorf("NextOriginItem(items, %d, %d) = %d, want %d", tc.current, tc.direction, got, tc.want)
+			}
+		})
+	}
+
+	for _, dir := range []int{-1, 1} {
+		if got := NextOriginItem(nil, 0, dir); got != 0 {
+			t.Errorf("NextOriginItem(nil, 0, %d) = %d, want 0", dir, got)
+		}
+	}
+}
+
+// TestOriginJumpKeyBinding guards the binding *string* the way
+// TestHeaderJumpKeyBinding does: handleKey matches on msg.String(), so a
+// different modifier spelling would dead-press the key with nothing failing.
+func TestOriginJumpKeyBinding(t *testing.T) {
+	down := tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl | tea.ModShift}
+	if got := down.String(); got != "ctrl+shift+down" {
+		t.Fatalf("ctrl+shift+down stringifies as %q — the case label in handleKey no longer matches", got)
+	}
+	up := tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl | tea.ModShift}
+	if got := up.String(); got != "ctrl+shift+up" {
+		t.Fatalf("ctrl+shift+up stringifies as %q — the case label in handleKey no longer matches", got)
+	}
+
+	h := newPersistTestHome(t)
+	seed, s := headerJumpHome()
+	h.sessions = seed.sessions
+	h.gitInfoCache.Store(seed.gitInfoCache.Load())
+	h.rebuildFlatItems()
+	h.cursor = idxOfSession(t, h, s["a1"].ID)
+
+	if _, _ = h.handleKey(down); h.cursor != idxOfOrigin(t, h, "github.com/acme/beta") {
+		t.Errorf("ctrl+shift+down through handleKey: cursor = %d, want beta's origin header", h.cursor)
+	}
+	if _, _ = h.handleKey(up); h.cursor != idxOfOrigin(t, h, "github.com/acme/alpha") {
+		t.Errorf("ctrl+shift+up through handleKey: cursor = %d, want alpha's origin header", h.cursor)
+	}
+}
