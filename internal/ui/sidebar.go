@@ -916,6 +916,23 @@ func LastSelectableItem(items []SidebarItem) int {
 // straight through to the edge clamp — sending the cursor to the *opposite* end of
 // the list from where NextSelectableItem leaves it in the same state.
 func NextHeaderItem(items []SidebarItem, current, direction int) int {
+	return nextRowMatching(items, current, direction, func(it SidebarItem) bool {
+		return it.IsRepoHeader
+	})
+}
+
+// NextOriginItem is NextHeaderItem narrowed to origin headers: checkout headers
+// are scanned past rather than landed on, so ctrl+shift+↑/↓ moves a whole group
+// at a time however many worktrees sit under it. Everything else — the "own
+// group first" landing, the edge clamp, the out-of-range guard — is the same
+// scan, so the two motions can't disagree about what a stale cursor means.
+func NextOriginItem(items []SidebarItem, current, direction int) int {
+	return nextRowMatching(items, current, direction, func(it SidebarItem) bool {
+		return it.IsOriginHeader
+	})
+}
+
+func nextRowMatching(items []SidebarItem, current, direction int, match func(SidebarItem) bool) int {
 	if len(items) == 0 {
 		return 0
 	}
@@ -925,7 +942,7 @@ func NextHeaderItem(items []SidebarItem, current, direction int) int {
 		current = len(items) - 1
 	}
 	for i := current + direction; i >= 0 && i < len(items); i += direction {
-		if items[i].IsRepoHeader {
+		if match(items[i]) {
 			return i
 		}
 	}

@@ -414,3 +414,61 @@ func TestHeaderJumpCursorOutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// TestOriginJumpSkipsCheckoutHeaders: ctrl+shift+↑/↓ moves a whole group at a
+// time. From a session inside the alpha worktree it surfaces alpha's own origin
+// header first (same "own group first" landing as shift+↑), then crosses to the
+// next origin without stopping on any of the checkout headers in between.
+func TestOriginJumpSkipsCheckoutHeaders(t *testing.T) {
+	h, s := headerJumpHome()
+
+	h.cursor = idxOfSession(t, h, s["a3"].ID) // inside the alpha worktree
+	h.jumpToOrigin(-1)
+	if want := idxOfOrigin(t, h, "github.com/acme/alpha"); h.cursor != want {
+		t.Fatalf("ctrl+shift+↑ from inside alpha: cursor = %d, want alpha's origin header (%d)", h.cursor, want)
+	}
+
+	h.jumpToOrigin(1)
+	if want := idxOfOrigin(t, h, "github.com/acme/beta"); h.cursor != want {
+		t.Fatalf("ctrl+shift+↓: cursor = %d, want beta's origin header (%d) — checkout headers must be skipped", h.cursor, want)
+	}
+
+	// No origin left in either direction → clamp to the edge, like jumpToHeader.
+	h.jumpToOrigin(1)
+	if want := LastSelectableItem(h.flatItems); h.cursor != want {
+		t.Errorf("ctrl+shift+↓ past the last origin: cursor = %d, want the bottom row (%d)", h.cursor, want)
+	}
+	h.cursor = idxOfOrigin(t, h, "github.com/acme/alpha")
+	h.jumpToOrigin(-1)
+	if want := FirstSelectableItem(h.flatItems); h.cursor != want {
+		t.Errorf("ctrl+shift+↑ above the first origin: cursor = %d, want the top row (%d)", h.cursor, want)
+	}
+}
+
+// TestOriginJumpKeyBinding guards the binding *string* the way
+// TestHeaderJumpKeyBinding does: handleKey matches on msg.String(), so a
+// different modifier spelling would dead-press the key with nothing failing.
+func TestOriginJumpKeyBinding(t *testing.T) {
+	down := tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl | tea.ModShift}
+	if got := down.String(); got != "ctrl+shift+down" {
+		t.Fatalf("ctrl+shift+down stringifies as %q — the case label in handleKey no longer matches", got)
+	}
+	up := tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl | tea.ModShift}
+	if got := up.String(); got != "ctrl+shift+up" {
+		t.Fatalf("ctrl+shift+up stringifies as %q — the case label in handleKey no longer matches", got)
+	}
+
+	h := newPersistTestHome(t)
+	seed, s := headerJumpHome()
+	h.sessions = seed.sessions
+	h.gitInfoCache.Store(seed.gitInfoCache.Load())
+	h.rebuildFlatItems()
+	h.cursor = idxOfSession(t, h, s["a1"].ID)
+
+	if _, _ = h.handleKey(down); h.cursor != idxOfOrigin(t, h, "github.com/acme/beta") {
+		t.Errorf("ctrl+shift+down through handleKey: cursor = %d, want beta's origin header", h.cursor)
+	}
+	if _, _ = h.handleKey(up); h.cursor != idxOfOrigin(t, h, "github.com/acme/alpha") {
+		t.Errorf("ctrl+shift+up through handleKey: cursor = %d, want alpha's origin header", h.cursor)
+	}
+}

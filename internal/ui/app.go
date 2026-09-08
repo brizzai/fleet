@@ -2914,6 +2914,14 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.jumpToHeader(-1)
 		analytics.Track(analytics.EventHeaderJump, nil)
 		return h, h.fetchPreviewForSelected()
+	case "ctrl+shift+down":
+		h.jumpToOrigin(1)
+		analytics.Track(analytics.EventHeaderJump, nil)
+		return h, h.fetchPreviewForSelected()
+	case "ctrl+shift+up":
+		h.jumpToOrigin(-1)
+		analytics.Track(analytics.EventHeaderJump, nil)
+		return h, h.fetchPreviewForSelected()
 	case "pgdown":
 		target := h.cursor + h.sidebarPanelRows()
 		if target > len(h.flatItems)-1 {
@@ -5381,6 +5389,13 @@ func (h *Home) collapseRepoAtCursor() {
 // still emits its header row, so every target is already in flatItems.
 func (h *Home) jumpToHeader(direction int) {
 	h.cursor = NextHeaderItem(h.flatItems, h.cursor, direction)
+	h.syncViewport()
+}
+
+// jumpToOrigin is jumpToHeader over origin headers only — the same motion one
+// level up, so a repo with a dozen worktrees costs one press instead of a dozen.
+func (h *Home) jumpToOrigin(direction int) {
+	h.cursor = NextOriginItem(h.flatItems, h.cursor, direction)
 	h.syncViewport()
 }
 
