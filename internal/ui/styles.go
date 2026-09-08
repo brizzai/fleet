@@ -97,9 +97,17 @@ var (
 	HelpSepStyle  lipgloss.Style
 
 	// Git info styles.
-	BranchStyle      lipgloss.Style
-	DirtyStyle       lipgloss.Style
-	PROpenStyle      lipgloss.Style
+	BranchStyle lipgloss.Style
+	DirtyStyle  lipgloss.Style
+	PROpenStyle lipgloss.Style
+	// ReviewLabelStyle is a pull request's labels in the preview: a quiet band
+	// carrying the shape of a chip, because that is what a label is and it is
+	// how everyone already reads them.
+	//
+	// Its own role rather than SelectionPill(false), which is what it borrowed
+	// first: a label is data, not a selection, and the pill is bold — three of
+	// them outweighed the state row, which is the thing you actually scan.
+	ReviewLabelStyle lipgloss.Style
 	PRFailStyle      lipgloss.Style
 	PRPendingStyle   lipgloss.Style
 	PRMergedStyle    lipgloss.Style
@@ -182,6 +190,7 @@ func ApplyPalette(p Palette) {
 	BranchStyle = lipgloss.NewStyle().Foreground(ColorBlue)
 	DirtyStyle = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	PROpenStyle = lipgloss.NewStyle().Foreground(ColorGreen)
+	ReviewLabelStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
 	PRFailStyle = lipgloss.NewStyle().Foreground(ColorRed)
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
 	PRMergedStyle = lipgloss.NewStyle().Foreground(ColorPurple)

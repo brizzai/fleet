@@ -291,6 +291,29 @@ The file list moved into the reader, where the tree and the tour already answer
 longer changes anything on that screen — it decides which list the reader opens
 on.
 
+### The header
+
+Six stacked rows became three, in two columns.
+
+- **No title row.** The panel's own bar already reads
+  `Preview · #5266 [BRZ-3641] Run migrations… · finished`. Repeating it was two
+  rows of stutter before a single fact.
+- **Facts left, state right.** What describes the change reads left to right;
+  what you are waiting on sits right, where the eye finds it without reading the
+  line — and on a queue that is the half you scan. They stack when the width
+  cannot hold both, so a narrow pane loses the layout rather than the content.
+- **`+946 −39` is coloured.** It is the one pair of numbers everybody scans, and
+  uncoloured in body text it reads as prose rather than as a measurement.
+- **Branch names moved from the gutter colour to the body colour.** They were
+  too quiet to read, and the base is occasionally the news: "into master" is
+  true of nearly every pull request, "into aviv/brz-3639-collapse-migrations"
+  means this one is stacked on another and merges after it.
+- **A draft carries no fill.** The design system spends a background on the
+  cursor and the caret; a state indicator that fills competes with both.
+- **Labels got their own role** (`ReviewLabelStyle`) rather than borrowing
+  `SelectionPill(false)`. A label is data, not a selection — and the pill is
+  bold, so three of them outweighed the state row.
+
 ### Three tabs
 
 `1` tour · `2` diff · `3` session. `t` survives as the 1↔2 toggle it was.

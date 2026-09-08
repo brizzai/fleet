@@ -32,11 +32,10 @@ func demoReview() github.ReviewRequest {
 func TestReviewPreviewRendersFromTheQueueAlone(t *testing.T) {
 	out := renderReviewPreview(demoReview(), 90, 30)
 	for _, want := range []string{
-		"Triage runs", // the title
-		"Open",        // state
-		"master",      // where it lands
-		"94 files",    // size
-		"+9426",       // and how big
+		"Open",     // state
+		"master",   // where it lands
+		"94 files", // size
+		"+9426",    // and how big
 		"review required",
 		"50 checks",
 		"77 comments",
@@ -46,6 +45,50 @@ func TestReviewPreviewRendersFromTheQueueAlone(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("preview is missing %q", want)
 		}
+	}
+}
+
+// The panel's own bar already reads "Preview · #5266 <title> · finished", so a
+// title row here was two rows of stutter before a single fact.
+func TestReviewPreviewDoesNotRepeatTheTitle(t *testing.T) {
+	if strings.Contains(renderReviewPreview(demoReview(), 90, 30), "Triage runs") {
+		t.Error("the title is rendered inside the panel that already names it")
+	}
+}
+
+// The pane is often 150 columns and the header was six rows stacked at one
+// indent. What describes the change reads left; what you are waiting on sits
+// right, where the eye finds it without reading the line.
+func TestReviewHeaderUsesTwoColumnsWhenItCan(t *testing.T) {
+	r := demoReview()
+	wide := reviewHeaderLines(r, 150)
+	if len(wide) != 3 {
+		t.Fatalf("wide header is %d rows, want facts + branches + labels", len(wide))
+	}
+	if !strings.Contains(wide[0], "hayke102") {
+		t.Errorf("row 0 has no author: %q", wide[0])
+	}
+	if !strings.Contains(wide[0], "checks") {
+		t.Error("the state did not join the facts row on a wide pane")
+	}
+
+	// Narrow: it stacks rather than truncating, so a small pane loses the
+	// layout and not the content.
+	narrow := reviewHeaderLines(r, 44)
+	if len(narrow) <= len(wide) {
+		t.Errorf("narrow header is %d rows, wide is %d — it should stack", len(narrow), len(wide))
+	}
+	if !strings.Contains(strings.Join(narrow, "\n"), "checks") {
+		t.Error("stacking dropped the state instead of moving it")
+	}
+}
+
+// "into master" is true of nearly every pull request; "into
+// aviv/brz-3639-collapse-migrations" means this one is stacked on another.
+func TestReviewHeaderShowsBothBranches(t *testing.T) {
+	out := strings.Join(reviewHeaderLines(demoReview(), 150), "\n")
+	if !strings.Contains(out, "master") || !strings.Contains(out, "brz-3620") {
+		t.Errorf("the branch pair is missing:\n%s", out)
 	}
 }
 

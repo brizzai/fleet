@@ -25,28 +25,12 @@ func renderReviewPreview(r github.ReviewRequest, width, height int) string {
 	var out []string
 	put := func(s string) { out = append(out, "  "+s) }
 
-	for _, l := range wrapTo(inner, r.Title) {
-		put(TitleStyle.Render(l))
+	// No title row. The panel's own bar already reads
+	// "Preview · #5266 [BRZ-3641] Run migrations… · finished", so repeating it
+	// here was two rows of stutter before a single fact.
+	for _, l := range reviewHeaderLines(r, inner) {
+		put(l)
 	}
-	put("")
-
-	// State and where it lands. The branch pair is the one fact that says what
-	// this change is against, and it is missing from every other fleet surface.
-	head := reviewStatePill(r)
-	if r.BaseRef != "" && r.HeadRef != "" {
-		head += "   " + DiffNumStyle.Render(r.BaseRef) + DimStyle.Render(" ← ") +
-			DiffNumStyle.Render(truncFront(r.HeadRef, max(inner-len(r.BaseRef)-16, 12)))
-	}
-	put(ansi.Truncate(head, inner, "…"))
-
-	put(DimStyle.Render(ansi.Truncate(reviewSizeLine(r), inner, "…")))
-	if line := reviewStateLine(r); line != "" {
-		put(ansi.Truncate(line, inner, "…"))
-	}
-	if labels := reviewLabelRow(r.Labels, inner); labels != "" {
-		put(labels)
-	}
-
 	put(lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", inner)))
 
 	// The description, which is the whole reason a pull request page opens on
@@ -62,26 +46,89 @@ func renderReviewPreview(r github.ReviewRequest, width, height int) string {
 	return strings.Join(out, "\n")
 }
 
-// reviewStatePill is open/draft, in the sidebar's own vocabulary — the same
-// glyph means the same thing here as on the row you came from.
-func reviewStatePill(r github.ReviewRequest) string {
-	if r.IsDraft {
-		return SelectionPill(false).Render(" ◌ Draft ")
+// reviewHeaderLines is everything above the description: what the change is,
+// and what it is waiting on.
+//
+// Two columns where the pane allows it. The facts that describe the change read
+// left to right; the things you are waiting on sit right, where the eye finds
+// them without reading the line — and on a review queue that second group is
+// the one you scan. They stack when the width cannot hold both, so a narrow
+// pane loses the layout rather than the content.
+func reviewHeaderLines(r github.ReviewRequest, width int) []string {
+	left, right := reviewFactsLine(r), reviewStateLine(r)
+
+	var out []string
+	switch {
+	case right == "":
+		out = append(out, ansi.Truncate(left, width, "…"))
+	case lipgloss.Width(left)+lipgloss.Width(right)+4 <= width:
+		gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+		out = append(out, left+strings.Repeat(" ", gap)+right)
+	default:
+		out = append(out, ansi.Truncate(left, width, "…"), ansi.Truncate(right, width, "…"))
 	}
-	return PROpenStyle.Render("◉ Open")
+	if line := reviewBranchLine(r, width); line != "" {
+		out = append(out, line)
+	}
+	if labels := reviewLabelRow(r.Labels, width); labels != "" {
+		out = append(out, labels)
+	}
+	return out
 }
 
-// reviewSizeLine is who, when, and how big.
-func reviewSizeLine(r github.ReviewRequest) string {
-	parts := []string{r.Author}
+// reviewFactsLine is the change itself: its state, who wrote it, how old it is
+// and how big.
+//
+// The insertion and deletion counts are coloured because they are the one pair
+// of numbers everybody scans, and because a bare "+946 −39" in body text reads
+// as prose rather than as a measurement.
+func reviewFactsLine(r github.ReviewRequest) string {
+	dot := DimStyle.Render(" · ")
+	parts := []string{
+		reviewStatePill(r),
+		lipgloss.NewStyle().Foreground(ColorText).Render(r.Author),
+	}
 	if age := reviewAge(r.UpdatedAt); age != "" {
-		parts = append(parts, age)
+		parts = append(parts, DimStyle.Render(age))
 	}
 	if r.ChangedFiles > 0 {
-		parts = append(parts, plural(r.ChangedFiles, "file"))
+		parts = append(parts, DimStyle.Render(plural(r.ChangedFiles, "file")))
 	}
-	parts = append(parts, fmt.Sprintf("+%d −%d", r.Additions, r.Deletions))
-	return strings.Join(parts, " · ")
+	parts = append(parts,
+		PROpenStyle.Render(fmt.Sprintf("+%d", r.Additions))+" "+
+			PRFailStyle.Render(fmt.Sprintf("−%d", r.Deletions)))
+	return strings.Join(parts, dot)
+}
+
+// reviewBranchLine is where the change lands and what it lands from.
+//
+// Worth its own row because the base is occasionally news: "into master" is
+// true of nearly every pull request, and "into aviv/brz-3639-collapse-migrations"
+// means this one is stacked on another and merges after it. Rendered in the
+// body colour rather than the gutter's, which was too quiet to read.
+func reviewBranchLine(r github.ReviewRequest, width int) string {
+	if r.BaseRef == "" || r.HeadRef == "" {
+		return ""
+	}
+	ref := lipgloss.NewStyle().Foreground(ColorText)
+	// The head is cut from the LEFT, like every other name in this app: the
+	// tail of a branch is what distinguishes it from its siblings.
+	budget := max(width-lipgloss.Width(r.BaseRef)-3, 10)
+	return ref.Render(r.BaseRef) + DimStyle.Render(" ← ") +
+		ref.Render(truncFront(r.HeadRef, budget))
+}
+
+// reviewStatePill is open/draft, in the sidebar's own vocabulary — the same
+// glyph means the same thing here as on the row you came from.
+//
+// A draft carries no fill. The design system spends a background on the cursor
+// and the caret, and a state indicator that fills competes with both for the
+// scarcest signal on the screen; weight and colour carry it instead.
+func reviewStatePill(r github.ReviewRequest) string {
+	if r.IsDraft {
+		return lipgloss.NewStyle().Foreground(ColorTextDim).Bold(true).Render("◌ Draft")
+	}
+	return lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("◉ Open")
 }
 
 // reviewStateLine is what is being asked of you and whether the change is green.
@@ -124,7 +171,7 @@ func reviewLabelRow(labels []string, width int) string {
 	}
 	var out string
 	for _, l := range labels {
-		chip := SelectionPill(false).Render(" " + l + " ")
+		chip := ReviewLabelStyle.Render(" " + l + " ")
 		if lipgloss.Width(out)+lipgloss.Width(chip)+1 > width {
 			break
 		}
