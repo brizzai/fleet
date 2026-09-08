@@ -95,7 +95,7 @@ func TestHelpTypingFiltersInsteadOfClosing(t *testing.T) {
 		t.Fatal(`"snooze" matched nothing`)
 	}
 	for _, r := range rows {
-		if r.Header || r.Spacer {
+		if r.Header {
 			t.Errorf("a filtered result carries structure rows: %+v", r)
 		}
 	}
@@ -275,6 +275,43 @@ func TestHelpArrowsScrollAndLettersType(t *testing.T) {
 	}
 }
 
+// fuzzy reports byte offsets, every bound in helpRows counts runes, and
+// `Shift+↑/↓` carries two 3-byte arrows — so an unconverted index highlighted
+// `p hea` for the query "group", four characters off, and clipped the tail.
+func TestHelpFilterHighlightsSurviveMultiByteKeys(t *testing.T) {
+	for _, tc := range []struct{ query, key, want string }{
+		{"group", "Shift+↑/↓", "group"},
+		{"sidebar", "`", "sidebar"},
+	} {
+		ho := NewHelpOverlay()
+		ho.SetSize(200, 50)
+		ho.Show()
+		ho.filter.SetValue(tc.query)
+
+		var found bool
+		for _, r := range ho.helpRows() {
+			if r.Key != tc.key {
+				continue
+			}
+			found = true
+			desc := []rune(r.Desc)
+			var lit string
+			for _, i := range r.DescIdx {
+				if i < 0 || i >= len(desc) {
+					t.Fatalf("%q on %q: index %d out of range for %q", tc.query, tc.key, i, r.Desc)
+				}
+				lit += string(desc[i])
+			}
+			if lit != tc.want {
+				t.Errorf("%q on %q: highlighted %q in %q, want %q", tc.query, tc.key, lit, r.Desc, tc.want)
+			}
+		}
+		if !found {
+			t.Fatalf("%q matched no row keyed %q", tc.query, tc.key)
+		}
+	}
+}
+
 // The at-rest overflow test can't cover this: a filtered row carries a section
 // tag worth up to 17 more columns ("  TERMINAL DRAWER"), which no resting row
 // ever pays for.
@@ -290,15 +327,16 @@ func TestHelpFilteredSheetNeverOverflows(t *testing.T) {
 			ho.SetSize(s.w, s.h)
 			ho.Show()
 			ho.filter.SetValue(q)
-			view := ho.View()
-			if bh := renderedBoxHeight(view); bh > s.h {
-				t.Errorf("%q at %dx%d: box height %d exceeds %d", q, s.w, s.h, bh, s.h)
+			// Measure the layout, not View(): its trailing
+			// MaxWidth/MaxHeight/Place clamp every line to the terminal, so
+			// asserting on the rendered string asserts the clamp and passes
+			// while the layout is silently being cut.
+			lay := ho.layout()
+			if w := chunksWidth(lay.chunks, lay.gutter) + DialogStyle.GetHorizontalFrameSize(); w > s.w {
+				t.Errorf("%q at %dx%d: box width %d exceeds %d", q, s.w, s.h, w, s.w)
 			}
-			for _, ln := range strings.Split(view, "\n") {
-				if w := lipgloss.Width(ln); w > s.w {
-					t.Errorf("%q at %dx%d: line width %d exceeds %d", q, s.w, s.h, w, s.w)
-					break
-				}
+			if bh := renderedBoxHeight(ho.View()); bh > s.h {
+				t.Errorf("%q at %dx%d: box height %d exceeds %d", q, s.w, s.h, bh, s.h)
 			}
 		}
 	}

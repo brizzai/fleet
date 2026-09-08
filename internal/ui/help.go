@@ -14,6 +14,10 @@ import (
 // stops tracking a row across the page, and the sheet has 51 bindings.
 const helpMaxCols = 5
 
+// helpMinDescW is the floor a truncated description keeps. Below this the row
+// is unreadable anyway, and a terminal that narrow has already lost.
+const helpMinDescW = 12
+
 // HelpOverlay shows a keybindings cheat sheet: grouped into sections, and
 // filterable as you type.
 type HelpOverlay struct {
@@ -111,20 +115,18 @@ func (h *HelpOverlay) Update(msg tea.Msg) (*HelpOverlay, tea.Cmd) {
 	return h, nil
 }
 
-// helpRow is one rendered line of the grid: a binding, a section header, or the
-// blank between two sections.
+// helpRow is one rendered line of the grid: a binding or a section header.
 type helpRow struct {
 	Key     string
 	Desc    string
 	Section string
 	Tag     string // section label folded onto the row, filtering only
 	Header  bool
-	Spacer  bool
 	KeyIdx  []int // matched rune indexes into Key, filtering only
 	DescIdx []int // matched rune indexes into Desc, filtering only
 }
 
-func (r helpRow) binding() bool { return !r.Header && !r.Spacer }
+func (r helpRow) binding() bool { return !r.Header }
 
 // helpRows flows the bindings into one list of lines: section headers
 // interleaved at rest, or a flat fuzzy result while filtering.
@@ -171,14 +173,17 @@ func (h *HelpOverlay) helpRows() []helpRow {
 	var rows []helpRow
 	for _, m := range fuzzy.Find(query, haystacks) {
 		e := all[m.Index]
+		// fuzzy reports byte offsets; every bound below counts runes, and the
+		// arrows in `Shift+↑/↓` are three bytes each.
+		idx := runeIndexes(haystacks[m.Index], m.MatchedIndexes)
 		keyLen := runeLen(e.Key)
 		rows = append(rows, helpRow{
 			Key:     e.Key,
 			Desc:    e.Desc,
 			Section: e.Section,
 			Tag:     helpSectionLabel(e.Section),
-			KeyIdx:  filterShiftIndexes(m.MatchedIndexes, 0, keyLen, 0),
-			DescIdx: filterShiftIndexes(m.MatchedIndexes, keyLen+1, keyLen+1+runeLen(e.Desc), keyLen+1),
+			KeyIdx:  filterShiftIndexes(idx, 0, keyLen, 0),
+			DescIdx: filterShiftIndexes(idx, keyLen+1, keyLen+1+runeLen(e.Desc), keyLen+1),
 		})
 	}
 	return rows
@@ -204,7 +209,6 @@ func newHelpChunk(rows []helpRow) helpChunk {
 	}
 	for _, r := range rows {
 		switch {
-		case r.Spacer:
 		case r.Header:
 			ch.w = max(ch.w, lipgloss.Width(r.Desc))
 		default:
@@ -226,10 +230,7 @@ func (ch helpChunk) cell(r int) string {
 		return ""
 	}
 	row := ch.rows[r]
-	switch {
-	case row.Spacer:
-		return ""
-	case row.Header:
+	if row.Header {
 		return PaletteSectionStyle.Render(row.Desc)
 	}
 	// Pad the raw text, then style — padding a styled string counts the ANSI
@@ -243,6 +244,38 @@ func (ch helpChunk) cell(r int) string {
 		cell += DimStyle.Render("  " + row.Tag)
 	}
 	return cell
+}
+
+// fitWidth shrinks the description column until the widest row fits w. Only
+// the single-column layout needs it — a wider one is rejected by the budget
+// and falls back — and there the alternative is View()'s MaxWidth cutting from
+// the right, which takes the section tag first. The tag is the half that can't
+// be re-derived: `Enter`, “ ` “ and `PgUp/PgDn` each appear in two sections,
+// so a filtered row without it reads as one key contradicting itself.
+func (ch helpChunk) fitWidth(w int) helpChunk {
+	if ch.w <= w {
+		return ch
+	}
+	tagW := 0
+	for _, r := range ch.rows {
+		if r.binding() && r.Tag != "" {
+			tagW = max(tagW, 2+lipgloss.Width(r.Tag))
+		}
+	}
+	descW := max(helpMinDescW, w-ch.keyW-2-tagW)
+	if descW >= ch.descW {
+		return ch // the key column alone overflows; nothing here can fix that
+	}
+	rows := append([]helpRow(nil), ch.rows...)
+	for i, r := range rows {
+		if !r.binding() || lipgloss.Width(r.Desc) <= descW {
+			continue
+		}
+		rows[i].Desc = truncRunes(r.Desc, descW)
+		// Highlights past the cut have nothing left to paint.
+		rows[i].DescIdx = filterShiftIndexes(r.DescIdx, 0, runeLen(rows[i].Desc), 0)
+	}
+	return newHelpChunk(rows)
 }
 
 // helpLayout holds the geometry computed from the terminal size, shared by
@@ -304,6 +337,10 @@ func (h *HelpOverlay) layout() helpLayout {
 		}
 	}
 
+	if len(chunks) == 1 {
+		chunks[0] = chunks[0].fitWidth(availW)
+	}
+
 	rowsPerCol := chunksHeight(chunks)
 
 	visibleRows, maxScroll := rowsPerCol, 0
@@ -332,11 +369,6 @@ func chunkHelpRows(rows []helpRow, per int) []helpChunk {
 	for start := 0; start < len(rows); start += per {
 		seg := append([]helpRow(nil), rows[start:min(start+per, len(rows))]...)
 		if start > 0 {
-			// A spacer at the top of a column is the gap between two sections,
-			// and the column edge already provides it.
-			for len(seg) > 0 && seg[0].Spacer {
-				seg = seg[1:]
-			}
 			// A section split across a column boundary repeats its header, so
 			// the continued half still says what it belongs to.
 			if len(seg) > 0 && seg[0].binding() {
@@ -450,8 +482,8 @@ func (h *HelpOverlay) View() string {
 }
 
 // hiddenCounts returns how many *bindings* sit above and below the visible
-// window. Header and spacer rows are excluded: they are structure, and counting
-// them would make "⋮ +12 below" promise more keys than are actually down there.
+// window. Header rows are excluded: they are structure, and counting them would
+// make "⋮ +12 below" promise more keys than are actually down there.
 func (lay helpLayout) hiddenCounts(scroll int) (above, below int) {
 	end := scroll + lay.visibleRows
 	for _, ch := range lay.chunks {
