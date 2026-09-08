@@ -138,3 +138,33 @@ func TestReviewSavesIgnoreAnEmptyKey(t *testing.T) {
 		t.Errorf("wrote %d read marks for PR 0", len(ms))
 	}
 }
+
+// The queue is cached so a review row paints the instant fleet starts, instead
+// of after a GraphQL round trip nobody asked for yet.
+func TestReviewQueueRoundTrip(t *testing.T) {
+	db := openTestDB(t)
+	if _, _, ok := db.LoadReviewQueue(); ok {
+		t.Fatal("an empty database returned a queue")
+	}
+	if err := db.SaveReviewQueue(`[{"Number":5241}]`); err != nil {
+		t.Fatal(err)
+	}
+	raw, at, ok := db.LoadReviewQueue()
+	if !ok || raw != `[{"Number":5241}]` {
+		t.Fatalf("got %q ok=%v, want the queue back", raw, ok)
+	}
+	if at.IsZero() {
+		t.Error("no fetch time recorded — without it there is no way to say how " +
+			"stale the thing on screen is")
+	}
+
+	// One row, always: the queue is a snapshot of a search, and half of an old
+	// queue is not a queue.
+	if err := db.SaveReviewQueue(`[{"Number":9}]`); err != nil {
+		t.Fatal(err)
+	}
+	raw, _, _ = db.LoadReviewQueue()
+	if raw != `[{"Number":9}]` {
+		t.Errorf("got %q — the second save should replace the first, not add to it", raw)
+	}
+}

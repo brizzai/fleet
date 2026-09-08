@@ -238,6 +238,42 @@ two quotas. Otherwise the ordinary strategy decides, honouring the origin's
 allowlist — a call fleet makes for itself is still a call on someone's
 subscription. No `--model` flag: the account's own default.
 
+### The preview is the pull request page
+
+The review row's preview was the changed-file list behind a "Loading files for
+#N…" — a **second** fetch (`/pulls/N/files`, seconds long) in front of a
+question the queue could already answer. It now renders what a pull request
+page opens on: title, `base ← head`, state, size, review decision, checks,
+labels, and the author's description.
+
+- **All of it rides the queue's existing GraphQL call.** `baseRefName`,
+  `headRefName`, `labels`, `reviewRequests`, `comments.totalCount` and the head
+  commit's `statusCheckRollup` were added as fields, not as round trips — so
+  the preview paints the instant the row exists.
+- **The queue is cached in SQLite** (one row: it is a snapshot of a search, and
+  half of an old queue is not a queue), restored at launch and corrected by a
+  refresh fired from `Init`. The cost is a pull request that merged while fleet
+  was closed rendering as open for a few seconds; the alternative is an empty
+  panel on every launch.
+- **An empty queue is never cached.** A failed or unauthenticated fetch produces
+  one too, and overwriting a good cache with it trades a slightly stale preview
+  for no preview at all.
+- **Absent checks are not passing checks.** An empty rollup says so rather than
+  rendering nothing, which would read as green.
+- **Template comments are stripped.** A repo with a pull request template hands
+  every description a `<!-- -->` block of instructions to the author, which
+  GitHub hides — without stripping it the first screen of most descriptions is a
+  form nobody filled in.
+- Markdown is hand-rolled on `renderInlineMarkdown`, matching the release-notes
+  dialog: the subset that appears in a pull request body is headings, bullets
+  and inline code, and a CommonMark dependency would be one for the parts nobody
+  writes here.
+
+The file list moved into the reader, where the tree and the tour already answer
+"where do I start". `s` on a review row now says what it changed, since it no
+longer changes anything on that screen — it decides which list the reader opens
+on.
+
 ### Three tabs
 
 `1` tour · `2` diff · `3` session. `t` survives as the 1↔2 toggle it was.

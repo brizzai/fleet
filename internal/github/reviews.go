@@ -48,8 +48,30 @@ query($q: String!, $limit: Int!) {
         deletions
         changedFiles
         reviewDecision
+        baseRefName
+        headRefName
         author { login __typename }
         repository { nameWithOwner }
+        labels(first: 8) { nodes { name } }
+        comments { totalCount }
+        reviewRequests(first: 8) {
+          nodes {
+            requestedReviewer {
+              ... on User { login }
+              ... on Team { name }
+            }
+          }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+                contexts { totalCount }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -78,6 +100,21 @@ type ReviewRequest struct {
 	// second round trip to learn it would sit between pressing submit and the
 	// review landing.
 	HeadSHA string
+
+	// Everything below is what a pull request page shows above the fold, and it
+	// all rides the same one query for the same reason: the preview has to
+	// paint the instant the row exists, and a second round trip per review is
+	// exactly the wait it exists to remove.
+	BaseRef   string
+	HeadRef   string
+	Labels    []string
+	Reviewers []string
+	Comments  int
+	// ChecksState is GitHub's own rollup — SUCCESS, FAILURE, PENDING, ERROR,
+	// EXPECTED — and ChecksTotal how many it covers. Empty means the head
+	// commit has no checks at all, which is different from them passing.
+	ChecksState string
+	ChecksTotal int
 }
 
 type ghReviewNode struct {
@@ -92,6 +129,8 @@ type ghReviewNode struct {
 	Deletions    int       `json:"deletions"`
 	ChangedFiles int       `json:"changedFiles"`
 	Decision     string    `json:"reviewDecision"`
+	BaseRefName  string    `json:"baseRefName"`
+	HeadRefName  string    `json:"headRefName"`
 	Author       struct {
 		Login    string `json:"login"`
 		TypeName string `json:"__typename"`
@@ -99,6 +138,34 @@ type ghReviewNode struct {
 	Repository struct {
 		NameWithOwner string `json:"nameWithOwner"`
 	} `json:"repository"`
+	Labels struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
+	Comments struct {
+		TotalCount int `json:"totalCount"`
+	} `json:"comments"`
+	ReviewRequests struct {
+		Nodes []struct {
+			RequestedReviewer struct {
+				Login string `json:"login"`
+				Name  string `json:"name"`
+			} `json:"requestedReviewer"`
+		} `json:"nodes"`
+	} `json:"reviewRequests"`
+	Commits struct {
+		Nodes []struct {
+			Commit struct {
+				StatusCheckRollup *struct {
+					State    string `json:"state"`
+					Contexts struct {
+						TotalCount int `json:"totalCount"`
+					} `json:"contexts"`
+				} `json:"statusCheckRollup"`
+			} `json:"commit"`
+		} `json:"nodes"`
+	} `json:"commits"`
 }
 
 type ghReviewsResponse struct {
@@ -205,6 +272,13 @@ func ReviewsRequested(ctx context.Context) ([]ReviewRequest, error) {
 			UpdatedAt:    n.UpdatedAt,
 			IsDraft:      n.IsDraft,
 			HeadSHA:      n.HeadRefOid,
+			BaseRef:      n.BaseRefName,
+			HeadRef:      n.HeadRefName,
+			Labels:       labelNames(n),
+			Reviewers:    reviewerNames(n),
+			Comments:     n.Comments.TotalCount,
+			ChecksState:  checkState(n),
+			ChecksTotal:  checkTotal(n),
 		})
 	}
 
@@ -216,6 +290,48 @@ func ReviewsRequested(ctx context.Context) ([]ReviewRequest, error) {
 
 	debuglog.Logger.Debug("reviews fetch: ok", "total", len(out), "bots", countBots(out))
 	return out, nil
+}
+
+func labelNames(n ghReviewNode) []string {
+	var out []string
+	for _, l := range n.Labels.Nodes {
+		if l.Name != "" {
+			out = append(out, l.Name)
+		}
+	}
+	return out
+}
+
+// reviewerNames flattens users and teams into one list. A team asked to review
+// is a reviewer, and separating them would be a distinction the row has no room
+// to draw.
+func reviewerNames(n ghReviewNode) []string {
+	var out []string
+	for _, r := range n.ReviewRequests.Nodes {
+		switch {
+		case r.RequestedReviewer.Login != "":
+			out = append(out, r.RequestedReviewer.Login)
+		case r.RequestedReviewer.Name != "":
+			out = append(out, r.RequestedReviewer.Name)
+		}
+	}
+	return out
+}
+
+// checkState reads the rollup off the head commit. Absent means the commit has
+// no checks at all, which must not read the same as them passing.
+func checkState(n ghReviewNode) string {
+	if len(n.Commits.Nodes) == 0 || n.Commits.Nodes[0].Commit.StatusCheckRollup == nil {
+		return ""
+	}
+	return n.Commits.Nodes[0].Commit.StatusCheckRollup.State
+}
+
+func checkTotal(n ghReviewNode) int {
+	if len(n.Commits.Nodes) == 0 || n.Commits.Nodes[0].Commit.StatusCheckRollup == nil {
+		return 0
+	}
+	return n.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.TotalCount
 }
 
 func countBots(rs []ReviewRequest) int {

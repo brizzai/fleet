@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/git"
@@ -118,122 +118,6 @@ func ownerRepoFromOrigin(origin string) string {
 		return ""
 	}
 	return strings.Join(parts[len(parts)-2:], "/")
-}
-
-// renderReviewFiles draws the changed-file list for a review session.
-//
-// The list is the answer to "what is actually in here" — the question that has
-// to be settled before any diff is worth reading. On a 34-file PR that is 23
-// test files, showing all 34 at equal weight is the failure; showing 11 with
-// the rest counted and one key away is the fix.
-func renderReviewFiles(pr int, files github.PRFiles, showFolded bool, width, height int) string {
-	if len(files.Files) == 0 {
-		return DimStyle.Render("  Loading files for #" + strconv.Itoa(pr) + "…")
-	}
-
-	shown, folded := github.Split(files.Files)
-
-	var b strings.Builder
-
-	hiddenCount := 0
-	for _, fs := range folded {
-		hiddenCount += len(fs)
-	}
-	head := fmt.Sprintf("%d files", files.Total)
-	if hiddenCount > 0 {
-		head += fmt.Sprintf(" · %d shown", len(shown))
-	}
-	b.WriteString("  " + DimStyle.Render(head) + "\n")
-	b.WriteString("  " + DimStyle.Render("⏎ read · v agent pane") + "\n\n")
-
-	// Biggest first. On a PR you have not read, size is the only ordering
-	// signal available without a model, and it puts the substantial change
-	// above the one-line import fix.
-	sort.SliceStable(shown, func(i, j int) bool {
-		return shown[i].Additions+shown[i].Deletions > shown[j].Additions+shown[j].Deletions
-	})
-
-	rows := height - 4
-	for i, f := range shown {
-		if rows > 0 && i >= rows {
-			b.WriteString("  " + DimStyle.Render(fmt.Sprintf("… %d more", len(shown)-i)) + "\n")
-			break
-		}
-		b.WriteString(renderFileRow(f, width) + "\n")
-	}
-
-	if hiddenCount > 0 {
-		b.WriteString("\n  " + DimStyle.Render(foldSummary(folded, showFolded)) + "\n")
-		if showFolded {
-			for _, r := range foldOrder(folded) {
-				for _, f := range folded[r] {
-					b.WriteString(renderFileRow(f, width) + "\n")
-				}
-			}
-		}
-	}
-
-	return b.String()
-}
-
-// renderFileRow is one file: viewed mark, size, path.
-func renderFileRow(f github.PRFile, width int) string {
-	adds := PROpenStyle.Render(fmt.Sprintf("+%-5d", f.Additions))
-	dels := PRFailStyle.Render(fmt.Sprintf("−%-5d", f.Deletions))
-
-	p := f.Path
-	// Truncate from the LEFT: the basename and its immediate parent are what
-	// identify a file, and a monorepo path's leading segments are the part
-	// every row shares.
-	budget := width - 20
-	if budget > 10 && len(p) > budget {
-		p = "…" + p[len(p)-budget+1:]
-	}
-	return "    " + adds + dels + " " + lipgloss.NewStyle().Render(p)
-}
-
-// foldOrder keeps the fold sections in a stable, meaningful order — the least
-// review-worthy first, tests last, since tests are the ones you might open.
-func foldOrder(folded map[github.DemoteReason][]github.PRFile) []github.DemoteReason {
-	all := []github.DemoteReason{
-		github.DemoteLockfile, github.DemoteVendored,
-		github.DemoteGenerated, github.DemoteSnapshot, github.DemoteTest,
-	}
-	var out []github.DemoteReason
-	for _, r := range all {
-		if len(folded[r]) > 0 {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// foldSummary names what was hidden and why, never just how much.
-//
-// A count alone asks you to trust the rule; naming the rule lets you check it,
-// which is the only thing that makes hiding safe to do on someone else's behalf.
-func foldSummary(folded map[github.DemoteReason][]github.PRFile, shown bool) string {
-	var parts []string
-	for _, r := range foldOrder(folded) {
-		parts = append(parts, fmt.Sprintf("%d %s", len(folded[r]), pluralize(string(r), len(folded[r]))))
-	}
-	key := " — s to show"
-	if shown {
-		key = " — s to hide"
-	}
-	return "⊞ " + strings.Join(parts, ", ") + key
-}
-
-// pluralize keeps the fold summary readable: "1 lockfile", "2 lockfiles",
-// and "1 test" rather than the "1 tests" the raw reason string produces.
-func pluralize(reason string, n int) string {
-	if n == 1 {
-		return strings.TrimSuffix(reason, "s")
-	}
-	if strings.HasSuffix(reason, "s") {
-		return reason
-	}
-	return reason + "s"
 }
 
 // handleReviewFiles stores a fetched list.
@@ -543,6 +427,47 @@ func (h *Home) loadReviewState() {
 			})
 		}
 	}
+}
+
+// saveReviewQueue caches the queue so a review row paints on the next launch
+// without waiting for a round trip.
+func (h *Home) saveReviewQueue() {
+	if h.storage == nil || len(h.reviewQueue) == 0 {
+		// An empty queue is not cached: a failed or unauthenticated fetch
+		// yields one too, and overwriting a good cache with it would trade a
+		// slightly stale preview for no preview at all.
+		return
+	}
+	raw, err := json.Marshal(h.reviewQueue)
+	if err != nil {
+		return
+	}
+	if err := h.storage.SaveReviewQueue(string(raw)); err != nil {
+		debuglog.Logger.Debug("review queue: could not cache", "err", err)
+	}
+}
+
+// loadReviewQueue restores the last queue fleet saw.
+//
+// Shown immediately and corrected by the refresh behind it. A pull request that
+// merged while fleet was closed will render as open for those few seconds — the
+// alternative is an empty panel on every launch, which is the wait this exists
+// to remove.
+func (h *Home) loadReviewQueue() {
+	if h.storage == nil {
+		return
+	}
+	raw, at, ok := h.storage.LoadReviewQueue()
+	if !ok {
+		return
+	}
+	var queue []github.ReviewRequest
+	if err := json.Unmarshal([]byte(raw), &queue); err != nil {
+		debuglog.Logger.Debug("review queue: cached copy unreadable", "err", err)
+		return
+	}
+	h.reviewQueue = queue
+	debuglog.Logger.Info("review queue: restored from cache", "count", len(queue), "fetched", at)
 }
 
 // syncReviewComments replaces the app's record of a PR's pending comments with

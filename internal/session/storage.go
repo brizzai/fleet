@@ -340,6 +340,26 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	// The review queue as last seen. One row, because the queue is a snapshot
+	// of a search rather than a set of records: it is replaced wholesale on
+	// every fetch, and half of an old queue is not a queue.
+	//
+	// Persisted so a review row can paint the instant fleet starts, rather than
+	// after a GraphQL round trip nobody asked for yet. The cost is showing a
+	// pull request that has since merged, for the few seconds until the
+	// refresh lands.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS review_queue (
+			id         INTEGER PRIMARY KEY CHECK (id = 1),
+			queue_json TEXT NOT NULL,
+			fetched_at INTEGER NOT NULL
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create review_queue table", "error", err)
+		return err
+	}
+
 	// Shells: plain non-agent terminals (dev servers, logs, scratch shells)
 	// shown in the bottom drawer, scoped to a repo/worktree checkout. Wholly
 	// independent of sessions — no FK, no hooks, no auto-naming.
@@ -943,6 +963,27 @@ func (s *StateDB) LoadReviewTour(repo string, pr int) (headSHA, tourJSON string,
 		return "", "", false
 	}
 	return headSHA, tourJSON, true
+}
+
+// SaveReviewQueue replaces the cached review queue.
+func (s *StateDB) SaveReviewQueue(queueJSON string) error {
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO review_queue (id, queue_json, fetched_at) VALUES (1, ?, ?)`,
+		queueJSON, time.Now().Unix())
+	if err != nil {
+		debuglog.Logger.Error("failed to save review queue", "error", err)
+	}
+	return err
+}
+
+// LoadReviewQueue returns the last queue fleet saw, and when it saw it.
+func (s *StateDB) LoadReviewQueue() (queueJSON string, fetchedAt time.Time, ok bool) {
+	var at int64
+	row := s.db.QueryRow("SELECT queue_json, fetched_at FROM review_queue WHERE id = 1")
+	if err := row.Scan(&queueJSON, &at); err != nil {
+		return "", time.Time{}, false
+	}
+	return queueJSON, unixToTime(at), true
 }
 
 // SavePRCacheRow upserts a single repo's PR-refresh state. Called per-repo

@@ -759,6 +759,10 @@ func (h *Home) Init() tea.Cmd {
 		h.previewTick(),
 		h.loadReleaseNotes(), // compute the What's New badge without opening the dialog
 		warmTickets(),        // resolve tracker credentials off the Update goroutine
+		// Correct the cached queue behind whatever it is already showing. The
+		// preview paints from disk immediately; this is what makes it true a
+		// few seconds later, without anyone pressing `c`.
+		h.maybeLoadPaletteReviews(),
 	)
 }
 
@@ -1767,6 +1771,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		h.reviewQueue = msg.reviews
+		h.saveReviewQueue()
 		h.commandPalette.SetReviews(h.reviewPaletteItems(msg.reviews))
 		return h, nil
 
@@ -2085,6 +2090,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// written but not sent. Both die with the process otherwise, which made
 		// closing fleet mid-review the same as abandoning it.
 		h.loadReviewState()
+		h.loadReviewQueue()
 
 		// Restore persisted collapse state before defaulting — the default
 		// loops below only fill missing keys, so loaded collapses survive.
@@ -3121,10 +3127,20 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.reviewShowPane = !h.reviewShowPane
 		return h, nil
 	case "s":
+		// The preview shows the pull request now, not its file list, so this
+		// key has nothing to change on this screen. It still decides which
+		// list the reader OPENS on, so it says so rather than toggling a flag
+		// with no visible effect — a key that appears to do nothing is
+		// indistinguishable from one that is not bound.
 		if reviewPRNumber(h.selectedSession()) == 0 {
 			return h, nil
 		}
 		h.reviewShowFolded = !h.reviewShowFolded
+		if h.reviewShowFolded {
+			h.setInfo("The reader will open showing every changed file")
+		} else {
+			h.setInfo("The reader will open with low-signal files folded")
+		}
 		return h, nil
 	case "f":
 		return h, h.forkSelected()
@@ -7916,13 +7932,17 @@ func (h *Home) selectedPreview(w, height int) (*session.Session, string) {
 	// the diff. The file list wins by default and `v` flips back — you can
 	// always reach the agent itself with Enter.
 	if pr := reviewPRNumber(s); pr != 0 && !h.reviewShowPane {
-		// Keyed lookup, but the DECISION to show this pane still rests on the
-		// number alone: a review whose origin fleet cannot map has no key, and
-		// falling through to the agent pane there would hide the file list on
-		// exactly the session that came for it. It renders "Loading…" instead,
-		// which is what it did before.
+		// The DECISION to show this pane rests on the number alone: a review
+		// whose origin fleet cannot map has no key, and falling through to the
+		// agent pane there would hide the review on exactly the session that
+		// came for it.
 		k, _ := h.reviewKeyFor(s)
-		return s, renderReviewFiles(pr, h.reviewFiles[k], h.reviewShowFolded, w, height)
+		if r, ok := h.findReviewByKey(k); ok {
+			return s, renderReviewPreview(r, w, height)
+		}
+		// Not in the queue: never fetched, or the pull request has left it.
+		// Naming the key is the useful part — it says which fact is missing.
+		return s, DimStyle.Render(fmt.Sprintf("  #%d — press c to load the review queue", pr))
 	}
 	content := h.previewCache[s.ID]
 	return s, content
