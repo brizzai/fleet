@@ -264,10 +264,27 @@ labels, and the author's description.
   every description a `<!-- -->` block of instructions to the author, which
   GitHub hides — without stripping it the first screen of most descriptions is a
   form nobody filled in.
-- Markdown is hand-rolled on `renderInlineMarkdown`, matching the release-notes
-  dialog: the subset that appears in a pull request body is headings, bullets
-  and inline code, and a CommonMark dependency would be one for the parts nobody
-  writes here.
+- **Markdown is hand-rolled, and the tables are why.** A general renderer
+  (glamour) wraps the whole document to one width and lays tables out without
+  wrapping their cells — the opposite of what a preview pane needs, where a
+  paragraph wants a reading measure and a four-column table wants the pane.
+- **Prose caps at 90 columns; tables and fenced code do not.** Those are laid
+  out rather than read line by line, and squeezing a table to match a paragraph
+  wraps every cell for nothing.
+- **Table cells wrap, never truncate.** In a before/after table the tail of the
+  cell is usually the part that mattered. Columns take their natural width where
+  the pane allows and are shrunk widest-first where it does not, never below a
+  word.
+- **Style first, then wrap — ANSI-aware.** The obvious order is wrong: emphasis
+  around a sentence is longer than the measure, so wrapping first puts the
+  opening marker on one line and the closing marker on the next and both render
+  raw. `ansi.Wordwrap` counts columns, so styled text can be wrapped safely.
+- **Nested inline markup recurses.** `_a **bold** word_` and ``**a `code`
+  span**`` used to emit their inner text verbatim, leaving the inner markers on
+  screen.
+- **`_` is a word character in code.** `skip_migrations` and `is_admin` are
+  everywhere in a description, so emphasis only opens at a word boundary
+  followed by non-space. Found by reading real output, not by a test.
 
 The file list moved into the reader, where the tree and the tour already answer
 "where do I start". `s` on a review row now says what it changed, since it no
