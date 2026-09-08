@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -229,6 +231,46 @@ func TestAccountEmailsNeverReachAnIssue(t *testing.T) {
 	for _, domain := range []string{"company.com", "acme.co.uk"} {
 		if strings.Contains(body, domain) {
 			t.Errorf("published the domain %s:\n%s", domain, body)
+		}
+	}
+}
+
+// TestLabelMarkerMatchesTheWorkflow pins the one coupling this mechanism has:
+// the marker fleet writes into the issue body and the pattern
+// .github/workflows/label-reports.yml extracts it with live in different files
+// and different languages, so nothing but this test fails when one moves. A
+// marker the workflow cannot read is invisible — the issue is still filed, and
+// still lands unlabelled, which is the state this exists to fix.
+func TestLabelMarkerMatchesTheWorkflow(t *testing.T) {
+	wf, err := os.ReadFile("../../.github/workflows/label-reports.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+	// The workflow extracts with sed, whose BRE spells the capture group
+	// `\(...\)`; dropping those backslashes is the whole translation to a Go
+	// regexp. Asserting the BRE is present first is what makes this test fail
+	// when the workflow's pattern is edited rather than silently checking a
+	// string nothing uses.
+	bre := `<!-- fleet-report-label: \([a-z-]*\) -->`
+	if !strings.Contains(string(wf), bre) {
+		t.Fatalf("workflow no longer extracts with %q — update the marker or this test", bre)
+	}
+	re := regexp.MustCompile(strings.NewReplacer(`\(`, `(`, `\)`, `)`).Replace(bre))
+
+	// Both labels the workflow allowlists. A label fleet emits that the
+	// workflow refuses is dropped just as silently as GitHub dropped it.
+	for _, label := range []string{"bug", "enhancement"} {
+		marker := fmt.Sprintf(labelMarkerFmt, label)
+		m := re.FindStringSubmatch(marker)
+		if m == nil {
+			t.Errorf("marker %q is not matched by the workflow pattern", marker)
+			continue
+		}
+		if m[1] != label {
+			t.Errorf("workflow would extract %q from %q, want %q", m[1], marker, label)
+		}
+		if !strings.Contains(string(wf), label+"|") && !strings.Contains(string(wf), "|"+label) {
+			t.Errorf("workflow allowlist does not accept %q", label)
 		}
 	}
 }

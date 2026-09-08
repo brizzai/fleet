@@ -343,12 +343,27 @@ func ghAvailable() bool {
 	return err == nil
 }
 
+// labelMarkerFmt embeds the requested label in the issue body, where
+// .github/workflows/label-reports.yml reads it back and applies the label with
+// the repo's own token.
+//
+// The --label flag below is not enough on its own: GitHub accepts labels on
+// issue creation only from users with write access, and silently drops them
+// for everyone else — no error, gh still exits 0, so nothing on this side can
+// tell. fleet is open source and most reporters are outside contributors, so
+// in practice almost every filed issue landed unlabelled. The flag stays for
+// maintainers, whose issues are then labelled at creation rather than a run
+// later; for everyone else the marker is the only path that works.
+const labelMarkerFmt = "\n\n<!-- fleet-report-label: %s -->\n"
+
 // createGitHubIssue files an issue and opens it in the browser. Shared by all
 // three report kinds; only title, body, and label differ between them.
 func (d *BugReportDialog) createGitHubIssue(title, body, label string) tea.Cmd {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return func() tea.Msg { return bugReportOpenErrMsg{err: fmt.Errorf("gh CLI not found")} }
 	}
+
+	body += fmt.Sprintf(labelMarkerFmt, label)
 
 	return func() tea.Msg {
 		debuglog.Logger.Info("bug report: creating GitHub issue via API", "label", label)
