@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initRepoWithWorktree creates a temp git repo with one commit and a linked
@@ -305,5 +306,123 @@ func TestFetchBaseRefSkipsLocalBase(t *testing.T) {
 	}
 	if err := FetchBaseRef(clone, "origin/master"); err == nil {
 		t.Fatal("positive control: fetch against a missing remote should fail, so the nils above are evidence of not fetching")
+	}
+}
+
+// git's option parser accepts options after a positional, so a base ref of
+// "origin/--upload-pack=…" reaches --upload-pack and git runs it. The "--"
+// terminator in FetchBaseRef is what stops that.
+func TestFetchBaseRefRefusesAnOptionLookingBase(t *testing.T) {
+	clone, _, _ := initCloneWithUpstream(t)
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "executed")
+	payload := filepath.Join(dir, "upload-pack")
+	script := "#!/bin/sh\ntouch \"" + sentinel + "\"\nexit 73\n"
+	if err := os.WriteFile(payload, []byte(script), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	if err := FetchBaseRef(clone, "origin/--upload-pack="+payload); err == nil {
+		t.Error("FetchBaseRef = nil, want an error — that base names no ref")
+	}
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatal("the payload ran: git read the base ref as an option, so the \"--\" terminator is missing")
+	}
+}
+
+// fetchTimeout only bounds the call if the pipe holders are cut off with it.
+// `git fetch` over SSH hands the pipe's write end to an ssh grandchild that the
+// context's kill never reaches, and CombinedOutput's Wait blocks on it: measured
+// at 30s against a 2s context before cmd.WaitDelay was set.
+func TestFetchBaseRefReturnsWhenAChildLeaksThePipe(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "git")
+	// Leaks a grandchild that keeps the inherited stdout/stderr open, which is
+	// what an ssh sitting on a passphrase prompt does.
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nsh -c 'sleep 30' &\nsleep 30\n"), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	prevTimeout, prevDelay := fetchTimeout, fetchWaitDelay
+	// A second, not a few hundred milliseconds: the first exec of a
+	// freshly-written file on macOS is slow enough that a shorter budget kills
+	// the fake before it has spawned the grandchild, and the test then passes
+	// against the unfixed code.
+	fetchTimeout, fetchWaitDelay = time.Second, 100*time.Millisecond
+	t.Cleanup(func() { fetchTimeout, fetchWaitDelay = prevTimeout, prevDelay })
+
+	start := time.Now()
+	err := FetchBaseRef(t.TempDir(), "origin/master")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("FetchBaseRef = nil, want the killed fetch reported as an error")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("FetchBaseRef took %v with a %v budget — the timeout does not bound it while a grandchild holds the pipe", elapsed, fetchTimeout)
+	}
+}
+
+func TestBranchExists(t *testing.T) {
+	main, _ := initRepoWithWorktree(t)
+
+	if !BranchExists(main, "feature") {
+		t.Error("BranchExists(feature) = false, want true")
+	}
+	if BranchExists(main, "no-such-branch") {
+		t.Error("BranchExists(no-such-branch) = true, want false")
+	}
+}
+
+// `git init` + `git remote add` writes no refs/remotes/origin/HEAD, so
+// GetDefaultBranch takes its fallback — which must still name origin's copy,
+// both because the doc contract says so and because FetchBaseRef only refreshes
+// an "origin/" base.
+func TestGetDefaultBranchPrefersOriginInFallback(t *testing.T) {
+	clone, _, run := initCloneWithUpstream(t)
+
+	out, err := exec.Command("git", "-C", clone, "config", "--get", "remote.origin.url").Output()
+	if err != nil {
+		t.Fatalf("read origin url: %v", err)
+	}
+	remoteURL := strings.TrimSpace(string(out))
+
+	manual := filepath.Join(t.TempDir(), "manual")
+	if err := os.MkdirAll(manual, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	run(manual, "init", "-q")
+	run(manual, "remote", "add", "origin", remoteURL)
+	run(manual, "fetch", "-q", "origin")
+
+	// git 2.46+ sets origin/HEAD opportunistically on fetch, so delete it rather
+	// than skipping: the fallback is still what every older git reaches here
+	// (Ubuntu 24.04 ships 2.43), and what any repo whose remote HEAD cannot be
+	// resolved reaches on every version.
+	run(manual, "remote", "set-head", "origin", "--delete")
+	if _, err := exec.Command("git", "-C", manual, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
+		t.Fatal("precondition: origin/HEAD still set, so this never reaches the fallback")
+	}
+	if got := GetDefaultBranch(manual); got != "origin/master" {
+		t.Errorf("GetDefaultBranch = %q, want origin/master", got)
+	}
+
+	// A repo with no remote at all must still get the bare local name: the
+	// fallback prefers origin's copy, it does not invent one.
+	local := filepath.Join(t.TempDir(), "local")
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	run(local, "init", "-q", "-b", "master")
+	run(local, "config", "user.email", "test@example.com")
+	run(local, "config", "user.name", "Test")
+	run(local, "commit", "-q", "--allow-empty", "-m", "one")
+	if got := GetDefaultBranch(local); got != "master" {
+		t.Errorf("GetDefaultBranch(no remote) = %q, want master", got)
 	}
 }

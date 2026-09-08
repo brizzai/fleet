@@ -1675,7 +1675,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the Creating… phantom is already spinning, so the round trip is
 			// invisible. Fetching at open time would either hold the box shut
 			// for it or move the suggestion rows under the cursor when it landed.
-			if !provider.IsCustom() && baseBranch != "" {
+			//
+			// Skipped for a branch that already exists, on the same rule the CLI
+			// path keeps: Create's no-`-b` retry drops the base, so the fetch
+			// would refresh a ref `worktree add` never reads.
+			if !provider.IsCustom() && baseBranch != "" && !git.BranchExists(repoPath, branch) {
 				if ferr := git.FetchBaseRef(repoPath, baseBranch); ferr != nil {
 					debuglog.Logger.Debug("base fetch failed; branching from local refs",
 						"repo", repoPath, "base", baseBranch, "err", ferr)
