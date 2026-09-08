@@ -2908,11 +2908,19 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.fetchPreviewForSelected()
 	case "shift+down":
 		h.jumpToHeader(1)
-		analytics.Track(analytics.EventHeaderJump, nil)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("checkout"))
 		return h, h.fetchPreviewForSelected()
 	case "shift+up":
 		h.jumpToHeader(-1)
-		analytics.Track(analytics.EventHeaderJump, nil)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("checkout"))
+		return h, h.fetchPreviewForSelected()
+	case "ctrl+shift+down":
+		h.jumpToOrigin(1)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("origin"))
+		return h, h.fetchPreviewForSelected()
+	case "ctrl+shift+up":
+		h.jumpToOrigin(-1)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("origin"))
 		return h, h.fetchPreviewForSelected()
 	case "pgdown":
 		target := h.cursor + h.sidebarPanelRows()
@@ -5381,6 +5389,22 @@ func (h *Home) collapseRepoAtCursor() {
 // still emits its header row, so every target is already in flatItems.
 func (h *Home) jumpToHeader(direction int) {
 	h.cursor = NextHeaderItem(h.flatItems, h.cursor, direction)
+	h.syncViewport()
+}
+
+// headerJumpProps labels which of the two header motions fired. Both emit
+// EventHeaderJump, so without the level they are one indistinguishable number
+// and there is no way to ask whether anyone presses ctrl+shift+↑/↓. Both are
+// labelled rather than only the new one, so the split reads as origin vs.
+// checkout instead of origin vs. unlabelled.
+func headerJumpProps(level string) map[string]interface{} {
+	return map[string]interface{}{"level": level}
+}
+
+// jumpToOrigin is jumpToHeader over origin headers only — the same motion one
+// level up, so a repo with a dozen worktrees costs one press instead of a dozen.
+func (h *Home) jumpToOrigin(direction int) {
+	h.cursor = NextOriginItem(h.flatItems, h.cursor, direction)
 	h.syncViewport()
 }
 
