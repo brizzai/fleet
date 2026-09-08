@@ -2643,7 +2643,11 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 
 	switch {
 	case h.helpOverlay.IsVisible():
-		overlay, cmd := h.helpOverlay.Update(cmdMsg)
+		// Raw, not remapped: the help sheet filters as you type, so a Hebrew or
+		// Greek user's characters must arrive as themselves. Nothing is lost by
+		// it — every key the sheet still acts on is a named one (arrows, PgUp,
+		// Home, esc), and normalizeKey returns those untouched anyway.
+		overlay, cmd := h.helpOverlay.Update(msg)
 		h.helpOverlay = overlay
 		return cmd, true
 	case h.releaseNotes.IsVisible():
