@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -257,9 +259,20 @@ func TestLabelMarkerMatchesTheWorkflow(t *testing.T) {
 	}
 	re := regexp.MustCompile(strings.NewReplacer(`\(`, `(`, `\)`, `)`).Replace(bre))
 
-	// Both labels the workflow allowlists. A label fleet emits that the
-	// workflow refuses is dropped just as silently as GitHub dropped it.
-	for _, label := range []string{"bug", "enhancement"} {
+	// fleet appends its marker last, so the workflow has to read the last one.
+	// head takes the first, which is inside reporter-written content — the
+	// debug log, error history or pane excerpt of a bug report, or the whole
+	// body of a feature request. Both labels are allowlisted, so the failure is
+	// silent: the issue is filed under the opposite kind to the one picked.
+	if !strings.Contains(string(wf), "-->.*/\\1/p' | tail -1)") {
+		t.Error("workflow no longer takes the LAST marker — head reads reporter-written content")
+	}
+
+	// Every label fleet actually emits round-trips through the workflow's
+	// pattern. Iterating reportLabels rather than a literal is the point: a
+	// fourth report kind spelling a new label would otherwise be refused by the
+	// workflow, land unlabelled, and leave this test green.
+	for _, label := range reportLabels {
 		marker := fmt.Sprintf(labelMarkerFmt, label)
 		m := re.FindStringSubmatch(marker)
 		if m == nil {
@@ -269,8 +282,24 @@ func TestLabelMarkerMatchesTheWorkflow(t *testing.T) {
 		if m[1] != label {
 			t.Errorf("workflow would extract %q from %q, want %q", m[1], marker, label)
 		}
-		if !strings.Contains(string(wf), label+"|") && !strings.Contains(string(wf), "|"+label) {
-			t.Errorf("workflow allowlist does not accept %q", label)
-		}
+	}
+
+	// The allowlist has to be read out of the `case` arm, not searched for in
+	// the file: a plain Contains over the whole workflow is satisfied by the
+	// explanatory comment above the arm and asserts nothing about the arm
+	// itself. Set equality, so it fails in both directions — a label fleet
+	// emits that the workflow refuses, and a label the workflow honours that
+	// fleet never emits, which is a silent widening of what an issue body can
+	// ask for.
+	arm := regexp.MustCompile(`(?m)^\s*([a-z|-]+)\) ;;$`).FindStringSubmatch(string(wf))
+	if arm == nil {
+		t.Fatalf("no `<labels>) ;;` allowlist arm in the workflow — did the case statement move?")
+	}
+	allowed := strings.Split(arm[1], "|")
+	sort.Strings(allowed)
+	emitted := append([]string(nil), reportLabels...)
+	sort.Strings(emitted)
+	if !slices.Equal(allowed, emitted) {
+		t.Errorf("workflow allowlist %v does not match the labels fleet emits %v", allowed, emitted)
 	}
 }
