@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -213,6 +214,59 @@ func GetDefaultBranch(repoPath string) string {
 	}
 	debuglog.Logger.Debug("GetDefaultBranch no default branch found, using 'main'", "path", repoPath)
 	return "main"
+}
+
+// fetchTimeout bounds FetchBaseRef. Deliberately shorter than gitTimeout: the
+// fetch is advisory — a stale base still produces a worktree — and it runs in
+// the window between the dialog closing and the worktree appearing, where the
+// user is already watching a spinner. Offline it can only ever fail, so the
+// budget is what an offline user should be made to wait, not what a slow clone
+// might need.
+const fetchTimeout = 5 * time.Second
+
+// FetchBaseRef refreshes origin's copy of one branch so a new worktree starts
+// at the real remote tip. `git worktree add -b <new> origin/master` resolves
+// origin/master out of this clone and never consults the remote, so without
+// this the worktree silently begins N commits behind and pays for it at merge
+// time.
+//
+// Only an "origin/…" base is fetched. That is the only form fleet produces
+// (GetDefaultBranch and the dialog's baseRefFor both write the prefix), and
+// splitting a bare name on "/" instead would read a local branch named
+// "feature/foo" as remote "feature" — spending the whole timeout on a fetch
+// that cannot work.
+//
+// The refspec-less `origin <branch>` form is deliberate: it is what
+// opportunistically updates refs/remotes/origin/<branch>, which is the ref
+// `worktree add` then resolves. The error is returned for logging only — every
+// caller carries on with the refs it already has, so a failure costs freshness,
+// never the worktree.
+func FetchBaseRef(repoPath, baseRef string) error {
+	branch, ok := strings.CutPrefix(baseRef, "origin/")
+	if !ok || branch == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	// gc.auto / maintenance.auto: a fetch normally signs off by kicking automatic
+	// housekeeping, which on a large repo is a repack competing with the agent
+	// sessions already running. fleet is asking for one ref, not volunteering the
+	// user's CPU. GIT_TERMINAL_PROMPT=0: an expired credential would otherwise
+	// sit on a prompt for the whole timeout instead of failing immediately.
+	cmd := exec.CommandContext(ctx, "git",
+		"-C", repoPath,
+		"-c", "gc.auto=0", "-c", "maintenance.auto=false",
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+		"origin", branch)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("git fetch origin %s: %s", branch, msg)
+	}
+	return nil
 }
 
 // IsWorktree returns true if the given path is a git worktree (not the main repo).

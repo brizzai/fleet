@@ -218,3 +218,92 @@ func TestListBranchesReportsTheLaterOfTheTwoRefs(t *testing.T) {
 			"date actually reported", pos["lagging"], pos["level"], pos["solo"])
 	}
 }
+
+// initCloneWithUpstream builds a bare "remote" with one commit, a work clone
+// that pushes to it (a teammate), and a second clone (the user's). Returns
+// (userClone, teammateWork, run).
+func initCloneWithUpstream(t *testing.T) (string, string, func(dir string, args ...string)) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run(root, "init", "-q", "--bare", "-b", "master", "remote.git")
+	bare := filepath.Join(root, "remote.git")
+
+	run(root, "clone", "-q", bare, "work")
+	work := filepath.Join(root, "work")
+	run(work, "config", "user.email", "test@example.com")
+	run(work, "config", "user.name", "Test")
+	run(work, "commit", "-q", "--allow-empty", "-m", "one")
+	run(work, "push", "-q", "origin", "master")
+
+	run(root, "clone", "-q", bare, "clone")
+	clone := filepath.Join(root, "clone")
+	return clone, work, run
+}
+
+func revParse(t *testing.T, dir, ref string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", ref).Output()
+	if err != nil {
+		t.Fatalf("rev-parse %s in %s: %v", ref, dir, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// A worktree branched from origin/master must start at the tip the remote
+// actually has, not at whatever this clone last fetched.
+func TestFetchBaseRefAdvancesTrackingRef(t *testing.T) {
+	clone, work, run := initCloneWithUpstream(t)
+
+	stale := revParse(t, clone, "origin/master")
+	headBefore := revParse(t, clone, "HEAD")
+
+	run(work, "commit", "-q", "--allow-empty", "-m", "two")
+	run(work, "push", "-q", "origin", "master")
+	fresh := revParse(t, work, "HEAD")
+
+	if revParse(t, clone, "origin/master") != stale {
+		t.Fatal("precondition: clone's origin/master moved without a fetch")
+	}
+
+	if err := FetchBaseRef(clone, "origin/master"); err != nil {
+		t.Fatalf("FetchBaseRef: %v", err)
+	}
+	if got := revParse(t, clone, "origin/master"); got != fresh {
+		t.Errorf("origin/master = %s, want the pushed tip %s", got, fresh)
+	}
+	// The fetch must be invisible to the checkout it runs in: it refreshes a
+	// remote-tracking ref, it does not move the user's HEAD.
+	if got := revParse(t, clone, "HEAD"); got != headBefore {
+		t.Errorf("HEAD moved to %s, want %s — fetch must not touch the checkout", got, headBefore)
+	}
+}
+
+// A base that names no remote must not be split on "/": reading a local branch
+// "feature/foo" as remote "feature" would spend the whole timeout on a fetch
+// that cannot work. The broken origin URL is what makes the assertion real —
+// without the positive control below, a nil error would prove nothing.
+func TestFetchBaseRefSkipsLocalBase(t *testing.T) {
+	clone, _, run := initCloneWithUpstream(t)
+	run(clone, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	for _, base := range []string{"master", "feature/foo", ""} {
+		if err := FetchBaseRef(clone, base); err != nil {
+			t.Errorf("FetchBaseRef(%q) = %v, want no fetch attempted", base, err)
+		}
+	}
+	if err := FetchBaseRef(clone, "origin/master"); err == nil {
+		t.Fatal("positive control: fetch against a missing remote should fail, so the nils above are evidence of not fetching")
+	}
+}

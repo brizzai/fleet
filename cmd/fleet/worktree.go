@@ -381,6 +381,18 @@ func runWorktree(args []string) {
 		defer storage.Close()
 	}
 
+	// Same act as the TUI's `w`, so the same refresh: branch from the real
+	// remote tip rather than from whatever this clone last fetched. Skipped when
+	// the branch already exists, since Create's no-`-b` retry drops the base
+	// anyway — the warning above already says so — and a fetch nothing reads is
+	// just five seconds of someone's time.
+	if !provider.IsCustom() && !reusedBranch && base != "" {
+		if ferr := git.FetchBaseRef(repoPath, base); ferr != nil {
+			debuglog.Logger.Debug("base fetch failed; branching from local refs",
+				"repo", repoPath, "base", base, "err", ferr)
+		}
+	}
+
 	info, err := provider.Create(repoPath, name, opts.branch, base)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create worktree: %v\n", err)
