@@ -433,15 +433,60 @@ func TestOriginJumpSkipsCheckoutHeaders(t *testing.T) {
 		t.Fatalf("ctrl+shift+↓: cursor = %d, want beta's origin header (%d) — checkout headers must be skipped", h.cursor, want)
 	}
 
-	// No origin left in either direction → clamp to the edge, like jumpToHeader.
+	// No origin left below → clamp to the edge, like jumpToHeader.
 	h.jumpToOrigin(1)
 	if want := LastSelectableItem(h.flatItems); h.cursor != want {
 		t.Errorf("ctrl+shift+↓ past the last origin: cursor = %d, want the bottom row (%d)", h.cursor, want)
 	}
+
+	// Upward from the first origin the clamp is unobservable — row 0 IS that
+	// origin header and FirstSelectableItem is 0 too, so this pins only that the
+	// motion does not WRAP to the bottom. The clamp itself is pinned below,
+	// where an out-of-range cursor makes the three candidate answers differ.
 	h.cursor = idxOfOrigin(t, h, "github.com/acme/alpha")
 	h.jumpToOrigin(-1)
-	if want := FirstSelectableItem(h.flatItems); h.cursor != want {
-		t.Errorf("ctrl+shift+↑ above the first origin: cursor = %d, want the top row (%d)", h.cursor, want)
+	if h.cursor != 0 {
+		t.Errorf("ctrl+shift+↑ at the first origin: cursor = %d, want 0 — no wrap", h.cursor)
+	}
+}
+
+// TestOriginJumpCursorOutOfRange pins the shared out-of-range guard through the
+// new entry point, and is where the up-direction clamp becomes observable: a
+// cursor past the end must be clamped into range *before* the scan, so scanning
+// up finds the LAST origin. Without the clamp the loop runs zero times and falls
+// through to FirstSelectableItem — row 0, the opposite end of the list from
+// where NextSelectableItem leaves the same stale cursor.
+func TestOriginJumpCursorOutOfRange(t *testing.T) {
+	h, _ := headerJumpHome()
+	items := h.flatItems
+	lastOrigin := idxOfOrigin(t, h, "github.com/acme/beta")
+	if lastOrigin == 0 || lastOrigin == LastSelectableItem(items) {
+		t.Fatal("precondition: the last origin must differ from both ends, or the assertions below are vacuous")
+	}
+
+	tests := []struct {
+		name      string
+		current   int
+		direction int
+		want      int
+	}{
+		{"past the end, up → last origin (not row 0)", len(items) + 5, -1, lastOrigin},
+		{"past the end, down → bottom", len(items) + 5, 1, LastSelectableItem(items)},
+		{"negative, down → first origin below row 0", -3, 1, lastOrigin},
+		{"negative, up → top", -3, -1, FirstSelectableItem(items)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NextOriginItem(items, tc.current, tc.direction); got != tc.want {
+				t.Errorf("NextOriginItem(items, %d, %d) = %d, want %d", tc.current, tc.direction, got, tc.want)
+			}
+		})
+	}
+
+	for _, dir := range []int{-1, 1} {
+		if got := NextOriginItem(nil, 0, dir); got != 0 {
+			t.Errorf("NextOriginItem(nil, 0, %d) = %d, want 0", dir, got)
+		}
 	}
 }
 
