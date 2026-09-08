@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.35.0] - 2026-09-08
+
+### Added
+
+- **Jump a whole repo at a time** — `Ctrl+Shift+↑/↓` moves between origin headers, skipping the checkout headers in between, so a repo with a dozen worktrees costs one press instead of a dozen. `Shift+↑/↓` still steps header by header.
+
+### Improved
+
+- **Fresh base branches** — creating a worktree now refreshes `origin/<base>` first, so a new branch starts at the tip the remote actually has instead of whatever this clone last fetched, and doesn't need a merge as its first act. The round trip hides behind the `Creating…` spinner; offline it gives up after about 5s and branches from the refs you already have.
+- **Searchable keybindings.** `?` now groups the keymap into sections and filters as you type — start typing to narrow all 51 bindings down to the one you want, `esc` to close. Columns are also sized to their own contents instead of to the single widest binding, so a 120-column terminal shows two columns rather than hiding 21 keys below the fold.
+
+### Fixed
+
+- **Attach works inside tmux.** If you run fleet from within a tmux session, `⏎` now attaches instead of doing nothing — fleet was passing `$TMUX` through to `tmux attach-session`, which refuses a nested attach and printed its error somewhere you could never see it.
+
 ## [2.34.0] - 2026-09-02
 
 ### Added
@@ -633,7 +648,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.34.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.35.0...HEAD
+[2.35.0]: https://github.com/brizzai/fleet/releases/tag/v2.35.0
 [2.34.0]: https://github.com/brizzai/fleet/releases/tag/v2.34.0
 [2.33.0]: https://github.com/brizzai/fleet/releases/tag/v2.33.0
 [2.32.0]: https://github.com/brizzai/fleet/releases/tag/v2.32.0
