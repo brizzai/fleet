@@ -169,6 +169,23 @@ and renders a fallback box. Check the font before picking a clever glyph.
 
 ---
 
+**The one concession: a word-diff mark.** There the background carries a *third*
+fact — "these are the words that changed" — on top of added/deleted, and the
+syntax colours were chosen for contrast against the row's quiet wash rather than
+against a mark. Reusing them put a comment on a changed word at a WCAG contrast
+ratio of **1.13**, where 1.0 means the text *is* the background. So a marked run
+swaps to a lifted variant of its own syntax colour — toward the text colour, and
+only as far as it has to go, so a string on a changed word is still recognisably
+a string.
+
+Both halves are **searched against a contrast target, never fixed**: the mark's
+own tint until it stands off the row it sits on (and clear of the gutter's tint,
+so the ladder row → gutter → mark stays three distinct steps), and the
+foreground until it clears the mark. A fixed factor is only ever tuned against
+one palette — the first attempt fixed fleet-pink and left five other themes
+unreadable, which is the whole failure mode deriving from the palette exists to
+prevent. `TestWordDiffTextStaysReadable` checks every class on every theme.
+
 ## 6. Interaction
 
 - **Exactly one highlight, and the caret lives with it.** If arrowing moves the

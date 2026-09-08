@@ -1008,6 +1008,25 @@ func (d *ReaderDialog) renderCode(l review.Line, width int, onCursor bool) strin
 // Takes the row's KIND rather than its style, because a style carries no way to
 // read a background back out — and a second table mapping styles to the colors
 // they were built from is exactly how the two drift apart.
+// wordRunStyle is the syntax style for a run sitting on a word-diff mark.
+func wordRunStyle(c review.TokenClass) lipgloss.Style {
+	switch c {
+	case review.TokKeyword:
+		return SynKeywordWordStyle
+	case review.TokType:
+		return SynTypeWordStyle
+	case review.TokString:
+		return SynStringWordStyle
+	case review.TokNumber:
+		return SynNumberWordStyle
+	case review.TokComment:
+		return SynCommentWordStyle
+	case review.TokFunc:
+		return SynFuncWordStyle
+	}
+	return SynPlainWordStyle
+}
+
 func codeRunStyle(kind review.LineKind, c review.TokenClass, marked, hit, onCursor bool) lipgloss.Style {
 	if hit {
 		// Search hits outrank both channels: you asked for these by name, and
@@ -1032,14 +1051,20 @@ func codeRunStyle(kind review.LineKind, c review.TokenClass, marked, hit, onCurs
 	}
 
 	if marked {
-		// The word mark stays as it is on the cursor row: it is already the
+		// A marked run swaps to the LIFTED syntax colour, because the word
+		// background is carrying a third fact on top of the row's own and the
+		// plain colours were picked against the quiet wash, not against a mark.
+		// Keeping them made a comment on a changed word score a contrast ratio
+		// of 1.13 against its background — invisible.
+		//
+		// The mark stays as it is on the cursor row: it is already the
 		// brightest thing on the line, and lifting it further would push it
 		// past the caret in weight.
 		switch kind {
 		case review.LineAdd:
-			return s.Background(ColorDiffAddWord)
+			return wordRunStyle(c).Background(ColorDiffAddWord)
 		case review.LineDel:
-			return s.Background(ColorDiffDelWord)
+			return wordRunStyle(c).Background(ColorDiffDelWord)
 		}
 	}
 	if onCursor {
