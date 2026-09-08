@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Improved
 
 - **Fresh base branches** — creating a worktree now refreshes `origin/<base>` first, so a new branch starts at the tip the remote actually has instead of whatever this clone last fetched, and doesn't need a merge as its first act. The round trip hides behind the `Creating…` spinner; offline it gives up after about 5s and branches from the refs you already have.
-- **Searchable keybindings.** `?` now groups the keymap into sections and filters as you type — start typing to narrow all 51 bindings down to the one you want, `esc` to close. Columns are also sized to their own contents instead of to the single widest binding, so a 120-column terminal shows two columns rather than hiding 21 keys below the fold.
+- **Searchable keybindings.** `?` now groups the keymap into sections and filters as you type — start typing to narrow all 52 bindings down to the one you want, `esc` to close. Columns are also sized to their own contents instead of to the single widest binding, so a 120-column terminal shows two columns rather than hiding 21 keys below the fold.
 
 ### Fixed
 
