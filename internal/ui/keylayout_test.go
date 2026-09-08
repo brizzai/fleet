@@ -291,3 +291,20 @@ func unwrapContainers(t reflect.Type) reflect.Type {
 		}
 	}
 }
+
+// TestNonLatinTypingReachesTheHelpFilter is the direction the drift guard above
+// cannot see: the help sheet filters as you type, so it left the normalized set
+// and TestNormalizedDialogsHoldNoTextInput no longer inspects it at all. If
+// routeToModal is ever "tidied" back to cmdMsg, a Hebrew user's search box
+// silently types Latin.
+func TestNonLatinTypingReachesTheHelpFilter(t *testing.T) {
+	h := newPersistTestHome(t)
+	h.helpOverlay.Show()
+
+	if _, handled := h.routeToModal(tea.KeyPressMsg{Code: 'ש', Text: "ש"}); !handled {
+		t.Fatal("the visible help overlay did not consume the keypress")
+	}
+	if got := h.helpOverlay.filter.Value(); got != "ש" {
+		t.Errorf("the help filter holds %q, want the Hebrew character as typed", got)
+	}
+}

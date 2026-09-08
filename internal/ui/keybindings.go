@@ -1,5 +1,7 @@
 package ui
 
+import "strings"
+
 // KeyBinding defines a single keybinding for display purposes.
 // The actual key handling logic lives in handleKey() — this is the
 // single source of truth for what shows in the help bar and overlay.
@@ -40,16 +42,21 @@ var allKeyBindings = []KeyBinding{
 	{Key: "r", BarKey: "r", BarDesc: "Restart", Desc: "Restart session", Section: "session"},
 	{Key: "R", Desc: "Rename session", Section: "session"},
 	{Key: "m", Desc: "Mark session as unread (idle → finished)", Section: "session"},
-	{Key: "z", Desc: "Snooze session / repo / worktree (again to wake)", Section: "session"},
+	{Key: "z", Desc: "Snooze / wake session / repo / worktree", Section: "session"},
 	{Key: "e", Desc: "Open in editor", Section: "session"},
 	{Key: "p", BarKey: "p", BarDesc: "PR", Desc: "Open PR in browser", Section: "session"},
 	{Key: "Y", BarKey: "Y", BarDesc: "Approve", Desc: "Quick approve permission", Section: "session"},
 	{Key: "b", BarKey: "b", BarDesc: "Branch", Desc: "Switch git branch", Section: "session"},
 	{Key: "/", BarKey: "/", BarDesc: "Filter", Desc: "Filter sessions", Section: "session"},
-	{Key: "0-9", Desc: "Jump to slot (double-tap to attach)", Section: "session"},
-	{Key: "Alt+0-9", Desc: "Bind/unbind slot (re-press same slot clears it)", Section: "session"},
-	{Key: "= then digit", Desc: "Bind slot (fallback if Alt unsupported)", Section: "session"},
-	{Key: "= = then digit", Desc: "Unbind slot", Section: "session"},
+
+	// Session slots. Split out of "session" because they are a distinct concept
+	// from acting on the row under the cursor — and because they carry the two
+	// longest strings in the table, which used to set the column width for every
+	// other binding in the sheet.
+	{Key: "0-9", Desc: "Jump to slot (double-tap to attach)", Section: "slots"},
+	{Key: "Alt+0-9", Desc: "Bind/unbind slot (re-press to clear)", Section: "slots"},
+	{Key: "= then digit", Desc: "Bind slot (if Alt unsupported)", Section: "slots"},
+	{Key: "= = then digit", Desc: "Unbind slot", Section: "slots"},
 
 	// Global.
 	{Key: "`", BarKey: "`", BarDesc: "Term", Desc: "Toggle terminal drawer", Section: "global"},
@@ -154,17 +161,45 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 	return
 }
 
-// HelpOverlayBindings returns all bindings for the full help overlay.
-// Attach-section bindings are preceded by a blank separator entry.
-func HelpOverlayBindings() []struct{ Key, Desc string } {
-	var result []struct{ Key, Desc string }
-	prevSection := ""
-	for _, kb := range allKeyBindings {
-		if (kb.Section == "drawer" || kb.Section == "focus" || kb.Section == "attach") && prevSection != kb.Section {
-			result = append(result, struct{ Key, Desc string }{"", ""})
-		}
-		result = append(result, struct{ Key, Desc string }{kb.Key, kb.Desc})
-		prevSection = kb.Section
+// HelpEntry is one row of the help overlay: a binding plus the section it
+// belongs to. The overlay draws section headers, so Section has to survive the
+// flatten — HelpOverlayBindings used to drop it and emit blank separator rows
+// instead, which the overlay then threw away as well.
+type HelpEntry struct {
+	Key     string
+	Desc    string
+	Section string
+}
+
+// helpSections names each section for the overlay's headers. Order comes from
+// allKeyBindings, not from this list — this only supplies the label, so a
+// reordering of the bindings can't silently reorder the sheet.
+// TestHelpSectionsAreAllLabelled pins the two sets against each other.
+var helpSections = map[string]string{
+	"nav":     "NAVIGATION",
+	"session": "SESSIONS",
+	"slots":   "SLOTS",
+	"global":  "GLOBAL",
+	"drawer":  "TERMINAL DRAWER",
+	"focus":   "FOCUS MODE",
+	"attach":  "ATTACH MODE",
+}
+
+// helpSectionLabel falls back to the raw id so an unlabelled section renders as
+// something rather than as an empty header row.
+func helpSectionLabel(id string) string {
+	if label, ok := helpSections[id]; ok {
+		return label
 	}
-	return result
+	return strings.ToUpper(id)
+}
+
+// HelpOverlayBindings returns every binding for the full help overlay, in
+// source order, each carrying its section.
+func HelpOverlayBindings() []HelpEntry {
+	out := make([]HelpEntry, 0, len(allKeyBindings))
+	for _, kb := range allKeyBindings {
+		out = append(out, HelpEntry{Key: kb.Key, Desc: kb.Desc, Section: kb.Section})
+	}
+	return out
 }

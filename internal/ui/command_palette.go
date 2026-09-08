@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -349,7 +350,7 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 			d.filtered = append(d.filtered, scoredItem{
 				PaletteItem:    it,
 				score:          m.Score,
-				matchedIndexes: m.MatchedIndexes,
+				matchedIndexes: runeIndexes(haystacks[m.Index], m.MatchedIndexes),
 			})
 		}
 	}
@@ -1012,6 +1013,30 @@ func highlightWith(s string, matchedIndexes []int, base, hl lipgloss.Style) stri
 		}
 	}
 	return b.String()
+}
+
+// runeIndexes converts the byte offsets fuzzy.Find reports into rune offsets.
+// Every consumer slices them against rune-counted substrings, and a key like
+// `Shift+↑/↓` carries 3-byte runes, so the two disagree by one per multi-byte
+// rune ahead of the match — the highlight lands on the wrong characters and
+// the tail is clipped by a bound measured in the other unit.
+func runeIndexes(haystack string, byteIdx []int) []int {
+	if len(byteIdx) == 0 || len(haystack) == utf8.RuneCountInString(haystack) {
+		return byteIdx // all-ASCII: the two offsets already agree
+	}
+	at := make(map[int]int, len(byteIdx))
+	r := 0
+	for b := range haystack {
+		at[b] = r
+		r++
+	}
+	out := make([]int, 0, len(byteIdx))
+	for _, b := range byteIdx {
+		if i, ok := at[b]; ok {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // filterShiftIndexes returns the subset of haystack rune indexes that fall in
