@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -205,14 +206,123 @@ func GetDefaultBranch(repoPath string) string {
 	} else {
 		debuglog.Logger.Debug("GetDefaultBranch symbolic-ref failed, trying fallback", "path", repoPath, "error", err)
 	}
-	// Fallback: check if "main" or "master" exists.
+	// Fallback: no refs/remotes/origin/HEAD. That symbolic ref is written by
+	// `git clone` and never by `git init` + `git remote add`, so this path is
+	// reached by real clones with a real remote — and returning a bare local
+	// name for them contradicts the contract above *and* skips FetchBaseRef's
+	// origin/ gate, leaving the one class of repo nothing in fleet refreshes as
+	// the only class that never gets refreshed. Prefer origin's copy when it
+	// exists, exactly as the branch above does.
 	for _, name := range []string{"main", "master"} {
+		if gitRun("-C", repoPath, "rev-parse", "--verify", "refs/remotes/origin/"+name) == nil {
+			return "origin/" + name
+		}
 		if gitRun("-C", repoPath, "rev-parse", "--verify", "refs/heads/"+name) == nil {
 			return name
 		}
 	}
 	debuglog.Logger.Debug("GetDefaultBranch no default branch found, using 'main'", "path", repoPath)
 	return "main"
+}
+
+// fetchTimeout bounds FetchBaseRef. Deliberately shorter than gitTimeout: the
+// fetch is advisory — a stale base still produces a worktree — and it runs in
+// the window between the dialog closing and the worktree appearing, where the
+// user is already watching a spinner. Offline it can only ever fail, so the
+// budget is what an offline user should be made to wait, not what a slow clone
+// might need.
+//
+// The context alone does not deliver that budget, which is why fetchWaitDelay
+// exists beside it: CommandContext kills git on expiry, but CombinedOutput's
+// Wait then blocks until every process holding the pipe's write end exits, and
+// `git fetch` over SSH hands that end to an ssh grandchild the kill never
+// reaches. Measured against a child that leaks such a grandchild, under a 2s
+// context: 30.0s with no WaitDelay, 3.0s with one. Without it the advisory step
+// is a blocking one — the Creating… phantom spins on and no worktree appears.
+// Vars rather than consts only so the leak test can shorten them: a test that
+// pins the bound has to be able to reach it, and at the real values it would
+// cost the suite six seconds.
+var (
+	fetchTimeout = 5 * time.Second
+
+	// fetchWaitDelay is how long after the kill the leaked pipe holders get
+	// before their side is closed out from under them. One second is slack for
+	// an orderly exit, not a second budget.
+	fetchWaitDelay = time.Second
+)
+
+// FetchBaseRef refreshes origin's copy of one branch so a new worktree starts
+// at the real remote tip. `git worktree add -b <new> origin/master` resolves
+// origin/master out of this clone and never consults the remote, so without
+// this the worktree silently begins N commits behind and pays for it at merge
+// time.
+//
+// Only an "origin/…" base is fetched. That is the only form fleet produces
+// (GetDefaultBranch and the dialog's baseRefFor both write the prefix), and
+// splitting a bare name on "/" instead would read a local branch named
+// "feature/foo" as remote "feature" — spending the whole timeout on a fetch
+// that cannot work.
+//
+// The refspec-less `origin <branch>` form is deliberate: it is what
+// opportunistically updates refs/remotes/origin/<branch>, which is the ref
+// `worktree add` then resolves. It sits behind "--" because git's option parser
+// accepts options *after* a positional: a base of
+// "origin/--upload-pack=/tmp/x" would otherwise reach --upload-pack and run it
+// (reproduced). git refuses to create a branch by that name, so it can only
+// arrive from someone typing it into the Base field or --base — but the
+// terminator costs one token and closes the class for every later caller.
+//
+// The error is returned for logging only — every caller carries on with the
+// refs it already has, so a failure costs freshness, never the worktree.
+func FetchBaseRef(repoPath, baseRef string) error {
+	branch, ok := strings.CutPrefix(baseRef, "origin/")
+	if !ok || branch == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	// gc.auto / maintenance.auto: a fetch normally signs off by kicking automatic
+	// housekeeping, which on a large repo is a repack competing with the agent
+	// sessions already running. fleet is asking for one ref, not volunteering the
+	// user's CPU. GIT_TERMINAL_PROMPT=0: an expired credential would otherwise
+	// sit on a prompt for the whole timeout instead of failing immediately.
+	cmd := exec.CommandContext(ctx, "git",
+		"-C", repoPath,
+		"-c", "gc.auto=0", "-c", "maintenance.auto=false",
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+		"--", "origin", branch)
+	cmd.WaitDelay = fetchWaitDelay
+	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// GIT_TERMINAL_PROMPT governs git's own prompts, not ssh's: ssh reads
+	// /dev/tty directly, so a passphrase-protected key with no agent loaded
+	// would sit on a prompt — printed over the TUI, competing with it for the
+	// terminal — until WaitDelay cuts it off. BatchMode makes it fail at once
+	// instead. Only when the caller sets no GIT_SSH_COMMAND of their own:
+	// overriding one carrying an identity ("ssh -i ~/.ssh/work_key") would turn
+	// a working fetch into a silently failing one. A core.sshCommand in git
+	// config is the residual gap — reading it costs a subprocess, and WaitDelay
+	// already bounds it.
+	if os.Getenv("GIT_SSH_COMMAND") == "" {
+		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+	}
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("git fetch origin %s: %s", branch, msg)
+	}
+	return nil
+}
+
+// BranchExists reports whether repoPath already has a local branch named
+// branch. Both worktree-create paths ask, because GitWorktreeProvider.Create
+// silently retries without `-b` when the branch is already there — and that
+// retry drops the base branch, so a base fetched for an existing branch
+// refreshes a ref `worktree add` never consults.
+func BranchExists(repoPath, branch string) bool {
+	return gitRun("-C", repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch) == nil
 }
 
 // IsWorktree returns true if the given path is a git worktree (not the main repo).

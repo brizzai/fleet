@@ -1665,6 +1665,26 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return h, tea.Batch(func() tea.Msg {
+			// Refresh the base ref before branching from it: `worktree add`
+			// resolves origin/<base> out of this clone and never asks the
+			// remote, so without this a worktree silently starts behind and the
+			// first thing it needs is a merge. Advisory, exactly like the file
+			// copies below — a failed fetch costs freshness, never the worktree.
+			//
+			// Here rather than when `w` opens: the dialog is already closed and
+			// the Creating… phantom is already spinning, so the round trip is
+			// invisible. Fetching at open time would either hold the box shut
+			// for it or move the suggestion rows under the cursor when it landed.
+			//
+			// Skipped for a branch that already exists, on the same rule the CLI
+			// path keeps: Create's no-`-b` retry drops the base, so the fetch
+			// would refresh a ref `worktree add` never reads.
+			if !provider.IsCustom() && baseBranch != "" && !git.BranchExists(repoPath, branch) {
+				if ferr := git.FetchBaseRef(repoPath, baseBranch); ferr != nil {
+					debuglog.Logger.Debug("base fetch failed; branching from local refs",
+						"repo", repoPath, "base", baseBranch, "err", ferr)
+				}
+			}
 			info, err := provider.Create(repoPath, name, branch, baseBranch)
 			var tres *ticket.Result
 			var terr error

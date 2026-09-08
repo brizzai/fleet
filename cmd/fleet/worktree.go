@@ -361,7 +361,7 @@ func runWorktree(args []string) {
 	// signal at all, and "Created … (branch X)" reads as "made X off your base".
 	// Say it up front instead. Git provider only — a ShellProvider defines its
 	// own branch semantics.
-	reusedBranch := !provider.IsCustom() && branchExists(repoPath, opts.branch)
+	reusedBranch := !provider.IsCustom() && git.BranchExists(repoPath, opts.branch)
 	if reusedBranch {
 		fmt.Fprintf(os.Stderr, "Branch %q already exists — reusing it.\n", opts.branch)
 		if opts.base != "" {
@@ -379,6 +379,18 @@ func runWorktree(args []string) {
 			os.Exit(1)
 		}
 		defer storage.Close()
+	}
+
+	// Same act as the TUI's `w`, so the same refresh: branch from the real
+	// remote tip rather than from whatever this clone last fetched. Skipped when
+	// the branch already exists, since Create's no-`-b` retry drops the base
+	// anyway — the warning above already says so — and a fetch nothing reads is
+	// just five seconds of someone's time.
+	if !provider.IsCustom() && !reusedBranch && base != "" {
+		if ferr := git.FetchBaseRef(repoPath, base); ferr != nil {
+			debuglog.Logger.Debug("base fetch failed; branching from local refs",
+				"repo", repoPath, "base", base, "err", ferr)
+		}
 	}
 
 	info, err := provider.Create(repoPath, name, opts.branch, base)
@@ -493,17 +505,6 @@ func branchNote(branch string, reused bool) string {
 		return fmt.Sprintf("existing branch %s", branch)
 	}
 	return fmt.Sprintf("branch %s", branch)
-}
-
-// branchExists reports whether repoPath already has a local branch named
-// branch. Used to warn that the worktree reuses it and that --base is moot,
-// since GitWorktreeProvider.Create silently falls back to the existing branch.
-func branchExists(repoPath, branch string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	err := exec.CommandContext(ctx, "git", "-C", repoPath,
-		"show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run()
-	return err == nil
 }
 
 // copyClaudeSettings copies .claude/settings.local.json from srcRepo to dstRepo.
