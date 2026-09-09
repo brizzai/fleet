@@ -31,6 +31,12 @@ func renderReviewPreview(r github.ReviewRequest, width, height int) string {
 	for _, l := range reviewHeaderLines(r, inner) {
 		put(l)
 	}
+	// The pane names its own keys, the way the file tree and the reader footer
+	// name theirs. The list this replaced printed "⏎ read · v agent pane" and
+	// "s to show"; dropping it took `v` and `s` off every surface that mentions
+	// them except the global sheet, which is not where you look while standing
+	// on a review.
+	put(DimStyle.Render("⏎ read · v agent pane · s folded files"))
 	put(lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", inner)))
 
 	// The description, which is the whole reason a pull request page opens on
