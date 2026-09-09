@@ -94,6 +94,8 @@ internal/ui/command_palette.go   # Command palette dialog (Ctrl+K) — fuzzy sea
 internal/ui/drawer.go            # Terminal drawer (` key): render, slide animation, focus/key handling, shell lifecycle + live-stream wiring (syncShellStream → OutputReader + vterm)
 internal/tmux/control_output.go  # Control-mode %output reader (live shell streaming) + octal decoder
 internal/vterm/vterm.go          # Insulated charmbracelet/x/vt wrapper (drawer live rendering; strips ESC k titles)
+internal/frost/                  # Frost mode: freeze a rendered frame into a styled cell grid (x/vt replay) and run cell effects over it
+internal/ui/frost.go             # Frost mode trigger + tick loop
 internal/chrome/protocol.go      # Command/Response types, action constants, socket path
 internal/chrome/native_host.go   # Native messaging host with Unix socket bridge
 internal/chrome/client.go        # TUI-side client (connects to socket, sends commands)

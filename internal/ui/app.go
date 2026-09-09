@@ -29,6 +29,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/discovery"
 	"github.com/brizzai/fleet/internal/editor"
+	"github.com/brizzai/fleet/internal/frost"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
@@ -256,6 +257,7 @@ type Home struct {
 	newDialog             *NewSessionDialog
 	confirmDialog         *ConfirmDialog
 	renameDialog          *RenameDialog
+	gate                  *gateDialog
 	helpOverlay           *HelpOverlay
 	settingsDialog        *SettingsDialog
 	worktreeDialog        *WorktreeDialog
@@ -561,6 +563,11 @@ type Home struct {
 	shutdownFrame int
 	frozenFrame   string
 
+	// Frost mode (frost.go). frost is nil unless a run is active; keyTrail is
+	// the trailing window of sidebar keys its trigger matches against.
+	frost    *frost.Scene
+	keyTrail []string
+
 	// Rendering diagnostics (accumulated counters for bug reports).
 	renderStats RenderStats
 }
@@ -598,6 +605,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		newDialog:              NewNewSessionDialog(),
 		confirmDialog:          NewConfirmDialog(),
 		renameDialog:           NewRenameDialog(),
+		gate:                   newGateDialog(),
 		helpOverlay:            NewHelpOverlay(),
 		settingsDialog:         NewSettingsDialog(cfg),
 		worktreeDialog:         NewWorktreeDialog(),
@@ -884,8 +892,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
+		resized := msg.Width != h.width || msg.Height != h.height
 		// Only log resizes after the initial one (startup always sends one).
-		if h.width > 0 && (msg.Width != h.width || msg.Height != h.height) {
+		if h.width > 0 && resized {
 			debuglog.Logger.Info("window resized",
 				"from", fmt.Sprintf("%dx%d", h.width, h.height),
 				"to", fmt.Sprintf("%dx%d", msg.Width, msg.Height),
@@ -895,9 +904,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.width = msg.Width
 		h.height = msg.Height
 		h.sidebarDirty = true
+		// Bubble Tea sends one of these on every SIGWINCH, size change or not —
+		// a tmux client attaching is enough — so only a real change ends the run.
+		if h.frost != nil && resized {
+			h.endFrost() // the frozen frame no longer fits
+		}
 		h.newDialog.SetSize(msg.Width, msg.Height)
 		h.confirmDialog.SetSize(msg.Width, msg.Height)
 		h.renameDialog.SetSize(msg.Width, msg.Height)
+		h.gate.SetSize(msg.Width, msg.Height)
 		h.helpOverlay.SetSize(msg.Width, msg.Height)
 		h.settingsDialog.SetSize(msg.Width, msg.Height)
 		h.worktreeDialog.SetSize(msg.Width, msg.Height)
@@ -1313,6 +1328,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case commandPaletteMsg:
 		return h.dispatchPaletteSelection(msg)
+
+	case gateOpenMsg:
+		// The prompt has already closed itself, so the frozen frame is the
+		// ordinary screen, not the prompt.
+		return h, h.startFrost()
 
 	case snoozeSelectedMsg:
 		// Same discipline as contextMenuMsg: the picker names a row, and an
@@ -1990,6 +2010,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case frostTickMsg:
+		// Self-rescheduling only while a run is active.
+		if h.frost == nil {
+			return h, nil
+		}
+		h.frost.Step()
+		if h.frost.Done() {
+			h.endFrost()
+			return h, nil
+		}
+		return h, frostTickCmd()
+
 	case whatsNewTickMsg:
 		// Advance the badge shimmer; stop the loop (and stop burning CPU) the
 		// moment the badge is hidden or a modal takes the screen.
@@ -2290,6 +2322,25 @@ func (h *Home) View() tea.View {
 	if !h.booted {
 		return h.chrome(RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame))
 	}
+	if h.frost != nil {
+		// The run owns the keys, not the toasts: worker and async results still
+		// land, and an error raised mid-run has to be shown before its TTL
+		// prunes it. The tip is already held back by modalOpen.
+		base := h.frost.Render()
+		if toast := h.toasts.View(h.width); toast != "" {
+			base = h.anchorBottomRight(toast, base)
+		}
+		return h.chrome(base)
+	}
+	return h.chrome(h.composeScreen())
+}
+
+// composeScreen paints everything View shows once the app is up: the body,
+// the header overlays, any dropdown or palette, and the tip/toast stack. It
+// is what a caller freezing "the current frame" wants — beginQuit's dimmed
+// backdrop and the frost freeze both take it — so a frozen picture matches
+// the live one instead of renderBody alone.
+func (h *Home) composeScreen() string {
 	base := h.renderBody()
 	// Animated "What's New" badge, top-right of the header row. Only when there
 	// are unseen highlights and no modal owns the screen (a modal makes
@@ -2363,10 +2414,9 @@ func (h *Home) View() tea.View {
 	}
 	toast := h.toasts.View(h.width)
 	if tip == "" && toast == "" {
-		return h.chrome(base)
+		return base
 	}
-	// Stack toast(s) above the tip, then anchor the block bottom-right with a
-	// 1-cell right margin and a 1-row lift so it clears the help-bar baseline.
+	// Stack toast(s) above the tip.
 	stack := toast
 	if tip != "" {
 		if stack != "" {
@@ -2375,9 +2425,15 @@ func (h *Home) View() tea.View {
 			stack = tip
 		}
 	}
-	x := h.width - lipgloss.Width(stack) - 1
-	y := h.height - lipgloss.Height(stack) - 1
-	return h.chrome(overlayAt(stack, base, x, y))
+	return h.anchorBottomRight(stack, base)
+}
+
+// anchorBottomRight composites block onto base at the bottom-right, with a
+// 1-cell right margin and a 1-row lift so it clears the help-bar baseline.
+func (h *Home) anchorBottomRight(block, base string) string {
+	x := h.width - lipgloss.Width(block) - 1
+	y := h.height - lipgloss.Height(block) - 1
+	return overlayAt(block, base, x, y)
 }
 
 // chrome wraps rendered content into the tea.View that carries fleet's terminal
@@ -2437,11 +2493,13 @@ func (h *Home) modalOpen() bool {
 		h.newDialog.IsVisible() ||
 		h.confirmDialog.IsVisible() ||
 		h.renameDialog.IsVisible() ||
+		h.gate.IsVisible() ||
 		h.commandPalette.IsVisible() ||
 		h.contextMenu.IsVisible() ||
 		h.snoozeDialog.IsVisible() ||
 		h.accountPicker.IsVisible() ||
 		h.allowedAccounts.IsVisible() ||
+		h.frost != nil ||
 		h.launchpadActive()
 }
 
@@ -2501,6 +2559,9 @@ func (h *Home) renderBody() string {
 	}
 	if h.renameDialog.IsVisible() {
 		return h.renameDialog.View()
+	}
+	if h.gate.IsVisible() {
+		return h.gate.View()
 	}
 
 	// First-run launchpad owns the screen while the fleet is empty.
@@ -2862,6 +2923,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		dialog, cmd := h.renameDialog.Update(msg)
 		h.renameDialog = dialog
 		return cmd, true
+	case h.gate.IsVisible():
+		dialog, cmd := h.gate.Update(msg)
+		h.gate = dialog
+		return cmd, true
 	}
 	return nil, false
 }
@@ -2910,6 +2975,18 @@ func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 }
 
 func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// An active frost run owns every key until the user leaves it — except
+	// fleet's own quit key, which ends the run and quits, as the help bar says.
+	if h.frost != nil {
+		if msg.String() != "ctrl+c" {
+			if h.frost.Key(normalizeKey(msg).String()) {
+				h.endFrost()
+			}
+			return h, nil
+		}
+		h.endFrost()
+	}
+
 	// Route to the active modal dialog/overlay first (keys + paste share this).
 	if cmd, handled := h.routeToModal(msg); handled {
 		return h, cmd
@@ -3020,6 +3097,12 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// falls through rather than returning; it owns no text and matches on the US
 	// position itself, above.)
 	msg = normalizeKey(msg)
+
+	// Frost trigger (see noteTrail). Every key of the run still does its
+	// usual job; only the one that completes it is taken.
+	if h.noteTrail(msg.String()) {
+		return h, h.startFrost()
+	}
 
 	switch msg.String() {
 	case "`": // open the terminal drawer + move focus into it
@@ -3403,7 +3486,7 @@ func (h *Home) beginQuit(source string) tea.Cmd {
 	case !h.booted:
 		h.frozenFrame = RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame)
 	default:
-		h.frozenFrame = h.renderBody()
+		h.frozenFrame = h.composeScreen()
 	}
 	h.cancel() // stop the worker now so it stops feeding Update
 	return tea.Batch(h.shutdownTick(), h.performShutdown())
@@ -8841,6 +8924,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "Shift+W"},
 		{Kind: PaletteKindCommand, ID: "release_notes", Name: "Release Notes"},
 		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
+		{Kind: PaletteKindCommand, ID: "frost_gate", Name: frost.Gate().Label, Haystack: frost.Gate().Label + " " + frost.Gate().Keywords, Hidden: true},
 		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
 		{Kind: PaletteKindCommand, ID: "suspend_now", Name: "Suspend Idle Sessions Now"},
 		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
@@ -8857,7 +8941,9 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		commands = append(commands, PaletteItem{Kind: PaletteKindCommand, ID: "open_fda", Name: "Open Full Disk Access Settings"})
 	}
 	for i := range commands {
-		commands[i].Haystack = commands[i].Name
+		if commands[i].Haystack == "" {
+			commands[i].Haystack = commands[i].Name
+		}
 	}
 
 	// Lock-free read of the immutable git/PR snapshot.
@@ -9044,6 +9130,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.connectJira.Show()
 		return h, nil
 
+	case "frost_gate":
+		h.gate.Show()
+		return h, nil
 	case "connect_linear":
 		h.actionLog.Add("connect linear", "", true)
 		// Opening the dialog is the feature the tip teaches, so this is where

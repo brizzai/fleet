@@ -52,6 +52,10 @@ type PaletteItem struct {
 	Shortcut string // right-aligned keybinding hint (commands only)
 	Haystack string // string used for fuzzy matching
 
+	// Hidden rows surface only on a search that matches them, never in the
+	// unfiltered list (and so never as a recent either).
+	Hidden bool
+
 	// Group is a section header this row sits under when nothing is typed
 	// (ticket rows only — their Linear state). Empty means no section.
 	Group string
@@ -314,6 +318,9 @@ func (d *CommandPaletteDialog) rebuildFiltered() {
 	haystacks := make([]string, 0, len(d.items))
 	for _, it := range d.items {
 		if !itemMatchesTab(it, d.activeTab) || d.scopedOut(it, d.activeTab) {
+			continue
+		}
+		if it.Hidden && query == "" {
 			continue
 		}
 		tabItems = append(tabItems, it)
