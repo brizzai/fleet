@@ -3285,9 +3285,17 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return h, nil
 }
 
-// shutdownTick schedules the next shutdown-overlay spinner advance (~80ms,
-// matching splashTick). Self-rescheduled by Update while `quitting`, until the
-// teardown command emits tea.Quit and the program exits.
+// shutdownTick schedules the next shutdown-overlay spinner advance (~80ms).
+//
+// That is splashTick's interval times splashSpinnerDiv, and the equality is the
+// point rather than a coincidence: the splash runs its tick fast for the shine
+// and divides the counter back down for its spinner, so both spinners advance
+// at the same wall-clock rate off different tick rates. Move either constant
+// and the other has to follow, or the two spinners visibly disagree on a
+// screen the user sees fleet start and stop with.
+//
+// Self-rescheduled by Update while `quitting`, until the teardown command emits
+// tea.Quit and the program exits.
 func (h *Home) shutdownTick() tea.Cmd {
 	if FreezeAnim {
 		return nil
@@ -6357,12 +6365,27 @@ func (h *Home) bootProgress() float64 {
 	return float64(resolved) / float64(h.bootstrapRepos)
 }
 
-// splashTick schedules the next splash-spinner advance (~80ms cadence).
+// splashTick schedules the next splash frame (~20ms cadence).
+//
+// Four times the rate of the shutdown overlay's otherwise-identical tick, and
+// that asymmetry is the point: the shine sweeping the wordmark is the only
+// thing here that moves continuously, and frame rate is the only currency that
+// buys it speed without cost. At a fixed rate a faster sweep must jump further
+// per frame, which is paid for by widening the glint until it reads as a glow
+// rather than a line — so each speed-up came as a rate bump instead, and the
+// bar got narrower each time rather than broader. The spinner and the label are
+// held to their original cadence by dividing this counter down at the call site
+// (see RenderSplash), so only the shine spends the extra frames.
+//
+// 50fps is affordable here and was measured, not assumed: RenderSplash costs
+// ~284us, so the splash burns ~1.4% of one core while it is up — for one to
+// three seconds, on a screen with nothing else competing for the loop. The
+// drawer slide already animates at 45fps.
 func (h *Home) splashTick() tea.Cmd {
 	if FreezeAnim {
 		return nil
 	}
-	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(20*time.Millisecond, func(t time.Time) tea.Msg {
 		return splashFrameMsg(t)
 	})
 }
