@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Tuning. The sim runs at a fixed tick (the UI schedules the interval); every
@@ -168,7 +169,7 @@ func (s *Scene) stampCard() {
 // instead; a second one during it ends the run at once.
 func (s *Scene) Key(k string) (exit bool) {
 	switch k {
-	case "esc", "q", "ctrl+c":
+	case "esc", "q":
 		if s.collapsing {
 			return true
 		}
@@ -466,8 +467,10 @@ func (s *Scene) fling(x, y int, c Cell, dx int) {
 	if len(s.falling) >= cap || c.Width == 0 {
 		return
 	}
-	if c.Content == "" || c.Content == " " {
-		c.Content = "▪" // a filled space sheds a chip, not an invisible one
+	if c.Content == "" || c.Content == " " || ansi.StringWidth(c.Content) != 1 {
+		// A filled space sheds a chip, not an invisible one; so does a glyph
+		// wider than the one column a heap cell has.
+		c.Content = "▪"
 	}
 	c.Width = 1
 	away := float64(dx) * 0.12
@@ -504,8 +507,10 @@ func (s *Scene) stepBursts() {
 // stepDebris drops falling glyphs through the (background) text until they
 // meet the floor or a heap, then stacks them.
 func (s *Scene) stepDebris() {
+	surface := func(col int) float64 { return float64(s.H - 1 - len(s.heap[col])) }
 	kept := s.falling[:0]
 	for _, d := range s.falling {
+		from := int(math.Round(d.x))
 		d.vy += debrisGravity
 		d.vx *= 0.9
 		d.x += d.vx
@@ -514,8 +519,15 @@ func (s *Scene) stepDebris() {
 		if col < 0 || col >= s.W {
 			continue
 		}
-		landing := float64(s.H - 1 - len(s.heap[col]))
-		if d.y >= landing {
+		// Drifting into a column whose mound already stands above the chip is
+		// hitting the mound's side, not landing on it: the chip stays in the
+		// column it came from instead of being stacked rows higher in one tick.
+		if col != from && d.y > surface(col)+1 {
+			col = from
+			d.x = float64(from)
+			d.vx = 0
+		}
+		if d.y >= surface(col) {
 			if len(s.heap[col]) < s.H {
 				s.heap[col] = append(s.heap[col], d.cell)
 			}

@@ -351,3 +351,67 @@ func TestKeysDriveAimEmitExit(t *testing.T) {
 		t.Fatal("space should emit")
 	}
 }
+
+func TestFreezeClipsAnOversizedFrame(t *testing.T) {
+	// Bubble Tea clips a line wider than the terminal; a naive replay would
+	// wrap it and scroll the top row off.
+	g := Freeze("row0\nAAAAAAAAAA\nrow2", 8, 2)
+	var rows []string
+	for y := 0; y < 2; y++ {
+		var b strings.Builder
+		for x := 0; x < 8; x++ {
+			b.WriteString(g.At(x, y).Content)
+		}
+		rows = append(rows, b.String())
+	}
+	if rows[0] != "row0    " || rows[1] != "AAAAAAAA" {
+		t.Fatalf("rows = %q, want the first line kept and the second clipped", rows)
+	}
+}
+
+func TestSetBlanksTheSpacerOfTheGlyphItCovers(t *testing.T) {
+	g := NewGrid(6, 1)
+	g.Set(0, 0, Cell{Content: "🔥", Width: 2})
+	g.Set(2, 0, Cell{Content: "🔥", Width: 2})
+	g.Set(1, 0, Cell{Content: "🔥", Width: 2}) // covers the left half of the second
+	if c := g.At(3, 0); c.Width != 1 || c.Content != " " || g.Solid(3, 0) {
+		t.Fatalf("cell 3 = %+v (solid=%v), want a blank, not an orphaned spacer", c, g.Solid(3, 0))
+	}
+	if c := g.At(1, 0); c.Content != "🔥" || c.Width != 2 || g.At(2, 0).Width != 0 {
+		t.Fatalf("the glyph written last should own cells 1–2, got %+v / %+v", c, g.At(2, 0))
+	}
+}
+
+func TestWideGlyphShedsAOneColumnChip(t *testing.T) {
+	s := New(NewGrid(12, 4), 1)
+	s.fling(5, 3, Cell{Content: "🔥", Width: 2}, 0)
+	if len(s.falling) != 1 || s.falling[0].cell.Content != "▪" || s.falling[0].cell.Width != 1 {
+		t.Fatalf("falling = %+v, want one ▪ chip", s.falling)
+	}
+	// A heap holds one column per cell, so a chip beside another must render.
+	s.falling = nil
+	s.heap[5] = append(s.heap[5], Cell{Content: "▪", Width: 1})
+	s.heap[6] = append(s.heap[6], Cell{Content: "x", Width: 1})
+	s.Render()
+	if a, b := s.frame.At(5, 3).Content, s.frame.At(6, 3).Content; a != "▪" || b != "x" {
+		t.Fatalf("bottom row renders %q %q, want ▪ x", a, b)
+	}
+}
+
+func TestChipHittingAMoundSideStaysInItsColumn(t *testing.T) {
+	s := New(NewGrid(20, 10), 1)
+	for i := 0; i < 6; i++ {
+		s.heap[10] = append(s.heap[10], Cell{Content: "#", Width: 1})
+	}
+	// Row 8, drifting right into a mound whose top is at row 3.
+	s.falling = []Debris{{x: 9.4, y: 8, vx: 0.3, cell: Cell{Content: "c", Width: 1}}}
+	s.stepDebris()
+	if len(s.heap[10]) != 6 {
+		t.Fatalf("the chip was stacked on top of the mound it ran into (heap[10] = %d tall)", len(s.heap[10]))
+	}
+	landed := len(s.heap[9]) == 1
+	stillFalling := len(s.falling) == 1 && s.falling[0].x == 9 && s.falling[0].vx == 0
+	if !landed && !stillFalling {
+		t.Fatalf("chip should stay in column 9: falling=%+v heap[9]=%d", s.falling, len(s.heap[9]))
+	}
+}

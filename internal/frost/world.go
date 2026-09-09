@@ -39,13 +39,24 @@ func NewGrid(w, h int) *Grid {
 // the real terminal would have shown — colors, bold, faint, wide glyphs —
 // lands in the right cell. Lines are joined with CRLF because the emulator
 // treats a bare LF as line-feed only.
+//
+// The frame is clipped to w×h first. Bubble Tea's renderer clips what it
+// paints, so a line wider than the terminal is invisible live — but the
+// emulator would wrap it and scroll the top row away.
 func Freeze(frame string, w, h int) *Grid {
 	g := NewGrid(w, h)
 	if w <= 0 || h <= 0 {
 		return g
 	}
+	lines := strings.Split(frame, "\n")
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, w, "")
+	}
 	emu := vt.NewEmulator(w, h)
-	_, _ = emu.Write([]byte(strings.ReplaceAll(frame, "\n", "\r\n")))
+	_, _ = emu.Write([]byte(strings.Join(lines, "\r\n")))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			c := emu.CellAt(x, y)
@@ -102,6 +113,9 @@ func (g *Grid) Set(x, y int, c Cell) {
 	g.cells[i] = c
 	if c.Width == 2 {
 		if x+1 < g.W {
+			if g.cells[i+1].Width == 2 && x+2 < g.W {
+				g.cells[i+2] = blank // the glyph being covered owned that spacer
+			}
 			g.cells[i+1] = Cell{Width: 0}
 		} else {
 			g.cells[i] = blank

@@ -3,6 +3,10 @@ package ui
 import (
 	"hash/fnv"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/brizzai/fleet/internal/frost"
 )
 
 // trailOf is the detector's own hash of a key run, so a test can install a
@@ -58,5 +62,39 @@ func TestTrailNeverFiresOnPlainNavigation(t *testing.T) {
 	}
 	if len(h.keyTrail) != trailLen {
 		t.Fatalf("trail should stay bounded at %d, got %d", trailLen, len(h.keyTrail))
+	}
+}
+
+// runningFrost gives a booted, sized Home with a run in progress.
+func runningFrost(t *testing.T) *Home {
+	t.Helper()
+	h := newPersistTestHome(t)
+	h.booted = true
+	h.Update(tea.WindowSizeMsg{Width: 80, Height: 24}) //nolint:errcheck // sizing only
+	h.frost = frost.New(frost.NewGrid(80, 24), 1)
+	return h
+}
+
+func TestOnlyARealResizeEndsTheRun(t *testing.T) {
+	h := runningFrost(t)
+	// Bubble Tea reports the size on every SIGWINCH, changed or not.
+	h.Update(tea.WindowSizeMsg{Width: 80, Height: 24}) //nolint:errcheck // the run is the assertion
+	if h.frost == nil {
+		t.Fatal("a same-size WindowSizeMsg ended the run")
+	}
+	h.Update(tea.WindowSizeMsg{Width: 80, Height: 23}) //nolint:errcheck // the run is the assertion
+	if h.frost != nil {
+		t.Fatal("a real resize should end the run")
+	}
+}
+
+func TestQuitKeyEndsTheRunInOnePress(t *testing.T) {
+	h := runningFrost(t)
+	h.handleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}) //nolint:errcheck // quitting is the assertion
+	if h.frost != nil {
+		t.Fatal("ctrl+c left the run active")
+	}
+	if !h.quitting {
+		t.Fatal("ctrl+c should quit fleet in one press, not just leave the run")
 	}
 }
