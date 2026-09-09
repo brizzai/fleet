@@ -50,6 +50,9 @@ const (
 	EventSpaceJump  = "space_jump"
 	EventHeaderJump = "header_jump"
 
+	// Frost mode was started from the sidebar.
+	EventFrostMode = "frost_mode"
+
 	// RTS slot bindings.
 	EventSlotBindingSet = "slot_binding_set"
 	EventSlotJumpUsed   = "slot_jump_used"
