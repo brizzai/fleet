@@ -2,6 +2,7 @@ package ui
 
 import (
 	"hash/fnv"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -96,5 +97,112 @@ func TestQuitKeyEndsTheRunInOnePress(t *testing.T) {
 	}
 	if !h.quitting {
 		t.Fatal("ctrl+c should quit fleet in one press, not just leave the run")
+	}
+}
+
+func TestHiddenPaletteRowSurfacesOnlyOnASearch(t *testing.T) {
+	d := NewCommandPaletteDialog()
+	items := []PaletteItem{
+		{Kind: PaletteKindCommand, ID: "plain", Name: "Plain Command"},
+		{Kind: PaletteKindCommand, ID: "shy", Name: "Zzz", Haystack: "Zzz needle words", Hidden: true},
+	}
+	d.Show(items, []string{"shy"}) // even a recent pick stays hidden
+	ids := func() []string {
+		var out []string
+		for _, it := range d.filtered {
+			out = append(out, it.ID)
+		}
+		return out
+	}
+	if got := ids(); len(got) != 1 || got[0] != "plain" {
+		t.Fatalf("unfiltered list = %v, want only the plain command", got)
+	}
+	d.filterInput.SetValue("needle")
+	d.rebuildFiltered()
+	if got := ids(); len(got) != 1 || got[0] != "shy" {
+		t.Fatalf("searching a hidden row's keyword gave %v, want the hidden row", got)
+	}
+}
+
+func TestGateRevealsTheHintOnlyToTheRightAnswer(t *testing.T) {
+	d := newGateDialog()
+	d.unlock = func(a string) bool { return a == "yes" }
+	d.SetSize(80, 24)
+	d.Show()
+
+	type_ := func(s string) {
+		for _, r := range s {
+			d.Update(tea.KeyPressMsg{Code: r, Text: string(r)}) //nolint:errcheck // the dialog state is the assertion
+		}
+	}
+	enter := tea.KeyPressMsg{Code: tea.KeyEnter}
+
+	type_("no")
+	d.Update(enter) //nolint:errcheck // the dialog state is the assertion
+	if !d.IsVisible() || d.open || d.note != frost.Gate().Wrong || d.input.Value() != "" {
+		t.Fatalf("a wrong answer should stay open, say %q and clear the field: open=%v note=%q value=%q",
+			frost.Gate().Wrong, d.open, d.note, d.input.Value())
+	}
+	if v := d.View(); !strings.Contains(v, frost.Gate().Wrong) || strings.Contains(v, frost.Gate().Hint) {
+		t.Fatal("the view should show the wrong line and not the hint")
+	}
+
+	type_("yes")
+	d.Update(enter) //nolint:errcheck // the dialog state is the assertion
+	if !d.IsVisible() || !d.open || d.note != frost.Gate().Hint {
+		t.Fatalf("the right answer should reveal the hint: open=%v note=%q", d.open, d.note)
+	}
+	// The box wraps a long line, so look for the hint's opening words.
+	opening := strings.Join(strings.Fields(frost.Gate().Hint)[:2], " ")
+	if v := d.View(); !strings.Contains(v, opening) || !strings.Contains(v, frost.Gate().Label) {
+		t.Fatal("the view should show the hint under the label")
+	}
+	d.Update(enter) //nolint:errcheck // the dialog state is the assertion
+	if d.IsVisible() {
+		t.Fatal("enter on the hint should close the prompt")
+	}
+
+	d.Show()
+	if d.open || d.note != "" {
+		t.Fatal("reopening should start fresh")
+	}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyEscape}) //nolint:errcheck // the dialog state is the assertion
+	if d.IsVisible() {
+		t.Fatal("esc should close the prompt")
+	}
+}
+
+func TestGateIsReachableFromThePalette(t *testing.T) {
+	h := newPersistTestHome(t)
+	h.booted = true
+	h.Update(tea.WindowSizeMsg{Width: 80, Height: 24}) //nolint:errcheck // sizing only
+	found := false
+	for _, it := range h.buildPaletteItems() {
+		if it.ID == "frost_gate" {
+			found = it.Hidden && it.Name == frost.Gate().Label
+		}
+	}
+	if !found {
+		t.Fatal("the palette should carry a hidden row for the gate, named from the pack")
+	}
+	// Through the real list, not a hand-built one: a later pass over the
+	// commands must not reset the search text the row relies on.
+	h.commandPalette.Show(h.buildPaletteItems(), nil)
+	h.commandPalette.filterInput.SetValue(strings.Fields(frost.Gate().Keywords)[0])
+	h.commandPalette.rebuildFiltered()
+	hit := false
+	for _, it := range h.commandPalette.filtered {
+		hit = hit || it.ID == "frost_gate"
+	}
+	if !hit {
+		t.Fatal("searching the first keyword did not surface the row")
+	}
+	h.commandPalette.Hide()
+	h.dispatchCommand("frost_gate") //nolint:errcheck // the dialog is the assertion
+	if !h.gate.IsVisible() || !h.modalOpen() {
+		t.Fatal("dispatching the row should open the prompt as a modal")
+	}
+	if !strings.Contains(h.renderBody(), frost.Gate().Label) {
+		t.Fatal("the body should render the prompt while it is open")
 	}
 }

@@ -257,6 +257,7 @@ type Home struct {
 	newDialog             *NewSessionDialog
 	confirmDialog         *ConfirmDialog
 	renameDialog          *RenameDialog
+	gate                  *gateDialog
 	helpOverlay           *HelpOverlay
 	settingsDialog        *SettingsDialog
 	worktreeDialog        *WorktreeDialog
@@ -586,6 +587,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		newDialog:              NewNewSessionDialog(),
 		confirmDialog:          NewConfirmDialog(),
 		renameDialog:           NewRenameDialog(),
+		gate:                   newGateDialog(),
 		helpOverlay:            NewHelpOverlay(),
 		settingsDialog:         NewSettingsDialog(cfg),
 		worktreeDialog:         NewWorktreeDialog(),
@@ -886,6 +888,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.newDialog.SetSize(msg.Width, msg.Height)
 		h.confirmDialog.SetSize(msg.Width, msg.Height)
 		h.renameDialog.SetSize(msg.Width, msg.Height)
+		h.gate.SetSize(msg.Width, msg.Height)
 		h.helpOverlay.SetSize(msg.Width, msg.Height)
 		h.settingsDialog.SetSize(msg.Width, msg.Height)
 		h.worktreeDialog.SetSize(msg.Width, msg.Height)
@@ -2390,6 +2393,7 @@ func (h *Home) modalOpen() bool {
 		h.newDialog.IsVisible() ||
 		h.confirmDialog.IsVisible() ||
 		h.renameDialog.IsVisible() ||
+		h.gate.IsVisible() ||
 		h.commandPalette.IsVisible() ||
 		h.contextMenu.IsVisible() ||
 		h.snoozeDialog.IsVisible() ||
@@ -2449,6 +2453,9 @@ func (h *Home) renderBody() string {
 	}
 	if h.renameDialog.IsVisible() {
 		return h.renameDialog.View()
+	}
+	if h.gate.IsVisible() {
+		return h.gate.View()
 	}
 
 	// First-run launchpad owns the screen while the fleet is empty.
@@ -2784,6 +2791,10 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.renameDialog.IsVisible():
 		dialog, cmd := h.renameDialog.Update(msg)
 		h.renameDialog = dialog
+		return cmd, true
+	case h.gate.IsVisible():
+		dialog, cmd := h.gate.Update(msg)
+		h.gate = dialog
 		return cmd, true
 	}
 	return nil, false
@@ -8610,6 +8621,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "Shift+W"},
 		{Kind: PaletteKindCommand, ID: "release_notes", Name: "Release Notes"},
 		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
+		{Kind: PaletteKindCommand, ID: "frost_gate", Name: frost.Gate().Label, Haystack: frost.Gate().Label + " " + frost.Gate().Keywords, Hidden: true},
 		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
 		{Kind: PaletteKindCommand, ID: "suspend_now", Name: "Suspend Idle Sessions Now"},
 		{Kind: PaletteKindCommand, ID: "mark_all_read", Name: "Mark All as Read"},
@@ -8626,7 +8638,9 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		commands = append(commands, PaletteItem{Kind: PaletteKindCommand, ID: "open_fda", Name: "Open Full Disk Access Settings"})
 	}
 	for i := range commands {
-		commands[i].Haystack = commands[i].Name
+		if commands[i].Haystack == "" {
+			commands[i].Haystack = commands[i].Name
+		}
 	}
 
 	// Lock-free read of the immutable git/PR snapshot.
@@ -8810,6 +8824,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.connectJira.Show()
 		return h, nil
 
+	case "frost_gate":
+		h.gate.Show()
+		return h, nil
 	case "connect_linear":
 		h.actionLog.Add("connect linear", "", true)
 		// Opening the dialog is the feature the tip teaches, so this is where

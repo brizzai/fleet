@@ -10,8 +10,10 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
+	"hash/fnv"
 	"image/color"
 	"io"
+	"strings"
 
 	uv "github.com/charmbracelet/ultraviolet"
 )
@@ -167,7 +169,7 @@ var (
 
 // pack is the glyph data: a gzip-compressed JSON array of strings, in the
 // order init reads them.
-const pack = "H4sIAAAAAAACE7WQuU7DQBCGX2XkhgblHSKgQCAqqBDFxtnEqxhvtLvESmdFKEpBEedYrhA6CiSOnreZJ2EPO3JEBBKC1a/x/DOfx7M+DQAA9Rj1PepRKZuberANge0+oF5UuitlBYL6cVO7qtsCvEO9/D4W4PJH1oJmh1I33l86Y6P3y1La+6tShX/2j2u3pXZ3Ha2G5agnLvpkum7zFZSXZv6Cs+zvNX9102cD8AcXH7BzWD/Z3YPj+tGB874xG6yTG886hcMxDicATcF61BdyHE4BCDv/SssuCQ3VYsJEKkOABgk7v/oy7VHRVxFL2sAkEFBEtKmqUPP3//mbb3Z6TNWWBEFbJFRcgNlD1myd865PVEQU8IRCSiSkXHTMoq6xDzLiF3ET7Lbu9oo7oHjNXMaoxRLqCpg9ubmpc42+r4aCKRaSGCKmasHZJ+4QVSSIAwAA"
+const pack = "H4sIAAAAAAACE7VRvW4TQRB+lcFNmsgPQGNFQIFAVFAhivXd+G51zu4xu47lzoqQlYIiTuzlLzgdBRIJPW+zT8Lsz1m2iEBCcPdpbr6Zb2dn5l72AMC7c+8+eXfWIfgc7x1CL2Q/e3e1k91iniXeXd+V3sWHLPzo3eb3Ngs3f9QGIffQ4X3ibyIJNvFNB5f42w6Zf02fd7FLF2c92xZbencRbXIu9+lyK1p2ZP3Nr+b/HuubWH11CunxVz/gwdOjFw8fwfOjZ08iT4nV6b7yzmdf5RfnfnEBUJI8wRRY+sUlgJDHv6pNKwpWjSSxRVMADEXR/NXNeII0s7VUFUgDAqygCu2Oav39/2zzNlQfoz0wQDgShdUE3Ifph7jWbXJsLSxohTAVBqaaGm40Jh6DqfVkXELoNk5vdRTkYzwMYyQVxoCff4l1p5ENZylakLSyEGOopU2BsZiUyEtQzeBefgeDkEFhLBJgVYHBgvjSWpYlKjATakmadAhygUYrcSzDuVYYw22V9wNRus0XayIsbJ8nRsKDsPhctcEZu68nqPgPaxUEYGSJQ0F9QFnVFlpCY9AcgtLAC+S2eFevfgIP8BCKRQQAAA=="
 
 func init() {
 	raw, err := base64.StdEncoding.DecodeString(pack)
@@ -205,5 +207,33 @@ func init() {
 	}
 	at += len(bursts)
 	card = s[at : at+cardRows]
-	quips = s[at+cardRows:]
+	at += cardRows
+	quips = s[at : at+quipCount]
+	gate = GateText{Label: s[at+quipCount], Keywords: s[at+quipCount+1], Prompt: s[at+quipCount+2], Wrong: s[at+quipCount+3], Hint: s[at+quipCount+4]}
+}
+
+// GateText is the copy for the prompt that fronts frost mode elsewhere in the
+// app: how the entry is found, what it asks, and what it says either way.
+type GateText struct {
+	Label    string // the entry's name
+	Keywords string // extra search terms that surface it
+	Prompt   string // what it asks for
+	Wrong    string // said to a wrong answer
+	Hint     string // said to the right one
+}
+
+var gate GateText
+
+// Gate returns the prompt's copy.
+func Gate() GateText { return gate }
+
+// gateKey is the hash of the answer the prompt accepts.
+var gateKey uint64 = 0x59f74680b7643863
+
+// Unlock reports whether answer is the one the prompt accepts. Case and
+// surrounding space do not count.
+func Unlock(answer string) bool {
+	f := fnv.New64a()
+	_, _ = f.Write([]byte(strings.ToLower(strings.TrimSpace(answer))))
+	return f.Sum64() == gateKey
 }

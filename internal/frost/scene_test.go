@@ -1,6 +1,7 @@
 package frost
 
 import (
+	"hash/fnv"
 	"math"
 	"strings"
 	"testing"
@@ -63,6 +64,9 @@ func TestUnpackedAssetsHaveTheExpectedShape(t *testing.T) {
 	}
 	if len(quips) != quipCount {
 		t.Fatalf("%d quips unpacked, want %d", len(quips), quipCount)
+	}
+	if g := Gate(); g.Label == "" || g.Keywords == "" || g.Prompt == "" || g.Wrong == "" || g.Hint == "" {
+		t.Fatalf("gate copy is incomplete: %+v", g)
 	}
 	w := len([]rune(card[0]))
 	for i, row := range card {
@@ -577,5 +581,24 @@ func TestCritGapIsEnforcedEvenWhenTheRollWouldHit(t *testing.T) {
 	}
 	if plain < critGap {
 		t.Fatalf("a crit came %d shots after a forced one, want at least %d", plain, critGap)
+	}
+}
+
+func TestUnlockIgnoresCaseAndSpace(t *testing.T) {
+	old := gateKey
+	defer func() { gateKey = old }()
+	f := fnv.New64a()
+	_, _ = f.Write([]byte("open sesame"))
+	gateKey = f.Sum64()
+
+	for _, ok := range []string{"open sesame", "  Open Sesame\t", "OPEN SESAME"} {
+		if !Unlock(ok) {
+			t.Errorf("Unlock(%q) = false", ok)
+		}
+	}
+	for _, bad := range []string{"", "open", "opensesame", "open sesame!"} {
+		if Unlock(bad) {
+			t.Errorf("Unlock(%q) = true", bad)
+		}
 	}
 }
