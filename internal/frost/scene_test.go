@@ -207,13 +207,13 @@ func TestDrivesInFromTheRightAndParks(t *testing.T) {
 	}
 }
 
-func TestEmitKicksBackAndDipsTheArm(t *testing.T) {
+func TestEmitDipsTheArmWithoutMoving(t *testing.T) {
 	s := New(NewGrid(80, 24), 1)
 	settle(s)
 	x := s.Actor.X
 	s.emit()
-	if s.Actor.X != x+1 {
-		t.Fatalf("facing left, emit should kick right: %v → %v", x, s.Actor.X)
+	if s.Actor.X != x {
+		t.Fatalf("emit must not move the actor: %v → %v", x, s.Actor.X)
 	}
 	if s.Actor.recoil == 0 {
 		t.Fatal("recoil should be set")

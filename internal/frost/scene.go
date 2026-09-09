@@ -328,8 +328,7 @@ func (s *Scene) nozzle() (x, y int) {
 	return px + s.Actor.Facing*tip[0], py + tip[1]
 }
 
-// emit launches a probe from the nozzle. The actor kicks back a column and
-// the arm dips for a moment.
+// emit launches a probe from the nozzle; the arm dips for a moment.
 func (s *Scene) emit() {
 	if s.Actor.cooldown > 0 {
 		return
@@ -339,8 +338,6 @@ func (s *Scene) emit() {
 	nx, ny := s.nozzle()
 	s.probes = append(s.probes, s.launch(float64(nx), float64(ny)))
 	s.Actor.recoil = recoilTicks
-	lo, hi := s.xRange()
-	s.Actor.X = min(max(s.Actor.X-float64(s.Actor.Facing), lo), hi)
 }
 
 // launch builds a probe leaving (x, y) at the actor's current elevation.
