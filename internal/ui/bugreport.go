@@ -300,7 +300,7 @@ func (d *BugReportDialog) submitStatusReport(desc string, expected session.Statu
 	body := buildStatusReportBody(desc, expected, &d.status, d.report)
 	title := fmt.Sprintf("Wrong status: showed %s, expected %s — %s",
 		d.status.shownStatus, expected, ansi.Truncate(sanitizeForIssue(desc), 60, "…"))
-	return d.createGitHubIssue(title, body, "bug")
+	return d.createGitHubIssue(title, body, labelBug)
 }
 
 func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
@@ -310,12 +310,12 @@ func (d *BugReportDialog) openGitHubIssue(description string) tea.Cmd {
 	title := ansi.Truncate(sanitizeForIssue(description), 60, "…")
 
 	var body string
-	label := "bug"
+	label := labelBug
 	if d.kind == kindFeature {
 		// A feature request carries prose and versions only. The error history,
 		// action log, and debug log are reproduction context for a defect; on an
 		// idea they are noise the maintainer has to scroll past.
-		label = "enhancement"
+		label = labelEnhancement
 		body = "## Feature Request\n\n### Problem\n" + sanitizeForIssue(description) + "\n\n" +
 			fmt.Sprintf("### Environment\n- **Version**: %s\n- **OS**: %s (%s)\n",
 				d.report.Version, d.report.OSSummary(), d.report.Arch)
@@ -343,12 +343,39 @@ func ghAvailable() bool {
 	return err == nil
 }
 
+// labelMarkerFmt embeds the requested label in the issue body, where
+// .github/workflows/label-reports.yml reads it back and applies the label with
+// the repo's own token.
+//
+// The --label flag below is not enough on its own: GitHub accepts labels on
+// issue creation only from users with write access, and silently drops them
+// for everyone else — no error, gh still exits 0, so nothing on this side can
+// tell. fleet is open source and most reporters are outside contributors, so
+// in practice almost every filed issue landed unlabelled. The flag stays for
+// maintainers, whose issues are then labelled at creation rather than a run
+// later; for everyone else the marker is the only path that works.
+const labelMarkerFmt = "\n\n<!-- fleet-report-label: %s -->\n"
+
+// The labels a report can ask for. The workflow allowlists the same set, so a
+// label added here and not there lands unlabelled — the state this whole
+// mechanism exists to fix. reportLabels is what lets the guard test compare the
+// two sets instead of a copy of one of them; a call site spelling its label
+// inline is invisible to it.
+const (
+	labelBug         = "bug"
+	labelEnhancement = "enhancement"
+)
+
+var reportLabels = []string{labelBug, labelEnhancement}
+
 // createGitHubIssue files an issue and opens it in the browser. Shared by all
 // three report kinds; only title, body, and label differ between them.
 func (d *BugReportDialog) createGitHubIssue(title, body, label string) tea.Cmd {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return func() tea.Msg { return bugReportOpenErrMsg{err: fmt.Errorf("gh CLI not found")} }
 	}
+
+	body += fmt.Sprintf(labelMarkerFmt, label)
 
 	return func() tea.Msg {
 		debuglog.Logger.Info("bug report: creating GitHub issue via API", "label", label)

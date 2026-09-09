@@ -1,0 +1,39 @@
+name: Label Reports
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    if: contains(github.event.issue.body, '<!-- fleet-report-label:')
+    steps:
+      - name: Apply the label the report asked for
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          # An issue body is written by whoever opened the issue, so the marker
+          # is a request, not an instruction: only these two labels are ever
+          # honoured. Without the allowlist anyone could hand themselves
+          # `autorelease` — the label merging a release PR keys on — by pasting
+          # a comment into an issue.
+          #
+          # tail, not head: fleet appends its marker after the body is fully
+          # built, so it is always the last one. Everything before it is written
+          # by the reporter — a feature request's body is their description
+          # verbatim, and a bug or wrong-status body carries the debug log,
+          # error history and pane excerpt. Any of those quoting the marker
+          # would otherwise outrank the kind they picked in the dialog.
+          LABEL=$(printf '%s' "$BODY" | sed -n 's/.*<!-- fleet-report-label: \([a-z-]*\) -->.*/\1/p' | tail -1)
+          case "$LABEL" in
+            bug|enhancement) ;;
+            *) echo "::notice::ignoring unknown report label '$LABEL'"; exit 0 ;;
+          esac
+          gh issue edit "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --add-label "$LABEL"

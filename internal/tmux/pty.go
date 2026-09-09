@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -48,6 +49,56 @@ func findCtrlQ(buf []byte) (int, int) {
 	return idx, length
 }
 
+// clientEnv returns the parent environment with tmux's own client variables
+// stripped. A tmux client refuses to attach to a session on the server it is
+// already inside — "sessions should be nested with care, unset $TMUX to force"
+// — so a fleet launched from within tmux would hand that variable to every
+// attach and Enter would do nothing at all. The error goes to the child's
+// stderr, which here is the PTY we immediately put into raw mode, so it never
+// reaches the TUI or the log: a silent dead key on fleet's primary action.
+// Unsetting is exactly what tmux's message asks for. TMUX_PANE goes with it —
+// it names a pane on the outer server and means nothing to the new client.
+// socketFromEnv reads the server socket path out of $TMUX, whose value is
+// "<socket>,<pid>,<session>". Empty when fleet is not running inside tmux.
+func socketFromEnv() string {
+	v := os.Getenv("TMUX")
+	if i := strings.IndexByte(v, ','); i >= 0 {
+		v = v[:i]
+	}
+	return v
+}
+
+// attachArgs builds the tmux argv for attaching to name.
+//
+// $TMUX carries two things at once: which server to talk to, and the fact that
+// we are nested inside it. Only the second is a problem, so they have to be
+// separated — keep the server by naming its socket with -S, and drop the
+// nesting marker from the environment (see clientEnv).
+//
+// Dropping $TMUX on its own is not enough and is its own bug: tmux would fall
+// back to the *default* socket, while Exists() just confirmed the session on
+// the inherited one. For anyone running fleet under a named socket
+// (`tmux -L work`) every session lives there, so the attach would look for it
+// on a server that has never heard of it.
+func attachArgs(name string) []string {
+	if sock := socketFromEnv(); sock != "" {
+		return []string{"-S", sock, "attach-session", "-t", name}
+	}
+	return []string{"attach-session", "-t", name}
+}
+
+func clientEnv() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_PANE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // Attach attaches to the tmux session with full PTY support.
 // Ctrl+Q detaches and returns to the caller. Ctrl+b d also works (tmux native).
 func (s *Session) Attach(ctx context.Context) error {
@@ -59,7 +110,8 @@ func (s *Session) Attach(ctx context.Context) error {
 	defer cancel()
 
 	// Start tmux attach with PTY.
-	cmd := exec.CommandContext(ctx, "tmux", "attach-session", "-t", s.Name)
+	cmd := exec.CommandContext(ctx, "tmux", attachArgs(s.Name)...)
+	cmd.Env = clientEnv()
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to start pty: %w", err)

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.35.0] - 2026-09-08
+
+### Added
+
+- **Jump a whole repo at a time** — `Ctrl+Shift+↑/↓` moves between origin headers, skipping the checkout headers in between, so a repo with a dozen worktrees costs one press instead of a dozen. `Shift+↑/↓` still steps header by header.
+
+### Improved
+
+- **Fresh base branches** — creating a worktree now refreshes `origin/<base>` first, so a new branch starts at the tip the remote actually has instead of whatever this clone last fetched, and doesn't need a merge as its first act. The round trip hides behind the `Creating…` spinner; offline it gives up after about 5s and branches from the refs you already have.
+- **Searchable keybindings.** `?` now groups the keymap into sections and filters as you type — start typing to narrow all 52 bindings down to the one you want, `esc` to close. Columns are also sized to their own contents instead of to the single widest binding, so a 120-column terminal shows two columns rather than hiding 21 keys below the fold.
+
+### Fixed
+
+- **Attach works inside tmux.** If you run fleet from within a tmux session, `⏎` now attaches instead of doing nothing — fleet was passing `$TMUX` through to `tmux attach-session`, which refuses a nested attach and printed its error somewhere you could never see it.
+
+## [2.34.0] - 2026-09-02
+
+### Added
+
+- **Pick the subscription up front.** `Shift+A` now carries an `Account` row beside `Agent`, so a new session starts on the Claude subscription you choose instead of whichever one `account_strategy` ranks first. Each option shows its 5-hour quota, `Auto` stays the default, and the row only appears once you have two accounts.
+
+## [2.33.0] - 2026-08-27
+
+### Added
+
+- **Todo-only tickets.** `Ctrl+O` in the tickets tab (`t`) hides what you've already started, leaving everything you haven't — todo, backlog and triage alike. The tab chip reads `tickets · todo` while it's on.
+- **More of your backlog.** The tickets tab now fetches 100 issues per tracker instead of 50 — the cut was ordered by recency, so it was truncating exactly the untouched backlog.
+
+### Fixed
+
+- **Status stops going dark.** Every session could lose status detection at once, silently, if the `fleet` binary that installed the hooks was later deleted or upgraded away — the sidebar kept showing a status, just a guessed one. fleet now repairs the hooks within a minute and names the sessions to restart.
+- **Busy sessions stay busy.** Starting a message while the agent was still working could mark it finished for ~18s — long enough for `Space` to jump you onto a session that was mid-run.
+
 ## [2.32.0] - 2026-08-26
 
 ### Highlights
@@ -615,7 +648,10 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.32.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.35.0...HEAD
+[2.35.0]: https://github.com/brizzai/fleet/releases/tag/v2.35.0
+[2.34.0]: https://github.com/brizzai/fleet/releases/tag/v2.34.0
+[2.33.0]: https://github.com/brizzai/fleet/releases/tag/v2.33.0
 [2.32.0]: https://github.com/brizzai/fleet/releases/tag/v2.32.0
 [2.31.0]: https://github.com/brizzai/fleet/releases/tag/v2.31.0
 [2.30.3]: https://github.com/brizzai/fleet/releases/tag/v2.30.3

@@ -165,21 +165,31 @@ func (d *AccountPickerDialog) View() string {
 	return DialogStyle.Width(boxW).Render(b.String())
 }
 
+// accountStateCell is what a row says about an account instead of its name: the
+// reason it can't be picked, else its 5-hour quota.
+//
+// The state cell answers "why would I pick this one", so the note takes priority
+// over the quota numbers: a rejected token's last-known percentage would present
+// a dead credential as one with headroom.
+//
+// Shared with the `A` dialog's Account cycler, which offers the same accounts on
+// the same terms — two copies of this order would eventually disagree about
+// which of a dead account's two facts to show.
+func accountStateCell(r accountPickerRow) string {
+	switch {
+	case r.note != "":
+		return r.note
+	case r.usage.Known():
+		return ansi.Strip(renderQuotaCell(r.usage))
+	default:
+		return "quota unknown"
+	}
+}
+
 // renderRow lays one account out across width cells — the dialog's INNER width,
 // not the box width.
 func (d *AccountPickerDialog) renderRow(i int, r accountPickerRow, width int) string {
-	// The state cell answers "why would I pick this one", so it takes priority
-	// over the quota numbers: a rejected token's last-known percentage would
-	// present a dead credential as one with headroom.
-	state := ""
-	switch {
-	case r.note != "":
-		state = r.note
-	case r.usage.Known():
-		state = ansi.Strip(renderQuotaCell(r.usage))
-	default:
-		state = "quota unknown"
-	}
+	state := accountStateCell(r)
 
 	// Budget the columns off the raw text and pad before styling — padding a
 	// styled string counts the ANSI bytes and the columns come out ragged.

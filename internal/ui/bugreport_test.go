@@ -1,7 +1,11 @@
 package ui
 
 import (
+	"fmt"
 	"os"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -230,5 +234,72 @@ func TestAccountEmailsNeverReachAnIssue(t *testing.T) {
 		if strings.Contains(body, domain) {
 			t.Errorf("published the domain %s:\n%s", domain, body)
 		}
+	}
+}
+
+// TestLabelMarkerMatchesTheWorkflow pins the one coupling this mechanism has:
+// the marker fleet writes into the issue body and the pattern
+// .github/workflows/label-reports.yml extracts it with live in different files
+// and different languages, so nothing but this test fails when one moves. A
+// marker the workflow cannot read is invisible — the issue is still filed, and
+// still lands unlabelled, which is the state this exists to fix.
+func TestLabelMarkerMatchesTheWorkflow(t *testing.T) {
+	wf, err := os.ReadFile("../../.github/workflows/label-reports.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+	// The workflow extracts with sed, whose BRE spells the capture group
+	// `\(...\)`; dropping those backslashes is the whole translation to a Go
+	// regexp. Asserting the BRE is present first is what makes this test fail
+	// when the workflow's pattern is edited rather than silently checking a
+	// string nothing uses.
+	bre := `<!-- fleet-report-label: \([a-z-]*\) -->`
+	if !strings.Contains(string(wf), bre) {
+		t.Fatalf("workflow no longer extracts with %q — update the marker or this test", bre)
+	}
+	re := regexp.MustCompile(strings.NewReplacer(`\(`, `(`, `\)`, `)`).Replace(bre))
+
+	// fleet appends its marker last, so the workflow has to read the last one.
+	// head takes the first, which is inside reporter-written content — the
+	// debug log, error history or pane excerpt of a bug report, or the whole
+	// body of a feature request. Both labels are allowlisted, so the failure is
+	// silent: the issue is filed under the opposite kind to the one picked.
+	if !strings.Contains(string(wf), "-->.*/\\1/p' | tail -1)") {
+		t.Error("workflow no longer takes the LAST marker — head reads reporter-written content")
+	}
+
+	// Every label fleet actually emits round-trips through the workflow's
+	// pattern. Iterating reportLabels rather than a literal is the point: a
+	// fourth report kind spelling a new label would otherwise be refused by the
+	// workflow, land unlabelled, and leave this test green.
+	for _, label := range reportLabels {
+		marker := fmt.Sprintf(labelMarkerFmt, label)
+		m := re.FindStringSubmatch(marker)
+		if m == nil {
+			t.Errorf("marker %q is not matched by the workflow pattern", marker)
+			continue
+		}
+		if m[1] != label {
+			t.Errorf("workflow would extract %q from %q, want %q", m[1], marker, label)
+		}
+	}
+
+	// The allowlist has to be read out of the `case` arm, not searched for in
+	// the file: a plain Contains over the whole workflow is satisfied by the
+	// explanatory comment above the arm and asserts nothing about the arm
+	// itself. Set equality, so it fails in both directions — a label fleet
+	// emits that the workflow refuses, and a label the workflow honours that
+	// fleet never emits, which is a silent widening of what an issue body can
+	// ask for.
+	arm := regexp.MustCompile(`(?m)^\s*([a-z|-]+)\) ;;$`).FindStringSubmatch(string(wf))
+	if arm == nil {
+		t.Fatalf("no `<labels>) ;;` allowlist arm in the workflow — did the case statement move?")
+	}
+	allowed := strings.Split(arm[1], "|")
+	sort.Strings(allowed)
+	emitted := append([]string(nil), reportLabels...)
+	sort.Strings(emitted)
+	if !slices.Equal(allowed, emitted) {
+		t.Errorf("workflow allowlist %v does not match the labels fleet emits %v", allowed, emitted)
 	}
 }

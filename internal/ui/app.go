@@ -210,6 +210,9 @@ type (
 )
 
 func spinnerTickCmd() tea.Msg {
+	if FreezeAnim {
+		return nil
+	}
 	time.Sleep(100 * time.Millisecond)
 	return spinnerTickMsg{}
 }
@@ -218,6 +221,9 @@ func spinnerTickCmd() tea.Msg {
 // while the badge is visible (see the whatsNewTickMsg handler), so it burns no
 // CPU when the badge is hidden.
 func whatsNewTickCmd() tea.Cmd {
+	if FreezeAnim {
+		return nil
+	}
 	return tea.Tick(whatsNewTickInterval, func(time.Time) tea.Msg { return whatsNewTickMsg{} })
 }
 
@@ -1683,6 +1689,26 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return h, tea.Batch(func() tea.Msg {
+			// Refresh the base ref before branching from it: `worktree add`
+			// resolves origin/<base> out of this clone and never asks the
+			// remote, so without this a worktree silently starts behind and the
+			// first thing it needs is a merge. Advisory, exactly like the file
+			// copies below — a failed fetch costs freshness, never the worktree.
+			//
+			// Here rather than when `w` opens: the dialog is already closed and
+			// the Creating… phantom is already spinning, so the round trip is
+			// invisible. Fetching at open time would either hold the box shut
+			// for it or move the suggestion rows under the cursor when it landed.
+			//
+			// Skipped for a branch that already exists, on the same rule the CLI
+			// path keeps: Create's no-`-b` retry drops the base, so the fetch
+			// would refresh a ref `worktree add` never reads.
+			if !provider.IsCustom() && baseBranch != "" && !git.BranchExists(repoPath, branch) {
+				if ferr := git.FetchBaseRef(repoPath, baseBranch); ferr != nil {
+					debuglog.Logger.Debug("base fetch failed; branching from local refs",
+						"repo", repoPath, "base", baseBranch, "err", ferr)
+				}
+			}
 			info, err := provider.Create(repoPath, name, branch, baseBranch)
 			var tres *ticket.Result
 			var terr error
@@ -2739,7 +2765,11 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		return cmd, true
 	case h.helpOverlay.IsVisible():
-		overlay, cmd := h.helpOverlay.Update(cmdMsg)
+		// Raw, not remapped: the help sheet filters as you type, so a Hebrew or
+		// Greek user's characters must arrive as themselves. Nothing is lost by
+		// it — every key the sheet still acts on is a named one (arrows, PgUp,
+		// Home, esc), and normalizeKey returns those untouched anyway.
+		overlay, cmd := h.helpOverlay.Update(msg)
 		h.helpOverlay = overlay
 		return cmd, true
 	case h.releaseNotes.IsVisible():
@@ -3004,11 +3034,19 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.fetchPreviewForSelected()
 	case "shift+down":
 		h.jumpToHeader(1)
-		analytics.Track(analytics.EventHeaderJump, nil)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("checkout"))
 		return h, h.fetchPreviewForSelected()
 	case "shift+up":
 		h.jumpToHeader(-1)
-		analytics.Track(analytics.EventHeaderJump, nil)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("checkout"))
+		return h, h.fetchPreviewForSelected()
+	case "ctrl+shift+down":
+		h.jumpToOrigin(1)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("origin"))
+		return h, h.fetchPreviewForSelected()
+	case "ctrl+shift+up":
+		h.jumpToOrigin(-1)
+		analytics.Track(analytics.EventHeaderJump, headerJumpProps("origin"))
 		return h, h.fetchPreviewForSelected()
 	case "pgdown":
 		target := h.cursor + h.sidebarPanelRows()
@@ -3103,7 +3141,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			h.newDialog.Show()
 			return h, nil
 		}
-		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()), h.sessionCreateAccountRows(repoPath))
 		return h, nil
 	case "n":
 		// New session at any repo path.
@@ -3337,6 +3375,9 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // matching splashTick). Self-rescheduled by Update while `quitting`, until the
 // teardown command emits tea.Quit and the program exits.
 func (h *Home) shutdownTick() tea.Cmd {
+	if FreezeAnim {
+		return nil
+	}
 	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return shutdownFrameMsg(t)
 	})
@@ -3599,6 +3640,16 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		msg.account = account
+	} else if !accountAllowedFor(msg.account, h.allowedAccountsFor(msg.path)) {
+		// An explicit account skips resolveAccount, and with it the per-origin
+		// allowlist. The `A` dialog already refuses one it dimmed, but the
+		// policy has to hold at the chokepoint too: the CLI makes exactly this
+		// check for an explicit --account (resolveLaunchAccount), and a policy
+		// enforced in one surface and not the other is worse than not having
+		// one — the cost of a miss here is billing work to the wrong
+		// subscription.
+		h.setError(fmt.Errorf("%s is not in allowed_accounts for this repo", h.accountLabel(msg.account)))
+		return h, nil
 	}
 	// A conflicting ambient credential outranks the per-session login, so the
 	// session would run on that credential while every fleet surface claimed it
@@ -3653,13 +3704,7 @@ func (h *Home) resolveAccount(ag agent.Type, path string) (string, string) {
 	allowed := h.allowedAccountsFor(path)
 	usage := h.accountUsageSnapshot()
 
-	acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
-		Accounts: h.accounts.List(),
-		Usage:    usage,
-		Strategy: strategy,
-		Manual:   h.cfg.DefaultAccount,
-		Allowed:  allowed,
-	})
+	acct, ok := h.selectAccountFor(path)
 	if !ok {
 		// Select's one false answer covers two situations that want opposite
 		// responses — see claudeaccount.AllowedConfigured. An allowlist naming
@@ -3684,6 +3729,73 @@ func (h *Home) resolveAccount(ag agent.Type, path string) (string, string) {
 		"allowed", allowed, "candidates", h.accounts.Len(),
 		"usage_known", len(usage), "chosen_five_hour_pct", usage[acct.Email].FiveHourPct)
 	return acct.Email, ""
+}
+
+// selectAccountFor returns the account the configured strategy would give a new
+// session at path, and whether it could choose one at all.
+//
+// Shared by resolveAccount, which acts on the answer, and the `A` dialog's
+// Account cycler, which only previews it under "Auto". Two hand-built SelectOpts
+// would eventually disagree, and a label naming a different account than the one
+// that gets billed is exactly the lie the account labelling exists to stop
+// telling.
+func (h *Home) selectAccountFor(path string) (claudeaccount.Account, bool) {
+	return claudeaccount.Select(claudeaccount.SelectOpts{
+		Accounts: h.accounts.List(),
+		Usage:    h.accountUsageSnapshot(),
+		Strategy: h.cfg.GetAccountStrategy(),
+		Manual:   h.cfg.DefaultAccount,
+		Allowed:  h.allowedAccountsFor(path),
+	})
+}
+
+// sessionCreateAccountRows builds the Account cycler offered by the `A` dialog
+// for a new session at repoPath: an "Auto" head naming what account_strategy
+// would pick, then every configured account with its 5-hour quota.
+//
+// Nil below two accounts — with one or none every session runs on the same
+// credential, so the row would be a constant. Same rule previewAccountLabel
+// applies to the preview footer, and the same reason.
+//
+// Modelled on openAccountPicker, minus its "current" clause: there is no session
+// yet, so no account is the one being moved off.
+func (h *Home) sessionCreateAccountRows(repoPath string) []accountPickerRow {
+	if h.accounts == nil || h.accounts.Len() < 2 {
+		return nil
+	}
+	usage := h.accountUsageSnapshot()
+
+	// "Auto" carries the resolved account's own quota, so the default option
+	// answers "and what would that get me" without being cycled off.
+	auto := accountPickerRow{label: "Auto", enabled: true}
+	if acct, ok := h.selectAccountFor(repoPath); ok {
+		auto.label = "Auto — " + acct.Name()
+		auto.usage = usage[acct.Email]
+	}
+	rows := make([]accountPickerRow, 0, h.accounts.Len()+1)
+	rows = append(rows, auto)
+
+	// The same per-origin allowlist every other assignment path applies. An
+	// explicit pick skips resolveAccount, so without this the `A` dialog would
+	// be the one surface that could bill an origin's work to an account its
+	// owner had excluded.
+	allowed := h.allowedAccountsFor(repoPath)
+	for _, a := range h.accounts.List() {
+		r := accountPickerRow{email: a.Email, label: a.Name(), usage: usage[a.Email], enabled: true}
+		switch {
+		case usage[a.Email].LoggedOut:
+			// Starting a session on an account nobody is logged into would open
+			// a pane that cannot answer.
+			r.enabled, r.note = false, "logged out"
+		case !accountAllowedFor(a.Email, allowed):
+			// Dimmed rather than dropped from the cycle: an option that vanishes
+			// reads as a missing account, where a disabled one with its reason
+			// teaches the policy the user set.
+			r.enabled, r.note = false, "not allowed here"
+		}
+		rows = append(rows, r)
+	}
+	return rows
 }
 
 // accountUnusableReason says why a session's pinned account cannot run it right
@@ -5513,6 +5625,22 @@ func (h *Home) jumpToHeader(direction int) {
 	h.syncViewport()
 }
 
+// headerJumpProps labels which of the two header motions fired. Both emit
+// EventHeaderJump, so without the level they are one indistinguishable number
+// and there is no way to ask whether anyone presses ctrl+shift+↑/↓. Both are
+// labelled rather than only the new one, so the split reads as origin vs.
+// checkout instead of origin vs. unlabelled.
+func headerJumpProps(level string) map[string]interface{} {
+	return map[string]interface{}{"level": level}
+}
+
+// jumpToOrigin is jumpToHeader over origin headers only — the same motion one
+// level up, so a repo with a dozen worktrees costs one press instead of a dozen.
+func (h *Home) jumpToOrigin(direction int) {
+	h.cursor = NextOriginItem(h.flatItems, h.cursor, direction)
+	h.syncViewport()
+}
+
 // jumpToNextAttentionSession moves the cursor to the next session needing
 // attention — waiting first, then finished — cycling in on-screen (tree) order
 // and wrapping.
@@ -6402,6 +6530,9 @@ func (h *Home) bootProgress() float64 {
 
 // splashTick schedules the next splash-spinner advance (~80ms cadence).
 func (h *Home) splashTick() tea.Cmd {
+	if FreezeAnim {
+		return nil
+	}
 	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return splashFrameMsg(t)
 	})
@@ -8894,7 +9025,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 			h.newDialog.Show()
 			return h, nil
 		}
-		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()))
+		h.sessionCreateDialog.Show(repoPath, filepath.Base(repoPath), agent.Parse(h.cfg.GetDefaultAgent()), h.sessionCreateAccountRows(repoPath))
 		return h, nil
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
