@@ -1,6 +1,7 @@
 package frost
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -60,8 +61,8 @@ func TestUnpackedAssetsHaveTheExpectedShape(t *testing.T) {
 	if len(card) != cardRows {
 		t.Fatalf("card has %d rows, want %d", len(card), cardRows)
 	}
-	if len(quips) < 8 {
-		t.Fatalf("only %d quips unpacked", len(quips))
+	if len(quips) != quipCount {
+		t.Fatalf("%d quips unpacked, want %d", len(quips), quipCount)
 	}
 	w := len([]rune(card[0]))
 	for i, row := range card {
@@ -93,7 +94,7 @@ func TestImpactCracksThenClearsAndShedsDebris(t *testing.T) {
 	settle(s)
 	// Hit the 'w' (x=16). The core — that cell and two either side — is
 	// cleared outright; the rest of the footprint only cracks.
-	s.impact(16, 3)
+	s.impact(16, 3, false)
 	if got := ansi.Strip(s.world.Render(0)); !strings.Contains(got, "hel▒     ▒d") {
 		t.Fatalf("after one hit: %q", got)
 	}
@@ -103,7 +104,7 @@ func TestImpactCracksThenClearsAndShedsDebris(t *testing.T) {
 	if c := s.falling[0].cell.Content; c == " " || c == "▒" {
 		t.Fatalf("debris should carry the original glyph, got %q", c)
 	}
-	s.impact(16, 3)
+	s.impact(16, 3, false)
 	if c := s.world.At(13, 3); c.Content != " " {
 		t.Fatalf("second hit should clear the cracked cell, got %q", c.Content)
 	}
@@ -223,17 +224,17 @@ func TestEmitDipsTheArmWithoutMoving(t *testing.T) {
 func TestSpeaksOnFirstHitAndSessionGlyph(t *testing.T) {
 	s := New(screenWith(60, 20, 10, 3, "● run"), 1)
 	settle(s)
-	s.impact(13, 3) // the 'r'; ● sits in the ring and survives as a crack
+	s.impact(13, 3, false) // the 'r'; ● sits in the ring and survives as a crack
 	if s.bubble != quips[quipFirstHit] {
 		t.Fatalf("first hit should say %q, got %q", quips[quipFirstHit], s.bubble)
 	}
-	s.impact(10, 3) // the ● itself
+	s.impact(10, 3, false) // the ● itself
 	if s.bubble != quips[quipSessionHit] {
 		t.Fatalf("hitting a session glyph should say %q, got %q", quips[quipSessionHit], s.bubble)
 	}
 	// Each line is said once.
 	s.bubbleLeft = 0
-	s.impact(10, 3)
+	s.impact(10, 3, false)
 	if s.bubbleLeft != 0 {
 		t.Fatal("a line should not repeat")
 	}
@@ -248,9 +249,20 @@ func TestExitCollapsesTheFrameThenFinishes(t *testing.T) {
 	if !s.collapsing || s.Done() {
 		t.Fatal("collapse should be running")
 	}
-	for i := 0; i < collapseCap+5 && !s.Done(); i++ {
+	// Everything falls, then the debris stays up for a beat before the run ends.
+	for i := 0; i < collapseCap && (s.collapseRow < s.H || len(s.falling) > 0); i++ {
 		s.Step()
 	}
+	if s.Done() {
+		t.Fatal("the run ended the moment the debris settled; it should linger first")
+	}
+	for i := 0; i < collapseLinger && !s.Done(); i++ {
+		s.Step()
+	}
+	if s.Done() {
+		t.Fatalf("the run ended %d ticks into a %d-tick linger", s.settled, collapseLinger)
+	}
+	s.Step()
 	if !s.Done() {
 		t.Fatal("collapse never finished")
 	}
@@ -287,7 +299,7 @@ func TestCardIsStampedAndTakesDamage(t *testing.T) {
 	for y := 0; y < s.H; y++ {
 		for x := 0; x < s.W; x++ {
 			if s.world.At(x, y).Content == "╭" {
-				s.impact(x+5, y)
+				s.impact(x+5, y, false)
 				if c := s.world.At(x+5, y); c.Content != " " {
 					t.Fatalf("card edge should be cleared at the impact, got %q", c.Content)
 				}
@@ -413,5 +425,157 @@ func TestChipHittingAMoundSideStaysInItsColumn(t *testing.T) {
 	stillFalling := len(s.falling) == 1 && s.falling[0].x == 9 && s.falling[0].vx == 0
 	if !landed && !stillFalling {
 		t.Fatalf("chip should stay in column 9: falling=%+v heap[9]=%d", s.falling, len(s.heap[9]))
+	}
+}
+
+func TestCritClearsAWiderFootprintOutright(t *testing.T) {
+	text := "abcdefghijklmnopqrstuvwxyz0123456789"
+	build := func() *Scene {
+		g := screenWith(40, 8, 2, 4, text)
+		for x := 2; x < 2+len(text); x++ {
+			g.Set(x, 2, Cell{Content: "#", Width: 1})
+			g.Set(x, 6, Cell{Content: "#", Width: 1})
+		}
+		return New(g, 1)
+	}
+	cell := func(s *Scene, x, y int) string { return s.world.At(x, y).Content }
+
+	plain := build()
+	plain.impact(20, 4, false)
+	if cell(plain, 17, 4) != "▒" || cell(plain, 16, 4) == " " || cell(plain, 20, 2) != "#" {
+		t.Fatalf("a plain impact should crack ±3 on its row and leave rows ±2 alone: %q %q %q",
+			cell(plain, 17, 4), cell(plain, 16, 4), cell(plain, 20, 2))
+	}
+
+	crit := build()
+	crit.impact(20, 4, true)
+	for dx := -6; dx <= 6; dx++ {
+		if got := cell(crit, 20+dx, 4); got != " " {
+			t.Fatalf("crit left %q at dx=%d on its row; want everything within ±6 cleared", got, dx)
+		}
+	}
+	if cell(crit, 13, 4) == " " || cell(crit, 27, 4) == " " {
+		t.Fatal("crit reached past ±6 on its row")
+	}
+	if cell(crit, 20, 2) != " " || cell(crit, 24, 2) != " " || cell(crit, 25, 2) != "#" {
+		t.Fatalf("crit should clear rows ±2 out to ±4: %q %q %q", cell(crit, 20, 2), cell(crit, 24, 2), cell(crit, 25, 2))
+	}
+	for y := 0; y < crit.H; y++ {
+		for x := 0; x < crit.W; x++ {
+			if cell(crit, x, y) == "▒" {
+				t.Fatalf("crit cracked (%d,%d) instead of clearing it", x, y)
+			}
+		}
+	}
+	if crit.shake != critShake || !crit.bursts[0].big {
+		t.Fatalf("crit should shake longer with a big burst: shake=%d big=%v", crit.shake, crit.bursts[0].big)
+	}
+	if crit.bubble != quips[quipCrit] {
+		t.Fatalf("crit should say %q, got %q", quips[quipCrit], crit.bubble)
+	}
+}
+
+func TestCritProbeDrawsATrailAndOutlivesAPlainBurst(t *testing.T) {
+	// Tall frame, straight up: the shot is in the air far longer than any
+	// cooldown, so what fires below is not confused with what lands.
+	s := New(NewGrid(200, 60), 1)
+	settle(s)
+	s.Actor.Angle = 90
+	s.fire(true)
+	s.Step()
+	out := s.Render()
+	if !strings.Contains(out, "◉") || !strings.Contains(out, "✦") {
+		t.Fatal("a crit in flight should draw as ◉ with a ✦ trail")
+	}
+	px, py := int(math.Round(s.probes[0].x)), int(math.Round(s.probes[0].y))
+	if l, r := s.frame.At(px-1, py).Content, s.frame.At(px+1, py).Content; l != "◖" || r != "◗" {
+		t.Fatalf("the ball should be three cells wide, got %q ◉ %q", l, r)
+	}
+	// A crit holds the next shot longer than a plain one; the sim keeps running.
+	if s.Actor.cooldown != critCooldown-1 {
+		t.Fatalf("cooldown = %d one tick after a crit, want %d", s.Actor.cooldown, critCooldown-1)
+	}
+	for s.Actor.cooldown > 0 {
+		s.emit()
+		s.Step()
+	}
+	if len(s.probes) != 1 {
+		t.Fatalf("%d probes in the air; nothing should fire during the crit cooldown", len(s.probes))
+	}
+	s.emit()
+	if len(s.probes) != 2 {
+		t.Fatal("firing should work again once the crit cooldown has run out")
+	}
+	for i := 0; i < 400 && len(s.bursts) == 0; i++ {
+		s.Step()
+	}
+	if len(s.bursts) == 0 || !s.bursts[0].big {
+		t.Fatalf("crit impact should leave a big burst, got %+v", s.bursts)
+	}
+	s.Render()
+	b := s.bursts[0]
+	if got := s.frame.At(b.x, b.y).Style; !got.Equal(&critGlow) {
+		t.Fatalf("a big burst should draw in the crit palette, got %+v", got)
+	}
+	ticks := 0
+	for ; len(s.bursts) > 0 && ticks < 50; ticks++ {
+		s.Step()
+	}
+	if want := len(bursts)*burstFrame + bigBurstLag*burstFrame - 1; ticks != want {
+		t.Fatalf("big burst lived %d ticks, want %d", ticks, want)
+	}
+}
+
+func TestCritRollsAboutOneInEight(t *testing.T) {
+	s := New(NewGrid(40, 10), 7)
+	settle(s)
+	const shots = 800
+	crits := 0
+	for i := 0; i < shots; i++ {
+		s.Actor.cooldown = 0
+		s.emit()
+	}
+	if len(s.probes) != shots {
+		t.Fatalf("%d probes launched, want %d", len(s.probes), shots)
+	}
+	for _, p := range s.probes {
+		if p.crit {
+			crits++
+		}
+	}
+	if crits < shots/critOdds/2 || crits > shots/critOdds*2 {
+		t.Fatalf("%d crits in %d shots; want about 1 in %d", crits, shots, critOdds)
+	}
+	// Never back to back: at least critGap plain shots separate two crits.
+	since := critGap
+	for i, p := range s.probes {
+		if !p.crit {
+			since++
+			continue
+		}
+		if since < critGap {
+			t.Fatalf("shot %d crit only %d shots after the previous crit", i, since)
+		}
+		since = 0
+	}
+}
+
+func TestCritGapIsEnforcedEvenWhenTheRollWouldHit(t *testing.T) {
+	s := New(NewGrid(40, 10), 1)
+	settle(s)
+	s.fire(true)
+	for i := 0; i < 2000; i++ {
+		s.Actor.cooldown = 0
+		s.emit()
+	}
+	plain := 0
+	for _, p := range s.probes[1:] {
+		if p.crit {
+			break
+		}
+		plain++
+	}
+	if plain < critGap {
+		t.Fatalf("a crit came %d shots after a forced one, want at least %d", plain, critGap)
 	}
 }

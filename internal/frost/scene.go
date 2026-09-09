@@ -13,23 +13,28 @@ import (
 // rate below is per tick. Rows are twice as tall as columns are wide, so a
 // vertical velocity is halved to look like the same speed on screen.
 const (
-	probeGravity  = 0.045 // rows per tick²
-	debrisGravity = 0.08
-	driveSpeed    = 0.9 // columns per tick while a drive key is held
-	driveTicks    = 3   // ticks of motion one key event adds (key repeat keeps it topped up)
-	driveMax      = 12  // cap on banked motion, so a burst of presses is not a long slide
-	angleStep     = 5   // degrees per ↑/↓
-	emitCooldown  = 4
-	flashTicks    = 2
-	shakeTicks    = 2
-	burstFrame    = 2 // ticks per impact frame
-	maxDebris     = 600
-	probeSubsteps = 6
-	traceDots     = 40
-	recoilTicks   = 2
-	bubbleTicks   = 40 // how long a line of speech stays up
-	collapseRows  = 3  // rows released per tick when the frame comes down
-	collapseCap   = 80 // ticks before a collapse ends whether or not debris has settled
+	probeGravity   = 0.045 // rows per tick²
+	debrisGravity  = 0.08
+	driveSpeed     = 0.9 // columns per tick while a drive key is held
+	driveTicks     = 3   // ticks of motion one key event adds (key repeat keeps it topped up)
+	driveMax       = 12  // cap on banked motion, so a burst of presses is not a long slide
+	angleStep      = 5   // degrees per ↑/↓
+	emitCooldown   = 4
+	critOdds       = 8  // one emit in critOdds is a crit: twice the footprint, cleared outright
+	critCooldown   = 16 // a crit holds the next shot longer, so there is time to watch it
+	critGap        = 3  // plain shots that must go between one crit and the next
+	flashTicks     = 2
+	shakeTicks     = 2
+	critShake      = 4
+	burstFrame     = 2 // ticks per impact frame
+	maxDebris      = 600
+	probeSubsteps  = 6
+	traceDots      = 40
+	recoilTicks    = 2
+	bubbleTicks    = 40 // how long a line of speech stays up
+	collapseRows   = 3  // rows released per tick when the frame comes down
+	collapseCap    = 80 // ticks before a collapse counts as settled whether or not debris has
+	collapseLinger = 30 // ticks the settled debris stays on screen before the run ends
 )
 
 // Actor is the driveable unit.
@@ -45,13 +50,30 @@ type Actor struct {
 }
 
 // Probe is a projectile in flight. Positions are in cells; y is fractional rows.
-type Probe struct{ x, y, vx, vy float64 }
+// A crit carries its last few positions so it can draw a trail.
+type Probe struct {
+	x, y, vx, vy float64
+	crit         bool
+	past         [3][2]float64
+}
 
-// Burst is an impact animation at a cell.
+// Burst is an impact animation at a cell. A big one is the same animation
+// stamped in a cluster that blooms outward: each outer copy runs a frame or
+// two behind the centre.
 type Burst struct {
 	x, y int
 	age  int
+	big  bool
 }
+
+// bigBurstStamps are a big burst's outer copies around the centre stamp, with
+// the frames each runs behind. Rows are tall, so the cluster is wide.
+var bigBurstStamps = [...]struct{ dx, dy, lag int }{
+	{-3, 0, 1}, {3, 0, 1}, {-2, -1, 1}, {2, -1, 1},
+	{-6, 0, 2}, {6, 0, 2},
+}
+
+const bigBurstLag = 2 // frames the outermost copies run behind
 
 // Debris is a glyph knocked loose and falling.
 type Debris struct {
@@ -68,17 +90,18 @@ type Scene struct {
 	frame    *Grid   // scratch buffer each Render composes into
 	damage   []uint8 // per cell: 0 intact, 1 cracked, 2 gone
 
-	Actor    Actor
-	probes   []Probe
-	bursts   []Burst
-	falling  []Debris
-	heap     [][]Cell // per column, bottom-up: debris that has landed
-	flash    int
-	shake    int
-	tick     int
-	power    float64
-	rng      *rand.Rand
-	showKeys bool
+	Actor     Actor
+	sinceCrit int // shots since the last crit; a crit needs critGap of them
+	probes    []Probe
+	bursts    []Burst
+	falling   []Debris
+	heap      [][]Cell // per column, bottom-up: debris that has landed
+	flash     int
+	shake     int
+	tick      int
+	power     float64
+	rng       *rand.Rand
+	showKeys  bool
 
 	entering bool // driving in from off-screen; input is ignored until parked
 	razed    int  // frame cells cleared by impacts
@@ -86,13 +109,15 @@ type Scene struct {
 	// Speech: one line at a time, each event line said once.
 	bubble     string
 	bubbleLeft int
-	said       [8]bool
+	said       [quipCount]bool
 
-	// Leaving: the frame is released row by row into debris, and the run
-	// ends once it has settled (or collapseCap ticks have passed).
+	// Leaving: the frame is released row by row into debris; once it has
+	// settled (or collapseCap ticks have passed) the debris lingers for
+	// collapseLinger ticks, and then the run ends.
 	collapsing  bool
 	collapseRow int
 	collapseAge int
+	settled     int // ticks spent lingering on the settled debris
 	done        bool
 }
 
@@ -112,6 +137,7 @@ func New(screen *Grid, seed uint64) *Scene {
 		heap:     make([][]Cell, screen.W),
 		rng:      rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
 	}
+	s.sinceCrit = critGap // the first shot may crit
 	s.stampCard()
 	s.pristine.CopyFrom(screen)
 	byWidth := math.Sqrt(1.4 * float64(s.W) * probeGravity)
@@ -281,7 +307,10 @@ func (s *Scene) stepCollapse() {
 		}
 	}
 	if (s.collapseRow >= s.H && len(s.falling) == 0) || s.collapseAge >= collapseCap {
-		s.done = true
+		s.settled++
+		if s.settled > collapseLinger {
+			s.done = true
+		}
 	}
 }
 
@@ -329,15 +358,29 @@ func (s *Scene) nozzle() (x, y int) {
 	return px + s.Actor.Facing*tip[0], py + tip[1]
 }
 
-// emit launches a probe from the nozzle; the arm dips for a moment.
+// emit launches a probe from the nozzle; the arm dips for a moment. One
+// emit in critOdds rolls a crit, once critGap plain shots have gone since
+// the last one.
 func (s *Scene) emit() {
 	if s.Actor.cooldown > 0 {
 		return
 	}
+	s.fire(s.sinceCrit >= critGap && s.rng.IntN(critOdds) == 0)
+}
+
+// fire launches a probe, crit or not, without rolling.
+func (s *Scene) fire(crit bool) {
 	s.Actor.cooldown = emitCooldown
+	s.sinceCrit++
+	if crit {
+		s.Actor.cooldown = critCooldown
+		s.sinceCrit = 0
+	}
 	s.flash = flashTicks
 	nx, ny := s.nozzle()
-	s.probes = append(s.probes, s.launch(float64(nx), float64(ny)))
+	p := s.launch(float64(nx), float64(ny))
+	p.crit = crit
+	s.probes = append(s.probes, p)
 	s.Actor.recoil = recoilTicks
 }
 
@@ -345,10 +388,11 @@ func (s *Scene) emit() {
 func (s *Scene) launch(x, y float64) Probe {
 	rad := float64(s.Actor.Angle) * math.Pi / 180
 	return Probe{
-		x:  x,
-		y:  y,
-		vx: float64(s.Actor.Facing) * s.power * math.Cos(rad),
-		vy: -s.power * math.Sin(rad) / 2,
+		x:    x,
+		y:    y,
+		vx:   float64(s.Actor.Facing) * s.power * math.Cos(rad),
+		vy:   -s.power * math.Sin(rad) / 2,
+		past: [3][2]float64{{x, y}, {x, y}, {x, y}},
 	}
 }
 
@@ -388,6 +432,7 @@ func (s *Scene) stepProbes() {
 	kept := s.probes[:0]
 	for i := range s.probes {
 		p := s.probes[i]
+		p.past[2], p.past[1], p.past[0] = p.past[1], p.past[0], [2]float64{p.x, p.y}
 		var hit, gone bool
 		var hx, hy int
 		for sub := 0; sub < probeSubsteps && !hit && !gone; sub++ {
@@ -395,7 +440,7 @@ func (s *Scene) stepProbes() {
 		}
 		switch {
 		case hit:
-			s.impact(hx, hy)
+			s.impact(hx, hy, p.crit)
 		case gone:
 		default:
 			kept = append(kept, p)
@@ -408,16 +453,22 @@ func (s *Scene) stepProbes() {
 // are tall). The core — the impact cell and two neighbours either side on its
 // row — is cleared outright; the ring cracks on the first hit and clears on
 // the next, so text visibly breaks before it disappears. Landed debris in the
-// footprint is thrown back into the air.
-func (s *Scene) impact(cx, cy int) {
-	s.bursts = append(s.bursts, Burst{x: cx, y: cy})
+// footprint is thrown back into the air. A crit doubles the footprint and
+// clears all of it outright, with a bigger burst and a longer shake.
+func (s *Scene) impact(cx, cy int, crit bool) {
+	s.bursts = append(s.bursts, Burst{x: cx, y: cy, big: crit})
 	s.shake = shakeTicks
+	rx, ry, reach := 3, 1, 10
+	if crit {
+		s.shake = critShake
+		rx, ry, reach = 6, 2, 40
+	}
 	if x0, x1 := s.baseSpan(); cx >= x0 && cx <= x1 && cy >= s.top() {
 		s.say(quipSelfHit)
 	}
-	for dy := -1; dy <= 1; dy++ {
-		for dx := -3; dx <= 3; dx++ {
-			if dx*dx+4*dy*dy > 10 {
+	for dy := -ry; dy <= ry; dy++ {
+		for dx := -rx; dx <= rx; dx++ {
+			if dx*dx+4*dy*dy > reach {
 				continue
 			}
 			x, y := cx+dx, cy+dy
@@ -432,7 +483,7 @@ func (s *Scene) impact(cx, cy int) {
 			if s.damage[i] == 2 || !s.world.Solid(x, y) {
 				continue
 			}
-			core := dy == 0 && dx >= -2 && dx <= 2
+			core := crit || (dy == 0 && dx >= -2 && dx <= 2)
 			if s.damage[i] == 0 && !core {
 				c := s.world.At(x, y)
 				s.world.Set(x, y, Cell{Content: "▒", Width: 1, Style: c.Style})
@@ -454,6 +505,9 @@ func (s *Scene) impact(cx, cy int) {
 		s.say(quipRazed300)
 	} else if s.razed >= 100 {
 		s.say(quipRazed100)
+	}
+	if crit {
+		s.say(quipCrit)
 	}
 }
 
@@ -497,7 +551,11 @@ func (s *Scene) stepBursts() {
 	kept := s.bursts[:0]
 	for _, b := range s.bursts {
 		b.age++
-		if b.age < len(bursts)*burstFrame {
+		life := len(bursts) * burstFrame
+		if b.big {
+			life += bigBurstLag * burstFrame // until the outermost copies finish
+		}
+		if b.age < life {
 			kept = append(kept, b)
 		}
 	}
@@ -631,11 +689,31 @@ func (s *Scene) Render() string {
 		s.drawBubble(f)
 	}
 	for _, p := range s.probes {
-		f.Set(int(math.Round(p.x)), int(math.Round(p.y)), Cell{Content: "●", Width: 1, Style: probeStyle})
+		if !p.crit {
+			f.Set(int(math.Round(p.x)), int(math.Round(p.y)), Cell{Content: "●", Width: 1, Style: probeStyle})
+			continue
+		}
+		for i, q := range p.past {
+			g := "·"
+			if i == 0 {
+				g = "✦"
+			}
+			f.Set(int(math.Round(q[0])), int(math.Round(q[1])), Cell{Content: g, Width: 1, Style: critGlow})
+		}
+		// A three-cell ball: half-circle rims around a bright core.
+		x, y := int(math.Round(p.x)), int(math.Round(p.y))
+		f.Set(x-1, y, Cell{Content: "◖", Width: 1, Style: critStyle})
+		f.Set(x, y, Cell{Content: "◉", Width: 1, Style: critGlow})
+		f.Set(x+1, y, Cell{Content: "◗", Width: 1, Style: critStyle})
 	}
 	for _, b := range s.bursts {
-		for _, c := range bursts[b.age/burstFrame] {
-			f.Set(b.x+c.dx, b.y+c.dy, Cell{Content: c.g, Width: 1, Style: c.style})
+		if !b.big {
+			s.drawBurst(f, b.x, b.y, b.age, burstStyles)
+			continue
+		}
+		s.drawBurst(f, b.x, b.y, b.age, critBurstStyles)
+		for _, o := range bigBurstStamps {
+			s.drawBurst(f, b.x+o.dx, b.y+o.dy, b.age-o.lag*burstFrame, critBurstStyles)
 		}
 	}
 	if s.flash > 0 {
@@ -725,6 +803,18 @@ func (s *Scene) drawBubble(f *Grid) {
 // drawStatus writes the elevation (and, on `?`, the keys — for after the
 // card is gone) into the top right corner. Right-aligned because the frozen
 // header's breadcrumb is on the left and is a target like anything else.
+// drawBurst stamps one frame of the impact animation at (x, y) in the given
+// palette; an age out of range draws nothing.
+func (s *Scene) drawBurst(f *Grid, x, y, age int, styles [4]uv.Style) {
+	if age < 0 || age >= len(bursts)*burstFrame {
+		return
+	}
+	frame := age / burstFrame
+	for _, c := range bursts[frame] {
+		f.Set(x+c.dx, y+c.dy, Cell{Content: c.g, Width: 1, Style: styles[frame]})
+	}
+}
+
 func (s *Scene) drawStatus(f *Grid) {
 	text := fmt.Sprintf(" ∠ %2d° ", s.Actor.Angle)
 	if s.showKeys {

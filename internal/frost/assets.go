@@ -47,6 +47,9 @@ const (
 	quipBuried
 	quipSelfHit
 	quipBye
+	quipCrit
+
+	quipCount
 )
 
 // armCell is one glyph of an arm sprite relative to its pivot: dx grows away
@@ -61,11 +64,11 @@ type arm struct {
 	tip   [2]int // where a probe leaves
 }
 
-// burstCell is one glyph of an impact frame relative to the impact cell.
+// burstCell is one glyph of an impact frame relative to the impact cell; the
+// frame's colour comes from the burst palette it is drawn with.
 type burstCell struct {
 	dx, dy int
 	g      string
-	style  uv.Style
 }
 
 var armGeom = [4]struct {
@@ -137,6 +140,8 @@ var (
 	trackStyle  = rgb(92, 99, 112)
 	armStyle    = rgb(184, 190, 200)
 	probeStyle  = rgb(249, 226, 175)
+	critStyle   = rgb(140, 195, 255) // a crit: the ball's rim, burst body
+	critGlow    = rgb(232, 244, 255) // a crit: the ball's core, trail, burst flash
 	flashStyle  = rgb(249, 226, 175)
 	fireStyle   = rgb(250, 179, 135)
 	emberStyle  = rgb(120, 124, 140)
@@ -154,11 +159,15 @@ var (
 	bubbleStyle    = uv.Style{Fg: color.RGBA{R: 230, G: 232, B: 240, A: 255}, Bg: cardBg}
 )
 
-var burstStyles = [4]uv.Style{flashStyle, flashStyle, fireStyle, emberStyle}
+// Burst palettes, one style per animation frame.
+var (
+	burstStyles     = [4]uv.Style{flashStyle, flashStyle, fireStyle, emberStyle}
+	critBurstStyles = [4]uv.Style{critGlow, critGlow, critStyle, emberStyle}
+)
 
 // pack is the glyph data: a gzip-compressed JSON array of strings, in the
 // order init reads them.
-const pack = "H4sIAAAAAAACE7WQvU7DMBDHX+WUhQXxDhUwIBATTIjBTZ02aqkr2zTqVlWo6sDQ9MN8lbAxIBXYeZt7EuxzErWiAgmB9dfl/ne/XM45CwAAzRjNA5pRIZfberANges+olmsdEv1cwTN06b2qu5y8B5N9n3MwexH1oF2h0K33l+RcdH7rJDx/rpQ7l/844a2NHTXUTksRTOh6JPpuk1LKC3MfImz/t9r/krTZwPwBxcfsHtUOd3bh5PK8SF535gN1smNZ53C4RiHE4CajLvcF1IcTgFYfPGVVh0WWiqKpY1chQBVFjZ/9WXe5bKnG3G7DrECBprJOtcr1Pz9f/7mm5ve4npLgeQRC7WQYPdQO64uRMcnusE0iDaHhClIhGzaRalxAKohLls1cNvS7bUgIH/NXsYqitucCth/prkJuWrPVs8/ATkhujx3AwAA"
+const pack = "H4sIAAAAAAACE7WQuU7DQBCGX2XkhgblHSKgQCAqqBDFxtnEqxhvtLvESmdFKEpBEedYrhA6CiSOnreZJ2EPO3JEBBKC1a/x/DOfx7M+DQAA9Rj1PepRKZuberANge0+oF5UuitlBYL6cVO7qtsCvEO9/D4W4PJH1oJmh1I33l86Y6P3y1La+6tShX/2j2u3pXZ3Ha2G5agnLvpkum7zFZSXZv6Cs+zvNX9102cD8AcXH7BzWD/Z3YPj+tGB874xG6yTG886hcMxDicATcF61BdyHE4BCDv/SssuCQ3VYsJEKkOABgk7v/oy7VHRVxFL2sAkEFBEtKmqUPP3//mbb3Z6TNWWBEFbJFRcgNlD1myd865PVEQU8IRCSiSkXHTMoq6xDzLiF3ET7Lbu9oo7oHjNXMaoxRLqCpg9ubmpc42+r4aCKRaSGCKmasHZJ+4QVSSIAwAA"
 
 func init() {
 	raw, err := base64.StdEncoding.DecodeString(pack)
@@ -191,7 +200,7 @@ func init() {
 	for i := range bursts {
 		rs := []rune(s[at+i])
 		for j, p := range burstGeom[i] {
-			bursts[i] = append(bursts[i], burstCell{p[0], p[1], string(rs[j]), burstStyles[i]})
+			bursts[i] = append(bursts[i], burstCell{p[0], p[1], string(rs[j])})
 		}
 	}
 	at += len(bursts)
