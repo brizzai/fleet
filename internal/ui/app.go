@@ -1305,6 +1305,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commandPaletteMsg:
 		return h.dispatchPaletteSelection(msg)
 
+	case gateOpenMsg:
+		// The prompt has already closed itself, so the frozen frame is the
+		// ordinary screen, not the prompt.
+		return h, h.startFrost()
+
 	case snoozeSelectedMsg:
 		// Same discipline as contextMenuMsg: the picker names a row, and an
 		// async rebuild may have moved the cursor while it was open, so put the

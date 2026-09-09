@@ -169,7 +169,7 @@ var (
 
 // pack is the glyph data: a gzip-compressed JSON array of strings, in the
 // order init reads them.
-const pack = "H4sIAAAAAAACE7VRvW4TQRB+lcFNmsgPQGNFQIFAVFAhivXd+G51zu4xu47lzoqQlYIiTuzlLzgdBRIJPW+zT8Lsz1m2iEBCcPdpbr6Zb2dn5l72AMC7c+8+eXfWIfgc7x1CL2Q/e3e1k91iniXeXd+V3sWHLPzo3eb3Ngs3f9QGIffQ4X3ibyIJNvFNB5f42w6Zf02fd7FLF2c92xZbencRbXIu9+lyK1p2ZP3Nr+b/HuubWH11CunxVz/gwdOjFw8fwfOjZ08iT4nV6b7yzmdf5RfnfnEBUJI8wRRY+sUlgJDHv6pNKwpWjSSxRVMADEXR/NXNeII0s7VUFUgDAqygCu2Oav39/2zzNlQfoz0wQDgShdUE3Ifph7jWbXJsLSxohTAVBqaaGm40Jh6DqfVkXELoNk5vdRTkYzwMYyQVxoCff4l1p5ENZylakLSyEGOopU2BsZiUyEtQzeBefgeDkEFhLBJgVYHBgvjSWpYlKjATakmadAhygUYrcSzDuVYYw22V9wNRus0XayIsbJ8nRsKDsPhctcEZu68nqPgPaxUEYGSJQ0F9QFnVFlpCY9AcgtLAC+S2eFevfgIP8BCKRQQAAA=="
+const pack = "H4sIAAAAAAACE7VRvW4TQRB+lQ83aaw8AI0VAQUCUUEVpVjfje9W5+weu3ux3FkRslJQxIl9/AWno0Aioedt9knYv7NsJQoSgr3R3Hwz387fHvYA2Pbctl9se9aJt52/10fPR7/a9morupFZotj2+r7wtnxKxM+2XT+sE3H9R64nuh46+RjxuwC8jnjdSRvx+04S/h5/H0KXbZj1bJNsYduLoKNxuQsXG9KiA6sfdjn797K6CdmXp4jHXv3Ck5cHb54+w+uDVy8CjoHl6S7z3rPLsvNzO78AcsVPKDoWdn4JMH58l61rljnWiCunSWfAkGXVX1WmE1JTU3JRgGswGKYKMlus1c//s81bn31MZk9D0YhlRiq4PvS+90tZR8OUzEAKwoRpTKSqXKMh8By6lM04h+82TG9kIKRrbhgnIy4oOOzsW8g7CWg4jd5MccMzNkbJTXSMWZOTW4KoBo/SNxj4CDFtSIGKApoy5YqWPM9JQDeqVlzHS0gJKinYMQ8VVR98hKlsUAk5cSMSaqa1azV/7AlC1pR6JkV7/g1SgYqmznzbkHCPLUW4qnlOQ6b2QbwoDWpFWpPuQ0i4XboO3dqOfgOrFdDxUAQAAA=="
 
 func init() {
 	raw, err := base64.StdEncoding.DecodeString(pack)
@@ -213,13 +213,14 @@ func init() {
 }
 
 // GateText is the copy for the prompt that fronts frost mode elsewhere in the
-// app: how the entry is found, what it asks, and what it says either way.
+// app: how the entry is found, the hint it always shows, what it asks for,
+// and what it says to a wrong answer. The right answer starts a run.
 type GateText struct {
 	Label    string // the entry's name
 	Keywords string // extra search terms that surface it
 	Prompt   string // what it asks for
 	Wrong    string // said to a wrong answer
-	Hint     string // said to the right one
+	Hint     string // the other way in, always shown
 }
 
 var gate GateText

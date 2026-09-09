@@ -124,7 +124,7 @@ func TestHiddenPaletteRowSurfacesOnlyOnASearch(t *testing.T) {
 	}
 }
 
-func TestGateRevealsTheHintOnlyToTheRightAnswer(t *testing.T) {
+func TestGateShowsTheHintAndOpensOnTheRightAnswer(t *testing.T) {
 	d := newGateDialog()
 	d.unlock = func(a string) bool { return a == "yes" }
 	d.SetSize(80, 24)
@@ -136,34 +136,35 @@ func TestGateRevealsTheHintOnlyToTheRightAnswer(t *testing.T) {
 		}
 	}
 	enter := tea.KeyPressMsg{Code: tea.KeyEnter}
+	// The box wraps a long line, so look for the hint's opening words.
+	opening := strings.Join(strings.Fields(frost.Gate().Hint)[:2], " ")
+
+	// The hint is the other way in, so it shows before any answer is given.
+	if v := d.View(); !strings.Contains(v, opening) || !strings.Contains(v, frost.Gate().Label) || !strings.Contains(v, frost.Gate().Prompt) {
+		t.Fatal("the prompt should show the label, the hint and the ask up front")
+	}
 
 	type_("no")
-	d.Update(enter) //nolint:errcheck // the dialog state is the assertion
-	if !d.IsVisible() || d.open || d.note != frost.Gate().Wrong || d.input.Value() != "" {
-		t.Fatalf("a wrong answer should stay open, say %q and clear the field: open=%v note=%q value=%q",
-			frost.Gate().Wrong, d.open, d.note, d.input.Value())
+	_, cmd := d.Update(enter)
+	if cmd != nil || !d.IsVisible() || d.note != frost.Gate().Wrong || d.input.Value() != "" {
+		t.Fatalf("a wrong answer should stay open, say %q and clear the field: note=%q value=%q",
+			frost.Gate().Wrong, d.note, d.input.Value())
 	}
-	if v := d.View(); !strings.Contains(v, frost.Gate().Wrong) || strings.Contains(v, frost.Gate().Hint) {
-		t.Fatal("the view should show the wrong line and not the hint")
+	if v := d.View(); !strings.Contains(v, frost.Gate().Wrong) || !strings.Contains(v, opening) {
+		t.Fatal("the view should show the wrong line and still the hint")
 	}
 
 	type_("yes")
-	d.Update(enter) //nolint:errcheck // the dialog state is the assertion
-	if !d.IsVisible() || !d.open || d.note != frost.Gate().Hint {
-		t.Fatalf("the right answer should reveal the hint: open=%v note=%q", d.open, d.note)
+	_, cmd = d.Update(enter)
+	if d.IsVisible() || cmd == nil {
+		t.Fatal("the right answer should close the prompt and hand back a command")
 	}
-	// The box wraps a long line, so look for the hint's opening words.
-	opening := strings.Join(strings.Fields(frost.Gate().Hint)[:2], " ")
-	if v := d.View(); !strings.Contains(v, opening) || !strings.Contains(v, frost.Gate().Label) {
-		t.Fatal("the view should show the hint under the label")
-	}
-	d.Update(enter) //nolint:errcheck // the dialog state is the assertion
-	if d.IsVisible() {
-		t.Fatal("enter on the hint should close the prompt")
+	if _, ok := cmd().(gateOpenMsg); !ok {
+		t.Fatal("the command should announce the unlock")
 	}
 
 	d.Show()
-	if d.open || d.note != "" {
+	if d.note != "" || d.input.Value() != "" {
 		t.Fatal("reopening should start fresh")
 	}
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEscape}) //nolint:errcheck // the dialog state is the assertion
@@ -204,5 +205,11 @@ func TestGateIsReachableFromThePalette(t *testing.T) {
 	}
 	if !strings.Contains(h.renderBody(), frost.Gate().Label) {
 		t.Fatal("the body should render the prompt while it is open")
+	}
+	// The unlock message starts a run, the same one the key sequence starts.
+	h.gate.Hide()
+	h.Update(gateOpenMsg{}) //nolint:errcheck // the run is the assertion
+	if h.frost == nil {
+		t.Fatal("the unlock should start a run")
 	}
 }

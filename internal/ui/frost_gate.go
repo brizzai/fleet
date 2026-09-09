@@ -10,17 +10,21 @@ import (
 	"github.com/brizzai/fleet/internal/frost"
 )
 
-// gateDialog is the palette-side front of frost mode: a small prompt that
-// takes an answer and, given the right one, drops a hint. Its palette row is
-// hidden until a search matches it, and every line of copy comes from the
-// frost package, so nothing here says what it is for.
+// gateOpenMsg is sent when the prompt has been answered correctly and has
+// closed itself; the app starts a run in reply.
+type gateOpenMsg struct{}
+
+// gateDialog is the palette-side front of frost mode. It names the other way
+// in — a key sequence, hinted at but not spelled out — and takes an answer as
+// a shortcut past it. Its palette row is hidden until a search matches it,
+// and every line of copy comes from the frost package, so nothing here says
+// what it is for.
 type gateDialog struct {
 	input   textinput.Model
 	visible bool
 	width   int
 	height  int
-	note    string // what the last answer earned: nothing yet, the wrong line, or the hint
-	open    bool   // the answer was right; enter now closes
+	note    string // what the last answer earned: nothing yet, or the wrong line
 
 	// unlock checks an answer. A field so a test can install its own.
 	unlock func(string) bool
@@ -37,7 +41,6 @@ func newGateDialog() *gateDialog {
 // Show opens the prompt fresh: empty answer, nothing said yet.
 func (d *gateDialog) Show() {
 	d.visible = true
-	d.open = false
 	d.note = ""
 	d.input.SetValue("")
 	d.input.Focus()
@@ -57,23 +60,14 @@ func (d *gateDialog) Update(msg tea.Msg) (*gateDialog, tea.Cmd) {
 			d.Hide()
 			return d, nil
 		case "enter":
-			if d.open {
-				d.Hide()
-				return d, nil
-			}
 			if d.unlock(d.input.Value()) {
-				d.open = true
-				d.note = frost.Gate().Hint
-				d.input.Blur()
-				return d, nil
+				d.Hide()
+				return d, func() tea.Msg { return gateOpenMsg{} }
 			}
 			d.note = frost.Gate().Wrong
 			d.input.SetValue("")
 			return d, nil
 		}
-	}
-	if d.open {
-		return d, nil
 	}
 	var cmd tea.Cmd
 	d.input, cmd = d.input.Update(msg)
@@ -85,21 +79,17 @@ func (d *gateDialog) View() string {
 	var b strings.Builder
 	b.WriteString(TitleStyle.Render(g.Label))
 	b.WriteString("\n\n")
-	if d.open {
-		b.WriteString(g.Hint)
+	b.WriteString(g.Hint)
+	b.WriteString("\n\n")
+	b.WriteString(DimStyle.Render(g.Prompt))
+	b.WriteString("\n")
+	b.WriteString(d.input.View())
+	b.WriteString("\n\n")
+	if d.note != "" {
+		b.WriteString(ErrorStyle.Render(d.note))
 		b.WriteString("\n\n")
-		b.WriteString(DimStyle.Render("enter: close"))
-	} else {
-		b.WriteString(DimStyle.Render(g.Prompt))
-		b.WriteString("\n")
-		b.WriteString(d.input.View())
-		b.WriteString("\n\n")
-		if d.note != "" {
-			b.WriteString(ErrorStyle.Render(d.note))
-			b.WriteString("\n\n")
-		}
-		b.WriteString(DimStyle.Render("enter: answer • esc: close"))
 	}
+	b.WriteString(DimStyle.Render("enter: try • esc: close"))
 
 	dialogWidth := min(max(d.width-4, 30), 64)
 	box := DialogStyle.Width(dialogWidth).Render(b.String())
