@@ -57,21 +57,26 @@ func TestSplashShineCrestSweepsThenRests(t *testing.T) {
 }
 
 // The shine may change color and nothing else — a splash that reflows every
-// 80ms is the most visible jitter fleet can ship.
+// 20ms is the most visible jitter fleet can ship.
 func TestRenderSplashShineIsColorOnly(t *testing.T) {
-	// Frames 1 and 3 fall inside one spinner window (splashSpinnerDiv frames
+	// These two frames fall inside one spinner window (splashSpinnerDiv frames
 	// per glyph) and one label bucket (splashLabelDwell), so the shine is the
-	// only thing that can differ. Both are mid-sweep, so both are lit.
-	a := RenderSplash(80, 24, 0.5, 1)
-	b := RenderSplash(80, 24, 0.5, 3)
+	// only thing that can differ. Both are mid-sweep, so both are lit. Every
+	// message below reports them rather than restating them: the pair has had
+	// to move twice already as the tick rate changed, and a hand-written frame
+	// number in a failure string is what sends the next reader to inspect a
+	// comparison that never happened.
+	const fa, fb = 1, 3
+	a := RenderSplash(80, 24, 0.5, fa)
+	b := RenderSplash(80, 24, 0.5, fb)
 
 	if ansi.Strip(a) != ansi.Strip(b) {
-		t.Error("the shine changed the splash's layout; it must only change color")
+		t.Errorf("frames %d and %d differ once stripped of color: the shine changed the splash's layout, and it must only change color", fa, fb)
 	}
 	if lipgloss.Width(a) != lipgloss.Width(b) {
-		t.Errorf("splash width moved between frames: %d vs %d", lipgloss.Width(a), lipgloss.Width(b))
+		t.Errorf("splash width moved between frames %d and %d: %d vs %d", fa, fb, lipgloss.Width(a), lipgloss.Width(b))
 	}
 	if a == b {
-		t.Error("frames 0 and 10 render identically; the shine is not animating")
+		t.Errorf("frames %d and %d render identically; the shine is not animating", fa, fb)
 	}
 }

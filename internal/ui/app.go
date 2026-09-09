@@ -3202,9 +3202,17 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return h, nil
 }
 
-// shutdownTick schedules the next shutdown-overlay spinner advance (~80ms,
-// matching splashTick). Self-rescheduled by Update while `quitting`, until the
-// teardown command emits tea.Quit and the program exits.
+// shutdownTick schedules the next shutdown-overlay spinner advance (~80ms).
+//
+// That is splashTick's interval times splashSpinnerDiv, and the equality is the
+// point rather than a coincidence: the splash runs its tick fast for the shine
+// and divides the counter back down for its spinner, so both spinners advance
+// at the same wall-clock rate off different tick rates. Move either constant
+// and the other has to follow, or the two spinners visibly disagree on a
+// screen the user sees fleet start and stop with.
+//
+// Self-rescheduled by Update while `quitting`, until the teardown command emits
+// tea.Quit and the program exits.
 func (h *Home) shutdownTick() tea.Cmd {
 	if FreezeAnim {
 		return nil
