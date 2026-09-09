@@ -29,6 +29,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/discovery"
 	"github.com/brizzai/fleet/internal/editor"
+	"github.com/brizzai/fleet/internal/frost"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/hooks"
@@ -543,6 +544,11 @@ type Home struct {
 	shutdownFrame int
 	frozenFrame   string
 
+	// Frost mode (frost.go). frost is nil unless a run is active; keyTrail is
+	// the trailing window of sidebar keys its trigger matches against.
+	frost    *frost.Scene
+	keyTrail []string
+
 	// Rendering diagnostics (accumulated counters for bug reports).
 	renderStats RenderStats
 }
@@ -871,6 +877,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.width = msg.Width
 		h.height = msg.Height
 		h.sidebarDirty = true
+		if h.frost != nil {
+			h.endFrost() // the frozen frame no longer fits
+		}
 		h.newDialog.SetSize(msg.Width, msg.Height)
 		h.confirmDialog.SetSize(msg.Width, msg.Height)
 		h.renameDialog.SetSize(msg.Width, msg.Height)
@@ -1902,6 +1911,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case frostTickMsg:
+		// Self-rescheduling only while a run is active.
+		if h.frost == nil {
+			return h, nil
+		}
+		h.frost.Step()
+		if h.frost.Done() {
+			h.endFrost()
+			return h, nil
+		}
+		return h, frostTickCmd()
+
 	case whatsNewTickMsg:
 		// Advance the badge shimmer; stop the loop (and stop burning CPU) the
 		// moment the badge is hidden or a modal takes the screen.
@@ -2196,6 +2217,9 @@ func (h *Home) View() tea.View {
 	if !h.booted {
 		return h.chrome(RenderSplash(h.width, h.height, h.bootProgress(), h.splashFrame))
 	}
+	if h.frost != nil {
+		return h.chrome(h.frost.Render())
+	}
 	base := h.renderBody()
 	// Animated "What's New" badge, top-right of the header row. Only when there
 	// are unseen highlights and no modal owns the screen (a modal makes
@@ -2347,6 +2371,7 @@ func (h *Home) modalOpen() bool {
 		h.snoozeDialog.IsVisible() ||
 		h.accountPicker.IsVisible() ||
 		h.allowedAccounts.IsVisible() ||
+		h.frost != nil ||
 		h.launchpadActive()
 }
 
@@ -2784,6 +2809,14 @@ func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 }
 
 func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// An active frost run owns every key until the user leaves it.
+	if h.frost != nil {
+		if h.frost.Key(normalizeKey(msg).String()) {
+			h.endFrost()
+		}
+		return h, nil
+	}
+
 	// Route to the active modal dialog/overlay first (keys + paste share this).
 	if cmd, handled := h.routeToModal(msg); handled {
 		return h, cmd
@@ -2894,6 +2927,12 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// falls through rather than returning; it owns no text and matches on the US
 	// position itself, above.)
 	msg = normalizeKey(msg)
+
+	// Frost trigger (see noteTrail). Every key of the run still does its
+	// usual job; only the one that completes it is taken.
+	if h.noteTrail(msg.String()) {
+		return h, h.startFrost()
+	}
 
 	switch msg.String() {
 	case "`": // open the terminal drawer + move focus into it

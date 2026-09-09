@@ -48,6 +48,9 @@ const (
 	// Navigation / filtering.
 	EventFilterUsed = "filter_used"
 	EventSpaceJump  = "space_jump"
+
+	// Frost mode was started from the sidebar.
+	EventFrostMode  = "frost_mode"
 	EventHeaderJump = "header_jump"
 
 	// RTS slot bindings.
