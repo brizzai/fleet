@@ -196,9 +196,17 @@ func ApplyPalette(p Palette) {
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
 	PRMergedStyle = lipgloss.NewStyle().Foreground(ColorPurple)
 	PRDraftStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
-	// Blue like every worktree row, because that is what the folder holds. The
-	// brackets do the distinguishing, so the hue does not have to.
-	ReviewGroupStyle = lipgloss.NewStyle().Foreground(ColorBlue)
+	// Orange. Blue was the wrong call: it is BranchStyle's hue, so the one row
+	// in the tree that is NOT a branch read as one, and it is also
+	// StatusFinishedStyle's, putting it in the same tone as the dots a few
+	// columns to its right. The brackets still do the distinguishing; the hue
+	// now says the node is a different kind of thing rather than repeating what
+	// its neighbours already say.
+	//
+	// It shares orange with SlotBadgeStyle, which is the one other bracketed
+	// token in the sidebar — that one is BOLD and always a single digit, so the
+	// pair reads apart on weight and content at the width they actually appear.
+	ReviewGroupStyle = lipgloss.NewStyle().Foreground(ColorOrange)
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
 	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
