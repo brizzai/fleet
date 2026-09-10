@@ -36,8 +36,10 @@ gtag('config', '${GA_MEASUREMENT_ID}');`}
       <body className="flex flex-col min-h-screen antialiased">
         <RootProvider
           theme={{
+            // Dark is the brand default for a first visit, but the toggle
+            // offers light and system too, so next-themes has to handle both.
             defaultTheme: "dark",
-            enableSystem: false,
+            enableSystem: true,
           }}
         >
           {children}

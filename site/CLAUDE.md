@@ -24,6 +24,12 @@ Raw `<a href="/docs/...">` does NOT get the `/fleet` basePath prepended. Only `n
 
 `app/globals.css` defines `--charm-*` and `--tn-*` palette tokens and overrides every `--color-fd-*` Fumadocs token. To restyle docs, edit the token overrides, not the Fumadocs components.
 
+**Every `--charm-*` token is declared twice** — light under `:root`, dark under `.dark` (the class next-themes puts on `<html>`). Source order matters: `:root` and `.dark` have equal specificity, so the dark block must stay *after* the light one. The `--color-fd-*` mapping below them is written once and mode-agnostic, because each value is a `--charm-*` token that already switches.
+
+**Never hardcode a color in a component.** The theme toggle was dead for exactly this reason: the palette lived only in `:root`, so flipping the class changed nothing, and the landing components carried literal `rgba(244,143,177,…)` glows and `#1a0a14` on-pink text that no theme could reach. If you need a new color, add a token pair — that includes glows (`--charm-glow`, `--charm-glow-soft`), tints (`--charm-tint`), translucent slabs (`--charm-panel`, `--charm-panel-ring`), and the page washes (`--charm-wash-1..3`). `--charm-on-pink` is the text color that sits *on* a pink fill; it is near-black in dark and white in light, because the light-mode pink is dark enough to need it.
+
+The **TUI demo is the deliberate exception**: `components/tui-demo/palette.ts` is hardcoded tokyo-night and stays dark in both modes — a terminal doesn't turn white. Only demo chrome *outside* the terminal frame (`CoachBanner`'s panel and inline `kbd`s) reads `--charm-*`.
+
 ## TUI demo (`components/tui-demo/`)
 
 Pure-React recreation of the fleet sidebar+preview. Reads as one feature; touch it carefully.
