@@ -110,35 +110,51 @@ func TestFullModeIdentifiesAndTracks(t *testing.T) {
 	}
 }
 
-func TestMinimalModeIsAnonymousDAUOnly(t *testing.T) {
+func TestMinimalModeSendsEveryEventAnonymously(t *testing.T) {
 	f := withFake(t)
 	Init(ModeMinimal, "9.9.9", testIdentity)
-	Track("thing_happened", map[string]interface{}{"count": 3}) // must no-op
-	Heartbeat()                                                 // must still fire
-	Shutdown()                                                  // drains the queue into the sink
+	Track("thing_happened", map[string]interface{}{"count": 3})
+	Gauge("a_gauge", 1, nil)
+	Distribution("a_distribution", 2, nil)
+	SetUserProperties(map[string]interface{}{"theme": "nord"}) // must no-op
+	TrackAppStarted("9.9.9", 4, 2, "nord", "attach", "claude", true, true)
+	Heartbeat()
+	Shutdown() // drains the queue into the sink; assertions below are race-free
 
-	// No people profile in minimal mode.
+	// No people profile in minimal mode: no Identify at Init, and neither
+	// SetUserProperties call (the direct one, the one inside TrackAppStarted) sends.
 	if got := len(f.identifies()); got != 0 {
 		t.Errorf("minimal mode enqueued %d Identify messages, want 0", got)
 	}
 
-	if _, ok := captureByEvent(f.captures(), "thing_happened"); ok {
-		t.Error("minimal mode must not send Track events")
+	for _, event := range []string{"thing_happened", "a_gauge", "a_distribution", EventAppStarted, EventAppActive} {
+		if _, ok := captureByEvent(f.captures(), event); !ok {
+			t.Errorf("minimal mode should send %q", event)
+		}
+	}
+	if started, ok := captureByEvent(f.captures(), EventAppStarted); ok {
+		if started.Properties["session_count"] != 4 || started.Properties["repo_count"] != 2 {
+			t.Errorf("minimal-mode app_started should carry the counts, got %v", started.Properties)
+		}
 	}
 
-	// The heartbeat is the one thing minimal mode does send: anonymous, profile-less.
-	c, ok := captureByEvent(f.captures(), EventAppActive)
-	if !ok {
-		t.Fatal("minimal mode should still send the app_active heartbeat")
-	}
-	if c.DistinctId != "devhash" {
-		t.Errorf("minimal-mode distinct_id = %q, want the anonymous device hash", c.DistinctId)
-	}
-	if c.Properties["$process_person_profile"] != false {
-		t.Errorf("minimal-mode events must set $process_person_profile=false, got %v", c.Properties["$process_person_profile"])
-	}
-	if c.Properties["mode"] != ModeMinimal {
-		t.Errorf("heartbeat mode = %v, want %q (for the decline-rate breakdown)", c.Properties["mode"], ModeMinimal)
+	// Every event is anonymous: the device hash, never the git identity, and no
+	// person profile.
+	for _, c := range f.captures() {
+		if c.DistinctId != "devhash" {
+			t.Errorf("%s: minimal-mode distinct_id = %q, want the anonymous device hash", c.Event, c.DistinctId)
+		}
+		if c.Properties["$process_person_profile"] != false {
+			t.Errorf("%s: minimal-mode events must set $process_person_profile=false, got %v", c.Event, c.Properties["$process_person_profile"])
+		}
+		if c.Properties["mode"] != ModeMinimal {
+			t.Errorf("%s: mode = %v, want %q (for the decline-rate breakdown)", c.Event, c.Properties["mode"], ModeMinimal)
+		}
+		for k, v := range c.Properties {
+			if s, ok := v.(string); ok && (s == testIdentity.GitEmail || s == testIdentity.GitName) {
+				t.Errorf("%s: property %q carries the git identity", c.Event, k)
+			}
+		}
 	}
 }
 

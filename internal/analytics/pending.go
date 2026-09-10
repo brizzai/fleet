@@ -55,8 +55,8 @@ func QueuePending(event string, props map[string]any) {
 
 // FlushPending emits any queued pending events through Track, then removes the
 // queue file. Call once right after Init. No-op when the file is absent (the
-// common case). Track itself no-ops when analytics is disabled/minimal, so the
-// file is cleared either way — queued events are never leaked or resent.
+// common case). Track itself no-ops when analytics is disabled, so the file is
+// cleared either way — queued events are never leaked or resent.
 func FlushPending() {
 	path := pendingEventsPath()
 	data, err := os.ReadFile(path)

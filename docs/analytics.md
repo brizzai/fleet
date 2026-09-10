@@ -1,18 +1,22 @@
 # Analytics
 
-fleet collects usage events via [Mixpanel](https://mixpanel.com) to understand how the tool is used, what new users do (and don't) succeed at, and to prioritize development.
+fleet collects usage events via [PostHog](https://posthog.com) to understand how the tool is used, what new users do (and don't) succeed at, and to prioritize development.
 
 ## First-Launch Consent
 
-The first time you run fleet, you'll see a dialog asking whether you want to participate. It surfaces exactly what's collected (including your git `user.name` and `user.email`) and lets you accept or decline with a single keystroke. Your answer is persisted in `~/.config/fleet/config.json` and never asked again — change it any time in **Settings (S key)**.
+The first time you run fleet, you'll see a dialog asking how much to share, answered with a single keystroke. Your answer is persisted in `~/.config/fleet/config.json` as `telemetry_mode` — change it any time in **Settings (S key)**.
 
-If you decline, no Mixpanel client is created and no network traffic happens. If you accept, analytics initialize and the events below start flowing.
+| Mode | Picked by | What's sent |
+|---|---|---|
+| **Full** (`full`) | Accepting the prompt | The events below, tagged with your git `user.name` and `user.email` |
+| **Basic** (`minimal`) | Declining the prompt | The same events, anonymously: no git name or email, no person profile, and the `distinct_id` is the device hash |
+| **Off** (`off`) | Settings only | Nothing |
 
 ## What We Collect
 
 ### Events
 
-All events are **Mixpanel events**. The `distinct_id` is your `git user.email` when git is configured globally (so the same person shows up as one Mixpanel user across machines); otherwise it falls back to a one-way SHA256 hash of the macOS hardware UUID. See the [Identity](#identity) section below for the full rule.
+All events are **PostHog events**. In Full mode the `distinct_id` is your `git user.email` when git is configured globally (so the same person shows up as one PostHog person across machines); otherwise — and always in Basic mode — it is an anonymous device hash. See the [Identity](#identity) section below for the full rule.
 
 Direct actions and lifecycle events:
 
@@ -26,11 +30,13 @@ Direct actions and lifecycle events:
 | `session_deleted` | — | Session deleted |
 | `session_renamed` | — | Session renamed |
 | `session_orphaned` | `lifetime_seconds` | Session deleted without ever being attached |
+| `session_errored` | `agent`, `reason`, `seconds_since_create`, `resumed` | A session moves into the error status — once per failure; `reason` is an enum (`start_failed`, `pane_dead`, `tmux_gone`, …), never error text |
+| `attach_bailed` | `agent`, `seconds` | User detaches within 10s of attaching |
 | `quick_approve` | — | Y key pressed |
-| `editor_opened` | `editor` | e key pressed |
+| `editor_opened` | `editor` (command name only — no path or flags) | e key pressed |
 | `pr_opened` | — | p key pressed |
 | `workspace_created` | `provider` | Worktree/workspace created |
-| `theme_changed` | `theme` | Theme cycled in settings |
+| `theme_changed` | `theme` | Theme committed: Settings closed on a new theme, or the first-run picker confirmed |
 | `filter_used` | — | / key pressed |
 | `space_jump` | — | Space key pressed |
 | `settings_opened` | — | S key pressed |
@@ -38,9 +44,10 @@ Direct actions and lifecycle events:
 | `command_palette` | — | Ctrl+K pressed |
 | `reload_all` | — | "Reload all sessions" command |
 | `mark_all_read` | — | "Mark all read" command |
-| `error_occurred` | `category` | Any error shown |
+| `error_occurred` | `category` (fleet's own wording before the first `:`, otherwise `other`) | An error toast is shown (guidance such as "no PR for this branch" is not an error) |
 | `manual_rename_after_auto` | — | User renames a session we auto-named (auto-title was wrong) |
 | `quit_with_running_sessions` | `running_count`, `waiting_count` | App quit while sessions were active |
+| `startup_failed` | `reason` | fleet can't run: `tmux_missing` (exits before the TUI) or `claude_missing` (launchpad) |
 | `claude_prompt_submitted` | — | UserPromptSubmit hook fired (engagement) |
 | `claude_response_received` | — | Stop hook fired (Claude finished a turn) |
 | `chrome_extension_connected` | — | Chrome native messaging host reachable |
@@ -58,9 +65,19 @@ Persisted in `~/.config/fleet/install_state.json`. Each event fires exactly once
 | `onboarding_first_claude_response` | `seconds_since_install` |
 | `onboarding_first_quit` | `uptime_seconds`, `session_count`, `attached_at_least_once` |
 
+### Launchpad
+
+The screen an empty fleet opens on, offering to resume your recent Claude Code repos. Counts only — never the repos themselves.
+
+| Event | Properties | When |
+|---|---|---|
+| `launchpad_shown` | `discovered_repos` | The launchpad rendered with at least one repo |
+| `launchpad_launched` | `selected`, `discovered` | Enter started the selection |
+| `launchpad_skipped` | `discovered` | Esc dismissed it |
+
 ### Numeric metrics (events with a `value` property)
 
-Mixpanel doesn't have native gauges or distributions, so these are emitted as events with a numeric `value` property. Use Mixpanel's aggregations (sum / avg / percentile by event) to chart them.
+PostHog has no native gauge or distribution type, so these are emitted as events with a numeric `value` property. Chart them by aggregating that property (sum / average / percentiles) per event.
 
 Gauges (snapshots at `app_started` + `app_quit`):
 
@@ -82,15 +99,15 @@ Distributions (sampled at the relevant moment):
 | `app_uptime_seconds` | seconds | App quit |
 | `sessions_per_repo` | count | Snapshot — one event per repo |
 
-### People profile (Mixpanel `/engage`)
+### Person profile (PostHog `$identify`)
 
-Set on the device's people profile so you can build cohorts and break events down by these dimensions:
+Set on your PostHog person profile — Full mode only; Basic creates none — so you can build cohorts and break events down by these dimensions:
 
 | Property | Example |
 |---|---|
 | `$name` | `Alice Smith` (from git `user.name`) |
 | `$email` | `alice@example.com` (from git `user.email`) |
-| `machine_hash` | SHA256 of hardware UUID (per-machine, anonymous) |
+| `machine_hash` | Device hash (per-machine, anonymous — see [Identity](#identity)) |
 | `app_version` | `v1.0.0` |
 | `os_version` | `15.3` |
 | `arch` | `arm64` |
@@ -103,8 +120,8 @@ Set on the device's people profile so you can build cohorts and break events dow
 
 Only when you accept the first-launch consent prompt:
 
-- `git user.name`  → Mixpanel people property `$name`
-- `git user.email` → Mixpanel people property `$email` and `distinct_id`
+- `git user.name`  → PostHog person property `$name`
+- `git user.email` → PostHog person property `$email` and `distinct_id`
 
 That's the entire personal-data surface. If you decline (or never have git configured), neither is sent.
 
@@ -114,19 +131,19 @@ That's the entire personal-data surface. If you decline (or never have git confi
 - Code content or prompts (only the count of prompts, not their contents)
 - Git branch names or commit hashes
 - Session titles or repo names
-- Anything beyond the people-properties listed above
+- Anything beyond the person properties listed above
 
-Defense-in-depth: `sanitizeKey` (in `internal/analytics/analytics.go`) drops any event property whose key matches a small PII blocklist (`path`, `repo`, `branch`, `title`, `hostname`, `prompt`, `message`, etc.) before the event reaches the Mixpanel SDK.
+Defense-in-depth: `sanitizeKey` (in `internal/analytics/analytics.go`) drops any event property whose key matches a small PII blocklist (`path`, `repo`, `branch`, `title`, `hostname`, `prompt`, `message`, etc.) before the event reaches the PostHog SDK.
 
 ## Privacy
 
 ### Identity
 
-If git is configured globally on this machine, fleet uses your `git user.email` as the Mixpanel `distinct_id`. This means:
+In Full mode, if git is configured globally on this machine, fleet uses your `git user.email` as the PostHog `distinct_id`. This means:
 - The same person shows up as a single user across multiple machines (cross-machine continuity in funnels).
-- Your git `user.name` is sent as the Mixpanel `$name` people property; your `user.email` as `$email`. This is what makes you identifiable to the fleet author when they look at the dashboard.
+- Your git `user.name` is sent as the PostHog `$name` person property; your `user.email` as `$email`. This is what makes you identifiable to the fleet author when they look at the dashboard.
 
-If git isn't configured, fleet falls back to an **anonymous device ID** — a one-way SHA256 hash of the macOS hardware UUID, cached at `~/.config/fleet/device_id`. The same machine hash is also always sent as the `machine_hash` people property, so you can tell how many machines a given person uses.
+In Basic mode, or if git isn't configured, fleet uses an **anonymous device ID**, cached at `~/.config/fleet/device_id`. On macOS it is a one-way SHA256 hash of the hardware UUID (`IOPlatformUUID`). On Linux it is an HMAC-SHA256 of `/etc/machine-id` (or `/var/lib/dbus/machine-id`) keyed to fleet, as [`machine-id(5)`](https://www.freedesktop.org/software/systemd/man/latest/machine-id.html) asks, so it never matches what another app derives from the same ID; only a Linux machine with no readable machine ID falls back to hashing the hostname and CPU architecture. In Full mode the same hash is also sent as the `machine_hash` person property, so you can tell how many machines a given person uses.
 
 The consent prompt appears once on first launch (unless `FLEET_TELEMETRY_DISABLED` / `DO_NOT_TRACK` is set). Change your answer any time in Settings.
 
@@ -152,15 +169,17 @@ Edit `~/.config/fleet/config.json`:
 
 ```json
 {
-  "telemetry": false
+  "telemetry_mode": "off"
 }
 ```
+
+The legacy `"telemetry": false` does **not** turn analytics off — it migrates to Basic.
 
 ### 3. Settings Dialog
 
 Press `S` in the TUI and toggle **Telemetry** to **off**.
 
-When telemetry is disabled, the Mixpanel client is never created and every call (`Track` / `Gauge` / `Distribution` / `SetUserProperties`) becomes a no-op — no network traffic.
+When telemetry is disabled, fleet creates a disabled client instead: every call (`Track` / `Gauge` / `Distribution` / `SetUserProperties`) is a no-op, and nothing touches the network.
 
 ## Architecture
 
@@ -172,11 +191,11 @@ internal/analytics/
 └── snapshot.go      # EmitSnapshot — boundary gauges
 ```
 
-- **Buffered worker** — Mixpanel's SDK is synchronous HTTP. The TUI must never block in `Update()`, so events are pushed onto a 256-slot channel and a single worker goroutine ships them. Track/Gauge/Distribution return immediately.
+- **Buffered queue** — the `posthog-go` SDK batches and flushes on its own worker, but its `Enqueue` blocks. The TUI must never block in `Update()`, so `Client` pushes events onto a 256-slot channel that a single goroutine drains into the SDK. Track/Gauge/Distribution return immediately.
 - **Queue full?** — Events are dropped silently (logged at debug level). In practice the queue is small enough that this only happens if the network is completely stuck for an extended time.
 - **Shutdown** — Closes the queue, waits up to 2s for the worker to drain, then returns. Surviving events are lost.
 - **Subprocesses** — `fleet hook-handler` and `fleet chrome-host` do **not** initialize analytics — they're transient (one invocation per Claude Code hook fire) and starting an HTTP worker per invocation isn't worth it.
 
-## Project Token
+## Project API Key
 
-Compiled into the binary (`mixpanelToken` constant in `analytics.go`). No remote configuration; updating the token requires a new release.
+PostHog's project (capture) API key is compiled into the binary (`projectAPIKey` in `analytics.go`). It is write-only: it can send events, never read them. `FLEET_POSTHOG_KEY` overrides it and `FLEET_POSTHOG_HOST` the ingest host; otherwise changing it requires a new release.

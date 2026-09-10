@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
@@ -151,6 +152,12 @@ type Session struct {
 	paneFinishedFirstAt time.Time
 
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
+
+	// launchResumed records whether the latest launch continued an existing
+	// conversation (a resume or fork id) rather than starting fresh, for
+	// session_errored. Captured at launch because ClaudeSessionID fills in from
+	// hooks afterwards — read at failure time, every session would look resumed.
+	launchResumed bool
 
 	// Transcript tiebreaker cache. conversationActivePastHook runs on the ~500ms fast
 	// pass for a session held running through a long turn, and lastLeadTranscriptTimestamp
@@ -359,6 +366,7 @@ func (s *Session) Start() error {
 	debuglog.Logger.Info("session start", "id", s.ID, "title", s.Title, "path", s.ProjectPath)
 	s.mu.Lock()
 	s.Status = StatusStarting
+	s.launchResumed = s.ClaudeSessionID != "" || s.ForkFromID != ""
 	s.mu.Unlock()
 
 	cmd := s.buildAgentCmd()
@@ -366,6 +374,7 @@ func (s *Session) Start() error {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
+		s.reportErrored("start_failed")
 		debuglog.Logger.Error("session start failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
 	}
@@ -404,6 +413,35 @@ func (s *Session) consumeLaunchOverridesLocked() {
 	s.InitialPrompt = ""
 	s.Model = ""
 	s.Effort = ""
+}
+
+// trackEvent is analytics.Track, swappable so tests can see what a status change
+// reports.
+var trackEvent = analytics.Track
+
+// reportErrored sends session_errored for this session's move into StatusError.
+// reason is a short enum, never error text. Call it for the move, not the status:
+// a status pass has to check newFailure first.
+func (s *Session) reportErrored(reason string) {
+	s.mu.RLock()
+	props := map[string]interface{}{
+		"agent":                string(s.Agent),
+		"reason":               reason,
+		"seconds_since_create": int(time.Since(s.CreatedAt).Seconds()),
+		"resumed":              s.launchResumed,
+	}
+	s.mu.RUnlock()
+	trackEvent(analytics.EventSessionErrored, props)
+}
+
+// newFailure reports whether a status pass that has just put a session into
+// StatusError, having found it in old, is a failure worth reporting. Not when it
+// was already in error: one failure is one event, however many passes find it
+// there. Not when it was Starting either: a launch is in flight, a liveness check
+// landing before its tmux exists reads a session that hasn't started yet, and the
+// launch reports its own failure (start_failed and friends).
+func newFailure(old Status) bool {
+	return old != StatusError && old != StatusStarting
 }
 
 // Kill terminates the tmux session.
@@ -941,6 +979,7 @@ func (s *Session) Restart() error {
 	s.TmuxSessionName = newTmux.Name
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.launchResumed = s.ClaudeSessionID != "" || s.ForkFromID != ""
 	s.mu.Unlock()
 
 	cmd := s.buildAgentCmd()
@@ -948,6 +987,7 @@ func (s *Session) Restart() error {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
+		s.reportErrored("restart_failed")
 		debuglog.Logger.Error("session restart failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
 	}
@@ -985,6 +1025,7 @@ func (s *Session) RespawnClaude() error {
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.launchResumed = s.ClaudeSessionID != "" || s.ForkFromID != ""
 	s.mu.Unlock()
 
 	cmd := s.buildAgentCmd()
@@ -992,6 +1033,7 @@ func (s *Session) RespawnClaude() error {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
+		s.reportErrored("respawn_failed")
 		debuglog.Logger.Error("session respawn failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
 	}
@@ -1148,6 +1190,9 @@ func (s *Session) UpdateStatus() {
 		s.SetStatus(StatusError)
 		log.Debug("status: not alive", "old", oldStatus, "new", StatusError)
 		s.triggerCrashDump("tmux_gone")
+		if newFailure(oldStatus) {
+			s.reportErrored("tmux_gone")
+		}
 		return
 	}
 
@@ -1156,6 +1201,9 @@ func (s *Session) UpdateStatus() {
 		s.SetStatus(StatusError)
 		log.Debug("status: pane dead", "old", oldStatus, "new", StatusError)
 		s.triggerCrashDump("pane_dead")
+		if newFailure(oldStatus) {
+			s.reportErrored("pane_dead")
+		}
 		return
 	}
 
@@ -1246,6 +1294,7 @@ func (s *Session) UpdateStatus() {
 // is purely plugin-driven with no pane fallback).
 func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog.Logger) {
 	hookSaysDead := false
+	errReason := ""
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -1267,9 +1316,11 @@ func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog
 			// kill the pane. Self-corrects on the next running/finished hook.
 			s.Status = StatusError
 			s.Acknowledged = false
+			errReason = "agent_error"
 		case "dead":
 			s.Status = StatusError
 			hookSaysDead = true
+			errReason = "hook_dead"
 		}
 		if s.Status != oldStatus {
 			log.Info("status changed (agent hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus)
@@ -1278,6 +1329,9 @@ func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog
 
 	if hookSaysDead {
 		s.triggerCrashDump("hook_dead")
+	}
+	if errReason != "" && newFailure(oldStatus) {
+		s.reportErrored(errReason)
 	}
 }
 
@@ -1346,6 +1400,9 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 
 	if hookSaysDead {
 		s.triggerCrashDump("hook_dead")
+		if newFailure(oldStatus) {
+			s.reportErrored("hook_dead")
+		}
 	}
 }
 

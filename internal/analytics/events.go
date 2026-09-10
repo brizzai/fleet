@@ -21,6 +21,16 @@ const (
 	EventSessionDeleted   = "session_deleted"
 	EventSessionRenamed   = "session_renamed"
 	EventSessionOrphaned  = "session_orphaned"
+	// EventSessionErrored fires once per move into the error status, not on every
+	// status pass that finds a session still there. Props: agent; reason, a short
+	// enum (start_failed, restart_failed, respawn_failed, tmux_gone, pane_dead,
+	// hook_dead, agent_error) — never error text; seconds_since_create; resumed,
+	// whether the launch continued an existing conversation (resume or fork) —
+	// false for a session launched by an earlier fleet process.
+	EventSessionErrored = "session_errored"
+	// EventAttachBailed is an attach left within 10s of entering it: the user
+	// looked, and came straight back. Props: agent, seconds.
+	EventAttachBailed = "attach_bailed"
 
 	// Direct actions.
 	EventQuickApprove = "quick_approve"
@@ -57,7 +67,9 @@ const (
 	EventSlotBindingSet = "slot_binding_set"
 	EventSlotJumpUsed   = "slot_jump_used"
 
-	// Configuration changes.
+	// Configuration changes. EventThemeChanged fires once per commit — Settings
+	// closed on a different theme, or the first-run picker confirmed — carrying
+	// the final theme, never once per preview step.
 	EventThemeChanged  = "theme_changed"
 	EventConfigChanged = "config_changed"
 
@@ -84,11 +96,18 @@ const (
 	EventUpdateCheck   = "update_check"
 	EventUpdateApplied = "update_applied"
 
-	// Frustration / failure signals.
+	// Frustration / failure signals. EventErrorOccurred is a real failure shown
+	// as an error toast; guidance ("no PR for this branch") is an info toast and
+	// is not tracked.
 	EventErrorOccurred           = "error_occurred"
 	EventManualRenameAfterAuto   = "manual_rename_after_auto"
 	EventQuitWithRunningSessions = "quit_with_running_sessions"
 	EventBugReportSubmitted      = "bug_report_submitted"
+	// EventStartupFailed is fleet refusing to go on without a dependency. Props:
+	// reason = tmux_missing (sent from main before the TUI exists, and only for a
+	// user who has answered the consent prompt) | claude_missing (Enter on the
+	// launchpad with no claude on PATH).
+	EventStartupFailed = "startup_failed"
 
 	// Subsystem failures (counters).
 	EventTmuxCommandFailure = "tmux_command_failure"
@@ -110,6 +129,16 @@ const (
 	EventOnboardingFirstAttach         = "onboarding_first_attach"
 	EventOnboardingFirstClaudeResponse = "onboarding_first_claude_response"
 	EventOnboardingFirstQuit           = "onboarding_first_quit"
+
+	// First-run launchpad: the "pick up your recent repos" screen an empty fleet
+	// opens on. Props are counts, never the repos themselves —
+	// launchpad_shown {discovered_repos} when it renders with items,
+	// launchpad_launched {selected, discovered} on Enter, and
+	// launchpad_skipped {discovered} on Esc. Not one-shot: an empty fleet shows
+	// the launchpad on every launch.
+	EventLaunchpadShown    = "launchpad_shown"
+	EventLaunchpadLaunched = "launchpad_launched"
+	EventLaunchpadSkipped  = "launchpad_skipped"
 
 	// Distribution metric names (not counters; used with analytics.Distribution).
 	MetricSessionLifetimeSeconds    = "session_lifetime_seconds"
