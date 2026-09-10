@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -215,6 +216,13 @@ func runTUI() {
 }
 
 func runList() {
+	// See runRemove: session.Open creates state.db, so the legacy-config-dir
+	// migration has to run ahead of it, and storage's Info lines belong in
+	// debug.log rather than on top of the table below.
+	migration.Run()
+	debuglog.Init()
+	defer debuglog.Close()
+
 	storage, err := session.Open(session.DefaultDBPath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
@@ -247,6 +255,14 @@ func runList() {
 }
 
 func runRemove(idPrefix string) {
+	// Same order as runAdd/runWorktree/runTUI: migrate a legacy `brizz-code`
+	// config dir before anything below creates `~/.config/fleet/`, then send
+	// storage's Info lines to debug.log instead of the user's terminal, where
+	// debuglog's stderr fallback would print them over this command's output.
+	migration.Run()
+	debuglog.Init()
+	defer debuglog.Close()
+
 	storage, err := session.Open(session.DefaultDBPath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
@@ -289,6 +305,46 @@ func runRemove(idPrefix string) {
 	}
 
 	fmt.Printf("Removed session '%s' (%s)\n", match.Title, match.ID)
+
+	// Creating a session pins its repo (session_launch.go), so removing the
+	// last one has to unpin it or the sidebar keeps rendering an empty header
+	// for a checkout nothing points at any more — for a worktree the caller
+	// then deletes, a header for a directory that no longer exists. The TUI
+	// leaves that pin behind on purpose: `d` on the empty header is the
+	// gesture that clears it. There is no such gesture from a shell, and a
+	// create/remove loop would otherwise accumulate phantom rows forever.
+	repo := session.GetRepoRoot(match.ProjectPath)
+	if !lastSessionInRepo(rows, match, repo, session.GetRepoRoot) {
+		return
+	}
+	// Only claim an unpin that was really there — a repo the user never had
+	// pinned must not be reported as one fleet just cleaned up.
+	pinned, err := storage.LoadPinnedRepos()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to read pinned repos: %v\n", err)
+		return
+	}
+	if !slices.Contains(pinned, repo) {
+		return
+	}
+	if err := storage.UnpinRepo(repo); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to unpin %s: %v\n", repo, err)
+		return
+	}
+	fmt.Printf("Unpinned %s (no sessions left)\n", repo)
+}
+
+// lastSessionInRepo reports whether removing `match` leaves no other session in
+// `repo`. repoOf is injected (session.GetRepoRoot in production) so the rule is
+// testable without a git checkout per row — the same seam `fleet send` uses for
+// branchOf.
+func lastSessionInRepo(rows []*session.SessionRow, match *session.SessionRow, repo string, repoOf func(string) string) bool {
+	for _, r := range rows {
+		if r.ID != match.ID && repoOf(r.ProjectPath) == repo {
+			return false
+		}
+	}
+	return true
 }
 
 func runUpdate() {
