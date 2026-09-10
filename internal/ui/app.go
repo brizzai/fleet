@@ -159,6 +159,13 @@ type (
 		// an 8s timeout on the UI loop.
 		repoRoots map[string]string
 	}
+	// dropSessionsMsg carries the other direction: sessions this TUI knows
+	// about whose SQLite row another fleet process deleted (`fleet remove`),
+	// plus repo pins that vanished from pinned_repos alongside them.
+	dropSessionsMsg struct {
+		ids      []string
+		unpinned []string
+	}
 	openEditorMsg        struct{ err error }
 	openPRMsg            struct{ err error }
 	quickApproveMsg      struct{ err error }
@@ -319,9 +326,16 @@ type Home struct {
 	// lastSuspendSweepAt throttles the memory-pressure idle-suspend sweep so it
 	// runs on its own slow cadence inside the ~2s heavy pass.
 	lastSuspendSweepAt time.Time
-	// lastAdoptSweepAt throttles the externally-created-session sweep, mirroring
+	// lastAdoptSweepAt throttles the external-session sweep, mirroring
 	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
 	lastAdoptSweepAt time.Time
+	// lastSweepSessionIDs / lastSweepPins hold what the previous sweep read out
+	// of SQLite. A row's *absence* is only believed when it was present in the
+	// read before — see maybeSyncExternalSessions. Worker-goroutine-only, so
+	// they need no lock; in particular the worker must never read
+	// h.pinnedRepos, which belongs to the Update goroutine.
+	lastSweepSessionIDs map[string]bool
+	lastSweepPins       map[string]bool
 	// lastHookRepairAt throttles the hook-command existence check, mirroring
 	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
 	lastHookRepairAt time.Time
@@ -1194,6 +1208,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case adoptSessionsMsg:
 		return h.handleAdoptSessions(msg)
+
+	case dropSessionsMsg:
+		return h.handleDropSessions(msg)
 
 	case tccProbeResultMsg:
 		if !msg.determined {
@@ -4191,6 +4208,102 @@ func (h *Home) handleAdoptSessions(msg adoptSessionsMsg) (tea.Model, tea.Cmd) {
 	return h, tea.Batch(cmds...)
 }
 
+// handleDropSessions removes sessions another fleet process deleted (`fleet
+// remove`) from the running TUI, and with them any repo pin that vanished from
+// pinned_repos at the same time. The mirror of handleAdoptSessions, minus every
+// side effect that belongs to whoever did the deleting: no tmux kill, no
+// workspace destroy, no undo entry. fleet did not decide to remove this
+// session, so it only stops rendering it.
+func (h *Home) handleDropSessions(msg dropSessionsMsg) (tea.Model, tea.Cmd) {
+	// The worker diffed against a snapshot taken at cycle start, so it can
+	// name a session the Update loop has already dealt with. As with adoption,
+	// this is the only place the check is authoritative.
+	drop := make(map[string]bool, len(msg.ids))
+	for _, id := range msg.ids {
+		if _, ok := h.sessionByID[id]; ok {
+			drop[id] = true
+		}
+	}
+
+	// A pin is only dropped once nothing in the list still lives there. Two
+	// cases need it: `u` undoes a delete by re-pinning the repo *and* restoring
+	// its session, which the sweep can catch mid-flight and report as a
+	// vanished pin; and a repo with sessions renders a header whether or not it
+	// is pinned, so unpinning it would only desync the two.
+	repoHasSession := make(map[string]bool, len(h.sessions))
+	for _, s := range h.sessions {
+		if drop[s.ID] {
+			continue
+		}
+		repoHasSession[session.GetRepoRoot(s.ProjectPath)] = true
+	}
+	var unpin []string
+	for _, repo := range msg.unpinned {
+		if h.pinnedRepos[repo] && !repoHasSession[repo] {
+			unpin = append(unpin, repo)
+		}
+	}
+
+	if len(drop) == 0 && len(unpin) == 0 {
+		return h, nil
+	}
+	debuglog.Logger.Info("dropping entries removed by another fleet process",
+		"sessions", len(drop), "pins", len(unpin))
+
+	// Like adoption, this arrives on a timer rather than because the user
+	// pressed a key, so the cursor is re-found by identity afterwards. Unlike
+	// adoption, rows can disappear beneath it — hence the clamp below.
+	target := h.targetForCursor()
+
+	if len(drop) > 0 {
+		var remaining []*session.Session
+		h.workerMu.Lock()
+		for _, s := range h.sessions {
+			if !drop[s.ID] {
+				remaining = append(remaining, s)
+			}
+		}
+		h.sessions = remaining
+		h.rebuildSessionMap()
+		h.workerMu.Unlock()
+
+		// The deleting process's DeleteSession already cascaded the
+		// slot_bindings rows away; the in-memory map needs explicit cleanup so
+		// the [N] badge goes with them (mirrors deferDelete).
+		for slot, sid := range h.slotBindings {
+			if drop[sid] {
+				delete(h.slotBindings, slot)
+			}
+		}
+		if h.lastSlotTapSlot >= 0 {
+			if sid, ok := h.slotBindings[h.lastSlotTapSlot]; !ok || drop[sid] {
+				h.lastSlotTapSlot = -1
+			}
+		}
+	}
+	for _, repo := range unpin {
+		delete(h.pinnedRepos, repo)
+	}
+
+	h.rebuildFlatItems()
+	if idx := target.find(h.flatItems); idx >= 0 {
+		h.cursor = idx
+	} else {
+		// The row under the cursor is one of the ones that went away.
+		if h.cursor >= len(h.flatItems) {
+			h.cursor = len(h.flatItems) - 1
+		}
+		if h.cursor < 0 {
+			h.cursor = 0
+		}
+		if len(h.flatItems) > 0 && h.flatItems[h.cursor].IsRepoHeader {
+			h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
+		}
+	}
+	h.syncViewport()
+	return h, nil
+}
+
 // canAutoExpand reports whether a group may be opened without the user asking.
 // False when they collapsed it themselves, and false while it's snoozed — a
 // snooze collapses its group on purpose, so re-opening it would leave the two
@@ -4993,50 +5106,133 @@ func (h *Home) maybeRepairClaudeHooks() {
 	}
 }
 
-// adoptSweepInterval throttles the externally-created-session sweep to its own
-// cadence inside the ~2s heavy worker pass. Re-reading the sessions table every
-// heavy cycle would buy nothing: the payoff is a CLI-created session showing up
-// without a restart, and a few seconds is a fine latency for that.
+// adoptSweepInterval throttles the external-session sweep to its own cadence
+// inside the ~2s heavy worker pass. Re-reading the sessions table every heavy
+// cycle would buy nothing: the payoff is a session created or removed from the
+// shell reaching the sidebar without a restart, and a few seconds is a fine
+// latency for that.
 const adoptSweepInterval = 5 * time.Second
 
-// maybeAdoptExternalSessions picks up session rows written by another fleet
-// process — `fleet worktree`, `fleet add` — while this TUI is running. Sessions
-// are otherwise read from SQLite exactly once, at startup (loadSessions), so
-// without this a session created from the shell stays invisible until restart.
+// maybeSyncExternalSessions reconciles the in-memory list with the sessions
+// another fleet process wrote to SQLite while this TUI ran — `fleet worktree`
+// and `fleet add` add rows, `fleet remove` deletes them. Sessions are otherwise
+// read from SQLite exactly once, at startup (loadSessions), so without this a
+// session created from the shell stays invisible until restart and one removed
+// from the shell keeps rendering until restart.
 //
-// Adoption only: rows deleted by another process are NOT dropped from the
-// in-memory list. Runs on the worker goroutine (it reads SQLite); the actual
-// mutation happens on the Update goroutine via adoptSessionsMsg.
-func (h *Home) maybeAdoptExternalSessions(known []*session.Session) {
+// Runs on the worker goroutine (it reads SQLite); every mutation happens on the
+// Update goroutine via adoptSessionsMsg / dropSessionsMsg.
+//
+// A removal is believed only when the row was in the *previous* read and is
+// gone from this one. That two-read rule is what keeps a creation from reading
+// as a removal: handleSessionCreateResult appends to h.sessions under workerMu
+// and calls SaveSession after releasing it, so a sweep can catch a brand-new
+// session in memory whose row is not written yet — but that row was in no
+// earlier read either, so it is not a drop candidate. The same rule spares a
+// session whose SaveSession failed outright (SQLITE_BUSY): nothing that was
+// never persisted can be seen to vanish, and dropping a live agent from the
+// sidebar because its row didn't land would be the worse failure.
+func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
+	// Same rendezvous hazard as the suspend sweep's send: program.Send blocks
+	// on Tea's unbuffered channel, and tea.Exec suspends the loop that drains
+	// it. Bail before the diff rather than after it — the previous-read state
+	// the drop rule compares against must not advance past a removal nobody
+	// was told about. Costs nothing: the next sweep re-finds everything.
+	if h.isAttaching.Load() {
+		return
+	}
 	if !h.lastAdoptSweepAt.IsZero() && time.Since(h.lastAdoptSweepAt) < adoptSweepInterval {
 		return
 	}
 	h.lastAdoptSweepAt = time.Now()
 
+	adopt, drop, ok := h.diffAgainstStorage(known)
+	if !ok {
+		return
+	}
+	if len(adopt.sessions) > 0 {
+		debuglog.Logger.Info("adopting externally-created sessions", "count", len(adopt.sessions))
+		h.send(adopt)
+	}
+	if len(drop.ids) > 0 || len(drop.unpinned) > 0 {
+		h.send(drop)
+	}
+}
+
+// diffAgainstStorage re-reads the sessions and pinned_repos tables and diffs
+// them against what this TUI holds, advancing the previous-read state as it
+// goes. Split out from the sweep so the diff is testable without a running
+// tea.Program. Reports false when the sessions table couldn't be read.
+func (h *Home) diffAgainstStorage(known []*session.Session) (adoptSessionsMsg, dropSessionsMsg, bool) {
 	rows, err := h.storage.LoadSessions()
 	if err != nil {
-		debuglog.Logger.Error("adopt sweep: failed to load sessions", "err", err)
-		return
+		debuglog.Logger.Error("session sweep: failed to load sessions", "err", err)
+		return adoptSessionsMsg{}, dropSessionsMsg{}, false
 	}
-	adopted := unknownSessions(rows, known, os.Getenv("FLEET_DEMO_PREFIX"))
-	if len(adopted) == 0 {
-		return
+	seenNow := sessionRowIDs(rows)
+	drop := dropSessionsMsg{ids: vanishedSessions(known, seenNow, h.lastSweepSessionIDs)}
+	h.lastSweepSessionIDs = seenNow
+
+	// Pins are diffed against the table rather than against h.pinnedRepos: that
+	// map belongs to the Update goroutine, and reading it here would be a race.
+	// A failed read leaves the previous set in place, so a transient error costs
+	// a sweep rather than reporting every pin as vanished.
+	if pins, err := h.storage.LoadPinnedRepos(); err != nil {
+		debuglog.Logger.Error("session sweep: failed to load pinned repos", "err", err)
+	} else {
+		pinsNow := make(map[string]bool, len(pins))
+		for _, p := range pins {
+			pinsNow[p] = true
+		}
+		for p := range h.lastSweepPins {
+			if !pinsNow[p] {
+				drop.unpinned = append(drop.unpinned, p)
+			}
+		}
+		h.lastSweepPins = pinsNow
 	}
-	debuglog.Logger.Info("adopting externally-created sessions", "count", len(adopted))
-	// Resolve repo roots here, on the worker: these paths were created by
-	// another process, so session.GetRepoRoot's cache always misses and it
-	// shells out to git. Doing it in the Update handler would violate the
-	// no-blocking-I/O-in-Update() rule once per adopted session.
-	roots := make(map[string]string, len(adopted))
-	for _, s := range adopted {
-		roots[s.ID] = session.GetRepoRoot(s.ProjectPath)
+
+	adopt := adoptSessionsMsg{sessions: unknownSessions(rows, known, os.Getenv("FLEET_DEMO_PREFIX"))}
+	if len(adopt.sessions) > 0 {
+		// Resolve repo roots here, on the worker: these paths were created by
+		// another process, so session.GetRepoRoot's cache always misses and it
+		// shells out to git. Doing it in the Update handler would violate the
+		// no-blocking-I/O-in-Update() rule once per adopted session.
+		adopt.repoRoots = make(map[string]string, len(adopt.sessions))
+		for _, s := range adopt.sessions {
+			adopt.repoRoots[s.ID] = session.GetRepoRoot(s.ProjectPath)
+		}
 	}
-	// Same rendezvous hazard as the suspend sweep's send: program.Send blocks on
-	// Tea's unbuffered channel, and tea.Exec suspends the loop that drains it.
-	// Skipping costs nothing — the next sweep re-finds these rows.
-	if !h.isAttaching.Load() {
-		h.send(adoptSessionsMsg{sessions: adopted, repoRoots: roots})
+	return adopt, drop, true
+}
+
+// sessionRowIDs is the id set of a sessions-table read, the shape
+// vanishedSessions diffs against.
+func sessionRowIDs(rows []*session.SessionRow) map[string]bool {
+	ids := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		ids[row.ID] = true
 	}
+	return ids
+}
+
+// vanishedSessions returns the ids of in-memory sessions whose row was in the
+// previous read (prev) and is absent from the current one (cur) — a row deleted
+// by another fleet process. Requiring the row in prev is what makes this safe
+// against a session created since the last sweep; see maybeSyncExternalSessions.
+//
+// This is a pre-filter only: known is a snapshot taken at worker cycle start,
+// so the handler re-checks sessionByID, which is where the decision is
+// authoritative.
+func vanishedSessions(known []*session.Session, cur, prev map[string]bool) []string {
+	var out []string
+	for _, s := range known {
+		if cur[s.ID] || !prev[s.ID] {
+			continue
+		}
+		out = append(out, s.ID)
+	}
+	return out
 }
 
 // unknownSessions returns the stored rows that aren't in known, hydrated into
@@ -6634,7 +6830,7 @@ func (h *Home) statusWorkerCycle() {
 		// sidebar is the likeliest place to be driving from the shell. Every
 		// other pass below has nothing to work on.
 		if heavy {
-			h.maybeAdoptExternalSessions(sessions)
+			h.maybeSyncExternalSessions(sessions)
 		}
 		return
 	}
@@ -6837,11 +7033,12 @@ drainPriority:
 	// which is why it lives here on the worker, not the Update loop.
 	h.maybeSuspendIdleSessions(sessions)
 
-	// 5c. Adopt sessions another fleet process created (e.g. `fleet worktree`
-	// from a shell) since the last sweep. Self-throttled; reads SQLite, which is
-	// why it lives here rather than on the Update loop. Also called on the
-	// empty-fleet early-return path above — the throttle makes that safe.
-	h.maybeAdoptExternalSessions(sessions)
+	// 5c. Reconcile with sessions another fleet process created (`fleet
+	// worktree` from a shell) or removed (`fleet remove`) since the last sweep.
+	// Self-throttled; reads SQLite, which is why it lives here rather than on
+	// the Update loop. Also called on the empty-fleet early-return path above —
+	// the throttle makes that safe.
+	h.maybeSyncExternalSessions(sessions)
 
 	// 5d. Re-point Claude's hooks if the command they name has been deleted.
 	// Self-throttled; stats a file and may rewrite settings.json, which is why it

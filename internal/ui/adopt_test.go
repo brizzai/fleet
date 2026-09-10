@@ -237,3 +237,168 @@ func indexOfSession(h *Home, id string) int {
 	}
 	return -1
 }
+
+// The drop direction is the mirror of adoption: `fleet remove` deletes the row
+// from another process, and the TUI has to stop rendering it without a restart.
+
+// A row missing from the current read is only a removal if it was in the read
+// before. That rule is what separates a deleted session from one this TUI just
+// created — handleSessionCreateResult appends to h.sessions before SaveSession
+// lands, so a sweep can legitimately catch a session in memory whose row isn't
+// written yet.
+func TestVanishedSessionsNeedsTheRowInAPreviousRead(t *testing.T) {
+	rowA := session.NewSession("a", "/tmp/a").ToRow()
+	rowB := session.NewSession("b", "/tmp/b").ToRow()
+	known := []*session.Session{session.FromRow(rowA), session.FromRow(rowB)}
+
+	// B is in memory and in neither read: brand new, not deleted.
+	cur := map[string]bool{rowA.ID: true}
+	if got := vanishedSessions(known, cur, map[string]bool{rowA.ID: true}); len(got) != 0 {
+		t.Fatalf("a never-persisted session was reported as vanished: %v", got)
+	}
+
+	// B was there last read and is gone now: deleted elsewhere.
+	prev := map[string]bool{rowA.ID: true, rowB.ID: true}
+	got := vanishedSessions(known, cur, prev)
+	if len(got) != 1 || got[0] != rowB.ID {
+		t.Fatalf("got %v, want just %s", got, rowB.ID)
+	}
+}
+
+func TestDiffAgainstStorageFindsRemovedSessionAndPin(t *testing.T) {
+	h := adoptTestHome(t)
+	repo := t.TempDir()
+	row := storeSession(t, h, "from-cli", repo)
+	h.handleAdoptSessions(adoptSessionsMsg{sessions: []*session.Session{session.FromRow(row)}})
+	known := []*session.Session{session.FromRow(row)}
+
+	// First sweep: everything is where it should be, and it seeds the
+	// previous-read state the next one diffs against.
+	if _, drop, ok := h.diffAgainstStorage(known); !ok || len(drop.ids) != 0 || len(drop.unpinned) != 0 {
+		t.Fatalf("first sweep reported a removal: %+v (ok=%v)", drop, ok)
+	}
+
+	// What `fleet remove` now does from another process.
+	repoRoot := session.GetRepoRoot(repo)
+	if err := h.storage.DeleteSession(row.ID); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if err := h.storage.UnpinRepo(repoRoot); err != nil {
+		t.Fatalf("unpin repo: %v", err)
+	}
+
+	_, drop, ok := h.diffAgainstStorage(known)
+	if !ok {
+		t.Fatal("diff failed")
+	}
+	if len(drop.ids) != 1 || drop.ids[0] != row.ID {
+		t.Fatalf("got ids %v, want just %s", drop.ids, row.ID)
+	}
+	if len(drop.unpinned) != 1 || drop.unpinned[0] != repoRoot {
+		t.Fatalf("got unpinned %v, want just %s", drop.unpinned, repoRoot)
+	}
+}
+
+// A session whose SaveSession failed (SQLITE_BUSY happens) exists only in
+// memory. It must never be dropped, however many sweeps run: it was never in
+// the table, so nothing about it vanished — and pulling a live agent out of the
+// sidebar because its row didn't land is the worse of the two failures.
+func TestDiffAgainstStorageKeepsAnUnpersistedSession(t *testing.T) {
+	h := adoptTestHome(t)
+	known := []*session.Session{session.NewSession("never-saved", t.TempDir())}
+
+	for i := 0; i < 3; i++ {
+		if _, drop, ok := h.diffAgainstStorage(known); !ok || len(drop.ids) != 0 {
+			t.Fatalf("sweep %d dropped a session with no row: %v", i, drop.ids)
+		}
+	}
+}
+
+func TestHandleDropSessionsRemovesSessionAndPin(t *testing.T) {
+	h := adoptTestHome(t)
+	repo := t.TempDir()
+	row := storeSession(t, h, "from-cli", repo)
+	h.handleAdoptSessions(adoptSessionsMsg{sessions: []*session.Session{session.FromRow(row)}})
+	repoRoot := session.GetRepoRoot(repo)
+	h.slotBindings[3] = row.ID
+
+	h.handleDropSessions(dropSessionsMsg{ids: []string{row.ID}, unpinned: []string{repoRoot}})
+
+	if _, ok := h.sessionByID[row.ID]; ok {
+		t.Error("dropped session still in sessionByID")
+	}
+	if len(h.sessions) != 0 {
+		t.Errorf("h.sessions has %d entries, want 0", len(h.sessions))
+	}
+	if h.pinnedRepos[repoRoot] {
+		t.Error("pin outlived the session it was created with")
+	}
+	if _, ok := h.slotBindings[3]; ok {
+		t.Error("slot binding still points at a session that is gone")
+	}
+	if indexOfSession(h, row.ID) >= 0 {
+		t.Error("dropped session still rendered in the sidebar")
+	}
+}
+
+// The sweep can catch an unpin the user has already reversed with `u` — undo
+// re-pins the repo and restores its session in one step. A repo with sessions
+// renders a header either way, so dropping the pin could only desync the two.
+func TestHandleDropSessionsKeepsAPinWithLiveSessions(t *testing.T) {
+	h := adoptTestHome(t)
+	repo := t.TempDir()
+	row := storeSession(t, h, "still-here", repo)
+	h.handleAdoptSessions(adoptSessionsMsg{sessions: []*session.Session{session.FromRow(row)}})
+	repoRoot := session.GetRepoRoot(repo)
+
+	h.handleDropSessions(dropSessionsMsg{unpinned: []string{repoRoot}})
+
+	if !h.pinnedRepos[repoRoot] {
+		t.Error("pin was dropped while a session still lives in that repo")
+	}
+}
+
+// Like adoption, a drop arrives on a timer rather than because the user pressed
+// a key — so a row disappearing elsewhere must not slide the selection.
+func TestHandleDropSessionsKeepsCursorOnItsRow(t *testing.T) {
+	h := adoptTestHome(t)
+	above, below := t.TempDir(), t.TempDir()
+
+	goneRow := storeSession(t, h, "removed-elsewhere", above)
+	parkedRow := storeSession(t, h, "parked", below)
+	h.handleAdoptSessions(adoptSessionsMsg{sessions: []*session.Session{
+		session.FromRow(goneRow), session.FromRow(parkedRow),
+	}})
+
+	idxBefore := indexOfSession(h, parkedRow.ID)
+	if idxBefore < 0 {
+		t.Fatal("parked session not in the sidebar")
+	}
+	h.cursor = idxBefore
+
+	h.handleDropSessions(dropSessionsMsg{ids: []string{goneRow.ID}})
+
+	idxAfter := indexOfSession(h, parkedRow.ID)
+	if idxAfter == idxBefore {
+		t.Fatalf("test is vacuous: the dropped row did not shift the parked row (still at %d)", idxBefore)
+	}
+	if h.cursor != idxAfter {
+		t.Fatalf("cursor moved off its row: parked session is at %d, cursor is at %d", idxAfter, h.cursor)
+	}
+}
+
+// The cursor's own row can be the one that goes away; the clamp has to leave it
+// somewhere selectable rather than off the end of the list.
+func TestHandleDropSessionsClampsCursorWhenItsRowGoes(t *testing.T) {
+	h := adoptTestHome(t)
+	repo := t.TempDir()
+	row := storeSession(t, h, "removed-elsewhere", repo)
+	h.handleAdoptSessions(adoptSessionsMsg{sessions: []*session.Session{session.FromRow(row)}})
+	h.cursor = indexOfSession(h, row.ID)
+
+	h.handleDropSessions(dropSessionsMsg{ids: []string{row.ID}, unpinned: []string{session.GetRepoRoot(repo)}})
+
+	if h.cursor < 0 || (len(h.flatItems) > 0 && h.cursor >= len(h.flatItems)) {
+		t.Fatalf("cursor %d out of range for %d rows", h.cursor, len(h.flatItems))
+	}
+}
