@@ -125,6 +125,8 @@ type CommandPaletteDialog struct {
 	// every tab, not only from the one that can toggle it — and it is not
 	// persisted to config, so a restart clears it.
 	ticketTodoOnly bool
+
+	clickRows overlayRowMap // filled by View; see ClickRowAt
 }
 
 type scoredItem struct {
@@ -454,6 +456,12 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.C
 func (d *CommandPaletteDialog) View() string {
 	var b strings.Builder
 
+	// DialogStyle is a border plus one row of vertical padding. Rows are
+	// recorded as they are emitted rather than computed: section headers, the
+	// `recent` label and the blank breaks between groups are interleaved with
+	// the results, so nothing but the loop below knows which line a row got.
+	d.clickRows.reset(2)
+
 	b.WriteString(TitleStyle.Render("Command Palette"))
 	b.WriteString("\n\n")
 
@@ -619,6 +627,9 @@ func (d *CommandPaletteDialog) View() string {
 			if leadCol > 0 {
 				lead = renderPriorityLead(it.Priority)
 			}
+			// Everything written so far ends in a newline, so the row lands on
+			// the line whose index is the count of them.
+			d.clickRows.set(strings.Count(b.String(), "\n"), i)
 			b.WriteString(prefix + badge + lead + name)
 			if selected {
 				// Carry the fill across the gap and the right column, padded to
@@ -1060,4 +1071,22 @@ func filterShiftIndexes(indexes []int, lo, hi, shift int) []int {
 		}
 	}
 	return out
+}
+
+// ClickRowAt implements clickableOverlay: the click lands the cursor on the
+// result under the pointer and the enter that follows runs it, the same as
+// picking it with the arrows.
+//
+// Only result rows are recorded, so a click on the title, the tab bar, the
+// search box, a section header, a `⋮` marker or the footer is swallowed. The
+// search box in particular: it already holds the keyboard whenever the palette
+// is open, so there is nothing for a click there to focus.
+func (d *CommandPaletteDialog) ClickRowAt(_, dy int) rune {
+	i, ok := d.clickRows.at(dy)
+	if !ok || i < 0 || i >= len(d.filtered) {
+		return 0
+	}
+	d.cursor = i
+	d.syncScroll()
+	return tea.KeyEnter
 }

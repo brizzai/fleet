@@ -241,6 +241,17 @@ type Home struct {
 	cursor     int
 	viewOffset int
 
+	// Mouse state. layout is written by renderBody each frame and read by the
+	// click/wheel handlers; frameCache + viewDirty let View hand back the last
+	// frame when a mouse message changed nothing (see mouse.go).
+	layout            screenLayout
+	frameCache        string
+	viewDirty         bool
+	lastMousePaint    time.Time
+	mouseSettleQueued bool
+	lastClickRow      int
+	lastClickAt       time.Time
+
 	isAttaching atomic.Bool
 
 	// hooksRepaired latches once maybeRepairClaudeHooks has re-pointed a hook
@@ -576,6 +587,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		lastTmuxStatusBar:      make(map[string]string),
 		slotBindings:           make(map[int]string),
 		lastSlotTapSlot:        -1,
+		lastClickRow:           -1,
 		toasts:                 NewToastStack(),
 		tipEpisodeDismissed:    make(map[string]bool),
 		tipVisibleFor:          make(map[string]time.Duration),
@@ -865,6 +877,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 	}
+	// Every message repaints, because any of them may have changed the screen —
+	// except a mouse message, which is guilty until proven innocent: the wheel
+	// arrives in bursts of hundreds per second and v2 renders after every one
+	// (see mouse.go). A handler that changes something sets this back.
+	_, isMouse := msg.(tea.MouseMsg)
+	h.viewDirty = !isMouse
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
@@ -926,6 +945,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return h.handleKey(msg)
+
+	case tea.MouseMsg:
+		return h.handleMouse(msg)
+
+	case mouseSettleMsg:
+		// The trailing frame a throttled wheel burst skipped. viewDirty is
+		// already true (this is not a mouse message), so returning paints it.
+		h.mouseSettleQueued = false
+		h.lastMousePaint = time.Now()
+		return h, nil
 
 	case tea.PasteMsg: // cmd+v — v2 delivers paste as its own message, not a KeyMsg
 		return h.handlePaste(msg)
@@ -2238,7 +2267,23 @@ func (h *Home) View() tea.View {
 		}
 		return h.chrome(base)
 	}
-	return h.chrome(h.composeScreen())
+	return h.chrome(h.screen())
+}
+
+// screen is composeScreen behind a one-frame cache. Bubble Tea v2 renders after
+// every message and offers no way to decline, so this is where a message that
+// changed nothing stops costing a full compose — see mouse.go, the only thing
+// that ever leaves viewDirty false.
+//
+// Deliberately not on composeScreen itself: beginQuit and frost call that to
+// freeze the live frame, and a freeze must never be served a stale one.
+func (h *Home) screen() string {
+	if !h.viewDirty && h.frameCache != "" {
+		return h.frameCache
+	}
+	h.frameCache = h.composeScreen()
+	h.viewDirty = false
+	return h.frameCache
 }
 
 // composeScreen paints everything View shows once the app is up: the body,
@@ -2247,6 +2292,12 @@ func (h *Home) View() tea.View {
 // backdrop and the frost freeze both take it — so a frozen picture matches
 // the live one instead of renderBody alone.
 func (h *Home) composeScreen() string {
+	// Cleared before renderBody, which clears the sidebar rect: between them,
+	// a frame that paints no overlay leaves the pointer with nothing stale to
+	// hit. renderBody cannot do it — the overlays composite out here, after it.
+	h.layout.overlay = mouseRect{}
+	h.layout.overlayRows = nil
+
 	base := h.renderBody()
 	// Animated "What's New" badge, top-right of the header row. Only when there
 	// are unseen highlights and no modal owns the screen (a modal makes
@@ -2288,6 +2339,7 @@ func (h *Home) composeScreen() string {
 		pv := h.commandPalette.View()
 		x := (h.width - lipgloss.Width(pv)) / 2
 		y := (h.height - lipgloss.Height(pv)) / 2
+		h.recordOverlay(pv, x, y, h.commandPalette)
 		base = overlayAt(pv, base, x, y)
 	}
 	// Context menu: a dropdown pinned to the cursor's sidebar row. Deliberately
@@ -2295,21 +2347,25 @@ func (h *Home) composeScreen() string {
 	// dimming the whole app for it would read as a modal takeover.
 	if mv := h.contextMenu.View(); mv != "" {
 		x, y := h.contextMenu.Position(lipgloss.Width(mv), lipgloss.Height(mv))
+		h.recordOverlay(mv, x, y, h.contextMenu)
 		base = overlayAt(mv, base, x, y)
 	}
 	// Account picker: same row-anchored dropdown treatment as the context menu.
 	if av := h.accountPicker.View(); av != "" {
 		x, y := h.accountPicker.Position(lipgloss.Width(av), lipgloss.Height(av))
+		h.recordOverlay(av, x, y, h.accountPicker)
 		base = overlayAt(av, base, x, y)
 	}
 	// Allowed-accounts editor: same row-anchored dropdown treatment.
 	if lv := h.allowedAccounts.View(); lv != "" {
 		x, y := h.allowedAccounts.Position(lipgloss.Width(lv), lipgloss.Height(lv))
+		h.recordOverlay(lv, x, y, h.allowedAccounts)
 		base = overlayAt(lv, base, x, y)
 	}
 	// Snooze picker: same row-anchored dropdown treatment as the context menu.
 	if sv := h.snoozeDialog.View(); sv != "" {
 		x, y := h.snoozeDialog.Position(lipgloss.Width(sv), lipgloss.Height(sv))
+		h.recordOverlay(sv, x, y, h.snoozeDialog)
 		base = overlayAt(sv, base, x, y)
 	}
 	// Contextual tip box — suppressed while a modal owns the screen so a sticky
@@ -2334,6 +2390,18 @@ func (h *Home) composeScreen() string {
 	return h.anchorBottomRight(stack, base)
 }
 
+// recordOverlay notes where an overlay box was composited, so a click can be
+// resolved against the frame the user is actually looking at.
+//
+// Called for each overlay in composite order, so the last one recorded is the
+// topmost — which is the one a click has to hit. The dropdowns are mutually
+// exclusive in practice, but ordering it this way means a future overlap
+// resolves the way the screen looks rather than the way the code is ordered.
+func (h *Home) recordOverlay(box string, x, y int, rows clickableOverlay) {
+	h.layout.overlay = mouseRect{x: x, y: y, w: lipgloss.Width(box), h: lipgloss.Height(box)}
+	h.layout.overlayRows = rows
+}
+
 // anchorBottomRight composites block onto base at the bottom-right, with a
 // 1-cell right margin and a 1-row lift so it clears the help-bar baseline.
 func (h *Home) anchorBottomRight(block, base string) string {
@@ -2349,16 +2417,22 @@ func (h *Home) anchorBottomRight(block, base string) string {
 func (h *Home) chrome(content string) tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
-	// MouseModeNone, deliberately: nothing in the TUI handles a mouse event, and
-	// reporting is not free. v2's eventLoop re-renders after *every* message, so
-	// with cell-motion on, one trackpad scroll over the window became ~300 ignored
-	// MouseWheelMsg/sec, each buying a full View() — measured at 220% CPU for as
-	// long as the finger moved, with nothing on screen changing. Off also hands
-	// drag-select back to the terminal — not scrollback, which the alternate
-	// screen does not have. Reporting off is only half of it: internal/termkeys
-	// clears DECSET 1007 alongside, or the terminal would synthesize arrow keys
-	// from the wheel instead and the events would land as KeyPressMsg.
+	// Reporting is on unless FLEET_NO_MOUSE says otherwise. Cell motion is the
+	// smallest mode v2 offers — there is no click-only variant — so the wheel
+	// arrives whether or not it is wanted, and v2's eventLoop re-renders after
+	// *every* message: that pairing is what made one trackpad flick ~300 ignored
+	// MouseWheelMsg/sec at 220% CPU (#268) back when nothing handled them.
+	// internal/ui/mouse.go is what keeps that from coming back — an event that
+	// changes nothing skips the repaint, and one that doesn't repaints at most
+	// once a frame.
+	//
+	// With reporting off, internal/termkeys' DECSET 1007 clear is what stops the
+	// terminal synthesizing arrow keys from the wheel instead; it stays either
+	// way, since it also covers the window before the first frame.
 	v.MouseMode = tea.MouseModeNone
+	if mouseEnabled() {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 
@@ -2408,7 +2482,19 @@ func (h *Home) modalOpen() bool {
 		h.launchpadActive()
 }
 
+// sidebarContentTop is the screen row the sidebar's first content row lands on,
+// in every layout: the header takes row 0 and the panel's top border row 1.
+// Shared by contextMenuAnchor (row → y) and renderBody's layout rect (y → row),
+// which are inverses of each other and have to stay that way.
+const sidebarContentTop = 2
+
 func (h *Home) renderBody() string {
+	// Cleared here and refilled by whichever branch below actually paints the
+	// sidebar, so a modal or the launchpad — both of which return early — leaves
+	// the pointer with nothing to hit rather than the geometry of a frame that is
+	// no longer on screen.
+	h.layout = screenLayout{}
+
 	// Modals take priority. Consent goes first — it gates analytics init
 	// and must be the user's first interaction with the TUI.
 	if h.consentDialog.IsVisible() {
@@ -2525,6 +2611,7 @@ func (h *Home) renderBody() string {
 		sidebar = ensureExactWidth(sidebar, innerW)
 		// Single layout: the sidebar is the only (bottom-most) panel, so the
 		// collapsed shell chips ride its bottom border.
+		h.layout.sidebar = mouseRect{x: 1, y: sidebarContentTop, w: innerW, h: innerH}
 		b.WriteString(RenderBorderedPanelInsets(sidebar, "Sessions", statusTitle, shellChips, "", h.width, contentHeight, h.focusMode))
 	case "stacked":
 		sidebarHeight := (contentHeight * 55) / 100
@@ -2537,6 +2624,7 @@ func (h *Home) renderBody() string {
 		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2, !h.drawerHasFocus())
 		sidebarInner = ensureExactHeight(sidebarInner, sidebarHeight-2)
 		sidebarInner = ensureExactWidth(sidebarInner, innerW)
+		h.layout.sidebar = mouseRect{x: 1, y: sidebarContentTop, w: innerW, h: sidebarHeight - 2}
 		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, "Sessions", statusTitle, h.width, sidebarHeight, h.focusMode))
 		b.WriteString("\n\n")
 
@@ -2582,6 +2670,9 @@ func (h *Home) renderBody() string {
 			h.cachedSidebar = leftPanel
 			h.sidebarDirty = false
 		}
+		// Outside the cache branch: a cached panel is still on screen, so the
+		// pointer still has to be able to hit it.
+		h.layout.sidebar = mouseRect{x: 1, y: sidebarContentTop, w: sidebarInnerW, h: innerH}
 
 		// Right column: preview on top; the terminal drawer (when open) splits
 		// the bottom of the same column, leaving the session list untouched.
@@ -3029,30 +3120,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.syncViewport()
 		return h, h.fetchPreviewForSelected()
 	case "enter":
-		// Toggle repo group or attach session.
-		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
-			h.toggleRepoGroup()
-			return h, nil
-		}
-		// A suspended session has no live tmux — resume it (recreates tmux +
-		// `--resume`), then attach once it's up. Overrides split mode: there is no
-		// live preview to focus.
-		if s := h.selectedSession(); s != nil && s.GetStatus() == session.StatusSuspended {
-			return h, h.resumeSelected(s)
-		}
-		if h.cfg.GetEnterMode() == "split" {
-			return h, h.enterFocusMode()
-		}
-		if s := h.selectedSession(); s != nil {
-			h.actionLog.Add("attach session", s.Title, true)
-			analytics.Track(analytics.EventSessionAttached, map[string]interface{}{"agent": string(s.Agent)})
-			if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstAttach) {
-				analytics.Track(analytics.EventOnboardingFirstAttach, map[string]interface{}{
-					"seconds_since_install": int(analytics.SecondsSinceInstall()),
-				})
-			}
-		}
-		return h, h.attachSelected()
+		return h, h.activateCursorRow()
 	case "tab":
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
 			return h, nil
@@ -3402,6 +3470,40 @@ func (h *Home) markSessionAccessed(s *session.Session) {
 	if err := h.storage.UpdateLastAccessed(s.ID); err != nil {
 		debuglog.Logger.Error("storage: UpdateLastAccessed", "id", s.ID, "err", err)
 	}
+}
+
+// activateCursorRow does what Enter does on the row under the cursor: toggle a
+// repo group, wake a suspended session, focus the split, or attach.
+//
+// Extracted so a double-click means literally the same thing as Enter rather
+// than a second copy that forgets a case — the split-mode branch and the
+// suspended-session branch are both easy to miss, and handleSlotJump's
+// double-tap already misses the first of them.
+func (h *Home) activateCursorRow() tea.Cmd {
+	// Toggle repo group or attach session.
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
+		h.toggleRepoGroup()
+		return nil
+	}
+	// A suspended session has no live tmux — resume it (recreates tmux +
+	// `--resume`), then attach once it's up. Overrides split mode: there is no
+	// live preview to focus.
+	if s := h.selectedSession(); s != nil && s.GetStatus() == session.StatusSuspended {
+		return h.resumeSelected(s)
+	}
+	if h.cfg.GetEnterMode() == "split" {
+		return h.enterFocusMode()
+	}
+	if s := h.selectedSession(); s != nil {
+		h.actionLog.Add("attach session", s.Title, true)
+		analytics.Track(analytics.EventSessionAttached, map[string]interface{}{"agent": string(s.Agent)})
+		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstAttach) {
+			analytics.Track(analytics.EventOnboardingFirstAttach, map[string]interface{}{
+				"seconds_since_install": int(analytics.SecondsSinceInstall()),
+			})
+		}
+	}
+	return h.attachSelected()
 }
 
 func (h *Home) attachSelected() tea.Cmd {
@@ -8070,10 +8172,7 @@ func (h *Home) sidebarListHeight() int {
 // header and row 1 on the panel's top border, in every layout mode. RenderSidebar
 // then spends one more row on a "… N more above" indicator whenever it's scrolled.
 func (h *Home) contextMenuAnchor() (int, int, int) {
-	const (
-		sidebarContentTop = 2 // header row + panel top border
-		indent            = 3 // nudge the box into the sidebar, off the border
-	)
+	const indent = 3 // nudge the box into the sidebar, off the border
 	above := 0
 	if h.viewOffset > 0 {
 		above = 1

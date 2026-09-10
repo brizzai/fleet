@@ -315,6 +315,49 @@ func CollectGroupInfo(sessions []*session.Session, repoPath string) RepoGroupInf
 	return info
 }
 
+// sidebarWindow is the slice of rows RenderSidebar actually paints into an
+// inner content area `height` rows tall, plus whether it spends a row on each
+// scroll indicator. Items[Start:End] are drawn, one row apiece, in order.
+//
+// It exists so hit-testing a click reads the same window the frame was drawn
+// from (see sidebarItemAt in mouse.go) instead of re-deriving it: the two
+// indicators each steal a row, so an off-by-one here would land a click on the
+// row above or below the one under the pointer — and the `… N more below`
+// indicator sits directly on top of the first item the window excludes, which
+// is exactly the index a naive `viewOffset + row` would hand back.
+type sidebarWindowSpec struct {
+	Start, End   int  // items[Start:End] are painted
+	Above, Below bool // a scroll indicator occupies the first / last row
+}
+
+// sidebarWindow computes the painted window for itemCount rows scrolled to
+// viewOffset inside an inner content area `height` rows tall.
+func sidebarWindow(itemCount, viewOffset, height int) sidebarWindowSpec {
+	visibleHeight := height
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	w := sidebarWindowSpec{Start: viewOffset}
+	w.Above = viewOffset > 0
+	w.Below = (viewOffset + visibleHeight) < itemCount
+	if w.Above {
+		visibleHeight--
+	}
+	if w.Below {
+		visibleHeight--
+	}
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	w.End = viewOffset + visibleHeight
+	if w.End > itemCount {
+		w.End = itemCount
+	}
+	return w
+}
+
 // RenderSidebar renders the clean origin → checkout → session tree.
 func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map[string]*git.RepoInfo, slotBindings map[int]string, cursor, viewOffset, width, height int, sidebarFocused bool) string {
 	// Mute the selected-row pill when the sidebar doesn't own the keyboard
@@ -334,27 +377,8 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 
 	// Panel title + border are now drawn by RenderBorderedPanel in the caller.
 	// `height` here is the inner content height — no title/underline rows to deduct.
-	visibleHeight := height
-	if visibleHeight < 1 {
-		visibleHeight = 1
-	}
-
-	showAbove := viewOffset > 0
-	showBelow := (viewOffset + visibleHeight) < len(items)
-	if showAbove {
-		visibleHeight--
-	}
-	if showBelow {
-		visibleHeight--
-	}
-	if visibleHeight < 1 {
-		visibleHeight = 1
-	}
-
-	visibleEnd := viewOffset + visibleHeight
-	if visibleEnd > len(items) {
-		visibleEnd = len(items)
-	}
+	win := sidebarWindow(len(items), viewOffset, height)
+	showAbove, showBelow, visibleEnd := win.Above, win.Below, win.End
 
 	if showAbove {
 		b.WriteString(DimStyle.Render(fmt.Sprintf("  … %d more above", viewOffset)))
