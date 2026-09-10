@@ -370,11 +370,17 @@ wait_booted() {
     exit 3
 }
 
-# Two consecutive identical captures, polled at 120ms. The interval is not
-# 100ms on purpose: fleet's tick cadences are 100ms (spinners), 80ms (splash)
-# and 60ms (shimmer), and a 100ms sampler aliases onto the spinner exactly —
-# it would report a spinning dialog as settled. 120ms shares no small-integer
-# ratio with any of them.
+# Two consecutive identical captures, polled at 120ms.
+#
+# Nothing here should animate in the first place: fleet_env exports
+# FLEET_FREEZE_ANIM=1, which makes every self-rescheduling tick return nil, so
+# no spinner turns and no shimmer sweeps. The interval is a hedge for anyone
+# pointing this sampler at an unfrozen fleet, and 120ms rather than 100ms
+# because a 100ms sampler aliases exactly onto the 100ms dialog spinners and
+# would report a spinning dialog as settled. It does NOT clear every cadence —
+# it is 6x the 20ms splash tick — but the splash is gone by the time wait_stable
+# runs (every caller goes through wait_booted first), so that overlap is
+# unreachable.
 wait_stable() {
     local ansi="$1" want="$2"
     local prev="" cur="" elapsed=0 capargs="-p"

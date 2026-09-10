@@ -59,6 +59,8 @@ type AllowedAccountsDialog struct {
 	anchorX     int
 	rowY        int
 	bottomLimit int
+
+	clickRows overlayRowMap // filled by View; see ClickRowAt
 }
 
 func NewAllowedAccountsDialog() *AllowedAccountsDialog { return &AllowedAccountsDialog{} }
@@ -207,10 +209,15 @@ func (d *AllowedAccountsDialog) View() string {
 	inner := max(boxW-allowedAccountsChrome, 1)
 
 	var b strings.Builder
+	// DialogStyle is a border plus one row of vertical padding, so the title is
+	// the third line of the box and the rows start two below it.
+	d.clickRows.reset(2)
+
 	b.WriteString(TitleStyle.Render(ansi.Truncate("Accounts for "+d.originLabel, inner, "…")))
 	b.WriteString("\n\n")
 
 	for i, r := range d.rows {
+		d.clickRows.set(2+i, i)
 		b.WriteString(d.renderRow(i, r, inner))
 		b.WriteString("\n")
 	}
@@ -299,4 +306,18 @@ func (d *AllowedAccountsDialog) Position(boxW, boxH int) (int, int) {
 		y = 0
 	}
 	return x, y
+}
+
+// ClickRowAt implements clickableOverlay. It returns space, not enter: these
+// rows are checkboxes and enter saves the whole dialog, so firing a row the way
+// a menu fires one would close the editor on the first click and store whatever
+// happened to be ticked. Every row is tickable, including a logged-out one —
+// this is policy, not availability.
+func (d *AllowedAccountsDialog) ClickRowAt(_, dy int) rune {
+	i, ok := d.clickRows.at(dy)
+	if !ok {
+		return 0
+	}
+	d.cursor = i
+	return tea.KeySpace
 }
