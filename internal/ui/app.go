@@ -249,7 +249,7 @@ type Home struct {
 	viewDirty         bool
 	lastMousePaint    time.Time
 	mouseSettleQueued bool
-	lastClickRow      int
+	lastClickTarget   contextMenuTarget
 	lastClickAt       time.Time
 
 	isAttaching atomic.Bool
@@ -587,7 +587,6 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		lastTmuxStatusBar:      make(map[string]string),
 		slotBindings:           make(map[int]string),
 		lastSlotTapSlot:        -1,
-		lastClickRow:           -1,
 		toasts:                 NewToastStack(),
 		tipEpisodeDismissed:    make(map[string]bool),
 		tipVisibleFor:          make(map[string]time.Duration),

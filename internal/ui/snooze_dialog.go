@@ -187,6 +187,15 @@ func (d *SnoozeDialog) View() string {
 	if max := d.width - 6; boxW > max {
 		boxW = max
 	}
+	// DialogStyle's frame: two border columns and two of padding a side. lipgloss
+	// v2's Width is border-INCLUSIVE, so a line budgeted against boxW overflows
+	// the content area and wraps — the same trap accountPickerChrome names. Here
+	// it is load-bearing rather than cosmetic: the title is "Snooze " + a session
+	// title (~50 runes from naming.GenerateTitle), so it wraps in the ordinary
+	// case, and a wrapped title pushes every preset one row below where clickRows
+	// says it is — clicking `30 minutes` would snooze for an hour.
+	const snoozeChrome = 6
+	inner := max(boxW-snoozeChrome, 1)
 
 	var b strings.Builder
 	// DialogStyle is a border plus one row of vertical padding, so the title is
@@ -199,7 +208,7 @@ func (d *SnoozeDialog) View() string {
 	}
 	d.clickRows.set(2+len(SnoozeDurations)+1, snoozeInputRow())
 
-	b.WriteString(TitleStyle.Render(ansi.Truncate(d.title, boxW, "…")))
+	b.WriteString(TitleStyle.Render(ansi.Truncate(d.title, inner, "…")))
 	b.WriteString("\n\n")
 
 	for i, dur := range SnoozeDurations {

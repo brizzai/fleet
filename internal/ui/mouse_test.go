@@ -12,13 +12,14 @@ import (
 
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
+	"github.com/brizzai/fleet/internal/frost"
 	"github.com/brizzai/fleet/internal/session"
 )
 
 // sidebarRows builds n selectable session rows plus the layout rect a frame
 // would have left behind, so the hit-testing tests describe a real screen.
 func mouseTestHome(rows, visibleRows int) *Home {
-	h := &Home{cfg: &config.Config{}, lastClickRow: -1, actionLog: NewActionLog(100)}
+	h := &Home{cfg: &config.Config{}, actionLog: NewActionLog(100)}
 	for i := 0; i < rows; i++ {
 		s := session.NewSession("s", "/tmp/mouse-test")
 		h.flatItems = append(h.flatItems, SidebarItem{Session: s})
@@ -150,16 +151,18 @@ func TestClickSelectsAndDoubleClickActivates(t *testing.T) {
 	h.cursor = 0
 	row := sidebarContentTop + 3 // viewOffset is 0 and no indicator is drawn
 
+	armed := h.flatItems[3].Session.ID
+
 	h.Update(tea.MouseClickMsg{X: 5, Y: row, Button: tea.MouseLeft})
 	if h.cursor != 3 {
 		t.Fatalf("click landed the cursor on %d, want 3", h.cursor)
 	}
-	if h.lastClickRow != 3 {
-		t.Fatalf("first click did not arm a double-click, lastClickRow=%d", h.lastClickRow)
+	if h.lastClickTarget.sessionID != armed {
+		t.Fatalf("first click did not arm a double-click, latch=%+v", h.lastClickTarget)
 	}
 
 	h.Update(tea.MouseClickMsg{X: 5, Y: row, Button: tea.MouseLeft})
-	if h.lastClickRow != -1 {
+	if h.lastClickTarget != (contextMenuTarget{}) {
 		t.Error("second click inside the window was not treated as a double-click")
 	}
 
@@ -167,7 +170,7 @@ func TestClickSelectsAndDoubleClickActivates(t *testing.T) {
 	h.Update(tea.MouseClickMsg{X: 5, Y: row, Button: tea.MouseLeft})
 	h.lastClickAt = time.Now().Add(-2 * mouseDoubleClickWindow)
 	h.Update(tea.MouseClickMsg{X: 5, Y: row, Button: tea.MouseLeft})
-	if h.lastClickRow != 3 {
+	if h.lastClickTarget.sessionID != armed {
 		t.Error("a slow second click was treated as a double-click")
 	}
 }
@@ -361,5 +364,191 @@ func TestClickIsInertWhileAnotherSurfaceOwnsTheKeyboard(t *testing.T) {
 	h.Update(tea.MouseWheelMsg{X: 5, Y: sidebarContentTop + 2, Button: tea.MouseWheelDown})
 	if h.viewOffset == 0 {
 		t.Error("wheel stopped scrolling while the split was focused")
+	}
+}
+
+// TestSidebarWindowAnnouncesTheLastItem: the upper indicator eats a row, so
+// asking whether anything is below *before* reserving it reports "nothing" for a
+// window that is about to lose that row. With 11 items at offset 1 in 10 rows,
+// item 10 was neither drawn nor announced and the list looked one short.
+//
+// Harmless while viewOffset came only from syncViewport, which never parked
+// there; the wheel can, which is what turned it into a bug a user hits.
+func TestSidebarWindowAnnouncesTheLastItem(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		itemCount, offset, height int
+		wantEnd                   int
+		wantAbove, wantBelow      bool
+	}{
+		{"the reported case", 11, 1, 10, 9, true, true},
+		{"unscrolled is unchanged", 11, 0, 10, 9, false, true},
+		{"scrolled far enough to show the tail", 11, 2, 10, 11, true, false},
+		{"everything fits", 10, 0, 10, 10, false, false},
+	} {
+		w := sidebarWindow(tc.itemCount, tc.offset, tc.height)
+		if w.End != tc.wantEnd || w.Above != tc.wantAbove || w.Below != tc.wantBelow {
+			t.Errorf("%s: got end=%d above=%v below=%v, want end=%d above=%v below=%v",
+				tc.name, w.End, w.Above, w.Below, tc.wantEnd, tc.wantAbove, tc.wantBelow)
+		}
+		// The real invariant: every item is either drawn or announced.
+		if w.End < tc.itemCount && !w.Below {
+			t.Errorf("%s: items past %d are neither drawn nor announced", tc.name, w.End)
+		}
+	}
+}
+
+// TestSnoozeRowMapSurvivesALongTitle: the title is "Snooze " + a session title,
+// which naming.GenerateTitle cuts at ~50 runes — so it is wider than the box's
+// content area in the ordinary case, not the edge one. Truncating it to the
+// outer width let it wrap, which pushed every preset one row below where
+// clickRows said it was: clicking `30 minutes` snoozed for an hour.
+func TestSnoozeRowMapSurvivesALongTitle(t *testing.T) {
+	d := NewSnoozeDialog()
+	d.SetSize(100, 40)
+	d.Show("Snooze refactor the status detection pipeline end to end")
+	box := d.View()
+
+	for i, dur := range SnoozeDurations {
+		line := boxLineOf(t, box, dur.Label)
+		if got := d.ClickRowAt(0, line); got != tea.KeyEnter || d.focus != i {
+			t.Errorf("%s is drawn on line %d but the map put focus on %d (key %q)",
+				dur.Label, line, d.focus, got)
+		}
+	}
+	if got := d.ClickRowAt(0, boxLineOf(t, box, "or type:")); got != 0 {
+		t.Errorf("custom-duration row returned %q, want no key", got)
+	}
+}
+
+// TestPaletteRowMapMatchesTheDrawnRowsAtEveryWidth. The box re-wraps anything
+// wider than its content area, and the tab bar and search input are the two
+// pieces that are not budgeted against it — so at 64 columns (an ordinary split
+// pane) the tab bar takes a second line and a map built from written newlines
+// fires the entry *below* the one clicked. Sweeping widths is the only way to
+// see it: at 65 and above the arithmetic and the render agree by luck.
+func TestPaletteRowMapMatchesTheDrawnRowsAtEveryWidth(t *testing.T) {
+	items := []PaletteItem{
+		{Kind: PaletteKindCommand, ID: "attach", Name: "Attach Session", Shortcut: "Enter", Haystack: "Attach Session"},
+		{Kind: PaletteKindCommand, ID: "focus", Name: "Focus Preview", Shortcut: "Tab", Haystack: "Focus Preview"},
+		{Kind: PaletteKindCommand, ID: "new", Name: "Renumber Panes", Shortcut: "a", Haystack: "Renumber Panes"},
+	}
+	// Needles, not full names: the narrow widths truncate the name column, and
+	// what is being tested is which line a row landed on, not how it was cut.
+	needles := []string{"Attach", "Focus", "Renumber"}
+
+	for _, w := range []int{40, 50, 64, 65, 80, 120} {
+		d := NewCommandPaletteDialog()
+		d.SetSize(w, 40)
+		d.Show(items, nil)
+		box := d.View()
+
+		for i, needle := range needles {
+			line := boxLineOf(t, box, needle)
+			d.cursor = -1
+			key := d.ClickRowAt(0, line)
+			if key != tea.KeyEnter || d.cursor != i {
+				t.Errorf("width %d: %q is drawn on line %d but the map resolved cursor=%d (key %q)",
+					w, needle, line, d.cursor, key)
+			}
+		}
+	}
+}
+
+// TestMouseIsInertDuringAFrostRun: handleKey swallows every key for the run, but
+// View() returns the frost frame without passing through screen(), so h.layout
+// still holds live geometry under the picture. Two clicks inside the
+// double-click window would otherwise launch an attach from a screen that never
+// showed what was picked.
+func TestMouseIsInertDuringAFrostRun(t *testing.T) {
+	h := mouseTestHome(50, 10)
+	h.width, h.height = 80, 24
+	h.cursor = 0
+	h.frost = frost.New(frost.Freeze("x", h.width, h.height), 1)
+
+	h.Update(tea.MouseClickMsg{X: 5, Y: sidebarContentTop + 4, Button: tea.MouseLeft})
+	if h.cursor != 0 {
+		t.Errorf("a click during a frost run moved the cursor to %d", h.cursor)
+	}
+	h.Update(tea.MouseWheelMsg{X: 5, Y: sidebarContentTop + 2, Button: tea.MouseWheelDown})
+	if h.viewOffset != 0 {
+		t.Errorf("a wheel during a frost run scrolled to %d", h.viewOffset)
+	}
+}
+
+// TestClickedRowStaysUnderThePointer. syncViewport anchors on
+// sidebarMinVisibleRows (contentHeight-4, which reserves both indicator rows
+// whether or not they are drawn) while the rect the frame was drawn from is
+// contentHeight-2. Re-anchoring on a click therefore scrolled the last two
+// painted rows of a scrolled list out from under the pointer, so the second
+// click of a double-click selected the neighbouring session instead — and a
+// third attached it.
+func TestClickedRowStaysUnderThePointer(t *testing.T) {
+	for _, off := range []int{28, 29, 30, 31, 32} {
+		h := mouseTestHome(50, 20)
+		h.width, h.height = 80, 24
+		h.viewOffset = off
+
+		for row := 0; row < 20; row++ {
+			y := h.layout.sidebar.y + row
+			first := h.sidebarItemAt(5, y)
+			if first < 0 {
+				continue
+			}
+			h.Update(tea.MouseClickMsg{X: 5, Y: y, Button: tea.MouseLeft})
+			if again := h.sidebarItemAt(5, y); again != first {
+				t.Fatalf("offset %d row %d: clicked item %d, the same cell now resolves to %d",
+					off, row, first, again)
+			}
+			if h.cursor != first {
+				t.Fatalf("offset %d row %d: clicked item %d but the cursor is on %d",
+					off, row, first, h.cursor)
+			}
+		}
+	}
+}
+
+// TestWheelInFocusModeRepaintsTheSidebar: in dual layout renderBody serves
+// h.cachedSidebar while the split is focused and the sidebar is clean, so a
+// scroll that did not mark it dirty moved viewOffset, bought a frame, and
+// changed nothing on screen — the list then jumped the moment focus returned.
+func TestWheelInFocusModeRepaintsTheSidebar(t *testing.T) {
+	h := mouseTestHome(50, 10)
+	h.focusMode = true
+	h.sidebarDirty = false
+
+	h.Update(tea.MouseWheelMsg{X: 5, Y: sidebarContentTop + 2, Button: tea.MouseWheelDown})
+	if h.viewOffset == 0 {
+		t.Fatal("wheel did not scroll in focus mode")
+	}
+	if !h.sidebarDirty {
+		t.Error("the scroll left the sidebar cache standing — the frame would not change")
+	}
+}
+
+// TestDoubleClickFollowsTheRowNotTheIndex. rebuildFlatItems runs on the ~2s tick
+// and from adoptSessionsMsg, so a session arriving above the clicked row inside
+// the 400ms window makes the same index a different session. Latching the index
+// would read the second click as a double-click on a row clicked once, and
+// attach something nobody pointed at.
+func TestDoubleClickFollowsTheRowNotTheIndex(t *testing.T) {
+	h := mouseTestHome(20, 10)
+	row := sidebarContentTop + 3
+
+	h.Update(tea.MouseClickMsg{X: 5, Y: row, Button: tea.MouseLeft})
+	clicked := h.lastClickTarget
+	if clicked.sessionID == "" {
+		t.Fatal("first click armed nothing")
+	}
+
+	// A session appears above the clicked row: the same index is now someone else.
+	h.flatItems = append([]SidebarItem{{Session: session.NewSession("newcomer", "/tmp/mouse-test")}}, h.flatItems...)
+
+	h.Update(tea.MouseClickMsg{X: 5, Y: row, Button: tea.MouseLeft})
+	if h.lastClickTarget == (contextMenuTarget{}) {
+		t.Error("the second click activated a row that had only been clicked once")
+	}
+	if h.lastClickTarget == clicked {
+		t.Error("the latch did not follow the row under the pointer")
 	}
 }

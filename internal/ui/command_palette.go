@@ -456,22 +456,38 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.C
 func (d *CommandPaletteDialog) View() string {
 	var b strings.Builder
 
-	// DialogStyle is a border plus one row of vertical padding. Rows are
-	// recorded as they are emitted rather than computed: section headers, the
-	// `recent` label and the blank breaks between groups are interleaved with
-	// the results, so nothing but the loop below knows which line a row got.
-	d.clickRows.reset(2)
-
-	b.WriteString(TitleStyle.Render("Command Palette"))
-	b.WriteString("\n\n")
+	// The chrome above the results is built and measured first, because the box
+	// re-wraps it and the row map has to count lines as DRAWN, not as written.
+	// Row bodies are budgeted against innerContentWidth, but renderTabs() and the
+	// search input are not: at 64 columns the tab bar takes a second line, and a
+	// map built from written newlines then fires the entry below the one clicked.
+	var head strings.Builder
+	head.WriteString(TitleStyle.Render("Command Palette"))
+	head.WriteString("\n\n")
 
 	// Tab bar.
-	b.WriteString(d.renderTabs())
-	b.WriteString("\n\n")
+	head.WriteString(d.renderTabs())
+	head.WriteString("\n\n")
 
 	// Search input.
-	b.WriteString("  " + d.filterInput.View())
-	b.WriteString("\n\n")
+	head.WriteString("  " + d.filterInput.View())
+	head.WriteString("\n\n")
+
+	b.WriteString(head.String())
+
+	// DialogStyle is a border plus one row of vertical padding, hence the 2.
+	// Rows are recorded as they are emitted rather than computed: section
+	// headers, the `recent` label and the blank breaks between groups are
+	// interleaved with the results, so nothing but the loop below knows which
+	// line a row got. Everything after the chrome is either budgeted to the inner
+	// width or far shorter than it, so from here one written line is one drawn
+	// line and a plain counter is exact.
+	d.clickRows.reset(2)
+	// Measured at the box's content width, because that is what re-wraps it. The
+	// -1 is the trailing newline: the chrome ends with one, and a final newline
+	// opens the next line rather than occupying one, while Height counts the
+	// empty segment after it as a line.
+	line := lipgloss.Height(lipgloss.NewStyle().Width(d.innerContentWidth()).Render(head.String())) - 1
 
 	if len(d.filtered) == 0 {
 		b.WriteString(DimStyle.Render("  " + d.emptyLine()))
@@ -481,6 +497,7 @@ func (d *CommandPaletteDialog) View() string {
 		if d.scrollOff > 0 {
 			b.WriteString(DimStyle.Render(fmt.Sprintf("  ⋮ +%d above", d.scrollOff)))
 			b.WriteString("\n")
+			line++
 		}
 
 		end := d.scrollOff + paletteMaxVisible
@@ -555,8 +572,10 @@ func (d *CommandPaletteDialog) View() string {
 			if it.recent && !prevRecent {
 				b.WriteString("  " + DimStyle.Render("recent"))
 				b.WriteString("\n")
+				line++
 			} else if !it.recent && prevRecent {
 				b.WriteString("\n")
+				line++
 			}
 			prevRecent = it.recent
 
@@ -564,14 +583,16 @@ func (d *CommandPaletteDialog) View() string {
 				if i > d.scrollOff || d.scrollOff == 0 {
 					if prevSection != "" {
 						b.WriteString("\n") // breathe between groups
+						line++
 					}
 				}
-				head := it.section
+				sectionHead := it.section
 				if n := d.sectionCounts[it.section]; n > 0 {
-					head += "  " + fmt.Sprint(n)
+					sectionHead += "  " + fmt.Sprint(n)
 				}
-				b.WriteString("  " + PaletteSectionStyle.Render(head))
+				b.WriteString("  " + PaletteSectionStyle.Render(sectionHead))
 				b.WriteString("\n")
+				line++
 			}
 			prevSection = it.section
 
@@ -627,9 +648,8 @@ func (d *CommandPaletteDialog) View() string {
 			if leadCol > 0 {
 				lead = renderPriorityLead(it.Priority)
 			}
-			// Everything written so far ends in a newline, so the row lands on
-			// the line whose index is the count of them.
-			d.clickRows.set(strings.Count(b.String(), "\n"), i)
+			d.clickRows.set(line, i)
+			line++
 			b.WriteString(prefix + badge + lead + name)
 			if selected {
 				// Carry the fill across the gap and the right column, padded to

@@ -138,6 +138,15 @@ func (m overlayRowMap) at(dy int) (int, bool) {
 // handleMouse routes a mouse message. It returns without marking the frame
 // dirty unless something actually changed, so an ignored event is free.
 func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// A frost run owns the screen, exactly as it owns the keyboard in handleKey.
+	// View() returns h.frost.Render() without passing through screen(), so
+	// h.layout still holds the geometry startFrost's own composeScreen() wrote —
+	// live coordinates under a picture. Without this, two clicks inside
+	// mouseDoubleClickWindow reach activateCursorRow and launch an attach from a
+	// screen that never showed what was picked.
+	if h.frost != nil {
+		return h, nil
+	}
 	m := msg.Mouse()
 	switch msg.(type) {
 	case tea.MouseWheelMsg:
@@ -208,6 +217,11 @@ func (h *Home) scrollSidebar(delta int) bool {
 		return false
 	}
 	h.viewOffset = next
+	// In dual layout renderBody serves h.cachedSidebar whenever the split is
+	// focused and the sidebar is clean, so without this the wheel would move
+	// viewOffset, buy a frame, and change nothing on screen — with the list
+	// jumping to wherever the wheel left it the moment focus returns.
+	h.sidebarDirty = true
 	return true
 }
 
@@ -239,17 +253,30 @@ func (h *Home) handleClick(m tea.Mouse) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	doubleClick := idx == h.lastClickRow && time.Since(h.lastClickAt) < mouseDoubleClickWindow
 	moved := h.cursor != idx
 	h.cursor = idx
-	h.syncViewport()
 	h.viewDirty = true
 
-	if doubleClick {
-		h.lastClickRow = -1
+	// Deliberately no syncViewport: a click is proof the row is on screen, and
+	// the index came out of sidebarWindow so it is already in range. Calling it
+	// would re-anchor the viewport against sidebarMinVisibleRows (contentHeight-4,
+	// which conservatively reserves both indicator rows) while the rect actually
+	// drawn is contentHeight-2 — so clicking either of the last two painted rows
+	// of a scrolled list scrolls it out from under the pointer, and the second
+	// click of a double-click lands on the next session instead.
+
+	// The latch holds the row's identity, not its index. rebuildFlatItems runs on
+	// the ~2s tick and from adoptSessionsMsg, so a session appearing above this
+	// row inside the 400ms window would make the same index a different session —
+	// and the second click would read as a double-click on a row clicked once,
+	// attaching something nobody pointed at. Same hazard, same answer, as
+	// contextMenuTarget.
+	target := h.targetForCursor()
+	if target == h.lastClickTarget && time.Since(h.lastClickAt) < mouseDoubleClickWindow {
+		h.lastClickTarget = contextMenuTarget{}
 		return h, h.activateCursorRow()
 	}
-	h.lastClickRow = idx
+	h.lastClickTarget = target
 	h.lastClickAt = time.Now()
 	if !moved {
 		return h, nil // same row: the preview is already the right one

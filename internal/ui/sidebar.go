@@ -340,10 +340,16 @@ func sidebarWindow(itemCount, viewOffset, height int) sidebarWindowSpec {
 
 	w := sidebarWindowSpec{Start: viewOffset}
 	w.Above = viewOffset > 0
-	w.Below = (viewOffset + visibleHeight) < itemCount
 	if w.Above {
 		visibleHeight--
 	}
+	// Below is decided against the budget the upper indicator has already taken,
+	// not the full height. Asking first (as this did) reports "nothing below" for
+	// a window that is about to lose a row to the `… N more above` line — so with
+	// 11 items at offset 1 in 10 rows, item 10 is neither drawn nor announced and
+	// the list looks like it ends one short. Harmless while viewOffset came only
+	// from syncViewport, which never parked there; the wheel can (scrollSidebar).
+	w.Below = (viewOffset + visibleHeight) < itemCount
 	if w.Below {
 		visibleHeight--
 	}
