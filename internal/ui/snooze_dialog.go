@@ -50,6 +50,8 @@ type SnoozeDialog struct {
 	anchorX     int
 	rowY        int
 	bottomLimit int
+
+	clickRows overlayRowMap // filled by View; see ClickRowAt
 }
 
 func NewSnoozeDialog() *SnoozeDialog {
@@ -185,9 +187,28 @@ func (d *SnoozeDialog) View() string {
 	if max := d.width - 6; boxW > max {
 		boxW = max
 	}
+	// DialogStyle's frame: two border columns and two of padding a side. lipgloss
+	// v2's Width is border-INCLUSIVE, so a line budgeted against boxW overflows
+	// the content area and wraps — the same trap accountPickerChrome names. Here
+	// it is load-bearing rather than cosmetic: the title is "Snooze " + a session
+	// title (~50 runes from naming.GenerateTitle), so it wraps in the ordinary
+	// case, and a wrapped title pushes every preset one row below where clickRows
+	// says it is — clicking `30 minutes` would snooze for an hour.
+	const snoozeChrome = 6
+	inner := max(boxW-snoozeChrome, 1)
 
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render(ansi.Truncate(d.title, boxW, "…")))
+	// DialogStyle is a border plus one row of vertical padding, so the title is
+	// the third line of the box and the presets start two below it. The input is
+	// the row after the presets and a blank, and carries the same highlight, so
+	// it is a click target like any other row.
+	d.clickRows.reset(2)
+	for i := range SnoozeDurations {
+		d.clickRows.set(2+i, i)
+	}
+	d.clickRows.set(2+len(SnoozeDurations)+1, snoozeInputRow())
+
+	b.WriteString(TitleStyle.Render(ansi.Truncate(d.title, inner, "…")))
 	b.WriteString("\n\n")
 
 	for i, dur := range SnoozeDurations {
@@ -294,4 +315,23 @@ func parseSnoozeDuration(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("max 30d")
 	}
 	return time.Duration(n) * mult, nil
+}
+
+// ClickRowAt implements clickableOverlay.
+//
+// A preset fires on the click, like a menu entry. The custom-duration row does
+// not: it takes the highlight and the caret and returns 0, because enter there
+// means "snooze for what I typed" and the box is empty at the moment you click
+// into it — the dialog would refuse, and a click that visibly does nothing is
+// worse than one that just puts the cursor where you pointed.
+func (d *SnoozeDialog) ClickRowAt(_, dy int) rune {
+	i, ok := d.clickRows.at(dy)
+	if !ok {
+		return 0
+	}
+	d.setFocus(i)
+	if d.inputFocused() {
+		return 0
+	}
+	return tea.KeyEnter
 }

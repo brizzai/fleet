@@ -44,6 +44,8 @@ type ContextMenuDialog struct {
 	bottomLimit int // first screen row the menu must not reach (top of the footer)
 
 	width, height int // terminal size, for clamping
+
+	clickRows overlayRowMap // filled by View; see SelectRowAt
 }
 
 // contextMenuStyle is DialogStyle without the vertical padding — a dropdown
@@ -222,11 +224,16 @@ func (d *ContextMenuDialog) View() string {
 
 	// Joined, not appended with a trailing "\n" — a trailing newline would leave a
 	// blank row hanging above the box's bottom border.
+	// contextMenuStyle is a border with no vertical padding, so the title is the
+	// first line inside the box.
+	d.clickRows.reset(1)
+
 	lines := []string{DimStyle.Render(truncRunes(d.title, labelW+keyW+2))}
 	if d.scrollOff > 0 {
 		lines = append(lines, DimStyle.Render("  ⋮"))
 	}
 	for i := d.scrollOff; i < end; i++ {
+		d.clickRows.set(len(lines), i)
 		lines = append(lines, d.renderRow(i, labelW, keyW))
 	}
 	if end < len(d.items) {
@@ -262,4 +269,20 @@ func (d *ContextMenuDialog) renderRow(i, labelW, keyW int) string {
 			"  " + DimStyle.Render(keyPad+it.Shortcut)
 	}
 	return "  " + label + pad + "  " + DimStyle.Render(keyPad+it.Shortcut)
+}
+
+// ClickRowAt implements clickableOverlay: it lands the cursor on the clicked
+// entry so the enter that follows fires that row and not the one that happened
+// to be selected.
+//
+// A disabled row refuses, matching j/k, which skip them — the menu renders them
+// with the reason they cannot run. The click is swallowed either way; it never
+// reaches the sidebar behind.
+func (d *ContextMenuDialog) ClickRowAt(_, dy int) rune {
+	i, ok := d.clickRows.at(dy)
+	if !ok || !d.enabledAt(i) {
+		return 0
+	}
+	d.cursor = i
+	return tea.KeyEnter
 }
