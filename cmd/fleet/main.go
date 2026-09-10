@@ -106,12 +106,13 @@ func runTUI() {
 		}
 	}()
 
+	cfg := config.Load()
+
 	if err := tmux.IsTmuxAvailable(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		reportStartupFailure(cfg, "tmux_missing")
 		os.Exit(1)
 	}
-
-	cfg := config.Load()
 
 	// Analytics is initialized inside the TUI, after the first-launch
 	// consent prompt is answered. We still defer Shutdown unconditionally
@@ -130,9 +131,8 @@ func runTUI() {
 		// Record update health for analytics. The updater runs before
 		// analytics.Init (which waits on the consent prompt inside the TUI) and
 		// re-execs on a successful update, so these events can't be sent now —
-		// QueuePending parks them for FlushPending to emit after Init. Full mode
-		// only: update health is a full-telemetry signal, like the launch snapshot.
-		if cfg.GetTelemetryMode() == config.TelemetryFull && !analytics.IsOptedOutByEnv() {
+		// QueuePending parks them for FlushPending to emit after Init.
+		if cfg.GetTelemetryMode() != config.TelemetryOff && !analytics.IsOptedOutByEnv() {
 			analytics.QueuePending(analytics.EventUpdateCheck, map[string]any{
 				"updated": err == nil && newVer != "",
 				"error":   err != nil && !skipped,
@@ -212,6 +212,26 @@ func runTUI() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// reportStartupFailure sends startup_failed for a launch that exits before the
+// TUI starts, and so before the TUI's own analytics.Init — without it the exit
+// is invisible. Only for a user who has already answered the consent prompt,
+// the same gate the TUI applies: a first-ever launch has no answer yet, and
+// GetTelemetryMode's "full" default is not one.
+func reportStartupFailure(cfg *config.Config, reason string) {
+	if !cfg.AnalyticsConsentSeen && !cfg.TelemetryConfigured() {
+		return
+	}
+	mode := cfg.GetTelemetryMode()
+	if mode == config.TelemetryOff || analytics.IsOptedOutByEnv() {
+		return
+	}
+	analytics.Init(mode, version, analytics.DiscoverIdentity())
+	analytics.Track(analytics.EventStartupFailed, map[string]interface{}{"reason": reason})
+	// Bounded by shutdownTimeout, so an unreachable network can't hold the error
+	// exit open.
+	analytics.Shutdown()
 }
 
 func runList() {

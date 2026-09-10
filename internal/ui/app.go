@@ -1434,8 +1434,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case consentResultMsg:
-		// Accept → full (usage + git identity); decline → minimal (anonymous
-		// daily-active ping only, no identity). "Off" is Settings-only. Persist
+		// Accept → full (usage + git identity); decline → minimal (the same
+		// usage, anonymously). "Off" is Settings-only. Persist
 		// the mode so we don't ask again, clearing any legacy bool so it can't
 		// shadow the new field, then run startup analytics in the chosen mode.
 		mode := config.TelemetryMinimal
@@ -1448,8 +1448,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := h.cfg.Save(); err != nil {
 			debuglog.Logger.Error("config: save after consent", "err", err)
 		}
-		// Both outcomes initialize the client and emit the anonymous DAU
-		// signals; only full mode additionally attaches identity + rich usage.
+		// Both outcomes initialize the client and send the same events; only
+		// full mode attaches git identity and a people profile.
 		h.workerMu.Lock()
 		repoCount := len(session.GroupByRepo(h.sessions))
 		h.workerMu.Unlock()
@@ -2020,7 +2020,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.startAccountWorker()
 		}
 		if len(msg.items) > 0 {
-			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
+			analytics.Track(analytics.EventLaunchpadShown, map[string]interface{}{
 				"discovered_repos": len(msg.items),
 			})
 		}
@@ -2905,6 +2905,9 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return h, h.launchLaunchpadSet(set)
 		case "esc":
 			h.launchpadDismissed = true
+			analytics.Track(analytics.EventLaunchpadSkipped, map[string]interface{}{
+				"discovered": h.launchpad.ItemCount(),
+			})
 			return h, nil
 		}
 	}
@@ -3105,7 +3108,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// New worktree session (works on a session, checkout header, or origin header).
 		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
-			h.setError(fmt.Errorf("no repo selected"))
+			h.setInfo("no repo selected")
 			return h, nil
 		}
 		h.worktreeDialog.ShowLoading()
@@ -3158,7 +3161,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("open editor", fmt.Sprintf("%q at %s", h.cfg.GetEditor(), s.ProjectPath), true)
-			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": h.cfg.GetEditor()})
+			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": editorName(h.cfg.GetEditor())})
 		}
 		return h, h.openEditorSelected()
 	case "p":
@@ -3422,6 +3425,10 @@ func (h *Home) attachSessionByID(id string) tea.Cmd {
 	return h.attachSession(s)
 }
 
+// attachBailThreshold is how short an attach has to be to count as a bail: the
+// user entered a session and came straight back out.
+const attachBailThreshold = 10 * time.Second
+
 func (h *Home) attachSession(s *session.Session) tea.Cmd {
 	if s == nil || !s.IsAlive() {
 		return nil
@@ -3456,8 +3463,14 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 		// the attach failed before / during entry (tmux gone, etc.) — the
 		// near-zero "uptime" would be noise in the distribution.
 		if err == nil {
-			analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs,
-				time.Since(attachStart).Seconds(), nil)
+			attached := time.Since(attachStart)
+			analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs, attached.Seconds(), nil)
+			if attached < attachBailThreshold {
+				analytics.Track(analytics.EventAttachBailed, map[string]interface{}{
+					"agent":   string(s.Agent),
+					"seconds": int(attached.Seconds()),
+				})
+			}
 		}
 		return statusUpdateMsg{attachedSessionID: s.ID}
 	})
@@ -3570,7 +3583,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		// enforced in one surface and not the other is worse than not having
 		// one — the cost of a miss here is billing work to the wrong
 		// subscription.
-		h.setError(fmt.Errorf("%s is not in allowed_accounts for this repo", h.accountLabel(msg.account)))
+		h.setError(fmt.Errorf("account not allowed for this repo: %s isn't in allowed_accounts", h.accountLabel(msg.account)))
 		return h, nil
 	}
 	// A conflicting ambient credential outranks the per-session login, so the
@@ -4028,22 +4041,28 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
 		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
+		analytics.Track(analytics.EventStartupFailed, map[string]interface{}{"reason": "claude_missing"})
 		return nil
 	}
-	analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{"count": len(items)})
+	analytics.Track(analytics.EventLaunchpadLaunched, map[string]interface{}{
+		"selected":   len(items),
+		"discovered": h.launchpad.ItemCount(),
+	})
 	cmds := make([]tea.Cmd, 0, len(items))
 	// startSessionCmd is called directly here rather than through
 	// handleSessionCreate, so the account has to be resolved per item — without
 	// this every session the launchpad creates lands on the ambient login
 	// regardless of account_strategy, on the one path that makes several at once.
-	ag := agent.Parse(h.cfg.GetDefaultAgent())
+	// Claude whatever default_agent says: every item resumes a conversation found
+	// in Claude Code's own history.
+	ag := agent.Claude
 	for _, it := range items {
 		account, blocked := h.resolveAccount(ag, it.Path)
 		if blocked != "" {
 			// Skipped, not aborted: this creates several sessions at once, and one
 			// repo with an unsatisfiable allowlist must not cost the user the rest
 			// of their selection. Named so the gap in the sidebar has a reason.
-			h.setError(fmt.Errorf("%s: %s", filepath.Base(it.Path), blocked))
+			h.setError(fmt.Errorf("launchpad skipped a repo: %s — %s", filepath.Base(it.Path), blocked))
 			h.actionLog.Add("launchpad skip", it.Path, false)
 			continue
 		}
@@ -4051,6 +4070,7 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
 			path:           it.Path,
 			title:          it.Title,
+			agent:          ag,
 			resumeClaudeID: it.ClaudeSessionID,
 			account:        account,
 		}))
@@ -5176,7 +5196,7 @@ func (h *Home) suspendSelected() tea.Cmd {
 func (h *Home) forkSelected() tea.Cmd {
 	s := h.selectedSession()
 	if s == nil {
-		h.setError(fmt.Errorf("cannot fork: no session selected"))
+		h.setInfo("cannot fork: no session selected")
 		return nil
 	}
 	if s.GetClaudeSessionID() == "" {
@@ -5274,7 +5294,7 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	s := h.selectedSession()
 	if s == nil {
-		h.setError(fmt.Errorf("cannot fork to worktree: no session selected"))
+		h.setInfo("cannot fork to worktree: no session selected")
 		return nil
 	}
 	// Fork-to-worktree stages the parent's Claude transcript into the new cwd so
@@ -5636,7 +5656,7 @@ func (h *Home) quickApproveSelected() tea.Cmd {
 		return nil
 	}
 	if s.GetStatus() != session.StatusWaiting {
-		h.setError(fmt.Errorf("session not waiting for approval"))
+		h.setInfo("session not waiting for approval")
 		return nil
 	}
 	h.markSessionAccessed(s)
@@ -5777,14 +5797,14 @@ func (h *Home) openPRInBrowser() tea.Cmd {
 	repo := h.resolveCurrentRepo()
 	if repo == "" {
 		debuglog.Logger.Debug("openPR: no repo selected")
-		h.setError(fmt.Errorf("no repo selected"))
+		h.setInfo("no repo selected")
 		return nil
 	}
 
 	info := h.gitInfo()[repo]
 	if info == nil || info.PR == nil || info.PR.URL == "" {
 		debuglog.Logger.Debug("openPR: no PR for branch", "repo", repo)
-		h.setError(fmt.Errorf("no PR for this branch"))
+		h.setInfo("no PR for this branch")
 		return nil
 	}
 
@@ -7797,7 +7817,7 @@ func (h *Home) layoutMode() string {
 func (h *Home) bindCurrentSessionToSlot(slot int) {
 	s := h.selectedSession()
 	if s == nil {
-		h.setError(fmt.Errorf("select a session first"))
+		h.setInfo("select a session first")
 		return
 	}
 	if existing, ok := h.slotBindings[slot]; ok && existing == s.ID {
@@ -8239,6 +8259,9 @@ func (h *Home) loadSessions() tea.Msg {
 	}
 }
 
+// setError reports a real failure: an error toast, an errorHistory entry (which
+// bug reports carry) and error_occurred. Guidance such as "no PR for this
+// branch" is not a failure — it goes through setInfo, which does none of those.
 func (h *Home) setError(err error) {
 	h.err = err
 	h.errTime = time.Now()
@@ -8246,7 +8269,7 @@ func (h *Home) setError(err error) {
 		h.errorHistory.Add(err.Error())
 		h.toasts.Add(ToastError, err.Error())
 		analytics.Track(analytics.EventErrorOccurred, map[string]interface{}{
-			"category": strings.SplitN(err.Error(), ":", 2)[0],
+			"category": errorCategory(err),
 		})
 	}
 }
@@ -8897,7 +8920,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "new_worktree":
 		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
-			h.setError(fmt.Errorf("no repo selected"))
+			h.setInfo("no repo selected")
 			return h, nil
 		}
 		h.worktreeDialog.ShowLoading()
@@ -8939,7 +8962,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "editor":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("open editor", fmt.Sprintf("%q at %s", h.cfg.GetEditor(), s.ProjectPath), true)
-			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": h.cfg.GetEditor()})
+			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": editorName(h.cfg.GetEditor())})
 		}
 		return h, h.openEditorSelected()
 	case "open_pr":

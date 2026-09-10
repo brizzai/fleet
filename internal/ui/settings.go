@@ -229,6 +229,11 @@ func (d *SettingsDialog) Update(msg tea.Msg) (*SettingsDialog, tea.Cmd) {
 	case "esc", "q":
 		_ = d.cfg.Save()
 		d.Hide()
+		// Once per commit with the final theme, not once per ←/→ through the live
+		// preview, where reaching one theme can pass every other on the way.
+		if d.cfg.Theme != d.origTheme {
+			analytics.Track(analytics.EventThemeChanged, map[string]interface{}{"theme": d.cfg.Theme})
+		}
 		return d, func() tea.Msg { return settingsClosedMsg{} }
 
 	case "tab", "shift+tab":
@@ -698,7 +703,7 @@ func buildSettingsCategories() []settingsCategory {
 				value: func(c *config.Config) string {
 					switch c.GetTelemetryMode() {
 					case config.TelemetryMinimal:
-						return "Minimal (anon)"
+						return "Basic (anon)"
 					case config.TelemetryOff:
 						return "Off"
 					default:
@@ -789,7 +794,6 @@ func cycleTheme(d *SettingsDialog, dir int) {
 	}
 	d.cfg.Theme = names[(idx+dir+len(names))%len(names)]
 	ApplyPalette(PaletteByName(d.cfg.Theme))
-	analytics.Track(analytics.EventThemeChanged, map[string]interface{}{"theme": d.cfg.Theme})
 }
 
 // cycleString returns the preset reached by stepping dir from cur (wrapping).

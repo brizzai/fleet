@@ -117,11 +117,11 @@ type Client struct {
 	disabled   bool
 	// mode is the resolved telemetry mode this client runs in
 	// (ModeFull/ModeMinimal) — the single source of truth, also emitted as the
-	// "mode" property on every event. Minimal is anonymous, DAU-only: no git
-	// name/email, no people profile (events carry $process_person_profile=false
-	// so the device still counts as a unique user), and Track/Gauge/Distribution/
-	// SetUserProperties all no-op; only app_started and the app_active heartbeat
-	// are sent. A disabled client leaves this empty.
+	// "mode" property on every event. Minimal sends the same events as full, but
+	// anonymously: distinct_id is the device hash instead of the git email, no
+	// people profile is created (events carry $process_person_profile=false so
+	// the device still counts as a unique user), and SetUserProperties no-ops.
+	// A disabled client leaves this empty.
 	mode string
 
 	// mu guards lastActiveDay, which the daily-active Heartbeat reads and
@@ -162,8 +162,8 @@ func DiscoverIdentity() Identity {
 // here. Safe to call once; subsequent calls are no-ops. mode is one of
 // ModeFull/ModeMinimal/ModeOff. ModeOff (or an env opt-out, or a missing
 // project key) creates a "disabled" client and all helper calls become no-ops.
-// ModeMinimal creates an anonymous client that sends only the DAU signals
-// (app_started + app_active) with no git name/email and no people profile.
+// ModeMinimal creates an anonymous client that sends every event, with no git
+// name/email and no people profile.
 func Init(mode string, version string, identity Identity) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
@@ -364,24 +364,14 @@ func (c *Client) identify(props posthog.Properties) {
 	})
 }
 
-// Track enqueues an event with the given properties. No-op in minimal mode,
-// which only ships the anonymous DAU signals (see Heartbeat / trackRaw).
+// Track enqueues an event with the given properties. Sends in both full and
+// minimal mode; minimal differs only in being anonymous (see capture).
 func Track(eventType string, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled || c.mode == ModeMinimal {
-		return
-	}
-	c.capture(eventType, c.baseProps(sanitizeProperties(properties)))
-}
-
-// trackRaw enqueues an event bypassing the minimal-mode gate. Reserved for the
-// DAU signals (app_started, app_active) that must send even in minimal mode.
-// Callers must pass already-clean, PII-free properties.
-func trackRaw(c *Client, eventType string, properties map[string]any) {
 	if c == nil || c.disabled {
 		return
 	}
-	c.capture(eventType, c.baseProps(properties))
+	c.capture(eventType, c.baseProps(sanitizeProperties(properties)))
 }
 
 // Heartbeat records that this device is active today, at most once per calendar
@@ -403,7 +393,7 @@ func Heartbeat() {
 	c.lastActiveDay = day
 	c.mu.Unlock()
 
-	trackRaw(c, EventAppActive, nil)
+	c.capture(EventAppActive, c.baseProps(nil))
 }
 
 // Gauge records a point-in-time value as an event with a numeric `value`
@@ -411,7 +401,7 @@ func Heartbeat() {
 // averages or maxes by event name in PostHog.
 func Gauge(name string, value float64, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled || c.mode == ModeMinimal {
+	if c == nil || c.disabled {
 		return
 	}
 	c.capture(name, c.baseProps(mergeValue(properties, value)))
@@ -422,7 +412,7 @@ func Gauge(name string, value float64, properties map[string]interface{}) {
 // intent only.
 func Distribution(name string, sample float64, properties map[string]interface{}) {
 	c := current()
-	if c == nil || c.disabled || c.mode == ModeMinimal {
+	if c == nil || c.disabled {
 		return
 	}
 	c.capture(name, c.baseProps(mergeValue(properties, sample)))
@@ -669,22 +659,11 @@ func osVersion() string {
 	return strings.TrimSpace(string(out))
 }
 
-// TrackAppStarted records app launch. In full mode it merges usage properties
-// into the people profile and emits an app_started event with session/repo
-// counts. In minimal mode it emits only an anonymous app_started (version +
-// mode via baseProps), with no people profile and no counts — the leanest
-// launch signal that still marks the device active today.
+// TrackAppStarted records app launch: an app_started event with session/repo
+// counts in both full and minimal mode, plus — full mode only, since
+// SetUserProperties no-ops in minimal — the user's settings merged into their
+// people profile.
 func TrackAppStarted(version string, sessionCount, repoCount int, theme, enterMode, defaultAgent string, autoName, copyClaudeSettings bool) {
-	c := current()
-	if c == nil || c.disabled {
-		return
-	}
-
-	if c.mode == ModeMinimal {
-		trackRaw(c, EventAppStarted, nil)
-		return
-	}
-
 	SetUserProperties(map[string]interface{}{
 		"theme":                theme,
 		"enter_mode":           enterMode,
