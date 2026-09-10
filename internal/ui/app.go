@@ -1424,6 +1424,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// mid-session, mark them active today so DAU catches them now.
 		analytics.SyncEnabled(h.cfg.GetTelemetryMode(), h.version, h.identity)
 		analytics.Heartbeat()
+		// Once per commit with the final theme, not once per ←/→ through the live
+		// preview — and only after SyncEnabled, so a user who turned telemetry off
+		// (or down to Basic) in this same visit isn't tracked by the old client.
+		if msg.theme != "" {
+			analytics.Track(analytics.EventThemeChanged, map[string]interface{}{"theme": msg.theme})
+		}
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
@@ -3571,7 +3577,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		ag = agent.Parse(h.cfg.GetDefaultAgent())
 	}
 	if _, err := exec.LookPath(ag.Binary()); err != nil {
-		h.setError(fmt.Errorf("%s CLI not found — install %s to create sessions", ag.Binary(), ag.DisplayName()))
+		h.setError(fmt.Errorf("%s CLI not found: install %s to create sessions", ag.Binary(), ag.DisplayName()))
 		return h, nil
 	}
 	// Codex prompts to trust a new directory on first launch; pre-seed trust so
@@ -4057,7 +4063,7 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 		return nil
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
-		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
+		h.setError(fmt.Errorf("claude CLI not found: install Claude Code to create sessions"))
 		analytics.Track(analytics.EventStartupFailed, map[string]interface{}{"reason": "claude_missing"})
 		return nil
 	}
@@ -8255,7 +8261,7 @@ func (h *Home) loadSessions() tea.Msg {
 	// Check for claude CLI availability.
 	var warning string
 	if _, err := exec.LookPath("claude"); err != nil {
-		warning = "claude CLI not found — install Claude Code to create sessions"
+		warning = "claude CLI not found: install Claude Code to create sessions"
 	}
 
 	// Load persisted PR cache. A failure here is non-fatal — the bootstrap

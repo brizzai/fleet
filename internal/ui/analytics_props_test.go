@@ -13,6 +13,7 @@ func TestErrorCategoryKeepsOnlyFleetProse(t *testing.T) {
 		{"failed to start session: tmux: exit status 1", "failed to start session"},
 		{"launchpad skipped a repo: secret-repo — no account", "launchpad skipped a repo"},
 		{"account not allowed for this repo: Ada isn't in allowed_accounts", "account not allowed for this repo"},
+		{"opencode CLI not found: install OpenCode to create sessions", "opencode CLI not found"},
 		{"open /Users/ada/.config/fleet/state.db: permission denied", "other"},
 		{"secret-repo: no allowed account is logged in", "other"},
 		{"feature-login already exists", "other"}, // a branch name inside prose, e.g. shell-provider output

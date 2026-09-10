@@ -7,14 +7,14 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/editor"
 )
 
-// settingsClosedMsg is sent when the settings dialog closes.
-type settingsClosedMsg struct{}
+// settingsClosedMsg is sent when the settings dialog closes. theme is the
+// committed theme when it differs from the one Settings opened with, else "".
+type settingsClosedMsg struct{ theme string }
 
 var (
 	// Only the editors this machine can actually launch — a preset the user picks
@@ -229,12 +229,11 @@ func (d *SettingsDialog) Update(msg tea.Msg) (*SettingsDialog, tea.Cmd) {
 	case "esc", "q":
 		_ = d.cfg.Save()
 		d.Hide()
-		// Once per commit with the final theme, not once per ←/→ through the live
-		// preview, where reaching one theme can pass every other on the way.
+		var theme string
 		if d.themeChanged() {
-			analytics.Track(analytics.EventThemeChanged, map[string]interface{}{"theme": d.cfg.Theme})
+			theme = d.cfg.Theme
 		}
-		return d, func() tea.Msg { return settingsClosedMsg{} }
+		return d, func() tea.Msg { return settingsClosedMsg{theme: theme} }
 
 	case "tab", "shift+tab":
 		if d.focus == focusCategories {
