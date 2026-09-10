@@ -106,7 +106,10 @@ func TestSessionEnvOmitsConfigDirWithoutAccount(t *testing.T) {
 	if _, ok := configDirIn(env); ok {
 		t.Fatal("config dir set for a session with no account")
 	}
-	want := []string{"FLEET_INSTANCE_ID=abc", "ZSH_DOTENV_PROMPT=false"}
+	// Exact, so a stray addition has to be added here deliberately.
+	// CLAUDE_CODE_CHILD_SESSION is blanked for every session regardless of
+	// account — see sessionEnv for why it cannot simply be omitted.
+	want := []string{"FLEET_INSTANCE_ID=abc", "ZSH_DOTENV_PROMPT=false", "CLAUDE_CODE_CHILD_SESSION="}
 	if !slices.Equal(env, want) {
 		t.Fatalf("env = %v, want %v", env, want)
 	}

@@ -265,6 +265,41 @@ func (s *Session) sessionEnv() []string {
 	env := []string{
 		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
+
+		// Blank the nested-session marker Claude Code sets on everything it
+		// spawns. fleet is often launched *from* a fleet session, and a tmux
+		// server first started there captures CLAUDE_CODE_CHILD_SESSION=1 in
+		// its global environment — after which every pane that server ever
+		// creates inherits it, including agent sessions that are nothing of the
+		// kind. Nothing in the UI says so; the marker is invisible once tmux
+		// has the env.
+		//
+		// Claude Code reads it as "I am a sub-session" and stops writing a
+		// transcript, so `claude --resume` can no longer find the conversation.
+		// That is load-bearing here: restart, fork and the idle-suspend wake
+		// all resume by id, and ReadClaudeSessionName reads the same transcript
+		// for the agent title auto-naming prefers. The marker also makes
+		// `-y/--yes` a no-op for plugin installs and disables skill proposals.
+		//
+		// Claude Code does have an escape hatch — it probes
+		// `tmux show-environment -g` and forgives a marker that is merely
+		// ambient in tmux — but that probe is one tmux call with a 250ms
+		// timeout, memoized for the process lifetime. Launching a fleet of
+		// sessions at once is exactly the load that blows the budget, and a
+		// session that loses the race is degraded for as long as it lives.
+		// Measured on one machine mid-session: 13 of 21 sessions suppressed.
+		//
+		// Blanked rather than omitted for the reason TmuxEnv documents: tmux -e
+		// can only add a variable, never remove one the server inherited, and
+		// Claude Code tests this one for truthiness, so an empty value reads as
+		// unset. Blanked rather than answered with
+		// CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 because the marker is simply
+		// false here — every fleet session is a top-level agent session — and
+		// forcing persistence would rescue the transcript while leaving the
+		// marker's other effects in place. Set for every agent, not just
+		// Claude: the value is a property of the tmux server fleet inherited,
+		// and it is inert to Codex and OpenCode either way.
+		"CLAUDE_CODE_CHILD_SESSION=",
 	}
 	// Per-account auth. Claude only: this points at a claude.ai login that
 	// Codex and OpenCode neither read nor need.

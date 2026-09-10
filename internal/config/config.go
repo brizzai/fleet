@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/brizzai/fleet/internal/claudeaccount"
@@ -55,9 +56,10 @@ const (
 
 // Config holds user-configurable settings.
 type Config struct {
-	TickIntervalSec      int    `json:"tick_interval_sec,omitempty"`
-	DefaultProjectPath   string `json:"default_project_path,omitempty"`
-	Editor               string `json:"editor,omitempty"`
+	TickIntervalSec    int    `json:"tick_interval_sec,omitempty"`
+	DefaultProjectPath string `json:"default_project_path,omitempty"`
+	Editor             string `json:"editor,omitempty"`
+
 	Theme                string `json:"theme,omitempty"`
 	AutoNameSessions     *bool  `json:"auto_name_sessions,omitempty"`
 	AutoUpdate           *bool  `json:"auto_update,omitempty"`
@@ -119,6 +121,25 @@ type Config struct {
 	// An absent or empty entry means every account is allowed, so the common
 	// case configures nothing.
 	AllowedAccounts map[string][]string `json:"allowed_accounts,omitempty"`
+
+	// ReviewPrompts is the first message a review session opens with, per
+	// origin. Keyed the same way as AllowedAccounts, collapsed_groups and
+	// snoozed_groups — one keyspace for everything that is per-remote.
+	//
+	// Per origin rather than global because a review command is repo-specific:
+	// the skill that reviews a Go monorepo is not the one that reviews a
+	// design system, and one global value would fire the wrong command on
+	// every repo but the first.
+	//
+	// Empty by default, and that default is deliberate: how you review is
+	// yours, and fleet shipping a review command of its own would bake one
+	// person's method into everyone's tool. `{pr}` is replaced with the PR
+	// number.
+	//
+	//	"review_prompts": {
+	//	  "github.com/brizzai/brizzai": "/review-team-pr-v2 {pr}"
+	//	}
+	ReviewPrompts map[string]string `json:"review_prompts,omitempty"`
 
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
@@ -723,6 +744,17 @@ func (c *Config) GetSessionSuspendMode() string {
 // value does not count as configured, so consent still applies.
 func (c *Config) TelemetryConfigured() bool {
 	return isValidTelemetryMode(c.TelemetryMode) || c.Telemetry != nil
+}
+
+// GetReviewPrompt returns the first message for a review session on originKey,
+// with {pr} substituted. Empty means the session opens with no prompt at all,
+// which is the default for every origin.
+func (c *Config) GetReviewPrompt(originKey string, pr int) string {
+	tmpl := c.ReviewPrompts[originKey]
+	if tmpl == "" {
+		return ""
+	}
+	return strings.ReplaceAll(tmpl, "{pr}", strconv.Itoa(pr))
 }
 
 // GetEditor returns the configured editor, falling back to $EDITOR then "code".
