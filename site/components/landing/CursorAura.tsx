@@ -48,7 +48,7 @@ export function CursorAura() {
         pointerEvents: "none",
         mixBlendMode: "screen",
         background:
-          "radial-gradient(640px 480px at var(--mx, 50vw) var(--my, 20vh), rgba(244,143,177,0.12), transparent 70%), radial-gradient(900px 680px at var(--mx, 50vw) var(--my, 20vh), rgba(160,106,254,0.07), transparent 75%)",
+          "radial-gradient(640px 480px at var(--mx, 50vw) var(--my, 20vh), var(--charm-wash-1), transparent 70%), radial-gradient(900px 680px at var(--mx, 50vw) var(--my, 20vh), var(--charm-wash-2), transparent 75%)",
       }}
     />
   );

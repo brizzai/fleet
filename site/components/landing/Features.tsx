@@ -149,7 +149,7 @@ export function Features() {
                 width: 32,
                 height: 32,
                 borderRadius: 6,
-                background: "rgba(244,143,177,0.14)",
+                background: "var(--charm-tint)",
                 color: "var(--charm-pink)",
                 fontFamily: "var(--font-mono)",
                 fontSize: "1.1rem",

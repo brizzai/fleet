@@ -7,9 +7,56 @@
 /* ─── Charm palette ────────────────────────────────────── */
 
 @layer base {
+  /* Light is the `:root` default; `.dark` (set by next-themes on <html>)
+     overrides it. Every surface below reads these tokens and nothing else,
+     which is what makes the theme toggle actually switch the site. */
   :root {
+    color-scheme: light;
+
+    --charm-pink: #c93571;
+    --charm-pink-bright: #e85d9a;
+    --charm-pink-hover: #ad2a60;
+    --charm-on-pink: #ffffff;
+    --charm-purple: #6d3ad6;
+    --charm-lime: #2f8f24;
+    --charm-bg: #fbf9fb;
+    --charm-bg-soft: #f4f1f6;
+    --charm-surface: #ffffff;
+    --charm-surface-elev: #f4eff6;
+    --charm-border: #e3dce7;
+    --charm-border-soft: #ede8f0;
+    --charm-text: #191820;
+    --charm-text-dim: #5a5665;
+    --charm-text-faint: #8b8697;
+
+    /* Accent glows and translucent slabs, per-mode so they never sit
+       dark-on-dark in light or wash out in dark. */
+    --charm-glow: rgba(201, 53, 113, 0.35);
+    --charm-glow-soft: rgba(201, 53, 113, 0.18);
+    --charm-tint: rgba(201, 53, 113, 0.12);
+    --charm-panel: rgba(255, 255, 255, 0.72);
+    --charm-panel-ring: rgba(25, 24, 32, 0.08);
+    --charm-wash-1: rgba(201, 53, 113, 0.07);
+    --charm-wash-2: rgba(109, 58, 214, 0.05);
+    --charm-wash-3: rgba(201, 53, 113, 0.04);
+
+    /* Tokyo-night status colors (from internal/ui/palette.go) */
+    --tn-green: #587a3a;
+    --tn-yellow: #97661f;
+    --tn-blue: #1a7fa8;
+    --tn-red: #c33f57;
+    --tn-gray: #6b7194;
+    --tn-orange: #b45f1e;
+    --tn-purple: #7a52c9;
+  }
+
+  .dark {
+    color-scheme: dark;
+
     --charm-pink: #f48fb1;
     --charm-pink-bright: #ff6ad5;
+    --charm-pink-hover: #f8b8cd;
+    --charm-on-pink: #1a0a14;
     --charm-purple: #a06afe;
     --charm-lime: #94ff8a;
     --charm-bg: #0a0b10;
@@ -22,7 +69,15 @@
     --charm-text-dim: #8a8fa0;
     --charm-text-faint: #565a6b;
 
-    /* Tokyo-night status colors (from internal/ui/palette.go) */
+    --charm-glow: rgba(244, 143, 177, 0.6);
+    --charm-glow-soft: rgba(244, 143, 177, 0.35);
+    --charm-tint: rgba(244, 143, 177, 0.14);
+    --charm-panel: rgba(20, 22, 31, 0.6);
+    --charm-panel-ring: rgba(35, 38, 52, 0.6);
+    --charm-wash-1: rgba(244, 143, 177, 0.12);
+    --charm-wash-2: rgba(160, 106, 254, 0.09);
+    --charm-wash-3: rgba(244, 143, 177, 0.06);
+
     --tn-green: #9ece6a;
     --tn-yellow: #e0af68;
     --tn-blue: #7dcfff;
@@ -32,9 +87,7 @@
     --tn-purple: #bb9af7;
   }
 
-  /* Force dark theme — site is terminal-themed */
   html {
-    color-scheme: dark;
     background: var(--charm-bg);
   }
 
@@ -55,17 +108,17 @@
     background:
       radial-gradient(
         ellipse 60vw 40vh at 50% -5%,
-        rgba(244, 143, 177, 0.12),
+        var(--charm-wash-1),
         transparent 70%
       ),
       radial-gradient(
         ellipse 50vw 35vh at 100% 25%,
-        rgba(160, 106, 254, 0.09),
+        var(--charm-wash-2),
         transparent 70%
       ),
       radial-gradient(
         ellipse 55vw 35vh at 0% 50%,
-        rgba(244, 143, 177, 0.06),
+        var(--charm-wash-3),
         transparent 70%
       ),
       var(--charm-bg);
@@ -83,7 +136,7 @@
   --color-fd-popover: var(--charm-surface);
   --color-fd-popover-foreground: var(--charm-text);
   --color-fd-primary: var(--charm-pink);
-  --color-fd-primary-foreground: #1a0a14;
+  --color-fd-primary-foreground: var(--charm-on-pink);
   --color-fd-secondary: var(--charm-surface);
   --color-fd-secondary-foreground: var(--charm-text);
   --color-fd-accent: var(--charm-surface-elev);
@@ -135,13 +188,13 @@ h3.font-mono,
 
 .fd-nav a:hover {
   color: var(--charm-pink);
-  text-shadow: 0 0 12px rgba(244, 143, 177, 0.4);
+  text-shadow: 0 0 12px var(--charm-glow-soft);
 }
 
 /* ─── Selection ────────────────────────────────────────── */
 
 ::selection {
-  background: rgba(244, 143, 177, 0.3);
+  background: var(--charm-glow-soft);
   color: var(--charm-text);
 }
 
