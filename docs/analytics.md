@@ -143,7 +143,7 @@ In Full mode, if git is configured globally on this machine, fleet uses your `gi
 - The same person shows up as a single user across multiple machines (cross-machine continuity in funnels).
 - Your git `user.name` is sent as the PostHog `$name` person property; your `user.email` as `$email`. This is what makes you identifiable to the fleet author when they look at the dashboard.
 
-In Basic mode, or if git isn't configured, fleet uses an **anonymous device ID**, cached at `~/.config/fleet/device_id`: a one-way SHA256 hash of the macOS hardware UUID (`IOPlatformUUID`), or — where `ioreg` isn't available, as on Linux — of the hostname and CPU architecture. In Full mode the same hash is also sent as the `machine_hash` person property, so you can tell how many machines a given person uses.
+In Basic mode, or if git isn't configured, fleet uses an **anonymous device ID**, cached at `~/.config/fleet/device_id`. On macOS it is a one-way SHA256 hash of the hardware UUID (`IOPlatformUUID`). On Linux it is an HMAC-SHA256 of `/etc/machine-id` (or `/var/lib/dbus/machine-id`) keyed to fleet, as [`machine-id(5)`](https://www.freedesktop.org/software/systemd/man/latest/machine-id.html) asks, so it never matches what another app derives from the same ID; only a Linux machine with no readable machine ID falls back to hashing the hostname and CPU architecture. In Full mode the same hash is also sent as the `machine_hash` person property, so you can tell how many machines a given person uses.
 
 The consent prompt appears once on first launch (unless `FLEET_TELEMETRY_DISABLED` / `DO_NOT_TRACK` is set). Change your answer any time in Settings.
 

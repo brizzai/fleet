@@ -15,6 +15,7 @@ package analytics
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -95,7 +96,8 @@ var newSink = func(key, host string) (sink, error) {
 // Client wraps the PostHog SDK, enforcing the telemetry mode on every call.
 //
 // deviceID and distinctID are kept separate on purpose: deviceID is always the
-// anonymous SHA256 of the hardware UUID (what DeviceID() exposes externally),
+// anonymous device hash (what DeviceID() exposes externally; see
+// getOrCreateDeviceID),
 // while distinctID is the identifier sent to PostHog — the git user.email in
 // full mode (so one human is one person across their machines), and the device
 // hash in minimal mode (so no identity leaves the machine). Logging distinctID
@@ -135,7 +137,7 @@ type Client struct {
 // Discovered via DiscoverIdentity() outside the Bubble Tea Update() loop so
 // the consent-flow Init call is pure in-memory work.
 type Identity struct {
-	DeviceID  string // anonymous SHA256 of macOS hardware UUID
+	DeviceID  string // anonymous device hash (see getOrCreateDeviceID)
 	GitName   string // git config --global user.name (may be empty)
 	GitEmail  string // git config --global user.email (may be empty)
 	OSVersion string // sw_vers -productVersion (may be "unknown")
@@ -597,9 +599,23 @@ func isTruthyEnv(v string) bool {
 
 // getOrCreateDeviceID returns a stable anonymous device ID.
 // Cached in ~/.config/fleet/device_id after first generation.
+//
+// On Linux a readable machine ID wins over the cache. Earlier builds derived the
+// Linux ID from hostname + architecture, which anyone who can guess the hostname
+// can reproduce, so a cache written that way is replaced — once, since every
+// later launch finds it already matching.
 func getOrCreateDeviceID() string {
 	home, _ := os.UserHomeDir()
 	idPath := filepath.Join(home, ".config", "fleet", "device_id")
+
+	if machineID := readMachineID(); machineID != "" {
+		id := machineIDHash(machineID)
+		if data, err := os.ReadFile(idPath); err != nil || strings.TrimSpace(string(data)) != id {
+			_ = os.MkdirAll(filepath.Dir(idPath), 0700)
+			_ = os.WriteFile(idPath, []byte(id), 0600)
+		}
+		return id
+	}
 
 	if data, err := os.ReadFile(idPath); err == nil {
 		id := strings.TrimSpace(string(data))
@@ -616,7 +632,51 @@ func getOrCreateDeviceID() string {
 	return id
 }
 
-// generateDeviceID creates a SHA256 hash of the macOS hardware UUID.
+// machineIDPaths are where Linux keeps its machine ID: systemd's file, then the
+// D-Bus copy that distros without systemd still ship. Empty everywhere else, so
+// macOS IDs keep coming from the hardware UUID. A var so tests can point it at
+// fixtures.
+var machineIDPaths = func() []string {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	return []string{"/etc/machine-id", "/var/lib/dbus/machine-id"}
+}()
+
+// readMachineID returns the first usable machine ID in machineIDPaths — 32 hex
+// characters — or "" when there is none: a missing file, an empty one (how
+// container images ship it), or "uninitialized" on a first boot.
+func readMachineID() string {
+	for _, p := range machineIDPaths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if id := strings.TrimSpace(string(data)); len(id) == 32 && strings.Trim(id, "0123456789abcdef") == "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// deviceIDAppKey is what machineIDHash signs with the machine ID as its key.
+// machine-id(5) asks that the ID never leave the machine as-is or as a plain
+// hash: every app hashing it the same way would send the same value, linking
+// the machine across all of them. An HMAC over an app-specific constant — what
+// systemd's sd_id128_get_machine_app_specific does — is stable per machine and
+// fleet's alone.
+const deviceIDAppKey = "fleet analytics device id"
+
+// machineIDHash derives fleet's device ID from a machine ID.
+func machineIDHash(machineID string) string {
+	mac := hmac.New(sha256.New, []byte(machineID))
+	mac.Write([]byte(deviceIDAppKey))
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}
+
+// generateDeviceID creates a SHA256 hash of the macOS hardware UUID, falling
+// back to the hostname where ioreg is unavailable — on Linux, only when no
+// machine ID is readable (see getOrCreateDeviceID).
 func generateDeviceID() string {
 	out, err := exec.Command("ioreg", "-rd1", "-c", "IOPlatformExpertDevice").Output()
 	if err != nil {
