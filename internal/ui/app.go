@@ -287,8 +287,11 @@ type Home struct {
 	// launchpad is the first-run experience shown when the fleet is empty:
 	// recent repos mined from Claude Code history, ready to resume.
 	// launchpadDismissed lets the user Esc out to the bare empty state.
-	launchpad          *Launchpad
-	launchpadDismissed bool
+	// launchpadShownPending holds launchpad_shown's repo count until the consent
+	// prompt is answered — see discoveryMsg.
+	launchpad             *Launchpad
+	launchpadDismissed    bool
+	launchpadShownPending int
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingForkCtx    *forkContext        // set while Shift+F worktree picker is open; consumed on pick/cancel
@@ -1454,6 +1457,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		repoCount := len(session.GroupByRepo(h.sessions))
 		h.workerMu.Unlock()
 		h.fireStartupAnalytics(repoCount)
+		if h.launchpadShownPending > 0 {
+			analytics.Track(analytics.EventLaunchpadShown, map[string]interface{}{
+				"discovered_repos": h.launchpadShownPending,
+			})
+			h.launchpadShownPending = 0
+		}
 		// First-run theme onboarding follows the consent prompt.
 		h.maybeShowOnboarding()
 		return h, nil
@@ -2020,9 +2029,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.startAccountWorker()
 		}
 		if len(msg.items) > 0 {
-			analytics.Track(analytics.EventLaunchpadShown, map[string]interface{}{
-				"discovered_repos": len(msg.items),
-			})
+			// On a first launch the consent prompt is still unanswered, so no
+			// analytics client exists yet and Track would drop this silently —
+			// every time, since the splash hides the prompt until this handler
+			// flips booted. Hold the count; consentResultMsg sends it.
+			if h.consentDialog.IsVisible() {
+				h.launchpadShownPending = len(msg.items)
+			} else {
+				analytics.Track(analytics.EventLaunchpadShown, map[string]interface{}{
+					"discovered_repos": len(msg.items),
+				})
+			}
 		}
 		return h, nil
 

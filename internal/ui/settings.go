@@ -231,7 +231,7 @@ func (d *SettingsDialog) Update(msg tea.Msg) (*SettingsDialog, tea.Cmd) {
 		d.Hide()
 		// Once per commit with the final theme, not once per ←/→ through the live
 		// preview, where reaching one theme can pass every other on the way.
-		if d.cfg.Theme != d.origTheme {
+		if d.themeChanged() {
 			analytics.Track(analytics.EventThemeChanged, map[string]interface{}{"theme": d.cfg.Theme})
 		}
 		return d, func() tea.Msg { return settingsClosedMsg{} }
@@ -794,6 +794,13 @@ func cycleTheme(d *SettingsDialog, dir int) {
 	}
 	d.cfg.Theme = names[(idx+dir+len(names))%len(names)]
 	ApplyPalette(PaletteByName(d.cfg.Theme))
+}
+
+// themeChanged reports whether the effective theme differs from the one Settings
+// opened on. PaletteByName resolves an unset theme to the default, as cycleTheme
+// does, so cycling a full lap back to the default is not a change.
+func (d *SettingsDialog) themeChanged() bool {
+	return PaletteByName(d.cfg.Theme).Name != PaletteByName(d.origTheme).Name
 }
 
 // cycleString returns the preset reached by stepping dir from cur (wrapping).
