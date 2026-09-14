@@ -39,6 +39,9 @@
     --charm-wash-1: rgba(201, 53, 113, 0.07);
     --charm-wash-2: rgba(109, 58, 214, 0.05);
     --charm-wash-3: rgba(201, 53, 113, 0.04);
+    /* `screen` can only lighten, so over a light page the cursor aura
+       needs its mirror image. */
+    --charm-aura-blend: multiply;
 
     /* Tokyo-night status colors (from internal/ui/palette.go) */
     --tn-green: #587a3a;
@@ -77,6 +80,7 @@
     --charm-wash-1: rgba(244, 143, 177, 0.12);
     --charm-wash-2: rgba(160, 106, 254, 0.09);
     --charm-wash-3: rgba(244, 143, 177, 0.06);
+    --charm-aura-blend: screen;
 
     --tn-green: #9ece6a;
     --tn-yellow: #e0af68;

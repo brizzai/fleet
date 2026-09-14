@@ -28,7 +28,7 @@ Raw `<a href="/docs/...">` does NOT get the `/fleet` basePath prepended. Only `n
 
 **Never hardcode a color in a component.** The theme toggle was dead for exactly this reason: the palette lived only in `:root`, so flipping the class changed nothing, and the landing components carried literal `rgba(244,143,177,…)` glows and `#1a0a14` on-pink text that no theme could reach. If you need a new color, add a token pair — that includes glows (`--charm-glow`, `--charm-glow-soft`), tints (`--charm-tint`), translucent slabs (`--charm-panel`, `--charm-panel-ring`), and the page washes (`--charm-wash-1..3`). `--charm-on-pink` is the text color that sits *on* a pink fill; it is near-black in dark and white in light, because the light-mode pink is dark enough to need it.
 
-The **TUI demo is the deliberate exception**: `components/tui-demo/palette.ts` is hardcoded tokyo-night and stays dark in both modes — a terminal doesn't turn white. Only demo chrome *outside* the terminal frame (`CoachBanner`'s panel and inline `kbd`s) reads `--charm-*`.
+The **TUI demo is the deliberate exception**: `components/tui-demo/palette.ts` is hardcoded tokyo-night and stays dark in both modes — a terminal doesn't turn white. Only demo chrome *outside* the terminal frame (`CoachBanner`'s panel and inline `kbd`s, `TuiDemo`'s focus aura and outer glow) reads `--charm-*`.
 
 ## TUI demo (`components/tui-demo/`)
 
