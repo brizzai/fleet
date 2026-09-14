@@ -275,7 +275,7 @@ export function TuiDemo() {
           pointerEvents: "none",
           borderRadius: 28,
           background:
-            "radial-gradient(60% 50% at 50% 50%, rgba(244,143,177,0.45), transparent 70%), radial-gradient(70% 60% at 80% 30%, rgba(160,106,254,0.30), transparent 75%), radial-gradient(50% 40% at 20% 80%, rgba(244,143,177,0.25), transparent 75%)",
+            "radial-gradient(60% 50% at 50% 50%, color-mix(in srgb, var(--charm-pink) 45%, transparent), transparent 70%), radial-gradient(70% 60% at 80% 30%, color-mix(in srgb, var(--charm-purple) 30%, transparent), transparent 75%), radial-gradient(50% 40% at 20% 80%, color-mix(in srgb, var(--charm-pink) 25%, transparent), transparent 75%)",
           filter: "blur(36px)",
           opacity: state.focused ? 1 : 0,
           transform: state.focused ? "scale(1.02)" : "scale(0.96)",
@@ -304,8 +304,8 @@ export function TuiDemo() {
           overflow: "hidden",
           background: PALETTE.bg,
           boxShadow: state.focused
-            ? "0 30px 80px -30px rgba(0,0,0,0.6), 0 0 80px -10px rgba(244,143,177,0.45), 0 0 140px -20px rgba(160,106,254,0.35)"
-            : "0 30px 80px -30px rgba(0,0,0,0.6), 0 0 60px -20px rgba(244,143,177,0.25)",
+            ? "0 30px 80px -30px rgba(0,0,0,0.6), 0 0 80px -10px color-mix(in srgb, var(--charm-pink) 45%, transparent), 0 0 140px -20px color-mix(in srgb, var(--charm-purple) 35%, transparent)"
+            : "0 30px 80px -30px rgba(0,0,0,0.6), 0 0 60px -20px color-mix(in srgb, var(--charm-pink) 25%, transparent)",
           transition:
             "box-shadow 0.45s ease, border-color 0.45s ease",
           ...(autoOnly

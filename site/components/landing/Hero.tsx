@@ -69,7 +69,7 @@ export function Hero() {
           color: "var(--charm-pink)",
           fontSize: "clamp(0.55rem, 1.6vw, 1rem)",
           lineHeight: 1.05,
-          textShadow: "0 0 24px rgba(244,143,177,0.35)",
+          textShadow: "0 0 24px var(--charm-glow-soft)",
           backgroundImage:
             "linear-gradient(110deg, var(--charm-pink) 0%, var(--charm-pink-bright) 40%, var(--charm-pink) 60%, var(--charm-pink) 100%)",
           backgroundSize: "200% 100%",
@@ -187,19 +187,19 @@ export function Hero() {
           transform: translateY(-1px);
           border-color: var(--charm-pink);
           background: var(--charm-surface-elev);
-          box-shadow: 0 6px 18px -10px rgba(244,143,177,0.6);
+          box-shadow: 0 6px 18px -10px var(--charm-glow);
         }
         .fleet-cta--primary {
           background: var(--charm-pink);
           border-color: var(--charm-pink);
-          color: #1a0a14;
+          color: var(--charm-on-pink);
           font-weight: 600;
         }
         .fleet-cta--primary:hover {
-          background: #f8b8cd;
-          border-color: #f8b8cd;
-          color: #1a0a14;
-          box-shadow: 0 8px 24px -10px rgba(244,143,177,0.5);
+          background: var(--charm-pink-hover);
+          border-color: var(--charm-pink-hover);
+          color: var(--charm-on-pink);
+          box-shadow: 0 8px 24px -10px var(--charm-glow);
         }
         @keyframes fleet-rise {
           from { opacity: 0; transform: translateY(8px); }
@@ -210,8 +210,8 @@ export function Hero() {
           50% { background-position: 100% 50%; }
         }
         @keyframes fleet-pulse {
-          0%, 100% { box-shadow: 0 0 0 0 rgba(244,143,177,0.6); }
-          50% { box-shadow: 0 0 0 6px rgba(244,143,177,0); }
+          0%, 100% { box-shadow: 0 0 0 0 var(--charm-glow); }
+          50% { box-shadow: 0 0 0 6px transparent; }
         }
         @keyframes fleet-blink {
           50% { opacity: 0; }

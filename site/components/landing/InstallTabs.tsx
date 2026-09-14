@@ -89,7 +89,7 @@ export function InstallTabs() {
               borderRadius: 999,
               border: "none",
               background: t.id === active ? "var(--charm-pink)" : "transparent",
-              color: t.id === active ? "#1a0a14" : "var(--charm-text-dim)",
+              color: t.id === active ? "var(--charm-on-pink)" : "var(--charm-text-dim)",
               fontFamily: "var(--font-mono)",
               fontSize: "0.85rem",
               fontWeight: t.id === active ? 700 : 500,
