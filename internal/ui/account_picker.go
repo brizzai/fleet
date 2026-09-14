@@ -45,6 +45,8 @@ type AccountPickerDialog struct {
 	anchorX     int
 	rowY        int
 	bottomLimit int
+
+	clickRows overlayRowMap // filled by View; see ClickRowAt
 }
 
 func NewAccountPickerDialog() *AccountPickerDialog { return &AccountPickerDialog{} }
@@ -147,10 +149,15 @@ func (d *AccountPickerDialog) View() string {
 	inner := max(boxW-accountPickerChrome, 1)
 
 	var b strings.Builder
+	// DialogStyle is a border plus one row of vertical padding, so the title is
+	// the third line of the box and the rows start two below it.
+	d.clickRows.reset(2)
+
 	b.WriteString(TitleStyle.Render(ansi.Truncate(d.title, inner, "…")))
 	b.WriteString("\n\n")
 
 	for i, r := range d.rows {
+		d.clickRows.set(2+i, i)
 		b.WriteString(d.renderRow(i, r, inner))
 		b.WriteString("\n")
 	}
@@ -234,4 +241,17 @@ func (d *AccountPickerDialog) Position(boxW, boxH int) (int, int) {
 		y = 0
 	}
 	return x, y
+}
+
+// ClickRowAt implements clickableOverlay. A dimmed row — the account the session
+// is already on, or one that is logged out — refuses, exactly as j/k skip it:
+// the row states its own reason, and moving a session onto a dead login is the
+// thing this dialog is careful not to do.
+func (d *AccountPickerDialog) ClickRowAt(_, dy int) rune {
+	i, ok := d.clickRows.at(dy)
+	if !ok || !d.enabledAt(i) {
+		return 0
+	}
+	d.cursor = i
+	return tea.KeyEnter
 }
