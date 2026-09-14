@@ -235,15 +235,21 @@ func TestHelpSectionsAreAllLabelled(t *testing.T) {
 // characters past the current longest collapses the layout back to one column
 // and ~30 rows of scrolling, silently. Nothing else in the suite would notice.
 func TestHelpSheetHoldsTwoColumnsAt120(t *testing.T) {
+	// 41 and not the 40 this was written at. The sheet was exactly full there —
+	// 59 rows, nothing to spare — so the review feature's `c` and `C` did not
+	// make it fat, they were simply the first bindings added after it reached
+	// capacity. Raised by the one row they cost rather than kept at a number
+	// that would refuse every future keybinding; the sheet is height-bound, so
+	// a wider terminal does not help and three columns do not fit at 120.
 	ho := NewHelpOverlay()
-	ho.SetSize(120, 40)
+	ho.SetSize(120, 41)
 	ho.Show()
 	lay := ho.layout()
 	if got := len(lay.chunks); got != 2 {
-		t.Errorf("120x40 renders %d columns, want 2 — a description probably grew", got)
+		t.Errorf("120x41 renders %d columns, want 2 — a description probably grew", got)
 	}
 	if lay.maxScroll != 0 {
-		t.Errorf("120x40 hides %d rows, want the whole sheet visible", lay.maxScroll)
+		t.Errorf("120x41 hides %d rows, want the whole sheet visible", lay.maxScroll)
 	}
 }
 
