@@ -14,8 +14,8 @@ import (
 )
 
 // Telemetry modes. Full sends usage events tagged with the user's git
-// name/email; Minimal sends only an anonymous daily-active ping (enough to
-// count daily active users, no identity); Off sends nothing.
+// name/email; Minimal ("Basic" in the UI) sends the same events anonymously,
+// with no identity and no people profile; Off sends nothing.
 const (
 	TelemetryFull    = "full"
 	TelemetryMinimal = "minimal"
@@ -72,8 +72,8 @@ type Config struct {
 	EnterMode                    string `json:"enter_mode,omitempty"`       // "attach" or "split"
 	StatusIndicator              string `json:"status_indicator,omitempty"` // "icon" (default) or "bar"
 	// TelemetryMode is the three-way telemetry preference: "full" (usage +
-	// git name/email), "minimal" (anonymous daily-active ping only, no
-	// identity), or "off" (nothing). Read via GetTelemetryMode, which migrates
+	// git name/email), "minimal" (the same usage, anonymously), or "off"
+	// (nothing). Read via GetTelemetryMode, which migrates
 	// the legacy Telemetry bool below when this is unset.
 	TelemetryMode string `json:"telemetry_mode,omitempty"`
 	// Telemetry is the legacy on/off flag, kept only for migration — new writes
@@ -676,7 +676,7 @@ func isValidTelemetryMode(mode string) bool {
 // GetTelemetryMode returns the telemetry mode: "full", "minimal", or "off".
 // Precedence: a valid explicit TelemetryMode wins; otherwise the legacy
 // Telemetry bool is migrated (true→full, false→minimal — a previously-declined
-// user keeps anonymous daily-active tracking); otherwise the default is "full".
+// user stays anonymous); otherwise the default is "full".
 // A non-empty but unrecognized mode falls back to "minimal", never "full", so a
 // corrupt/typo value can't silently grant identity-tagged telemetry. A
 // brand-new install is shown the consent prompt before anything is sent, so

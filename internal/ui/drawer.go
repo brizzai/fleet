@@ -434,7 +434,7 @@ func (h *Home) dropShellStream(async bool) {
 func (h *Home) createShell(command string) tea.Cmd {
 	repo := h.drawerScopeRepo()
 	if repo == "" {
-		h.setError(fmt.Errorf("select a repo or worktree to open a shell"))
+		h.setInfo("select a repo or worktree to open a shell")
 		return nil
 	}
 	name := h.nextShellName(repo, command)
