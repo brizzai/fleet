@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.38.0] - 2026-09-14
+
+### Highlights
+
+- **The mouse works now.** Click a session row to select it, double-click to attach, scroll a long sidebar with the wheel instead of holding `j`, and click an entry in the context menu (`.`) or command palette (`Ctrl+K`) to run it. Copying text out of fleet's own window now needs `Shift` held (Option in iTerm2) — set `FLEET_NO_MOUSE` to turn reporting back off.
+
+### Added
+
+- **The mouse works now.** Click a session row to select it, double-click to attach, scroll a long sidebar with the wheel instead of holding `j`, and click an entry in the context menu (`.`) or command palette (`Ctrl+K`) to run it. Copying text out of fleet's own window now needs `Shift` held (Option in iTerm2) — set `FLEET_NO_MOUSE` to turn reporting back off.
+
+### Changed
+
+- **Basic sends anonymous usage.** Basic telemetry now sends the same usage events as Full, just without who you are — no git name or email, and still never file paths, prompts, code or repo/branch names. To send nothing at all, set Telemetry to Off in Settings (`S`).
+- **Linux device ID uses your machine ID.** On Linux, fleet's anonymous telemetry ID now comes from a hash of your machine ID (never the ID itself) instead of your hostname, which anyone who could guess it could reproduce. Installs switch on their next launch; a machine with no machine ID (some containers) keeps its current ID.
+
 ## [2.37.0] - 2026-09-09
 
 ### Improved
@@ -656,7 +671,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.37.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.38.0...HEAD
+[2.38.0]: https://github.com/brizzai/fleet/releases/tag/v2.38.0
 [2.37.0]: https://github.com/brizzai/fleet/releases/tag/v2.37.0
 [2.36.0]: https://github.com/brizzai/fleet/releases/tag/v2.36.0
 [2.35.0]: https://github.com/brizzai/fleet/releases/tag/v2.35.0
