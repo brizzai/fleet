@@ -1,4 +1,4 @@
 ---
 type: changed
 ---
-**Linux device ID stops using your hostname.** The anonymous device ID fleet sends with telemetry on Linux now comes from a fleet-keyed hash of `/etc/machine-id` instead of your hostname, which anyone who could guess the hostname could reproduce. Existing Linux installs switch over once, on their next launch.
+**Linux device ID uses your machine ID.** On Linux, fleet's anonymous telemetry ID now comes from a hash of your machine ID (never the ID itself) instead of your hostname, which anyone who could guess it could reproduce. Installs switch on their next launch; a machine with no machine ID (some containers) keeps its current ID.
