@@ -165,6 +165,10 @@ type (
 	externalRemovalsMsg struct {
 		sessionIDs  []string
 		missingPins map[string]bool
+		// pinned is the SQLite pin set, so a hidden pin is restored only while
+		// it is still pinned. nil means the pin table couldn't be read this
+		// sweep, and the handler leaves pins untouched.
+		pinned map[string]bool
 	}
 	openEditorMsg        struct{ err error }
 	openPRMsg            struct{ err error }
@@ -344,9 +348,6 @@ type Home struct {
 	// lastAdoptSweepAt throttles the externally-created-session sweep, mirroring
 	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
 	lastAdoptSweepAt time.Time
-	// lastMissingPins is the missing-pin set the sync sweep last delivered, so an
-	// unchanged set isn't re-sent every sweep. Worker-goroutine-only.
-	lastMissingPins map[string]bool
 	// lastHookRepairAt throttles the hook-command existence check, mirroring
 	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
 	lastHookRepairAt time.Time
@@ -4354,7 +4355,8 @@ func (h *Home) handleAdoptSessions(msg adoptSessionsMsg) (tea.Model, tea.Cmd) {
 // away. Sessions leave memory only: their row is already deleted, and tmux
 // belongs to whoever removed them. Pins are hidden, never unpinned — the SQLite
 // row stays, so a checkout whose directory comes back (a remounted volume, a
-// worktree re-created at the same path) reappears on a later sweep. Like
+// worktree re-created at the same path) reappears on a later sweep, unless it
+// was unpinned in the meantime. Like
 // adoption this arrives on a timer, so the cursor is re-found by identity.
 func (h *Home) handleExternalRemovals(msg externalRemovalsMsg) (tea.Model, tea.Cmd) {
 	target := h.targetForCursor()
@@ -4369,19 +4371,27 @@ func (h *Home) handleExternalRemovals(msg externalRemovalsMsg) (tea.Model, tea.C
 		h.forgetSession(id)
 		changed = true
 	}
-	for repo := range msg.missingPins {
-		if h.pinnedRepos[repo] {
-			debuglog.Logger.Info("hiding pinned repo whose directory is gone", "repo", repo)
-			delete(h.pinnedRepos, repo)
-			h.missingPins[repo] = true
-			changed = true
+	if msg.pinned != nil {
+		for repo := range msg.missingPins {
+			if h.pinnedRepos[repo] {
+				debuglog.Logger.Info("hiding pinned repo whose directory is gone", "repo", repo)
+				delete(h.pinnedRepos, repo)
+				h.missingPins[repo] = true
+				changed = true
+			}
 		}
-	}
-	for repo := range h.missingPins {
-		if !msg.missingPins[repo] {
+		for repo := range h.missingPins {
+			if msg.missingPins[repo] {
+				continue
+			}
 			delete(h.missingPins, repo)
-			h.pinnedRepos[repo] = true
-			changed = true
+			// Dropping out of the missing set means either the directory is back
+			// or the pin is gone from SQLite (the header delete unpins). Only the
+			// first restores it.
+			if msg.pinned[repo] {
+				h.pinnedRepos[repo] = true
+				changed = true
+			}
 		}
 	}
 	if !changed {
@@ -5274,27 +5284,36 @@ func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	h.sendExternalRemovals(rows, known)
 }
 
-// sendExternalRemovals reports the sessions another process deleted and the
-// pinned checkouts whose directory is gone. The missing-pin set is sent only
-// when it changes, so the steady state costs one stat per pin and no message.
+// sendExternalRemovals reports what another process took away, every sweep: the
+// handler reconciles memory against disk and SQLite and skips the rebuild when
+// nothing changed. Sending only when the missing set changed missed memory
+// drifting on its own — a hidden pin unpinned and then undone before the next
+// sweep is back in memory while the set looks the same.
 func (h *Home) sendExternalRemovals(rows []*session.SessionRow, known []*session.Session) {
-	gone := goneSessions(rows, known, (*session.Session).IsAlive)
-	missing := h.lastMissingPins
-	if pins, err := h.storage.LoadPinnedRepos(); err != nil {
-		debuglog.Logger.Error("sync sweep: failed to load pinned repos", "err", err)
-	} else {
-		missing = missingDirs(pins)
-	}
-	if len(gone) == 0 && maps.Equal(missing, h.lastMissingPins) {
-		return
-	}
-	// Same rendezvous hazard as the adopt send. Skipping costs nothing: the next
-	// sweep recomputes both, and lastMissingPins only advances once delivered.
+	msg := h.buildExternalRemovals(rows, known)
+	// Same rendezvous hazard as the adopt send; the next sweep recomputes it.
 	if h.isAttaching.Load() {
 		return
 	}
-	h.send(externalRemovalsMsg{sessionIDs: gone, missingPins: missing})
-	h.lastMissingPins = missing
+	h.send(msg)
+}
+
+// buildExternalRemovals computes a sync sweep's removals. pinned stays nil when
+// the pin table can't be read, so the handler leaves pins alone rather than
+// read every hidden pin as unpinned.
+func (h *Home) buildExternalRemovals(rows []*session.SessionRow, known []*session.Session) externalRemovalsMsg {
+	msg := externalRemovalsMsg{sessionIDs: goneSessions(rows, known, (*session.Session).IsAlive)}
+	pins, err := h.storage.LoadPinnedRepos()
+	if err != nil {
+		debuglog.Logger.Error("sync sweep: failed to load pinned repos", "err", err)
+		return msg
+	}
+	msg.pinned = make(map[string]bool, len(pins))
+	for _, p := range pins {
+		msg.pinned[p] = true
+	}
+	msg.missingPins = missingDirs(pins)
+	return msg
 }
 
 // adoptExternalSessions sends the stored rows this TUI doesn't know yet.

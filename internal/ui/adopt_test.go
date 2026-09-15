@@ -331,7 +331,10 @@ func TestHandleExternalRemovalsHidesAndRestoresMissingPin(t *testing.T) {
 		t.Fatal("precondition: pinned repo not in the sidebar")
 	}
 
-	h.handleExternalRemovals(externalRemovalsMsg{missingPins: map[string]bool{repo: true}})
+	h.handleExternalRemovals(externalRemovalsMsg{
+		missingPins: map[string]bool{repo: true},
+		pinned:      map[string]bool{repo: true},
+	})
 
 	if len(h.flatItems) != 0 {
 		t.Fatalf("missing pin still renders %d sidebar rows", len(h.flatItems))
@@ -344,9 +347,68 @@ func TestHandleExternalRemovalsHidesAndRestoresMissingPin(t *testing.T) {
 		t.Error("hiding a missing pin must not unpin it in storage")
 	}
 
-	h.handleExternalRemovals(externalRemovalsMsg{})
+	h.handleExternalRemovals(externalRemovalsMsg{pinned: map[string]bool{repo: true}})
 
 	if !h.pinnedRepos[repo] || len(h.flatItems) == 0 {
 		t.Fatal("pin did not come back once its directory stopped being missing")
+	}
+}
+
+// hiddenPinWithSession is a worktree whose directory was deleted outside fleet
+// while a session still lives under it: one sweep has hidden its pin, and the
+// session keeps its header on screen.
+func hiddenPinWithSession(t *testing.T, h *Home) (repo, sessionID string) {
+	t.Helper()
+	repo = filepath.Join(t.TempDir(), "worktree") // never created
+	row := storeSession(t, h, "orphan", repo)
+	h.handleAdoptSessions(adoptSessionsMsg{
+		sessions:  []*session.Session{session.FromRow(row)},
+		repoRoots: map[string]string{row.ID: repo},
+	})
+	syncPins(h)
+	if h.pinnedRepos[repo] || !h.missingPins[repo] {
+		t.Fatal("precondition: the missing pin was not hidden")
+	}
+	return repo, row.ID
+}
+
+// syncPins runs a sync sweep's pin half against real storage and disk. It passes
+// no sessions, so nothing is asked about tmux.
+func syncPins(h *Home) {
+	h.handleExternalRemovals(h.buildExternalRemovals(nil, nil))
+}
+
+// `d` on the header of a hidden pin unpins it in SQLite; the next sweep must not
+// read "dropped out of the missing set" as "the directory is back".
+func TestUnpinnedHiddenPinStaysGone(t *testing.T) {
+	h := adoptTestHome(t)
+	repo, id := hiddenPinWithSession(t, h)
+
+	h.deferDelete(sessionDeleteMsg{id: id, unpinRepo: true, repoPath: repo})
+	syncPins(h)
+
+	if h.pinnedRepos[repo] || h.missingPins[repo] {
+		t.Fatalf("unpinned pin came back: pinned=%v missing=%v", h.pinnedRepos[repo], h.missingPins[repo])
+	}
+	if len(h.flatItems) != 0 {
+		t.Fatalf("sidebar still renders %d rows for an unpinned, deleted directory", len(h.flatItems))
+	}
+}
+
+// Undoing that delete re-pins in memory without changing the missing set, so the
+// sweep has to reconcile every time rather than only when the set changes.
+func TestUndoneUnpinIsHiddenAgain(t *testing.T) {
+	h := adoptTestHome(t)
+	repo, id := hiddenPinWithSession(t, h)
+
+	h.deferDelete(sessionDeleteMsg{id: id, unpinRepo: true, repoPath: repo})
+	h.undoDelete()
+	if !h.pinnedRepos[repo] {
+		t.Fatal("test is vacuous: undo did not re-pin in memory")
+	}
+	syncPins(h)
+
+	if h.pinnedRepos[repo] || !h.missingPins[repo] {
+		t.Fatalf("undone pin not hidden again: pinned=%v missing=%v", h.pinnedRepos[repo], h.missingPins[repo])
 	}
 }
