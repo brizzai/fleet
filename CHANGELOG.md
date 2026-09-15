@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.39.0] - 2026-09-15
+
+### Fixed
+
+- **`fleet remove` reaches the TUI.** A session you remove from the shell now disappears from a running fleet within ~5s, instead of lingering as a `✕` error row until you restart.
+- **Deleted worktrees leave the sidebar.** A pinned repo whose directory is gone is now hidden instead of sitting there as `(empty)` forever, and it comes back if the directory does.
+
 ## [2.38.0] - 2026-09-14
 
 ### Highlights
@@ -671,7 +678,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.38.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.39.0...HEAD
+[2.39.0]: https://github.com/brizzai/fleet/releases/tag/v2.39.0
 [2.38.0]: https://github.com/brizzai/fleet/releases/tag/v2.38.0
 [2.37.0]: https://github.com/brizzai/fleet/releases/tag/v2.37.0
 [2.36.0]: https://github.com/brizzai/fleet/releases/tag/v2.36.0
