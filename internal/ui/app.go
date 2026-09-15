@@ -159,6 +159,17 @@ type (
 		// an 8s timeout on the UI loop.
 		repoRoots map[string]string
 	}
+	// externalRemovalsMsg carries what another process took away since the last
+	// sync sweep: sessions whose row was deleted (`fleet remove`) and the full
+	// set of pinned checkouts whose directory no longer exists.
+	externalRemovalsMsg struct {
+		sessionIDs  []string
+		missingPins map[string]bool
+		// pinned is the SQLite pin set, so a hidden pin is restored only while
+		// it is still pinned. nil means the pin table couldn't be read this
+		// sweep, and the handler leaves pins untouched.
+		pinned map[string]bool
+	}
 	openEditorMsg        struct{ err error }
 	openPRMsg            struct{ err error }
 	quickApproveMsg      struct{ err error }
@@ -313,6 +324,7 @@ type Home struct {
 	// kill isn't lost when fleet exits mid-cleanup.
 	finalizingDeletes []PendingDelete
 	pinnedRepos       map[string]bool // pinned repo paths (persist in SQLite)
+	missingPins       map[string]bool // pins hidden from pinnedRepos because their directory is gone (still pinned in SQLite)
 
 	// failedWorktreeRemovals holds worktree repo paths whose destroy failed
 	// (something is still holding the directory). Such repos are re-pinned and
@@ -597,6 +609,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		tccProbed:              make(map[string]bool),
 		tccBlockedRoots:        make(map[string]bool),
 		pinnedRepos:            make(map[string]bool),
+		missingPins:            make(map[string]bool),
 		failedWorktreeRemovals: make(map[string]bool),
 		newDialog:              NewNewSessionDialog(),
 		confirmDialog:          NewConfirmDialog(),
@@ -1225,6 +1238,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case adoptSessionsMsg:
 		return h.handleAdoptSessions(msg)
+
+	case externalRemovalsMsg:
+		return h.handleExternalRemovals(msg)
 
 	case tccProbeResultMsg:
 		if !msg.determined {
@@ -4335,6 +4351,106 @@ func (h *Home) handleAdoptSessions(msg adoptSessionsMsg) (tea.Model, tea.Cmd) {
 	return h, tea.Batch(cmds...)
 }
 
+// handleExternalRemovals applies what the sync sweep found another process took
+// away. Sessions leave memory only: their row is already deleted, and tmux
+// belongs to whoever removed them. Pins are hidden, never unpinned — the SQLite
+// row stays, so a checkout whose directory comes back (a remounted volume, a
+// worktree re-created at the same path) reappears on a later sweep, unless it
+// was unpinned in the meantime. Like
+// adoption this arrives on a timer, so the cursor is re-found by identity.
+func (h *Home) handleExternalRemovals(msg externalRemovalsMsg) (tea.Model, tea.Cmd) {
+	target := h.targetForCursor()
+	changed := false
+	for _, id := range msg.sessionIDs {
+		// The worker diffed a cycle-start snapshot, so a session this TUI
+		// deleted since is already gone from memory.
+		if _, ok := h.sessionByID[id]; !ok {
+			continue
+		}
+		debuglog.Logger.Info("dropping session removed by another process", "id", id)
+		h.forgetSession(id)
+		changed = true
+	}
+	if msg.pinned != nil {
+		for repo := range msg.missingPins {
+			if h.pinnedRepos[repo] {
+				debuglog.Logger.Info("hiding pinned repo whose directory is gone", "repo", repo)
+				delete(h.pinnedRepos, repo)
+				h.missingPins[repo] = true
+				changed = true
+			}
+		}
+		for repo := range h.missingPins {
+			if msg.missingPins[repo] {
+				continue
+			}
+			delete(h.missingPins, repo)
+			// Dropping out of the missing set means either the directory is back
+			// or the pin is gone from SQLite (the header delete unpins). Only the
+			// first restores it.
+			if msg.pinned[repo] {
+				h.pinnedRepos[repo] = true
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return h, nil
+	}
+
+	h.rebuildFlatItems()
+	if idx := target.find(h.flatItems); idx >= 0 {
+		h.cursor = idx
+		h.syncViewport()
+		return h, nil
+	}
+	h.clampCursor()
+	h.syncViewport()
+	return h, h.fetchPreviewForSelected()
+}
+
+// forgetSession drops a session from the in-memory model: the session list, the
+// ID index, and any slot binding pointing at it. The FK cascade on the session
+// row drops the stored binding, but the in-memory map needs explicit cleanup so
+// the [N] badge disappears. Callers rebuild the sidebar.
+func (h *Home) forgetSession(id string) {
+	for slot, sid := range h.slotBindings {
+		if sid == id {
+			delete(h.slotBindings, slot)
+		}
+	}
+	if h.lastSlotTapSlot >= 0 {
+		if sid, ok := h.slotBindings[h.lastSlotTapSlot]; !ok || sid == id {
+			h.lastSlotTapSlot = -1
+		}
+	}
+
+	var remaining []*session.Session
+	for _, sess := range h.sessions {
+		if sess.ID != id {
+			remaining = append(remaining, sess)
+		}
+	}
+	h.workerMu.Lock()
+	h.sessions = remaining
+	h.rebuildSessionMap()
+	h.workerMu.Unlock()
+}
+
+// clampCursor pulls the cursor back in range after rows were removed from under
+// it, stepping off a header onto the nearest selectable row.
+func (h *Home) clampCursor() {
+	if h.cursor >= len(h.flatItems) {
+		h.cursor = len(h.flatItems) - 1
+	}
+	if h.cursor < 0 {
+		h.cursor = 0
+	}
+	if len(h.flatItems) > 0 && h.flatItems[h.cursor].IsRepoHeader {
+		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
+	}
+}
+
 // canAutoExpand reports whether a group may be opened without the user asking.
 // False when they collapsed it themselves, and false while it's snoozed — a
 // snooze collapses its group on purpose, so re-opening it would leave the two
@@ -5143,15 +5259,17 @@ func (h *Home) maybeRepairClaudeHooks() {
 // without a restart, and a few seconds is a fine latency for that.
 const adoptSweepInterval = 5 * time.Second
 
-// maybeAdoptExternalSessions picks up session rows written by another fleet
-// process — `fleet worktree`, `fleet add` — while this TUI is running. Sessions
-// are otherwise read from SQLite exactly once, at startup (loadSessions), so
-// without this a session created from the shell stays invisible until restart.
+// maybeSyncExternalSessions folds in session changes another fleet process made
+// while this TUI is running: rows written by `fleet worktree` / `fleet add` are
+// adopted, rows deleted by `fleet remove` are dropped. Sessions are otherwise
+// read from SQLite exactly once, at startup (loadSessions), so without this the
+// sidebar shows its startup snapshot until restart. The same sweep hides pinned
+// checkouts whose directory has been deleted.
 //
-// Adoption only: rows deleted by another process are NOT dropped from the
-// in-memory list. Runs on the worker goroutine (it reads SQLite); the actual
-// mutation happens on the Update goroutine via adoptSessionsMsg.
-func (h *Home) maybeAdoptExternalSessions(known []*session.Session) {
+// Runs on the worker goroutine (it reads SQLite and stats directories); the
+// actual mutation happens on the Update goroutine via adoptSessionsMsg and
+// externalRemovalsMsg.
+func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	if !h.lastAdoptSweepAt.IsZero() && time.Since(h.lastAdoptSweepAt) < adoptSweepInterval {
 		return
 	}
@@ -5162,6 +5280,44 @@ func (h *Home) maybeAdoptExternalSessions(known []*session.Session) {
 		debuglog.Logger.Error("adopt sweep: failed to load sessions", "err", err)
 		return
 	}
+	h.adoptExternalSessions(rows, known)
+	h.sendExternalRemovals(rows, known)
+}
+
+// sendExternalRemovals reports what another process took away, every sweep: the
+// handler reconciles memory against disk and SQLite and skips the rebuild when
+// nothing changed. Sending only when the missing set changed missed memory
+// drifting on its own — a hidden pin unpinned and then undone before the next
+// sweep is back in memory while the set looks the same.
+func (h *Home) sendExternalRemovals(rows []*session.SessionRow, known []*session.Session) {
+	msg := h.buildExternalRemovals(rows, known)
+	// Same rendezvous hazard as the adopt send; the next sweep recomputes it.
+	if h.isAttaching.Load() {
+		return
+	}
+	h.send(msg)
+}
+
+// buildExternalRemovals computes a sync sweep's removals. pinned stays nil when
+// the pin table can't be read, so the handler leaves pins alone rather than
+// read every hidden pin as unpinned.
+func (h *Home) buildExternalRemovals(rows []*session.SessionRow, known []*session.Session) externalRemovalsMsg {
+	msg := externalRemovalsMsg{sessionIDs: goneSessions(rows, known, (*session.Session).IsAlive)}
+	pins, err := h.storage.LoadPinnedRepos()
+	if err != nil {
+		debuglog.Logger.Error("sync sweep: failed to load pinned repos", "err", err)
+		return msg
+	}
+	msg.pinned = make(map[string]bool, len(pins))
+	for _, p := range pins {
+		msg.pinned[p] = true
+	}
+	msg.missingPins = missingDirs(pins)
+	return msg
+}
+
+// adoptExternalSessions sends the stored rows this TUI doesn't know yet.
+func (h *Home) adoptExternalSessions(rows []*session.SessionRow, known []*session.Session) {
 	adopted := unknownSessions(rows, known, os.Getenv("FLEET_DEMO_PREFIX"))
 	if len(adopted) == 0 {
 		return
@@ -5206,6 +5362,41 @@ func unknownSessions(rows []*session.SessionRow, known []*session.Session, demoP
 			continue
 		}
 		out = append(out, session.FromRow(row))
+	}
+	return out
+}
+
+// goneSessions returns the IDs of known sessions with no stored row and no live
+// tmux — removed by another process, e.g. `fleet remove`. Both halves are
+// needed: a session this TUI just created joins the in-memory list with its tmux
+// already running but before its SaveSession lands, so a sweep can briefly see
+// it without a row. A removed session's tmux is already gone, so requiring both
+// costs nothing. alive is only asked about sessions whose row is missing.
+func goneSessions(rows []*session.SessionRow, known []*session.Session, alive func(*session.Session) bool) []string {
+	stored := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		stored[row.ID] = true
+	}
+	var out []string
+	for _, s := range known {
+		if !stored[s.ID] && !alive(s) {
+			out = append(out, s.ID)
+		}
+	}
+	return out
+}
+
+// missingDirs returns the paths that no longer exist on disk. Only a definite
+// not-exist counts: a permission error is not evidence the checkout was deleted.
+func missingDirs(paths []string) map[string]bool {
+	var out map[string]bool
+	for _, p := range paths {
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			if out == nil {
+				out = make(map[string]bool)
+			}
+			out[p] = true
+		}
 	}
 	return out
 }
@@ -5987,43 +6178,12 @@ func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
 		h.forgetSnooze(msg.repoPath)
 	}
 
-	// Clear any slot binding pointing at this session. FK cascade drops the
-	// DB row (triggered by the DeleteSession above), but the in-memory map
-	// needs explicit cleanup so the [N] badge disappears from the sidebar.
-	// Slot bindings do NOT survive undo: restoring the session via `u` leaves
-	// it unbound, and the user can re-press Alt+<N> to rebind.
-	for slot, sid := range h.slotBindings {
-		if sid == msg.id {
-			delete(h.slotBindings, slot)
-		}
-	}
-	if h.lastSlotTapSlot >= 0 {
-		if sid, ok := h.slotBindings[h.lastSlotTapSlot]; !ok || sid == msg.id {
-			h.lastSlotTapSlot = -1
-		}
-	}
-
-	// Remove from in-memory session list.
-	var remaining []*session.Session
-	for _, sess := range h.sessions {
-		if sess.ID != msg.id {
-			remaining = append(remaining, sess)
-		}
-	}
-	h.sessions = remaining
-	h.rebuildSessionMap()
+	// Remove from memory, slot bindings included. Slot bindings do NOT survive
+	// undo: restoring the session via `u` leaves it unbound, and the user can
+	// re-press Alt+<N> to rebind.
+	h.forgetSession(msg.id)
 	h.rebuildFlatItems()
-
-	// Fix cursor.
-	if h.cursor >= len(h.flatItems) {
-		h.cursor = len(h.flatItems) - 1
-	}
-	if h.cursor < 0 {
-		h.cursor = 0
-	}
-	if len(h.flatItems) > 0 && h.flatItems[h.cursor].IsRepoHeader {
-		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
-	}
+	h.clampCursor()
 
 	// Generate nonce for timer matching.
 	nonce := fmt.Sprintf("%s-%d", msg.id, time.Now().UnixNano())
@@ -6778,7 +6938,7 @@ func (h *Home) statusWorkerCycle() {
 		// sidebar is the likeliest place to be driving from the shell. Every
 		// other pass below has nothing to work on.
 		if heavy {
-			h.maybeAdoptExternalSessions(sessions)
+			h.maybeSyncExternalSessions(sessions)
 		}
 		return
 	}
@@ -6982,10 +7142,11 @@ drainPriority:
 	h.maybeSuspendIdleSessions(sessions)
 
 	// 5c. Adopt sessions another fleet process created (e.g. `fleet worktree`
-	// from a shell) since the last sweep. Self-throttled; reads SQLite, which is
-	// why it lives here rather than on the Update loop. Also called on the
-	// empty-fleet early-return path above — the throttle makes that safe.
-	h.maybeAdoptExternalSessions(sessions)
+	// from a shell) and drop ones it removed (`fleet remove`) since the last
+	// sweep. Self-throttled; reads SQLite, which is why it lives here rather
+	// than on the Update loop. Also called on the empty-fleet early-return path
+	// above — the throttle makes that safe.
+	h.maybeSyncExternalSessions(sessions)
 
 	// 5d. Re-point Claude's hooks if the command they name has been deleted.
 	// Self-throttled; stats a file and may rewrite settings.json, which is why it
