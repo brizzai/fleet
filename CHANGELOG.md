@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.40.0] - 2026-09-16
+
+### Improved
+
+- **See what your PR is waiting on.** The yellow PR badge now shows `⇶` while CI is running and `⌕` while a review is still required, instead of a bare `#5415` that looked the same either way.
+
 ## [2.39.1] - 2026-09-16
 
 ### Fixed
@@ -684,7 +690,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.39.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.40.0...HEAD
+[2.40.0]: https://github.com/brizzai/fleet/releases/tag/v2.40.0
 [2.39.1]: https://github.com/brizzai/fleet/releases/tag/v2.39.1
 [2.39.0]: https://github.com/brizzai/fleet/releases/tag/v2.39.0
 [2.38.0]: https://github.com/brizzai/fleet/releases/tag/v2.38.0
