@@ -930,6 +930,16 @@ func prBadgeText(pr *github.PR) string {
 	if icons == "" && pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" {
 		icons = "✓"
 	}
+	// Nothing to fix: name what the PR is waiting on, so a yellow badge says
+	// whether it's CI or a reviewer holding it up.
+	if icons == "" {
+		if pr.CIStatus == "PENDING" {
+			icons += "⇶"
+		}
+		if pr.ReviewDecision == "REVIEW_REQUIRED" {
+			icons += "⌕"
+		}
+	}
 	if icons == "" {
 		return badge
 	}

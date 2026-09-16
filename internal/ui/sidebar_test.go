@@ -133,6 +133,27 @@ func TestRenderSessionItem_AgentGlyph(t *testing.T) {
 	}
 }
 
+func TestPRBadge_WaitingOnCIVsReview(t *testing.T) {
+	cases := []struct {
+		name string
+		pr   *github.PR
+		want string
+	}{
+		{"CI running", &github.PR{Number: 1, State: "OPEN", CIStatus: "PENDING"}, "#1 ⇶"},
+		{"awaiting review", &github.PR{Number: 2, State: "OPEN", CIStatus: "SUCCESS", ReviewDecision: "REVIEW_REQUIRED"}, "#2 ⌕"},
+		{"both", &github.PR{Number: 3, State: "OPEN", CIStatus: "PENDING", ReviewDecision: "REVIEW_REQUIRED"}, "#3 ⇶⌕"},
+		{"approved, CI running", &github.PR{Number: 4, State: "OPEN", CIStatus: "PENDING", ReviewDecision: "APPROVED"}, "#4 ⇶"},
+		// A problem outranks a wait: only the thing to fix is shown.
+		{"CI failed, awaiting review", &github.PR{Number: 5, State: "OPEN", CIStatus: "FAILURE", ReviewDecision: "REVIEW_REQUIRED"}, "#5 ✕"},
+		{"threads, CI running", &github.PR{Number: 6, State: "OPEN", CIStatus: "PENDING", UnresolvedThreads: 1}, "#6 ↩"},
+	}
+	for _, tc := range cases {
+		if got := prBadgeText(tc.pr); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestPRBadge_Draft(t *testing.T) {
 	draft := &github.PR{Number: 133, State: "OPEN", IsDraft: true}
 	if got := prBadgeText(draft); got != "◌ #133" {
