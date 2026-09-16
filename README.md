@@ -13,6 +13,8 @@
     <a href="https://brizzai.github.io/fleet/">Website</a>
     &middot;
     <a href="https://brizzai.github.io/fleet/docs/">Docs</a>
+    &middot;
+    <a href="https://www.brizz.ai/">Built by Brizz</a>
   </p>
   <p align="center">
     <a href="https://goreportcard.com/report/github.com/brizzai/fleet"><img src="https://goreportcard.com/badge/github.com/brizzai/fleet" alt="Go Report Card"></a>
@@ -207,3 +209,5 @@ See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for development setup and guideli
 ## License
 
 Apache 2.0
+
+fleet is built and maintained by [Brizz](https://www.brizz.ai/), the agent analytics platform.
