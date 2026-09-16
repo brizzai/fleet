@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- - **CI-running glyph swapped.** The PR badge now shows `◔` while CI is running instead of `⇶`, which read as a stray arrow beside `⌕`.
+- **CI-running glyph swapped.** The PR badge now shows `◔` while CI is running instead of `⇶`, which read as a stray arrow beside `⌕`.
 
 ## [2.40.0] - 2026-09-16
 
