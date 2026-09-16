@@ -250,3 +250,25 @@ func TestLinearEscCancelsKeyVerification(t *testing.T) {
 		t.Error("Hide must clear the cancel func after calling it")
 	}
 }
+
+// TestConnectPasteReachesTheKeyField pins #310 for the Linear dialog: the
+// "Paste an API key" path dropped tea.PasteMsg (not a tea.KeyMsg in Bubble Tea
+// v2) before the input saw it, so the one thing the row names was the one
+// thing it could not do.
+func TestConnectPasteReachesTheKeyField(t *testing.T) {
+	d := connectDialog(t)
+	d.stage = connectPasting
+	d.input.Focus()
+
+	d, _ = d.Update(tea.PasteMsg{Content: "lin_api_pasted"})
+	if got := d.input.Value(); got != "lin_api_pasted" {
+		t.Fatalf("key after paste = %q, want the pasted value", got)
+	}
+
+	// On the method chooser no field is focused, so a paste is inert.
+	d = connectDialog(t)
+	d, _ = d.Update(tea.PasteMsg{Content: "stray"})
+	if got := d.input.Value(); got != "" {
+		t.Fatalf("paste on the chooser wrote %q into the hidden key field", got)
+	}
+}

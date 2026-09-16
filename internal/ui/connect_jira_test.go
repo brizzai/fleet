@@ -258,3 +258,34 @@ func TestJiraCancelledVerificationIsNotReportedAsRejection(t *testing.T) {
 		t.Errorf("a cancelled verification reported an error: %v", d.err)
 	}
 }
+
+// TestJiraPasteReachesTheFocusedField pins #310: cmd+v arrives as
+// tea.PasteMsg, which is not a tea.KeyMsg in Bubble Tea v2, and the dialog used
+// to drop it before the text input ever saw it. Typed keys landed, so the form
+// looked fine to anyone who never tried to paste a 200-character token into it.
+func TestJiraPasteReachesTheFocusedField(t *testing.T) {
+	d := jiraDialog(t)
+	d = pressJira(d, "down")
+	d = pressJira(d, "down")
+	if d.focus != jiraFieldToken {
+		t.Fatalf("focus = %d, want the token field", d.focus)
+	}
+
+	d, _ = d.Update(tea.PasteMsg{Content: "ATATT3xFfGF0-pasted"})
+	if got := d.inputs[jiraFieldToken].Value(); got != "ATATT3xFfGF0-pasted" {
+		t.Fatalf("token after paste = %q, want the pasted value", got)
+	}
+	for i := range d.inputs {
+		if i != jiraFieldToken && d.inputs[i].Value() != "" {
+			t.Errorf("field %d = %q — paste must land only on the focused field", i, d.inputs[i].Value())
+		}
+	}
+
+	// Outside the form nothing owns a field, so a paste is inert rather than
+	// written somewhere the user cannot see.
+	d.stage = connectWorking
+	d, _ = d.Update(tea.PasteMsg{Content: "stray"})
+	if got := d.inputs[jiraFieldToken].Value(); got != "ATATT3xFfGF0-pasted" {
+		t.Fatalf("paste while verifying changed the token to %q", got)
+	}
+}
