@@ -159,6 +159,17 @@ type (
 		// an 8s timeout on the UI loop.
 		repoRoots map[string]string
 	}
+	// externalRemovalsMsg carries what another process took away since the last
+	// sync sweep: sessions whose row was deleted (`fleet remove`) and the full
+	// set of pinned checkouts whose directory no longer exists.
+	externalRemovalsMsg struct {
+		sessionIDs  []string
+		missingPins map[string]bool
+		// pinned is the SQLite pin set, so a hidden pin is restored only while
+		// it is still pinned. nil means the pin table couldn't be read this
+		// sweep, and the handler leaves pins untouched.
+		pinned map[string]bool
+	}
 	openEditorMsg        struct{ err error }
 	openPRMsg            struct{ err error }
 	quickApproveMsg      struct{ err error }
@@ -298,8 +309,11 @@ type Home struct {
 	// launchpad is the first-run experience shown when the fleet is empty:
 	// recent repos mined from Claude Code history, ready to resume.
 	// launchpadDismissed lets the user Esc out to the bare empty state.
-	launchpad          *Launchpad
-	launchpadDismissed bool
+	// launchpadShownPending holds launchpad_shown's repo count until the consent
+	// prompt is answered — see discoveryMsg.
+	launchpad             *Launchpad
+	launchpadDismissed    bool
+	launchpadShownPending int
 
 	pendingWorkspaces []*PendingWorkspace // in-flight workspace creations
 	pendingForkCtx    *forkContext        // set while Shift+F worktree picker is open; consumed on pick/cancel
@@ -310,6 +324,7 @@ type Home struct {
 	// kill isn't lost when fleet exits mid-cleanup.
 	finalizingDeletes []PendingDelete
 	pinnedRepos       map[string]bool                  // pinned repo paths (persist in SQLite)
+	missingPins       map[string]bool                  // pins hidden from pinnedRepos because their directory is gone (still pinned in SQLite)
 	reviewQueue       []github.ReviewRequest           // PRs awaiting review, from the last fetch
 	reviewFiles       map[reviewKey]github.PRFiles     // changed files per reviewed PR
 	reviewFilesAt     map[reviewKey]time.Time          // when each was fetched, for the TTL
@@ -612,6 +627,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		tccProbed:              make(map[string]bool),
 		tccBlockedRoots:        make(map[string]bool),
 		pinnedRepos:            make(map[string]bool),
+		missingPins:            make(map[string]bool),
 		failedWorktreeRemovals: make(map[string]bool),
 		newDialog:              NewNewSessionDialog(),
 		confirmDialog:          NewConfirmDialog(),
@@ -1247,6 +1263,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case adoptSessionsMsg:
 		return h.handleAdoptSessions(msg)
 
+	case externalRemovalsMsg:
+		return h.handleExternalRemovals(msg)
+
 	case tccProbeResultMsg:
 		if !msg.determined {
 			// Inconclusive (no server yet / tmux error) — unlatch so a later create
@@ -1473,6 +1492,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// mid-session, mark them active today so DAU catches them now.
 		analytics.SyncEnabled(h.cfg.GetTelemetryMode(), h.version, h.identity)
 		analytics.Heartbeat()
+		// Once per commit with the final theme, not once per ←/→ through the live
+		// preview — and only after SyncEnabled, so a user who turned telemetry off
+		// (or down to Basic) in this same visit isn't tracked by the old client.
+		if msg.theme != "" {
+			analytics.Track(analytics.EventThemeChanged, map[string]interface{}{"theme": msg.theme})
+		}
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
@@ -1486,8 +1511,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case consentResultMsg:
-		// Accept → full (usage + git identity); decline → minimal (anonymous
-		// daily-active ping only, no identity). "Off" is Settings-only. Persist
+		// Accept → full (usage + git identity); decline → minimal (the same
+		// usage, anonymously). "Off" is Settings-only. Persist
 		// the mode so we don't ask again, clearing any legacy bool so it can't
 		// shadow the new field, then run startup analytics in the chosen mode.
 		mode := config.TelemetryMinimal
@@ -1500,12 +1525,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := h.cfg.Save(); err != nil {
 			debuglog.Logger.Error("config: save after consent", "err", err)
 		}
-		// Both outcomes initialize the client and emit the anonymous DAU
-		// signals; only full mode additionally attaches identity + rich usage.
+		// Both outcomes initialize the client and send the same events; only
+		// full mode attaches git identity and a people profile.
 		h.workerMu.Lock()
 		repoCount := len(session.GroupByRepo(h.sessions))
 		h.workerMu.Unlock()
 		h.fireStartupAnalytics(repoCount)
+		if h.launchpadShownPending > 0 {
+			analytics.Track(analytics.EventLaunchpadShown, map[string]interface{}{
+				"discovered_repos": h.launchpadShownPending,
+			})
+			h.launchpadShownPending = 0
+		}
 		// First-run theme onboarding follows the consent prompt.
 		h.maybeShowOnboarding()
 		return h, nil
@@ -2136,9 +2167,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.startAccountWorker()
 		}
 		if len(msg.items) > 0 {
-			analytics.Track(analytics.EventOnboardingFirstLaunch, map[string]interface{}{
-				"discovered_repos": len(msg.items),
-			})
+			// On a first launch the consent prompt is still unanswered, so no
+			// analytics client exists yet and Track would drop this silently —
+			// every time, since the splash hides the prompt until this handler
+			// flips booted. Hold the count; consentResultMsg sends it.
+			if h.consentDialog.IsVisible() {
+				h.launchpadShownPending = len(msg.items)
+			} else {
+				analytics.Track(analytics.EventLaunchpadShown, map[string]interface{}{
+					"discovered_repos": len(msg.items),
+				})
+			}
 		}
 		return h, nil
 
@@ -3123,6 +3162,9 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return h, h.launchLaunchpadSet(set)
 		case "esc":
 			h.launchpadDismissed = true
+			analytics.Track(analytics.EventLaunchpadSkipped, map[string]interface{}{
+				"discovered": h.launchpad.ItemCount(),
+			})
 			return h, nil
 		}
 	}
@@ -3300,7 +3342,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// New worktree session (works on a session, checkout header, or origin header).
 		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
-			h.setError(fmt.Errorf("no repo selected"))
+			h.setInfo("no repo selected")
 			return h, nil
 		}
 		h.worktreeDialog.ShowLoading()
@@ -3377,7 +3419,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("open editor", fmt.Sprintf("%q at %s", h.cfg.GetEditor(), s.ProjectPath), true)
-			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": h.cfg.GetEditor()})
+			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": editorName(h.cfg.GetEditor())})
 		}
 		return h, h.openEditorSelected()
 	case "p":
@@ -3698,6 +3740,10 @@ func (h *Home) attachSessionByID(id string) tea.Cmd {
 	return h.attachSession(s)
 }
 
+// attachBailThreshold is how short an attach has to be to count as a bail: the
+// user entered a session and came straight back out.
+const attachBailThreshold = 10 * time.Second
+
 func (h *Home) attachSession(s *session.Session) tea.Cmd {
 	if s == nil || !s.IsAlive() {
 		return nil
@@ -3732,8 +3778,14 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 		// the attach failed before / during entry (tmux gone, etc.) — the
 		// near-zero "uptime" would be noise in the distribution.
 		if err == nil {
-			analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs,
-				time.Since(attachStart).Seconds(), nil)
+			attached := time.Since(attachStart)
+			analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs, attached.Seconds(), nil)
+			if attached < attachBailThreshold {
+				analytics.Track(analytics.EventAttachBailed, map[string]interface{}{
+					"agent":   string(s.Agent),
+					"seconds": int(attached.Seconds()),
+				})
+			}
 		}
 		return statusUpdateMsg{attachedSessionID: s.ID}
 	})
@@ -3817,7 +3869,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		ag = agent.Parse(h.cfg.GetDefaultAgent())
 	}
 	if _, err := exec.LookPath(ag.Binary()); err != nil {
-		h.setError(fmt.Errorf("%s CLI not found — install %s to create sessions", ag.Binary(), ag.DisplayName()))
+		h.setError(fmt.Errorf("%s CLI not found: install %s to create sessions", ag.Binary(), ag.DisplayName()))
 		return h, nil
 	}
 	// Codex prompts to trust a new directory on first launch; pre-seed trust so
@@ -3846,7 +3898,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		// enforced in one surface and not the other is worse than not having
 		// one — the cost of a miss here is billing work to the wrong
 		// subscription.
-		h.setError(fmt.Errorf("%s is not in allowed_accounts for this repo", h.accountLabel(msg.account)))
+		h.setError(fmt.Errorf("account not allowed for this repo: %s isn't in allowed_accounts", h.accountLabel(msg.account)))
 		return h, nil
 	}
 	// A conflicting ambient credential outranks the per-session login, so the
@@ -4303,23 +4355,29 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 		return nil
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
-		h.setError(fmt.Errorf("claude CLI not found — install Claude Code to create sessions"))
+		h.setError(fmt.Errorf("claude CLI not found: install Claude Code to create sessions"))
+		analytics.Track(analytics.EventStartupFailed, map[string]interface{}{"reason": "claude_missing"})
 		return nil
 	}
-	analytics.Track(analytics.EventOnboardingFirstSessionCreated, map[string]interface{}{"count": len(items)})
+	analytics.Track(analytics.EventLaunchpadLaunched, map[string]interface{}{
+		"selected":   len(items),
+		"discovered": h.launchpad.ItemCount(),
+	})
 	cmds := make([]tea.Cmd, 0, len(items))
 	// startSessionCmd is called directly here rather than through
 	// handleSessionCreate, so the account has to be resolved per item — without
 	// this every session the launchpad creates lands on the ambient login
 	// regardless of account_strategy, on the one path that makes several at once.
-	ag := agent.Parse(h.cfg.GetDefaultAgent())
+	// Claude whatever default_agent says: every item resumes a conversation found
+	// in Claude Code's own history.
+	ag := agent.Claude
 	for _, it := range items {
 		account, blocked := h.resolveAccount(ag, it.Path)
 		if blocked != "" {
 			// Skipped, not aborted: this creates several sessions at once, and one
 			// repo with an unsatisfiable allowlist must not cost the user the rest
 			// of their selection. Named so the gap in the sidebar has a reason.
-			h.setError(fmt.Errorf("%s: %s", filepath.Base(it.Path), blocked))
+			h.setError(fmt.Errorf("launchpad skipped a repo: %s — %s", filepath.Base(it.Path), blocked))
 			h.actionLog.Add("launchpad skip", it.Path, false)
 			continue
 		}
@@ -4327,6 +4385,7 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
 			path:           it.Path,
 			title:          it.Title,
+			agent:          ag,
 			resumeClaudeID: it.ClaudeSessionID,
 			account:        account,
 		}))
@@ -4465,6 +4524,106 @@ func (h *Home) handleAdoptSessions(msg adoptSessionsMsg) (tea.Model, tea.Cmd) {
 	// so the viewport has to be re-synced either way.
 	h.syncViewport()
 	return h, tea.Batch(cmds...)
+}
+
+// handleExternalRemovals applies what the sync sweep found another process took
+// away. Sessions leave memory only: their row is already deleted, and tmux
+// belongs to whoever removed them. Pins are hidden, never unpinned — the SQLite
+// row stays, so a checkout whose directory comes back (a remounted volume, a
+// worktree re-created at the same path) reappears on a later sweep, unless it
+// was unpinned in the meantime. Like
+// adoption this arrives on a timer, so the cursor is re-found by identity.
+func (h *Home) handleExternalRemovals(msg externalRemovalsMsg) (tea.Model, tea.Cmd) {
+	target := h.targetForCursor()
+	changed := false
+	for _, id := range msg.sessionIDs {
+		// The worker diffed a cycle-start snapshot, so a session this TUI
+		// deleted since is already gone from memory.
+		if _, ok := h.sessionByID[id]; !ok {
+			continue
+		}
+		debuglog.Logger.Info("dropping session removed by another process", "id", id)
+		h.forgetSession(id)
+		changed = true
+	}
+	if msg.pinned != nil {
+		for repo := range msg.missingPins {
+			if h.pinnedRepos[repo] {
+				debuglog.Logger.Info("hiding pinned repo whose directory is gone", "repo", repo)
+				delete(h.pinnedRepos, repo)
+				h.missingPins[repo] = true
+				changed = true
+			}
+		}
+		for repo := range h.missingPins {
+			if msg.missingPins[repo] {
+				continue
+			}
+			delete(h.missingPins, repo)
+			// Dropping out of the missing set means either the directory is back
+			// or the pin is gone from SQLite (the header delete unpins). Only the
+			// first restores it.
+			if msg.pinned[repo] {
+				h.pinnedRepos[repo] = true
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return h, nil
+	}
+
+	h.rebuildFlatItems()
+	if idx := target.find(h.flatItems); idx >= 0 {
+		h.cursor = idx
+		h.syncViewport()
+		return h, nil
+	}
+	h.clampCursor()
+	h.syncViewport()
+	return h, h.fetchPreviewForSelected()
+}
+
+// forgetSession drops a session from the in-memory model: the session list, the
+// ID index, and any slot binding pointing at it. The FK cascade on the session
+// row drops the stored binding, but the in-memory map needs explicit cleanup so
+// the [N] badge disappears. Callers rebuild the sidebar.
+func (h *Home) forgetSession(id string) {
+	for slot, sid := range h.slotBindings {
+		if sid == id {
+			delete(h.slotBindings, slot)
+		}
+	}
+	if h.lastSlotTapSlot >= 0 {
+		if sid, ok := h.slotBindings[h.lastSlotTapSlot]; !ok || sid == id {
+			h.lastSlotTapSlot = -1
+		}
+	}
+
+	var remaining []*session.Session
+	for _, sess := range h.sessions {
+		if sess.ID != id {
+			remaining = append(remaining, sess)
+		}
+	}
+	h.workerMu.Lock()
+	h.sessions = remaining
+	h.rebuildSessionMap()
+	h.workerMu.Unlock()
+}
+
+// clampCursor pulls the cursor back in range after rows were removed from under
+// it, stepping off a header onto the nearest selectable row.
+func (h *Home) clampCursor() {
+	if h.cursor >= len(h.flatItems) {
+		h.cursor = len(h.flatItems) - 1
+	}
+	if h.cursor < 0 {
+		h.cursor = 0
+	}
+	if len(h.flatItems) > 0 && h.flatItems[h.cursor].IsRepoHeader {
+		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
+	}
 }
 
 // canAutoExpand reports whether a group may be opened without the user asking.
@@ -5335,15 +5494,17 @@ func (h *Home) maybeRepairClaudeHooks() {
 // without a restart, and a few seconds is a fine latency for that.
 const adoptSweepInterval = 5 * time.Second
 
-// maybeAdoptExternalSessions picks up session rows written by another fleet
-// process — `fleet worktree`, `fleet add` — while this TUI is running. Sessions
-// are otherwise read from SQLite exactly once, at startup (loadSessions), so
-// without this a session created from the shell stays invisible until restart.
+// maybeSyncExternalSessions folds in session changes another fleet process made
+// while this TUI is running: rows written by `fleet worktree` / `fleet add` are
+// adopted, rows deleted by `fleet remove` are dropped. Sessions are otherwise
+// read from SQLite exactly once, at startup (loadSessions), so without this the
+// sidebar shows its startup snapshot until restart. The same sweep hides pinned
+// checkouts whose directory has been deleted.
 //
-// Adoption only: rows deleted by another process are NOT dropped from the
-// in-memory list. Runs on the worker goroutine (it reads SQLite); the actual
-// mutation happens on the Update goroutine via adoptSessionsMsg.
-func (h *Home) maybeAdoptExternalSessions(known []*session.Session) {
+// Runs on the worker goroutine (it reads SQLite and stats directories); the
+// actual mutation happens on the Update goroutine via adoptSessionsMsg and
+// externalRemovalsMsg.
+func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	if !h.lastAdoptSweepAt.IsZero() && time.Since(h.lastAdoptSweepAt) < adoptSweepInterval {
 		return
 	}
@@ -5354,6 +5515,44 @@ func (h *Home) maybeAdoptExternalSessions(known []*session.Session) {
 		debuglog.Logger.Error("adopt sweep: failed to load sessions", "err", err)
 		return
 	}
+	h.adoptExternalSessions(rows, known)
+	h.sendExternalRemovals(rows, known)
+}
+
+// sendExternalRemovals reports what another process took away, every sweep: the
+// handler reconciles memory against disk and SQLite and skips the rebuild when
+// nothing changed. Sending only when the missing set changed missed memory
+// drifting on its own — a hidden pin unpinned and then undone before the next
+// sweep is back in memory while the set looks the same.
+func (h *Home) sendExternalRemovals(rows []*session.SessionRow, known []*session.Session) {
+	msg := h.buildExternalRemovals(rows, known)
+	// Same rendezvous hazard as the adopt send; the next sweep recomputes it.
+	if h.isAttaching.Load() {
+		return
+	}
+	h.send(msg)
+}
+
+// buildExternalRemovals computes a sync sweep's removals. pinned stays nil when
+// the pin table can't be read, so the handler leaves pins alone rather than
+// read every hidden pin as unpinned.
+func (h *Home) buildExternalRemovals(rows []*session.SessionRow, known []*session.Session) externalRemovalsMsg {
+	msg := externalRemovalsMsg{sessionIDs: goneSessions(rows, known, (*session.Session).IsAlive)}
+	pins, err := h.storage.LoadPinnedRepos()
+	if err != nil {
+		debuglog.Logger.Error("sync sweep: failed to load pinned repos", "err", err)
+		return msg
+	}
+	msg.pinned = make(map[string]bool, len(pins))
+	for _, p := range pins {
+		msg.pinned[p] = true
+	}
+	msg.missingPins = missingDirs(pins)
+	return msg
+}
+
+// adoptExternalSessions sends the stored rows this TUI doesn't know yet.
+func (h *Home) adoptExternalSessions(rows []*session.SessionRow, known []*session.Session) {
 	adopted := unknownSessions(rows, known, os.Getenv("FLEET_DEMO_PREFIX"))
 	if len(adopted) == 0 {
 		return
@@ -5398,6 +5597,41 @@ func unknownSessions(rows []*session.SessionRow, known []*session.Session, demoP
 			continue
 		}
 		out = append(out, session.FromRow(row))
+	}
+	return out
+}
+
+// goneSessions returns the IDs of known sessions with no stored row and no live
+// tmux — removed by another process, e.g. `fleet remove`. Both halves are
+// needed: a session this TUI just created joins the in-memory list with its tmux
+// already running but before its SaveSession lands, so a sweep can briefly see
+// it without a row. A removed session's tmux is already gone, so requiring both
+// costs nothing. alive is only asked about sessions whose row is missing.
+func goneSessions(rows []*session.SessionRow, known []*session.Session, alive func(*session.Session) bool) []string {
+	stored := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		stored[row.ID] = true
+	}
+	var out []string
+	for _, s := range known {
+		if !stored[s.ID] && !alive(s) {
+			out = append(out, s.ID)
+		}
+	}
+	return out
+}
+
+// missingDirs returns the paths that no longer exist on disk. Only a definite
+// not-exist counts: a permission error is not evidence the checkout was deleted.
+func missingDirs(paths []string) map[string]bool {
+	var out map[string]bool
+	for _, p := range paths {
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			if out == nil {
+				out = make(map[string]bool)
+			}
+			out[p] = true
+		}
 	}
 	return out
 }
@@ -5512,7 +5746,7 @@ func (h *Home) suspendSelected() tea.Cmd {
 func (h *Home) forkSelected() tea.Cmd {
 	s := h.selectedSession()
 	if s == nil {
-		h.setError(fmt.Errorf("cannot fork: no session selected"))
+		h.setInfo("cannot fork: no session selected")
 		return nil
 	}
 	if s.GetClaudeSessionID() == "" {
@@ -5610,7 +5844,7 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	s := h.selectedSession()
 	if s == nil {
-		h.setError(fmt.Errorf("cannot fork to worktree: no session selected"))
+		h.setInfo("cannot fork to worktree: no session selected")
 		return nil
 	}
 	// Fork-to-worktree stages the parent's Claude transcript into the new cwd so
@@ -5972,7 +6206,7 @@ func (h *Home) quickApproveSelected() tea.Cmd {
 		return nil
 	}
 	if s.GetStatus() != session.StatusWaiting {
-		h.setError(fmt.Errorf("session not waiting for approval"))
+		h.setInfo("session not waiting for approval")
 		return nil
 	}
 	h.markSessionAccessed(s)
@@ -6113,14 +6347,14 @@ func (h *Home) openPRInBrowser() tea.Cmd {
 	repo := h.resolveCurrentRepo()
 	if repo == "" {
 		debuglog.Logger.Debug("openPR: no repo selected")
-		h.setError(fmt.Errorf("no repo selected"))
+		h.setInfo("no repo selected")
 		return nil
 	}
 
 	info := h.gitInfo()[repo]
 	if info == nil || info.PR == nil || info.PR.URL == "" {
 		debuglog.Logger.Debug("openPR: no PR for branch", "repo", repo)
-		h.setError(fmt.Errorf("no PR for this branch"))
+		h.setInfo("no PR for this branch")
 		return nil
 	}
 
@@ -6186,43 +6420,12 @@ func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
 		h.forgetSnooze(msg.repoPath)
 	}
 
-	// Clear any slot binding pointing at this session. FK cascade drops the
-	// DB row (triggered by the DeleteSession above), but the in-memory map
-	// needs explicit cleanup so the [N] badge disappears from the sidebar.
-	// Slot bindings do NOT survive undo: restoring the session via `u` leaves
-	// it unbound, and the user can re-press Alt+<N> to rebind.
-	for slot, sid := range h.slotBindings {
-		if sid == msg.id {
-			delete(h.slotBindings, slot)
-		}
-	}
-	if h.lastSlotTapSlot >= 0 {
-		if sid, ok := h.slotBindings[h.lastSlotTapSlot]; !ok || sid == msg.id {
-			h.lastSlotTapSlot = -1
-		}
-	}
-
-	// Remove from in-memory session list.
-	var remaining []*session.Session
-	for _, sess := range h.sessions {
-		if sess.ID != msg.id {
-			remaining = append(remaining, sess)
-		}
-	}
-	h.sessions = remaining
-	h.rebuildSessionMap()
+	// Remove from memory, slot bindings included. Slot bindings do NOT survive
+	// undo: restoring the session via `u` leaves it unbound, and the user can
+	// re-press Alt+<N> to rebind.
+	h.forgetSession(msg.id)
 	h.rebuildFlatItems()
-
-	// Fix cursor.
-	if h.cursor >= len(h.flatItems) {
-		h.cursor = len(h.flatItems) - 1
-	}
-	if h.cursor < 0 {
-		h.cursor = 0
-	}
-	if len(h.flatItems) > 0 && h.flatItems[h.cursor].IsRepoHeader {
-		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
-	}
+	h.clampCursor()
 
 	// Generate nonce for timer matching.
 	nonce := fmt.Sprintf("%s-%d", msg.id, time.Now().UnixNano())
@@ -6995,7 +7198,7 @@ func (h *Home) statusWorkerCycle() {
 		// sidebar is the likeliest place to be driving from the shell. Every
 		// other pass below has nothing to work on.
 		if heavy {
-			h.maybeAdoptExternalSessions(sessions)
+			h.maybeSyncExternalSessions(sessions)
 		}
 		return
 	}
@@ -7199,10 +7402,11 @@ drainPriority:
 	h.maybeSuspendIdleSessions(sessions)
 
 	// 5c. Adopt sessions another fleet process created (e.g. `fleet worktree`
-	// from a shell) since the last sweep. Self-throttled; reads SQLite, which is
-	// why it lives here rather than on the Update loop. Also called on the
-	// empty-fleet early-return path above — the throttle makes that safe.
-	h.maybeAdoptExternalSessions(sessions)
+	// from a shell) and drop ones it removed (`fleet remove`) since the last
+	// sweep. Self-throttled; reads SQLite, which is why it lives here rather
+	// than on the Update loop. Also called on the empty-fleet early-return path
+	// above — the throttle makes that safe.
+	h.maybeSyncExternalSessions(sessions)
 
 	// 5d. Re-point Claude's hooks if the command they name has been deleted.
 	// Self-throttled; stats a file and may rewrite settings.json, which is why it
@@ -8158,7 +8362,7 @@ func (h *Home) layoutMode() string {
 func (h *Home) bindCurrentSessionToSlot(slot int) {
 	s := h.selectedSession()
 	if s == nil {
-		h.setError(fmt.Errorf("select a session first"))
+		h.setInfo("select a session first")
 		return
 	}
 	if existing, ok := h.slotBindings[slot]; ok && existing == s.ID {
@@ -8592,7 +8796,7 @@ func (h *Home) loadSessions() tea.Msg {
 	// Check for claude CLI availability.
 	var warning string
 	if _, err := exec.LookPath("claude"); err != nil {
-		warning = "claude CLI not found — install Claude Code to create sessions"
+		warning = "claude CLI not found: install Claude Code to create sessions"
 	}
 
 	// Load persisted PR cache. A failure here is non-fatal — the bootstrap
@@ -8613,6 +8817,9 @@ func (h *Home) loadSessions() tea.Msg {
 	}
 }
 
+// setError reports a real failure: an error toast, an errorHistory entry (which
+// bug reports carry) and error_occurred. Guidance such as "no PR for this
+// branch" is not a failure — it goes through setInfo, which does none of those.
 func (h *Home) setError(err error) {
 	h.err = err
 	h.errTime = time.Now()
@@ -8620,7 +8827,7 @@ func (h *Home) setError(err error) {
 		h.errorHistory.Add(err.Error())
 		h.toasts.Add(ToastError, err.Error())
 		analytics.Track(analytics.EventErrorOccurred, map[string]interface{}{
-			"category": strings.SplitN(err.Error(), ":", 2)[0],
+			"category": errorCategory(err),
 		})
 	}
 }
@@ -9274,7 +9481,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "new_worktree":
 		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
-			h.setError(fmt.Errorf("no repo selected"))
+			h.setInfo("no repo selected")
 			return h, nil
 		}
 		h.worktreeDialog.ShowLoading()
@@ -9316,7 +9523,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "editor":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("open editor", fmt.Sprintf("%q at %s", h.cfg.GetEditor(), s.ProjectPath), true)
-			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": h.cfg.GetEditor()})
+			analytics.Track(analytics.EventEditorOpened, map[string]interface{}{"editor": editorName(h.cfg.GetEditor())})
 		}
 		return h, h.openEditorSelected()
 	case "open_pr":

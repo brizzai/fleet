@@ -38,6 +38,10 @@ jobs:
       - name: Build (Next.js static export)
         env:
           NEXT_BASE_PATH: /fleet
+          # Analytics ships only from this workflow, so `npm run dev` and local
+          # production builds send nothing. Public by design: a measurement id
+          # is inlined into the bundle and visible in the page source anyway.
+          NEXT_PUBLIC_GA_ID: G-3PPLWJ1R08
         run: npm run build
 
       - uses: actions/configure-pages@v5

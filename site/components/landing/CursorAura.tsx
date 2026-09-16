@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 
 /**
  * Full-viewport pink+purple aura that follows the cursor. Sits at z-index -1
@@ -46,9 +46,10 @@ export function CursorAura() {
         inset: 0,
         zIndex: 9999,
         pointerEvents: "none",
-        mixBlendMode: "screen",
+        // csstype has no `var()` escape hatch for this property.
+        mixBlendMode: "var(--charm-aura-blend)" as CSSProperties["mixBlendMode"],
         background:
-          "radial-gradient(640px 480px at var(--mx, 50vw) var(--my, 20vh), rgba(244,143,177,0.12), transparent 70%), radial-gradient(900px 680px at var(--mx, 50vw) var(--my, 20vh), rgba(160,106,254,0.07), transparent 75%)",
+          "radial-gradient(640px 480px at var(--mx, 50vw) var(--my, 20vh), var(--charm-wash-1), transparent 70%), radial-gradient(900px 680px at var(--mx, 50vw) var(--my, 20vh), var(--charm-wash-2), transparent 75%)",
       }}
     />
   );

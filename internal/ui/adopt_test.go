@@ -2,6 +2,7 @@ package ui
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -236,4 +237,178 @@ func indexOfSession(h *Home, id string) int {
 		}
 	}
 	return -1
+}
+
+// A session another process removed has no row AND no tmux. Either alone is not
+// enough: a session this TUI just created is live before its row lands.
+func TestGoneSessionsNeedsNoRowAndNoTmux(t *testing.T) {
+	stored := session.NewSession("stored", "/tmp/stored")
+	unsavedLive := session.NewSession("unsaved-live", "/tmp/live")
+	removed := session.NewSession("removed", "/tmp/removed")
+	rows := []*session.SessionRow{stored.ToRow()}
+	live := map[string]bool{unsavedLive.ID: true}
+
+	got := goneSessions(rows, []*session.Session{stored, unsavedLive, removed},
+		func(s *session.Session) bool { return live[s.ID] })
+	if len(got) != 1 || got[0] != removed.ID {
+		t.Fatalf("got %v, want just %s", got, removed.ID)
+	}
+}
+
+func TestMissingDirsFlagsOnlyDeletedPaths(t *testing.T) {
+	present := t.TempDir()
+	deleted := filepath.Join(t.TempDir(), "worktree-removed")
+
+	got := missingDirs([]string{present, deleted})
+	if len(got) != 1 || !got[deleted] {
+		t.Fatalf("got %v, want just %s", got, deleted)
+	}
+}
+
+// `fleet remove` from a shell (#304): the row is gone, so the running TUI must
+// drop the session and any slot badge pointing at it.
+func TestHandleExternalRemovalsDropsSession(t *testing.T) {
+	h := adoptTestHome(t)
+	row := storeSession(t, h, "from-cli", t.TempDir())
+	h.handleAdoptSessions(adoptSessionsMsg{sessions: []*session.Session{session.FromRow(row)}})
+	h.slotBindings = map[int]string{1: row.ID}
+
+	h.handleExternalRemovals(externalRemovalsMsg{sessionIDs: []string{row.ID}})
+
+	if _, ok := h.sessionByID[row.ID]; ok {
+		t.Fatal("removed session still in sessionByID")
+	}
+	if len(h.sessions) != 0 {
+		t.Fatalf("h.sessions has %d entries, want 0", len(h.sessions))
+	}
+	if indexOfSession(h, row.ID) >= 0 {
+		t.Fatal("removed session still in the sidebar")
+	}
+	if _, ok := h.slotBindings[1]; ok {
+		t.Error("slot binding to the removed session survived")
+	}
+}
+
+// A removal arrives on a timer, so it must not slide the selection onto a
+// different session.
+func TestHandleExternalRemovalsKeepsCursorOnItsRow(t *testing.T) {
+	h := adoptTestHome(t)
+	above, below := t.TempDir(), t.TempDir()
+	removedRow := storeSession(t, h, "removed", above)
+	parkedRow := storeSession(t, h, "parked", below)
+	h.handleAdoptSessions(adoptSessionsMsg{sessions: []*session.Session{
+		session.FromRow(removedRow), session.FromRow(parkedRow),
+	}})
+
+	idxBefore := indexOfSession(h, parkedRow.ID)
+	if idxBefore < 0 {
+		t.Fatal("parked session not in the sidebar")
+	}
+	h.cursor = idxBefore
+
+	h.handleExternalRemovals(externalRemovalsMsg{sessionIDs: []string{removedRow.ID}})
+
+	idxAfter := indexOfSession(h, parkedRow.ID)
+	if idxAfter == idxBefore {
+		t.Fatalf("test is vacuous: the removal did not shift the parked row (still at %d)", idxBefore)
+	}
+	if h.cursor != idxAfter {
+		t.Fatalf("cursor moved off its row: parked session is at %d, cursor is at %d", idxAfter, h.cursor)
+	}
+}
+
+// A pinned worktree deleted from disk (#304) is hidden, not unpinned: the SQLite
+// pin survives, so the checkout comes back if its directory does.
+func TestHandleExternalRemovalsHidesAndRestoresMissingPin(t *testing.T) {
+	h := adoptTestHome(t)
+	repo := filepath.Join(t.TempDir(), "worktree")
+	if err := h.storage.PinRepo(repo); err != nil {
+		t.Fatalf("pin repo: %v", err)
+	}
+	h.pinnedRepos[repo] = true
+	h.rebuildFlatItems()
+	if len(h.flatItems) == 0 {
+		t.Fatal("precondition: pinned repo not in the sidebar")
+	}
+
+	h.handleExternalRemovals(externalRemovalsMsg{
+		missingPins: map[string]bool{repo: true},
+		pinned:      map[string]bool{repo: true},
+	})
+
+	if len(h.flatItems) != 0 {
+		t.Fatalf("missing pin still renders %d sidebar rows", len(h.flatItems))
+	}
+	pinned, err := h.storage.LoadPinnedRepos()
+	if err != nil {
+		t.Fatalf("load pinned repos: %v", err)
+	}
+	if !slices.Contains(pinned, repo) {
+		t.Error("hiding a missing pin must not unpin it in storage")
+	}
+
+	h.handleExternalRemovals(externalRemovalsMsg{pinned: map[string]bool{repo: true}})
+
+	if !h.pinnedRepos[repo] || len(h.flatItems) == 0 {
+		t.Fatal("pin did not come back once its directory stopped being missing")
+	}
+}
+
+// hiddenPinWithSession is a worktree whose directory was deleted outside fleet
+// while a session still lives under it: one sweep has hidden its pin, and the
+// session keeps its header on screen.
+func hiddenPinWithSession(t *testing.T, h *Home) (repo, sessionID string) {
+	t.Helper()
+	repo = filepath.Join(t.TempDir(), "worktree") // never created
+	row := storeSession(t, h, "orphan", repo)
+	h.handleAdoptSessions(adoptSessionsMsg{
+		sessions:  []*session.Session{session.FromRow(row)},
+		repoRoots: map[string]string{row.ID: repo},
+	})
+	syncPins(h)
+	if h.pinnedRepos[repo] || !h.missingPins[repo] {
+		t.Fatal("precondition: the missing pin was not hidden")
+	}
+	return repo, row.ID
+}
+
+// syncPins runs a sync sweep's pin half against real storage and disk. It passes
+// no sessions, so nothing is asked about tmux.
+func syncPins(h *Home) {
+	h.handleExternalRemovals(h.buildExternalRemovals(nil, nil))
+}
+
+// `d` on the header of a hidden pin unpins it in SQLite; the next sweep must not
+// read "dropped out of the missing set" as "the directory is back".
+func TestUnpinnedHiddenPinStaysGone(t *testing.T) {
+	h := adoptTestHome(t)
+	repo, id := hiddenPinWithSession(t, h)
+
+	h.deferDelete(sessionDeleteMsg{id: id, unpinRepo: true, repoPath: repo})
+	syncPins(h)
+
+	if h.pinnedRepos[repo] || h.missingPins[repo] {
+		t.Fatalf("unpinned pin came back: pinned=%v missing=%v", h.pinnedRepos[repo], h.missingPins[repo])
+	}
+	if len(h.flatItems) != 0 {
+		t.Fatalf("sidebar still renders %d rows for an unpinned, deleted directory", len(h.flatItems))
+	}
+}
+
+// Undoing that delete re-pins in memory without changing the missing set, so the
+// sweep has to reconcile every time rather than only when the set changes.
+func TestUndoneUnpinIsHiddenAgain(t *testing.T) {
+	h := adoptTestHome(t)
+	repo, id := hiddenPinWithSession(t, h)
+
+	h.deferDelete(sessionDeleteMsg{id: id, unpinRepo: true, repoPath: repo})
+	h.undoDelete()
+	if !h.pinnedRepos[repo] {
+		t.Fatal("test is vacuous: undo did not re-pin in memory")
+	}
+	syncPins(h)
+
+	if h.pinnedRepos[repo] || !h.missingPins[repo] {
+		t.Fatalf("undone pin not hidden again: pinned=%v missing=%v", h.pinnedRepos[repo], h.missingPins[repo])
+	}
 }

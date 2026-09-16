@@ -69,6 +69,9 @@ func groupByOrigin(items []discovery.Recent) []discovery.Recent {
 // HasItems reports whether discovery surfaced at least one repo.
 func (l *Launchpad) HasItems() bool { return len(l.items) > 0 }
 
+// ItemCount reports how many repos discovery surfaced.
+func (l *Launchpad) ItemCount() int { return len(l.items) }
+
 // Move walks the cursor by delta, clamped to the list bounds.
 func (l *Launchpad) Move(delta int) {
 	if len(l.items) == 0 {

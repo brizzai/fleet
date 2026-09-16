@@ -50,13 +50,13 @@ export function CoachBanner({ step }: { step: CoachStep }) {
         @keyframes fleet-coach-pulse {
           0%, 100% {
             box-shadow:
-              0 0 0 1px rgba(244,143,177,0.18),
-              0 0 32px -6px rgba(244,143,177,0.45);
+              0 0 0 1px var(--charm-tint),
+              0 0 32px -6px var(--charm-glow-soft);
           }
           50% {
             box-shadow:
-              0 0 0 1px rgba(244,143,177,0.35),
-              0 0 44px -4px rgba(244,143,177,0.65);
+              0 0 0 1px var(--charm-glow-soft),
+              0 0 44px -4px var(--charm-glow);
           }
         }
         @keyframes fleet-key-press {
@@ -76,7 +76,7 @@ function BannerPanel({ step }: { step: CoachStep }) {
         body={
           <>
             click the demo above, then{" "}
-            <KbdInline color={PALETTE.pink}>SPACE</KbdInline> to jump to the next{" "}
+            <KbdInline color="var(--charm-pink)">SPACE</KbdInline> to jump to the next{" "}
             <Glyph color={PALETTE.yellow}>◐</Glyph>
           </>
         }
@@ -119,9 +119,9 @@ function BannerPanel({ step }: { step: CoachStep }) {
       eyebrow="that's the loop"
       body={
         <>
-          repeat <KbdInline color={PALETTE.pink}>SPACE</KbdInline> →{" "}
-          <KbdInline color={PALETTE.pink}>ENTER</KbdInline> through every waiting
-          agent · try <KbdInline color={PALETTE.pink}>a</KbdInline> to spawn one
+          repeat <KbdInline color="var(--charm-pink)">SPACE</KbdInline> →{" "}
+          <KbdInline color="var(--charm-pink)">ENTER</KbdInline> through every waiting
+          agent · try <KbdInline color="var(--charm-pink)">a</KbdInline> to spawn one
         </>
       }
     />
@@ -146,13 +146,13 @@ function Panel({
         gap: "0.4rem",
         padding: "0.9rem 1.4rem",
         borderRadius: 14,
-        border: `1px solid ${emphasize ? "rgba(244,143,177,0.55)" : "rgba(244,143,177,0.25)"}`,
+        border: `1px solid ${emphasize ? "var(--charm-glow)" : "var(--charm-glow-soft)"}`,
         background: emphasize
-          ? "linear-gradient(180deg, rgba(244,143,177,0.10) 0%, rgba(160,106,254,0.05) 100%)"
-          : "rgba(20,22,31,0.6)",
+          ? "linear-gradient(180deg, var(--charm-wash-1) 0%, var(--charm-wash-2) 100%)"
+          : "var(--charm-panel)",
         boxShadow: emphasize
-          ? "0 0 0 1px rgba(244,143,177,0.18), 0 0 32px -6px rgba(244,143,177,0.45)"
-          : "0 0 0 1px rgba(35,38,52,0.6)",
+          ? "0 0 0 1px var(--charm-tint), 0 0 32px -6px var(--charm-glow-soft)"
+          : "0 0 0 1px var(--charm-panel-ring)",
         animation: emphasize
           ? "fleet-coach-pulse 2.6s ease-in-out infinite"
           : undefined,
@@ -162,7 +162,7 @@ function Panel({
       <span
         aria-hidden
         style={{
-          color: PALETTE.pink,
+          color: "var(--charm-pink)",
           fontSize: "0.68rem",
           letterSpacing: "0.18em",
           textTransform: "uppercase",
@@ -231,7 +231,7 @@ function KbdInline({
         display: "inline-block",
         padding: "0.05rem 0.5ch",
         borderRadius: 4,
-        background: "rgba(244,143,177,0.18)",
+        background: "var(--charm-tint)",
         border: `1px solid ${color}`,
         color,
         fontFamily: "var(--font-mono)",

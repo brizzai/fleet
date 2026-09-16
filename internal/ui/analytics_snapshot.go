@@ -71,10 +71,8 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 	h.workerMu.Lock()
 	sessionCount := len(h.sessions)
 	h.workerMu.Unlock()
-	// TrackAppStarted internally trims itself in minimal mode (anonymous,
-	// version-only). The snapshot + onboarding-funnel emissions are full-mode
-	// only — their Gauge/Distribution/Track calls no-op in minimal anyway, so
-	// gating here just avoids the wasted work of collecting a snapshot.
+	// Full and minimal send the same events, minimal anonymously. Off is gated
+	// below only to skip collecting a snapshot whose every call would no-op.
 	analytics.TrackAppStarted(
 		h.version,
 		sessionCount,
@@ -85,7 +83,7 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 		h.cfg.IsAutoNameEnabled(),
 		h.cfg.IsCopyClaudeSettingsEnabled(),
 	)
-	if mode == config.TelemetryFull {
+	if mode != config.TelemetryOff {
 		analytics.EmitSnapshot(h.collectSnapshot())
 		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
 			analytics.Track(analytics.EventOnboardingFirstLaunch, nil)

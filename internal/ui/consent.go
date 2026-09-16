@@ -16,9 +16,9 @@ type consentResultMsg struct {
 // ConsentDialog is the first-launch analytics prompt. It surfaces exactly what
 // fleet collects before initializing the Mixpanel client so the user can make
 // an informed choice. "Yes" → full telemetry (usage + git name/email). Any
-// other dismissal → minimal: an anonymous daily-active ping only (no identity),
-// so daily-active users can still be counted. Turning telemetry fully off is a
-// Settings-only choice, disclosed in the dialog copy.
+// other dismissal → minimal ("Basic"): the same usage events, anonymously — no
+// identity, no people profile. Turning telemetry fully off is a Settings-only
+// choice.
 type ConsentDialog struct {
 	visible bool
 	width   int
@@ -76,15 +76,14 @@ func (d *ConsentDialog) View() string {
 	b.WriteString("\n\n")
 
 	body := lipgloss.NewStyle().Foreground(ColorText)
-	b.WriteString(body.Render("fleet can send a little usage info so I can see"))
+	b.WriteString(body.Render("fleet can send usage info so I can see"))
 	b.WriteString("\n")
 	b.WriteString(body.Render("how it's doing. Pick what you're comfortable with:"))
 	b.WriteString("\n\n")
 
-	// Two outcomes, kept intentionally light and vague. "Basic" still sends a
-	// tiny anonymous signal (so it's honest that something goes out) but the
-	// copy avoids the scary/technical framing — no "anonymous", no "identity",
-	// no enumerating what isn't collected.
+	// Two outcomes, kept light. Both send the same usage events and differ only
+	// in whether they're tagged with who you are, so that's the one thing each
+	// line says.
 	markStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 	optStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	subStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
@@ -94,14 +93,14 @@ func (d *ConsentDialog) View() string {
 	b.WriteString(" ")
 	b.WriteString(optStyle.Render("Full"))
 	b.WriteString("   ")
-	b.WriteString(subStyle.Render("the full picture — includes git name & email"))
+	b.WriteString(subStyle.Render("usage, plus your git name & email"))
 	b.WriteString("\n")
 	b.WriteString("  ")
 	b.WriteString(markStyle.Render("N"))
 	b.WriteString(" ")
 	b.WriteString(optStyle.Render("Basic"))
 	b.WriteString("  ")
-	b.WriteString(subStyle.Render("just a quiet heads-up that fleet's in use"))
+	b.WriteString(subStyle.Render("anonymous usage — what's used, never who"))
 	b.WriteString("\n\n")
 
 	checkStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
