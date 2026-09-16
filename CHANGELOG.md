@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.40.1] - 2026-09-16
+
+### Changed
+
+- **CI-running glyph swapped.** The PR badge now shows `◔` while CI is running instead of `⇶`, which read as a stray arrow beside `⌕`.
+
 ## [2.40.0] - 2026-09-16
 
 ### Improved
@@ -690,7 +696,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.40.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.40.1...HEAD
+[2.40.1]: https://github.com/brizzai/fleet/releases/tag/v2.40.1
 [2.40.0]: https://github.com/brizzai/fleet/releases/tag/v2.40.0
 [2.39.1]: https://github.com/brizzai/fleet/releases/tag/v2.39.1
 [2.39.0]: https://github.com/brizzai/fleet/releases/tag/v2.39.0
