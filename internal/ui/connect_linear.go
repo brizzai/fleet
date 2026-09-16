@@ -205,7 +205,16 @@ func (d *ConnectLinearDialog) Update(msg tea.Msg) (*ConnectLinearDialog, tea.Cmd
 
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return d, nil
+		// Non-key messages (notably tea.PasteMsg for cmd+v, which is not a
+		// KeyMsg in Bubble Tea v2) still need to reach the key field. An API
+		// key is pasted, never typed, so dropping paste here left the "Paste
+		// an API key" path unable to do the one thing it names (#310).
+		if d.stage != connectPasting {
+			return d, nil
+		}
+		var cmd tea.Cmd
+		d.input, cmd = d.input.Update(msg)
+		return d, cmd
 	}
 
 	switch d.stage {

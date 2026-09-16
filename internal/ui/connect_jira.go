@@ -215,7 +215,16 @@ func (d *ConnectJiraDialog) Update(msg tea.Msg) (*ConnectJiraDialog, tea.Cmd) {
 
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return d, nil
+		// Non-key messages (notably tea.PasteMsg for cmd+v, which is not a
+		// KeyMsg in Bubble Tea v2) still need to reach the focused field. An
+		// API token is pasted, never typed, so dropping paste here left the
+		// form unfillable (#310).
+		if d.stage != connectPasting {
+			return d, nil
+		}
+		var cmd tea.Cmd
+		d.inputs[d.focus], cmd = d.inputs[d.focus].Update(msg)
+		return d, cmd
 	}
 
 	switch d.stage {
