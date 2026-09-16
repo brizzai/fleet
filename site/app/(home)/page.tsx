@@ -14,6 +14,24 @@ export default function Page() {
       </div>
       <Features />
       <InstallTabs />
+      <footer
+        style={{
+          padding: "3rem 1.25rem 2.5rem",
+          textAlign: "center",
+          fontFamily: "var(--font-mono)",
+          fontSize: "0.8rem",
+          color: "var(--charm-text-faint)",
+        }}
+      >
+        Built by{" "}
+        <a
+          href="https://www.brizz.ai/"
+          style={{ color: "var(--charm-text-dim)", textDecoration: "underline", textUnderlineOffset: 3 }}
+        >
+          Brizz
+        </a>
+        , the agent analytics platform
+      </footer>
     </main>
   );
 }

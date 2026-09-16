@@ -934,7 +934,7 @@ func prBadgeText(pr *github.PR) string {
 	// whether it's CI or a reviewer holding it up.
 	if icons == "" {
 		if pr.CIStatus == "PENDING" {
-			icons += "⇶"
+			icons += "◔"
 		}
 		if pr.ReviewDecision == "REVIEW_REQUIRED" {
 			icons += "⌕"
