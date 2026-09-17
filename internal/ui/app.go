@@ -5950,7 +5950,14 @@ func (h *Home) buildJumpTree() []SidebarItem {
 // reachable without expanding anything. Snoozed checkouts — by their own
 // deadline or their origin's — are skipped, since snooze is the attention mute
 // and this is an attention surface.
+//
+// With PR badges turned off (Settings → Appearance) there is no badge to land
+// on, so the jump is a no-op rather than stopping on a bare branch row with
+// nothing on screen saying why.
 func (h *Home) jumpToNextAttentionPR() {
+	if !ShowPRBadges {
+		return
+	}
 	n := len(h.flatItems)
 	if n == 0 {
 		return

@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
@@ -601,6 +602,22 @@ func TestPRJumpMutedByCollapsedOrigin(t *testing.T) {
 	h.jumpToNextAttentionPR()
 	if h.cursor != 0 {
 		t.Errorf("jump into a collapsed origin moved the cursor to %d; want a no-op", h.cursor)
+	}
+}
+
+// TestPRJumpNoopWithPRBadgesOff: with the badges hidden there is nothing on
+// screen to land on, so the jump must not move the cursor onto a bare row.
+func TestPRJumpNoopWithPRBadgesOff(t *testing.T) {
+	resetDisplayFlags(t)
+	off := false
+	ApplyDisplayConfig(&config.Config{ShowPRBadges: &off})
+	defer resetDisplayFlags(t)
+
+	h := prJumpHome(t)
+	h.cursor = 0
+	h.jumpToNextAttentionPR()
+	if h.cursor != 0 {
+		t.Errorf("jump with PR badges off moved the cursor to %d; want a no-op", h.cursor)
 	}
 }
 
