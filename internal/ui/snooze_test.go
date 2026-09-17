@@ -734,6 +734,84 @@ func TestMaybeWakeSnoozedExpires(t *testing.T) {
 	}
 }
 
+// TestExpiredSnoozeFlagsIdleSessionUnread: a snooze is a reminder, not just a
+// mute. When the deadline lapses on a session that has gone idle, the session
+// comes back as finished (the `m` flip) so it re-enters the Space rotation —
+// and that reaches storage, or the next restart would load it idle again. Three
+// things must NOT flip: a session that isn't idle (its real status is the
+// point of snooze not being a status), a manual `z` wake (you're already on
+// the row), and the children of a group snooze (that one means "out of my
+// way", not "remind me about all of these").
+func TestExpiredSnoozeFlagsIdleSessionUnread(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "snzu.db")
+	storage, err := session.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { storage.Close() })
+
+	h := NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{})
+	now := time.Now()
+
+	idle := session.NewSession("idle", "/tmp/snz-u")
+	idle.Acknowledge()
+	idle.SetSnoozedUntil(now.Add(-time.Minute))
+	if err := storage.SaveSession(idle.ToRow()); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	running := session.NewSession("running", "/tmp/snz-u")
+	running.SetStatus(session.StatusRunning)
+	running.SetSnoozedUntil(now.Add(-time.Minute))
+	manual := session.NewSession("manual", "/tmp/snz-u")
+	manual.Acknowledge()
+	manual.SetSnoozedUntil(now.Add(time.Hour))
+	underGroup := session.NewSession("under-group", "/tmp/snz-u-group")
+	underGroup.Acknowledge()
+	h.sessions = []*session.Session{idle, running, manual, underGroup}
+	h.groupSnooze = map[string]time.Time{"/tmp/snz-u-group": now.Add(-time.Second)}
+
+	if !h.maybeWakeSnoozed() {
+		t.Fatal("sweep reported no change despite expired snoozes")
+	}
+	if got := idle.GetStatus(); got != session.StatusFinished {
+		t.Errorf("idle session after its snooze lapsed = %s, want finished", got)
+	}
+	if idle.Acknowledged {
+		t.Error("a woken idle session must read as unacknowledged, or the worker settles it straight back to idle")
+	}
+	if got := running.GetStatus(); got != session.StatusRunning {
+		t.Errorf("running session after its snooze lapsed = %s, want running untouched", got)
+	}
+	if got := underGroup.GetStatus(); got != session.StatusIdle {
+		t.Errorf("idle session under a lapsed group snooze = %s, want idle (group wake never fans out)", got)
+	}
+
+	rows, err := storage.LoadSessions()
+	if err != nil {
+		t.Fatalf("LoadSessions: %v", err)
+	}
+	var row *session.SessionRow
+	for _, r := range rows {
+		if r.ID == idle.ID {
+			row = r
+		}
+	}
+	if row == nil {
+		t.Fatal("idle session row missing from storage")
+	}
+	if row.Status != string(session.StatusFinished) || row.Acknowledged {
+		t.Errorf("persisted row = status %q acknowledged %v, want finished/unacknowledged", row.Status, row.Acknowledged)
+	}
+	if !row.SnoozedUntil.IsZero() {
+		t.Errorf("persisted snooze = %v, want cleared — a kept deadline would re-fire on every launch", row.SnoozedUntil)
+	}
+
+	h.clearSnooze(snoozeScope{session: manual, label: "manual", kind: "session"})
+	if got := manual.GetStatus(); got != session.StatusIdle {
+		t.Errorf("manually woken idle session = %s, want idle (you are already on the row)", got)
+	}
+}
+
 // TestRenderSnoozedRowFitsWidth: the snooze suffix comes out of the title's
 // budget, so a snoozed row must never render wider than an unsnoozed one. This
 // is the regression test for the hardcoded `reserve` in renderSessionItem.

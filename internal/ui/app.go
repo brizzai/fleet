@@ -2152,6 +2152,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.setExpanded(key, true)
 			}
 		}
+		// Session snoozes that lapsed while fleet was closed fire their
+		// reminder here, on the same terms as the live sweep: FromRow keeps
+		// the lapsed deadline so this is the one place that both clears it
+		// in storage and flips an idle session to finished. Dropping it at
+		// load without persisting (as FromRow once did) would re-fire the
+		// reminder on every launch until something else rewrote the row.
+		now := time.Now()
+		for _, s := range h.sessions {
+			if until := s.SnoozedUntil(); !until.IsZero() && !until.After(now) {
+				h.expireSessionSnooze(s)
+			}
+		}
 		// Default all repos to expanded on first load.
 		groups := session.GroupByRepo(h.sessions)
 		for repo := range groups {
@@ -9583,6 +9595,14 @@ func (h *Home) markUnreadSelected() {
 		return
 	}
 	analytics.Track(analytics.EventMarkUnread, nil)
+	h.flagUnread(s)
+	h.rebuildFlatItems()
+	h.setInfo("Marked as unread")
+}
+
+// flagUnread flips an idle session back to finished and persists both halves.
+// Shared by the `m` key and a lapsed snooze (expireSessionSnooze).
+func (h *Home) flagUnread(s *session.Session) {
 	s.MarkUnread()
 	if err := h.storage.UpdateStatus(s.ID, string(session.StatusFinished)); err != nil {
 		debuglog.Logger.Error("storage: UpdateStatus", "id", s.ID, "err", err)
@@ -9590,8 +9610,6 @@ func (h *Home) markUnreadSelected() {
 	if err := h.storage.SetAcknowledged(s.ID, false); err != nil {
 		debuglog.Logger.Error("storage: SetAcknowledged", "id", s.ID, "err", err)
 	}
-	h.rebuildFlatItems()
-	h.setInfo("Marked as unread")
 }
 
 // ensureExactHeight pads or truncates content to exactly n lines.

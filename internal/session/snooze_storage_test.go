@@ -183,16 +183,26 @@ func TestSnoozeMigrationIsIdempotent(t *testing.T) {
 
 // TestFromRowDropsExpiredSnooze: a deadline that lapsed while fleet was closed
 // must be gone on the first frame, not linger until the wake sweep runs.
-func TestFromRowDropsExpiredSnooze(t *testing.T) {
+// TestFromRowKeepsLapsedSnooze: a deadline that lapsed while fleet was closed
+// must survive the load. The UI's startup reconciliation is what clears it —
+// in storage, and flipping an idle session to finished as it goes. FromRow
+// used to drop it in memory only, which left the row holding a dead deadline;
+// with the wake now carrying a side effect, that would re-fire the reminder on
+// every launch. A lapsed deadline still never reads as snoozed.
+func TestFromRowKeepsLapsedSnooze(t *testing.T) {
 	now := time.Now()
+	lapsed := now.Add(-time.Minute)
 	live := now.Add(time.Hour)
 
 	expired := FromRow(&SessionRow{
 		ID: "a-1", Title: "expired", ProjectPath: "/tmp/p", Status: "idle",
-		CreatedAt: now, LastAccessed: now, SnoozedUntil: now.Add(-time.Minute),
+		CreatedAt: now, LastAccessed: now, SnoozedUntil: lapsed,
 	})
-	if !expired.SnoozedUntil().IsZero() {
-		t.Errorf("expired snooze survived load: %v", expired.SnoozedUntil())
+	if !expired.SnoozedUntil().Equal(lapsed) {
+		t.Errorf("lapsed snooze = %v, want it kept as %v for the startup sweep", expired.SnoozedUntil(), lapsed)
+	}
+	if expired.IsSnoozed(now) {
+		t.Error("a lapsed deadline must not read as snoozed")
 	}
 
 	fresh := FromRow(&SessionRow{
