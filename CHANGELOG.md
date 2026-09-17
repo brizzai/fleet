@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.41.0] - 2026-09-17
+
+### Highlights
+
+- **Jump to the PR that needs you.** `P` moves the cursor to the next worktree whose PR badge is red — CI failed, changes requested, unresolved threads, or conflicts — and, when nothing is red, to the next green one that's ready to merge. Also in `Ctrl+K` as "Jump to Next PR Needing Attention".
+
+### Added
+
+- **Jump to the PR that needs you.** `P` moves the cursor to the next worktree whose PR badge is red — CI failed, changes requested, unresolved threads, or conflicts — and, when nothing is red, to the next green one that's ready to merge. Also in `Ctrl+K` as "Jump to Next PR Needing Attention".
+
+### Improved
+
+- **Help sheet hides less when it scrolls.** The `⋮ +N above/below` notes in `?` now sit on the blank rows the sheet already had, so a sheet one row too tall hides one row instead of three.
+
 ## [2.40.1] - 2026-09-16
 
 ### Changed
@@ -696,7 +710,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.40.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.41.0...HEAD
+[2.41.0]: https://github.com/brizzai/fleet/releases/tag/v2.41.0
 [2.40.1]: https://github.com/brizzai/fleet/releases/tag/v2.40.1
 [2.40.0]: https://github.com/brizzai/fleet/releases/tag/v2.40.0
 [2.39.1]: https://github.com/brizzai/fleet/releases/tag/v2.39.1
