@@ -58,6 +58,7 @@ const (
 	// Navigation / filtering.
 	EventFilterUsed = "filter_used"
 	EventSpaceJump  = "space_jump"
+	EventPRJump     = "pr_jump"
 	EventHeaderJump = "header_jump"
 
 	// Frost mode was started from the sidebar.
