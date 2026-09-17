@@ -245,6 +245,18 @@ func idxOfCheckout(t *testing.T, h *Home, repoPath string) int {
 	return -1
 }
 
+// idxOfFirstSessionIn is the row of the first session under a checkout.
+func idxOfFirstSessionIn(t *testing.T, h *Home, repoPath string) int {
+	t.Helper()
+	for i, it := range h.flatItems {
+		if it.Session != nil && it.RepoPath == repoPath {
+			return i
+		}
+	}
+	t.Fatalf("no session under checkout %s in flatItems", repoPath)
+	return -1
+}
+
 func idxOfOrigin(t *testing.T, h *Home, originKey string) int {
 	t.Helper()
 	for i, it := range h.flatItems {
@@ -556,38 +568,70 @@ func prJumpHome(t *testing.T) *Home {
 }
 
 // TestPRJumpRedBeforeGreen: P seeks a red badge first and falls back
-// to green only when no red badge is on screen. A draft with failing CI is
-// neither — the badge paints it gray — and a snoozed checkout is skipped the
-// way Space skips a snoozed session.
+// to green only when no red badge is on screen, landing on the checkout's
+// first session. A draft with failing CI is neither — the badge paints it
+// gray — and a snoozed checkout is skipped the way Space skips a snoozed
+// session.
 func TestPRJumpRedBeforeGreen(t *testing.T) {
 	h := prJumpHome(t)
 	h.cursor = 0 // origin header
 
 	h.jumpToNextAttentionPR()
-	if want := idxOfCheckout(t, h, "/tmp/pj-wt-red"); h.cursor != want {
-		t.Fatalf("first jump: cursor = %d, want the red checkout at %d (skipping the green main)", h.cursor, want)
+	if want := idxOfFirstSessionIn(t, h, "/tmp/pj-wt-red"); h.cursor != want {
+		t.Fatalf("first jump: cursor = %d, want the red checkout's session at %d (skipping the green main)", h.cursor, want)
 	}
 
 	// The only red badge: a second press wraps back onto it, never onto the
 	// draft or the snoozed checkout.
 	h.jumpToNextAttentionPR()
-	if want := idxOfCheckout(t, h, "/tmp/pj-wt-red"); h.cursor != want {
-		t.Fatalf("second jump: cursor = %d, want to stay on the sole red checkout at %d", h.cursor, want)
+	if want := idxOfFirstSessionIn(t, h, "/tmp/pj-wt-red"); h.cursor != want {
+		t.Fatalf("second jump: cursor = %d, want to stay on the sole red checkout's session at %d", h.cursor, want)
 	}
 
 	// Red gets fixed → pending. Nothing red is left on screen, so green wins.
 	gi := *h.gitInfoCache.Load()
 	gi["/tmp/pj-wt-red"].PR.CIStatus = "PENDING"
 	h.jumpToNextAttentionPR()
-	if want := idxOfCheckout(t, h, "/tmp/pj-main"); h.cursor != want {
-		t.Fatalf("no-red jump: cursor = %d, want the green main at %d", h.cursor, want)
+	if want := idxOfFirstSessionIn(t, h, "/tmp/pj-main"); h.cursor != want {
+		t.Fatalf("no-red jump: cursor = %d, want the green main's session at %d", h.cursor, want)
 	}
 
 	// Waking the snoozed checkout puts its red badge back in the rotation.
 	delete(h.groupSnooze, "/tmp/pj-wt-snoozed")
 	h.jumpToNextAttentionPR()
-	if want := idxOfCheckout(t, h, "/tmp/pj-wt-snoozed"); h.cursor != want {
-		t.Fatalf("after unsnooze: cursor = %d, want the red snoozed checkout at %d", h.cursor, want)
+	if want := idxOfFirstSessionIn(t, h, "/tmp/pj-wt-snoozed"); h.cursor != want {
+		t.Fatalf("after unsnooze: cursor = %d, want the red snoozed checkout's session at %d", h.cursor, want)
+	}
+}
+
+// TestPRJumpExpandsCollapsedCheckout: a collapsed checkout still shows its
+// badge, so it stays a target — and P unfolds it to land on its first
+// session, the way Space reveals a session in a folded checkout. A checkout
+// with no sessions has nothing to land on but its header.
+func TestPRJumpExpandsCollapsedCheckout(t *testing.T) {
+	h := prJumpHome(t)
+	extra := session.NewSession("red-2", "/tmp/pj-wt-red")
+	extra.SetStatus(session.StatusIdle)
+	h.sessions = append(h.sessions, extra)
+	h.repoExpanded["/tmp/pj-wt-red"] = false
+	h.rebuildFlatItems()
+	h.cursor = 0
+
+	h.jumpToNextAttentionPR()
+	if !h.repoExpanded["/tmp/pj-wt-red"] {
+		t.Fatal("jump into a collapsed red checkout left it collapsed")
+	}
+	if want := idxOfFirstSessionIn(t, h, "/tmp/pj-wt-red"); h.cursor != want {
+		t.Fatalf("cursor = %d, want the red checkout's first session at %d", h.cursor, want)
+	}
+
+	h.sessions = h.sessions[:1] // only main's green session remains
+	h.pinnedRepos["/tmp/pj-wt-red"] = true
+	h.rebuildFlatItems()
+	h.cursor = 0
+	h.jumpToNextAttentionPR()
+	if want := idxOfCheckout(t, h, "/tmp/pj-wt-red"); h.cursor != want {
+		t.Fatalf("empty red checkout: cursor = %d, want its header at %d", h.cursor, want)
 	}
 }
 
@@ -636,7 +680,7 @@ func TestPRJumpKeyBinding(t *testing.T) {
 	h.rebuildFlatItems()
 	h.cursor = 0
 
-	if _, _ = h.handleKey(key); h.cursor != idxOfCheckout(t, h, "/tmp/pj-wt-red") {
-		t.Errorf("P through handleKey: cursor = %d, want the red checkout header", h.cursor)
+	if _, _ = h.handleKey(key); h.cursor != idxOfFirstSessionIn(t, h, "/tmp/pj-wt-red") {
+		t.Errorf("P through handleKey: cursor = %d, want the red checkout's first session", h.cursor)
 	}
 }
