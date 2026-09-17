@@ -1995,20 +1995,13 @@ func FromRow(row *SessionRow) *Session {
 		FirstPrompt:     row.FirstPrompt,
 		TitleGenerated:  row.TitleGenerated,
 		PromptCount:     row.PromptCount,
-		// A deadline that lapsed while fleet was closed is dropped here rather
-		// than waiting for the wake sweep, so the first frame is already correct.
-		snoozedUntil: dropIfPast(row.SnoozedUntil, time.Now()),
+		// A deadline that lapsed while fleet was closed is kept, not dropped:
+		// the UI's startup reconciliation needs to see it to fire the wake
+		// reminder and clear the row. Every reader treats a past deadline as
+		// not snoozed, so nothing renders stale in the meantime.
+		snoozedUntil: row.SnoozedUntil,
 		tmuxSession:  ts,
 	}
-}
-
-// dropIfPast returns the zero time for a deadline that has already lapsed,
-// so an expired snooze never has to be reasoned about downstream.
-func dropIfPast(deadline, now time.Time) time.Time {
-	if deadline.IsZero() || !deadline.After(now) {
-		return time.Time{}
-	}
-	return deadline
 }
 
 // --- Status detection ---
