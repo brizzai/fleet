@@ -301,11 +301,13 @@ func (h *HelpOverlay) layout() helpLayout {
 	const (
 		gutter  = 2 // space between columns
 		marginH = 2 // breathing room from the screen edges
-		indRows = 2 // ⋮ above / ⋮ below lines reserved when scrolling
-		// Non-grid lines View() always emits.
+		// Non-grid lines View() always emits. The separator rows either side of
+		// the grid double as the ⋮ scroll indicators, so scrolling reserves no
+		// rows of its own: overflowing by k rows hides exactly k rows, and the
+		// frame is the same whether or not the sheet scrolls.
 		titleLines  = 2 // title + blank
-		searchLines = 2 // filter input + blank
-		hintLines   = 2 // blank + hint
+		searchLines = 2 // filter input + separator (⋮ above, once scrolled)
+		hintLines   = 2 // separator (⋮ below, while more remains) + hint
 	)
 	// Frame overhead (border + padding) is read from DialogStyle, so the scroll
 	// math follows automatically if the dialog is ever restyled.
@@ -345,7 +347,7 @@ func (h *HelpOverlay) layout() helpLayout {
 
 	visibleRows, maxScroll := rowsPerCol, 0
 	if rowsPerCol > availH { // can't fit even at max columns → scroll
-		visibleRows = max(1, availH-indRows)
+		visibleRows = availH
 		maxScroll = rowsPerCol - visibleRows
 	}
 
@@ -429,19 +431,25 @@ func (h *HelpOverlay) View() string {
 
 	var lines []string
 	lines = append(lines, TitleStyle.Render("Keybindings"), "")
-	lines = append(lines, h.filter.View(), "")
+	lines = append(lines, h.filter.View())
 
+	// The separator rows either side of the grid carry the scroll indicators.
+	// They are emitted in every state, blank when there is nothing to say, so
+	// the layout's row budget holds and the frame never jumps between a sheet
+	// that just fits and one that is a row over.
+	above, below := "", ""
+	var body []string
 	switch {
 	case len(lay.rows) == 0:
-		lines = append(lines, DimStyle.Render("No binding matches — esc to clear"))
+		body = append(body, DimStyle.Render("No binding matches — esc to clear"))
 	case lay.maxScroll == 0:
 		for r := 0; r < lay.rowsPerCol; r++ {
-			lines = append(lines, lay.row(r))
+			body = append(body, lay.row(r))
 		}
 	default:
-		above, below := lay.hiddenCounts(h.scroll)
-		if above > 0 {
-			note := fmt.Sprintf("⋮ +%d above", above)
+		nAbove, nBelow := lay.hiddenCounts(h.scroll)
+		if nAbove > 0 {
+			note := fmt.Sprintf("⋮ +%d above", nAbove)
 			// In one column the section header scrolls off and "(cont.)" never
 			// fires, because there is no column boundary to fire it at — which
 			// is every terminal under ~120 columns. Past one column the grid
@@ -449,25 +457,24 @@ func (h *HelpOverlay) View() string {
 			if sec := lay.sectionAt(h.scroll); sec != "" {
 				note += " · " + sec
 			}
-			lines = append(lines, DimStyle.Render(note))
-		} else {
-			lines = append(lines, "")
+			above = DimStyle.Render(note)
 		}
 		for r := h.scroll; r < h.scroll+lay.visibleRows; r++ {
-			lines = append(lines, lay.row(r))
+			body = append(body, lay.row(r))
 		}
-		if below > 0 {
-			lines = append(lines, DimStyle.Render(fmt.Sprintf("⋮ +%d below", below)))
-		} else {
-			lines = append(lines, "")
+		if nBelow > 0 {
+			below = DimStyle.Render(fmt.Sprintf("⋮ +%d below", nBelow))
 		}
 	}
+	lines = append(lines, above)
+	lines = append(lines, body...)
+	lines = append(lines, below)
 
 	hint := "esc close"
 	if lay.maxScroll > 0 {
 		hint = "↑↓ scroll · esc close"
 	}
-	lines = append(lines, "", DimStyle.Render(hint))
+	lines = append(lines, DimStyle.Render(hint))
 
 	// Let the box auto-size to its widest line (the padded grid rows). Forcing
 	// an explicit Width would make lipgloss count the horizontal padding against

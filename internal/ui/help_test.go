@@ -234,16 +234,32 @@ func TestHelpSectionsAreAllLabelled(t *testing.T) {
 // by the *longest description in the table*: one binding whose Desc runs ~7
 // characters past the current longest collapses the layout back to one column
 // and ~30 rows of scrolling, silently. Nothing else in the suite would notice.
+//
+// Height is the other budget: 61 rows split 31 per column, plus 10 rows of
+// chrome (frame, title, filter, hint and their separators), so the sheet is
+// whole at 41 rows. One row shorter it must scroll — and the second check pins
+// that scrolling costs exactly the overflow. The ⋮ indicators ride the
+// separator rows the frame already has; a version that reserved two rows of
+// its own turned a one-row overflow into three hidden rows.
 func TestHelpSheetHoldsTwoColumnsAt120(t *testing.T) {
 	ho := NewHelpOverlay()
-	ho.SetSize(120, 40)
+	ho.SetSize(120, 41)
 	ho.Show()
 	lay := ho.layout()
 	if got := len(lay.chunks); got != 2 {
-		t.Errorf("120x40 renders %d columns, want 2 — a description probably grew", got)
+		t.Errorf("120x41 renders %d columns, want 2 — a description probably grew", got)
 	}
 	if lay.maxScroll != 0 {
-		t.Errorf("120x40 hides %d rows, want the whole sheet visible", lay.maxScroll)
+		t.Errorf("120x41 hides %d rows, want the whole sheet visible", lay.maxScroll)
+	}
+
+	ho.SetSize(120, 40)
+	lay = ho.layout()
+	if got := len(lay.chunks); got != 2 {
+		t.Errorf("120x40 renders %d columns, want 2", got)
+	}
+	if lay.maxScroll != 1 {
+		t.Errorf("120x40 hides %d rows, want exactly the 1 row it is over — scrolling must not reserve rows of its own", lay.maxScroll)
 	}
 }
 

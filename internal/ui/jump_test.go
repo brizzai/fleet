@@ -2,10 +2,12 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/brizzai/fleet/internal/git"
+	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -515,5 +517,109 @@ func TestOriginJumpKeyBinding(t *testing.T) {
 	}
 	if _, _ = h.handleKey(up); h.cursor != idxOfOrigin(t, h, "github.com/acme/alpha") {
 		t.Errorf("ctrl+shift+up through handleKey: cursor = %d, want alpha's origin header", h.cursor)
+	}
+}
+
+// prJumpHome builds one origin with four checkouts, each holding an idle
+// session so it renders: a green PR on main, a red one on wt-red, a draft
+// whose CI failed on wt-draft (the badge paints drafts gray, never red), and a
+// red one on wt-snoozed that the checkout snooze must mute.
+func prJumpHome(t *testing.T) *Home {
+	t.Helper()
+	const origin = "github.com/acme/pj"
+	mk := func(name, path string) *session.Session {
+		s := session.NewSession(name, path)
+		s.SetStatus(session.StatusIdle)
+		return s
+	}
+	h := &Home{
+		sessions: []*session.Session{
+			mk("main", "/tmp/pj-main"),
+			mk("red", "/tmp/pj-wt-red"),
+			mk("draft", "/tmp/pj-wt-draft"),
+			mk("snoozed", "/tmp/pj-wt-snoozed"),
+		},
+		repoExpanded: map[string]bool{},
+		pinnedRepos:  map[string]bool{},
+		groupSnooze:  map[string]time.Time{"/tmp/pj-wt-snoozed": time.Now().Add(time.Hour)},
+	}
+	gi := map[string]*git.RepoInfo{
+		"/tmp/pj-main":       {OriginKey: origin, PR: &github.PR{Number: 1, State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS"}},
+		"/tmp/pj-wt-red":     {OriginKey: origin, IsWorktreeRepo: true, PR: &github.PR{Number: 2, State: "OPEN", CIStatus: "FAILURE"}},
+		"/tmp/pj-wt-draft":   {OriginKey: origin, IsWorktreeRepo: true, PR: &github.PR{Number: 3, State: "OPEN", CIStatus: "FAILURE", IsDraft: true}},
+		"/tmp/pj-wt-snoozed": {OriginKey: origin, IsWorktreeRepo: true, PR: &github.PR{Number: 4, State: "OPEN", ReviewDecision: "CHANGES_REQUESTED"}},
+	}
+	h.gitInfoCache.Store(&gi)
+	h.rebuildFlatItems()
+	return h
+}
+
+// TestPRJumpRedBeforeGreen: P seeks a red badge first and falls back
+// to green only when no red badge is on screen. A draft with failing CI is
+// neither — the badge paints it gray — and a snoozed checkout is skipped the
+// way Space skips a snoozed session.
+func TestPRJumpRedBeforeGreen(t *testing.T) {
+	h := prJumpHome(t)
+	h.cursor = 0 // origin header
+
+	h.jumpToNextAttentionPR()
+	if want := idxOfCheckout(t, h, "/tmp/pj-wt-red"); h.cursor != want {
+		t.Fatalf("first jump: cursor = %d, want the red checkout at %d (skipping the green main)", h.cursor, want)
+	}
+
+	// The only red badge: a second press wraps back onto it, never onto the
+	// draft or the snoozed checkout.
+	h.jumpToNextAttentionPR()
+	if want := idxOfCheckout(t, h, "/tmp/pj-wt-red"); h.cursor != want {
+		t.Fatalf("second jump: cursor = %d, want to stay on the sole red checkout at %d", h.cursor, want)
+	}
+
+	// Red gets fixed → pending. Nothing red is left on screen, so green wins.
+	gi := *h.gitInfoCache.Load()
+	gi["/tmp/pj-wt-red"].PR.CIStatus = "PENDING"
+	h.jumpToNextAttentionPR()
+	if want := idxOfCheckout(t, h, "/tmp/pj-main"); h.cursor != want {
+		t.Fatalf("no-red jump: cursor = %d, want the green main at %d", h.cursor, want)
+	}
+
+	// Waking the snoozed checkout puts its red badge back in the rotation.
+	delete(h.groupSnooze, "/tmp/pj-wt-snoozed")
+	h.jumpToNextAttentionPR()
+	if want := idxOfCheckout(t, h, "/tmp/pj-wt-snoozed"); h.cursor != want {
+		t.Fatalf("after unsnooze: cursor = %d, want the red snoozed checkout at %d", h.cursor, want)
+	}
+}
+
+// TestPRJumpMutedByCollapsedOrigin: a collapsed origin hides its checkout
+// headers, so its PRs are not targets — the same rule Space applies to its
+// sessions. With nothing else on screen the jump is a silent no-op.
+func TestPRJumpMutedByCollapsedOrigin(t *testing.T) {
+	h := prJumpHome(t)
+	h.repoExpanded[OriginExpandKey("github.com/acme/pj")] = false
+	h.rebuildFlatItems()
+	h.cursor = 0
+	h.jumpToNextAttentionPR()
+	if h.cursor != 0 {
+		t.Errorf("jump into a collapsed origin moved the cursor to %d; want a no-op", h.cursor)
+	}
+}
+
+// TestPRJumpKeyBinding: the fully-wired handleKey routes P to the jump.
+func TestPRJumpKeyBinding(t *testing.T) {
+	key := tea.KeyPressMsg{Code: 'p', ShiftedCode: 'P', Mod: tea.ModShift, Text: "P"}
+	if got := key.String(); got != "P" {
+		t.Fatalf("shift+p stringifies as %q — the case label in handleKey no longer matches", got)
+	}
+
+	h := newPersistTestHome(t)
+	seed := prJumpHome(t)
+	h.sessions = seed.sessions
+	h.groupSnooze = seed.groupSnooze
+	h.gitInfoCache.Store(seed.gitInfoCache.Load())
+	h.rebuildFlatItems()
+	h.cursor = 0
+
+	if _, _ = h.handleKey(key); h.cursor != idxOfCheckout(t, h, "/tmp/pj-wt-red") {
+		t.Errorf("P through handleKey: cursor = %d, want the red checkout header", h.cursor)
 	}
 }

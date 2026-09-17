@@ -871,25 +871,48 @@ func prBadgeText(pr *github.PR) string {
 	return badge + " " + icons
 }
 
+// prBadgeVerdict is the state semantic a PR badge carries. prBadgeStyle maps
+// it to a colour and the P jump reads it directly, so the two can
+// never disagree about which badges are red.
+type prBadgeVerdict int
+
+const (
+	prBadgePending prBadgeVerdict = iota // open with nothing to fix and not yet mergeable (also: no PR)
+	prBadgeHidden                        // closed — the badge renders nothing
+	prBadgeMerged
+	prBadgeDraft
+	prBadgeFail  // red: CI failed, changes requested, unresolved threads, or conflicts
+	prBadgeReady // green: approved + CI passed
+)
+
+func prVerdict(pr *github.PR) prBadgeVerdict {
+	switch {
+	case pr == nil:
+		return prBadgePending
+	case pr.State == "CLOSED":
+		return prBadgeHidden
+	case pr.State == "MERGED":
+		return prBadgeMerged
+	case pr.IsDraft:
+		return prBadgeDraft
+	case pr.CIStatus == "FAILURE" || pr.ReviewDecision == "CHANGES_REQUESTED" || pr.UnresolvedThreads > 0 || pr.HasConflicts:
+		return prBadgeFail
+	case pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS":
+		return prBadgeReady
+	}
+	return prBadgePending
+}
+
 // prBadgeStyle picks the foreground color carrying the PR's state semantic.
 func prBadgeStyle(pr *github.PR) lipgloss.Style {
-	if pr == nil {
-		return PRPendingStyle
-	}
-	if pr.State == "MERGED" {
+	switch prVerdict(pr) {
+	case prBadgeMerged:
 		return PRMergedStyle
-	}
-	if pr.IsDraft {
+	case prBadgeDraft:
 		return PRDraftStyle
-	}
-	ciFail := pr.CIStatus == "FAILURE"
-	changesReq := pr.ReviewDecision == "CHANGES_REQUESTED"
-	hasThreads := pr.UnresolvedThreads > 0
-	hasConflicts := pr.HasConflicts
-	if ciFail || changesReq || hasThreads || hasConflicts {
+	case prBadgeFail:
 		return PRFailStyle
-	}
-	if pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" {
+	case prBadgeReady:
 		return PROpenStyle
 	}
 	return PRPendingStyle
