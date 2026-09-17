@@ -5936,20 +5936,21 @@ func (h *Home) buildJumpTree() []SidebarItem {
 	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
 }
 
-// jumpToNextAttentionPR moves the cursor to the next checkout whose PR badge
-// is red — CI failed, changes requested, unresolved threads, or conflicts —
-// and, when no badge on screen is red, to the next green one (approved + CI
-// passed). Cycles in on-screen order and wraps; silent no-op when nothing
-// qualifies.
+// jumpToNextAttentionPR moves the cursor to the first session of the next
+// checkout whose PR badge is red — CI failed, changes requested, unresolved
+// threads, or conflicts — and, when no badge on screen is red, of the next
+// green one (approved + CI passed). Cycles in on-screen order and wraps;
+// silent no-op when nothing qualifies. A checkout with no sessions lands on
+// its header.
 //
 // Red and green are prVerdict's own answers, the same ones prBadgeStyle paints,
 // so the jump can never land on a badge a different colour than the one it
 // claims to seek. Candidates are the checkout headers already on screen: a
 // collapsed origin hides its headers, which mutes it exactly as Space mutes its
 // sessions, while a collapsed checkout still shows its header, so its PR stays
-// reachable without expanding anything. Snoozed checkouts — by their own
-// deadline or their origin's — are skipped, since snooze is the attention mute
-// and this is an attention surface.
+// reachable — and is expanded to reveal the session, as Space does. Snoozed
+// checkouts — by their own deadline or their origin's — are skipped, since
+// snooze is the attention mute and this is an attention surface.
 //
 // With PR badges turned off (Settings → Appearance) there is no badge to land
 // on, so the jump is a no-op rather than stopping on a bare branch row with
@@ -5991,6 +5992,16 @@ func (h *Home) jumpToNextAttentionPR() {
 		return // Silent no-op.
 	}
 	h.cursor = target
+	if hdr := h.flatItems[target]; hdr.SessionCount > 0 {
+		h.repoExpanded[hdr.RepoPath] = true
+		h.rebuildFlatItems()
+		for i, it := range h.flatItems {
+			if it.Session != nil && it.RepoPath == hdr.RepoPath {
+				h.cursor = i
+				break
+			}
+		}
+	}
 	h.syncViewport()
 }
 
