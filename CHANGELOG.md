@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.42.0] - 2026-09-17
+
+### Improved
+
+- **`P` lands on the session.** Jumping to a PR that needs you now puts the cursor on that worktree's first session instead of its header, so `Enter` attaches straight away — a collapsed worktree unfolds to show it.
+
 ## [2.41.0] - 2026-09-17
 
 ### Highlights
@@ -710,7 +716,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.41.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.42.0...HEAD
+[2.42.0]: https://github.com/brizzai/fleet/releases/tag/v2.42.0
 [2.41.0]: https://github.com/brizzai/fleet/releases/tag/v2.41.0
 [2.40.1]: https://github.com/brizzai/fleet/releases/tag/v2.40.1
 [2.40.0]: https://github.com/brizzai/fleet/releases/tag/v2.40.0
