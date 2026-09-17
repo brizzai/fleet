@@ -346,6 +346,39 @@ func TestInitialPromptIsOneShot(t *testing.T) {
 // hook. It fires *because* the lead is parked, so counting it as progress inverted the
 // tiebreaker's own premise — "the LEAD-only transcript stays static while the lead is
 // truly blocked" — and pinned the session to running for the whole 120s window.
+// A tmux server first started from inside a Claude Code session carries
+// CLAUDE_CODE_CHILD_SESSION=1 in its global environment forever, and every pane
+// it creates inherits it — so fleet's own agent sessions announce themselves as
+// sub-sessions and Claude Code stops writing their transcripts. That costs
+// `claude --resume`, which restart, fork and the idle-suspend wake all depend
+// on, and the transcript ReadClaudeSessionName reads for the agent title.
+//
+// The value must be present and EMPTY, never absent: tmux -e can only add a
+// variable, so omitting it leaves the inherited 1 in place. It is asserted for
+// every agent because the marker comes from the tmux server, not the agent.
+func TestSessionEnvBlanksTheChildSessionMarker(t *testing.T) {
+	const marker = "CLAUDE_CODE_CHILD_SESSION"
+	for _, ag := range []agent.Type{agent.Claude, agent.Codex, agent.OpenCode} {
+		s := &Session{ID: "abc-123", Agent: ag}
+
+		found := false
+		for _, e := range s.sessionEnv() {
+			v, ok := strings.CutPrefix(e, marker+"=")
+			if !ok {
+				continue
+			}
+			found = true
+			if v != "" {
+				t.Errorf("%s: %s=%q — a truthy value suppresses the transcript", ag, marker, v)
+			}
+		}
+		if !found {
+			t.Errorf("%s: sessionEnv() does not set %s, so an inherited marker survives: %q",
+				ag, marker, s.sessionEnv())
+		}
+	}
+}
+
 func TestConversationActivePastHookIgnoresQueuedWork(t *testing.T) {
 	debuglog.Init()
 

@@ -98,13 +98,22 @@ var (
 	HelpSepStyle  lipgloss.Style
 
 	// Git info styles.
-	BranchStyle    lipgloss.Style
-	DirtyStyle     lipgloss.Style
-	PROpenStyle    lipgloss.Style
-	PRFailStyle    lipgloss.Style
-	PRPendingStyle lipgloss.Style
-	PRMergedStyle  lipgloss.Style
-	PRDraftStyle   lipgloss.Style
+	BranchStyle lipgloss.Style
+	DirtyStyle  lipgloss.Style
+	PROpenStyle lipgloss.Style
+	// ReviewLabelStyle is a pull request's labels in the preview: a quiet band
+	// carrying the shape of a chip, because that is what a label is and it is
+	// how everyone already reads them.
+	//
+	// Its own role rather than SelectionPill(false), which is what it borrowed
+	// first: a label is data, not a selection, and the pill is bold — three of
+	// them outweighed the state row, which is the thing you actually scan.
+	ReviewLabelStyle lipgloss.Style
+	PRFailStyle      lipgloss.Style
+	PRPendingStyle   lipgloss.Style
+	PRMergedStyle    lipgloss.Style
+	ReviewGroupStyle lipgloss.Style
+	PRDraftStyle     lipgloss.Style
 
 	// Slot badge style (RTS-style quick-access hotkey).
 	SlotBadgeStyle lipgloss.Style
@@ -142,6 +151,10 @@ func ApplyPalette(p Palette) {
 	ColorOrange = p.Orange
 	ColorPurple = p.Purple
 
+	// The review reader's diff tints and syntax colors are derived from the
+	// palette above — see design_review.go.
+	applyReviewPalette(p)
+
 	// 2. Rebuild all styles (lipgloss copies colors by value at construction).
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
 	RepoHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
@@ -178,10 +191,22 @@ func ApplyPalette(p Palette) {
 	BranchStyle = lipgloss.NewStyle().Foreground(ColorBlue)
 	DirtyStyle = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 	PROpenStyle = lipgloss.NewStyle().Foreground(ColorGreen)
+	ReviewLabelStyle = lipgloss.NewStyle().Foreground(ColorText).Background(ColorBorder)
 	PRFailStyle = lipgloss.NewStyle().Foreground(ColorRed)
 	PRPendingStyle = lipgloss.NewStyle().Foreground(ColorYellow)
 	PRMergedStyle = lipgloss.NewStyle().Foreground(ColorPurple)
 	PRDraftStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+	// Orange. Blue was the wrong call: it is BranchStyle's hue, so the one row
+	// in the tree that is NOT a branch read as one, and it is also
+	// StatusFinishedStyle's, putting it in the same tone as the dots a few
+	// columns to its right. The brackets still do the distinguishing; the hue
+	// now says the node is a different kind of thing rather than repeating what
+	// its neighbours already say.
+	//
+	// It shares orange with SlotBadgeStyle, which is the one other bracketed
+	// token in the sidebar — that one is BOLD and always a single digit, so the
+	// pair reads apart on weight and content at the width they actually appear.
+	ReviewGroupStyle = lipgloss.NewStyle().Foreground(ColorOrange)
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
 	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
