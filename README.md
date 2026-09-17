@@ -180,6 +180,7 @@ If you drive Claude Code, Codex, or OpenCode and want the tightest integration, 
 | `Ctrl+Q` | Detach from session |
 | `Tab` | Focus/unfocus preview (split mode, beta) |
 | `Space` | Jump to next waiting/finished session |
+| `P` | Jump to next PR with something to fix (red badge), else next one ready to merge (green) |
 | `a` | New session (current repo, default agent) |
 | `A` | New session (pick agent: Claude Code / Codex / OpenCode) |
 | `n` | New session (any path, autocomplete) |

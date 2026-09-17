@@ -3426,6 +3426,11 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.actionLog.Add("open PR", "", true)
 		analytics.Track(analytics.EventPROpened, nil)
 		return h, h.openPRInBrowser()
+	case "P":
+		// Jump to next red (or, failing that, green) PR.
+		h.jumpToNextAttentionPR()
+		analytics.Track(analytics.EventPRJump, nil)
+		return h, h.fetchPreviewForSelected()
 	case "Y":
 		if s := h.selectedSession(); s != nil {
 			h.actionLog.Add("quick approve", s.Title, true)
@@ -6164,6 +6169,64 @@ func (h *Home) buildJumpTree() []SidebarItem {
 	}
 	originOf, isWorktreeOf := h.originResolvers()
 	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
+}
+
+// jumpToNextAttentionPR moves the cursor to the next checkout whose PR badge
+// is red — CI failed, changes requested, unresolved threads, or conflicts —
+// and, when no badge on screen is red, to the next green one (approved + CI
+// passed). Cycles in on-screen order and wraps; silent no-op when nothing
+// qualifies.
+//
+// Red and green are prVerdict's own answers, the same ones prBadgeStyle paints,
+// so the jump can never land on a badge a different colour than the one it
+// claims to seek. Candidates are the checkout headers already on screen: a
+// collapsed origin hides its headers, which mutes it exactly as Space mutes its
+// sessions, while a collapsed checkout still shows its header, so its PR stays
+// reachable without expanding anything. Snoozed checkouts — by their own
+// deadline or their origin's — are skipped, since snooze is the attention mute
+// and this is an attention surface.
+//
+// With PR badges turned off (Settings → Appearance) there is no badge to land
+// on, so the jump is a no-op rather than stopping on a bare branch row with
+// nothing on screen saying why.
+func (h *Home) jumpToNextAttentionPR() {
+	if !ShowPRBadges {
+		return
+	}
+	n := len(h.flatItems)
+	if n == 0 {
+		return
+	}
+	gitInfo := h.gitInfo()
+	now := time.Now()
+	findNext := func(want prBadgeVerdict) int {
+		for off := 1; off <= n; off++ {
+			i := (h.cursor + off + n) % n // +n keeps the index non-negative for a stale cursor
+			it := h.flatItems[i]
+			if !it.IsCheckoutHeader {
+				continue
+			}
+			if snoozeState(nil, it.OriginKey, it.RepoPath, h.groupSnooze, now).Muted {
+				continue
+			}
+			info := gitInfo[it.RepoPath]
+			if info != nil && prVerdict(info.PR) == want {
+				return i
+			}
+		}
+		return -1
+	}
+
+	target := findNext(prBadgeFail)
+	if target == -1 {
+		target = findNext(prBadgeReady)
+	}
+	if target == -1 {
+		debuglog.Logger.Debug("prjump: no red/green PR on screen", "cursor", h.cursor)
+		return // Silent no-op.
+	}
+	h.cursor = target
+	h.syncViewport()
 }
 
 func (h *Home) renameSelected() tea.Cmd {
@@ -9234,6 +9297,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "attach", Name: "Attach Session", Shortcut: "Enter"},
 		{Kind: PaletteKindCommand, ID: "focus", Name: "Focus Preview", Shortcut: "Tab"},
 		{Kind: PaletteKindCommand, ID: "jump_next", Name: "Jump to Next Waiting", Shortcut: "Space"},
+		{Kind: PaletteKindCommand, ID: "jump_next_pr", Name: "Jump to Next PR Needing Attention", Shortcut: "P"},
 		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
@@ -9427,6 +9491,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "jump_next":
 		h.jumpToNextAttentionSession()
 		analytics.Track(analytics.EventSpaceJump, nil)
+		return h, h.fetchPreviewForSelected()
+	case "jump_next_pr":
+		h.jumpToNextAttentionPR()
+		analytics.Track(analytics.EventPRJump, nil)
 		return h, h.fetchPreviewForSelected()
 	case "new_session":
 		repoPath := h.resolveCurrentRepo()
