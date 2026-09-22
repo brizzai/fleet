@@ -92,6 +92,12 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 	// Mark this device active today (full + minimal); the UI tick keeps it
 	// fresh across day boundaries for long-running instances.
 	analytics.Heartbeat()
+
+	// A first run that ended by closing the terminal left its trace on disk;
+	// this is the first moment of the next launch that has a client to send it
+	// with. Newcomers do exactly that, so a trace that lived only in memory
+	// would miss the runs worth reading.
+	h.sendUncleanFirstRunTrace()
 }
 
 // anyAttached reports whether the user attached to at least one session this

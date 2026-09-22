@@ -211,7 +211,7 @@ func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID stri
 		h.setExpanded(sc.groupKey, false)
 	}
 	h.rebuildFlatItems()
-	h.actionLog.Add("snooze "+sc.kind, sc.label, true)
+	h.logAction("snooze "+sc.kind, sc.label, true)
 	analytics.Track(analytics.EventSnoozeSet, map[string]interface{}{
 		"scope":    sc.kind,
 		"duration": durationID,
@@ -243,7 +243,7 @@ func (h *Home) clearSnooze(sc snoozeScope) {
 		h.setExpanded(sc.groupKey, true)
 	}
 	h.rebuildFlatItems()
-	h.actionLog.Add("wake "+sc.kind, sc.label, true)
+	h.logAction("wake "+sc.kind, sc.label, true)
 	analytics.Track(analytics.EventSnoozeCleared, map[string]interface{}{
 		"scope":  sc.kind,
 		"reason": "manual",

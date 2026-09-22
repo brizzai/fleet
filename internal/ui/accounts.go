@@ -733,7 +733,7 @@ func (h *Home) runAccountLogin() tea.Cmd {
 
 	h.isAttaching.Store(true)
 	h.attachStartedAt.Store(time.Now().UnixNano())
-	h.actionLog.Add("add claude account", "", true)
+	h.logAction("add claude account", "", true)
 
 	// Watch for the login completing and pull the user back the moment it does,
 	// so finishing the browser flow is the last thing they have to do. Runs

@@ -64,7 +64,7 @@ func (h *Home) startFrost() tea.Cmd {
 		return nil
 	}
 	debuglog.Logger.Info("frost: start", "size", h.width*h.height)
-	h.actionLog.Add("frost", "start", true)
+	h.logAction("frost", "start", true)
 	analytics.Track(analytics.EventFrostMode, nil)
 	screen := frost.Freeze(h.composeScreen(), h.width, h.height)
 	h.frost = frost.New(screen, uint64(time.Now().UnixNano()))
