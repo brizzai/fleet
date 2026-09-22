@@ -100,18 +100,44 @@ func TestExitReasonIsOmittedWhenTheHookHasNone(t *testing.T) {
 
 // A death tmux can still describe carries how the process went: exit_code tells a
 // clean `/exit` from a crash, and exit_signal names the killer (9 = SIGKILL, the
-// machine running out of memory). Both liveness branches read the same exitProps,
-// and a tmux that can't answer adds nothing rather than a blank.
+// machine running out of memory).
+//
+// The cases are the three states tmux can be in, and which branch each reaches
+// matters: only pane_dead — a live session whose process exited — can produce an
+// exit code at all. tmux_gone deliberately doesn't ask, since a session that is
+// gone has no pane to report on and the question costs an uncached list-panes
+// per session at exactly the moment they all die together.
 func TestSessionErroredCarriesThePanesExitCode(t *testing.T) {
 	debuglog.Init()
 	t.Setenv("HOME", t.TempDir()) // a death also writes a crash dump
 	for _, tc := range []struct {
-		name string
-		pane *mockPane
-		want map[string]string
+		name       string
+		pane       *mockPane
+		wantReason string
+		want       map[string]string
+		wantAsks   int // PaneDeadInfo shell-outs this death may spend
 	}{
-		{"killed", &mockPane{dead: true, exitStatus: "137", exitSignal: "9"}, map[string]string{"exit_code": "137", "exit_signal": "9"}},
-		{"tmux can't say", &mockPane{dead: true}, nil},
+		{
+			"pane died, tmux can say how",
+			&mockPane{dead: true, exitStatus: "137", exitSignal: "9"},
+			"pane_dead",
+			map[string]string{"exit_code": "137", "exit_signal": "9"},
+			1,
+		},
+		{
+			"pane died, tmux won't answer",
+			&mockPane{dead: true, deadInfoFails: true},
+			"pane_dead",
+			nil,
+			1,
+		},
+		{
+			"tmux gone — never asked",
+			&mockPane{dead: true, tmuxGone: true},
+			"tmux_gone",
+			nil,
+			0,
+		},
 	} {
 		sent := recordErroredProps(t)
 		s := &Session{ID: "dead", Status: StatusRunning, paneCapturer: tc.pane}
@@ -120,11 +146,24 @@ func TestSessionErroredCarriesThePanesExitCode(t *testing.T) {
 		if len(*sent) != 1 {
 			t.Fatalf("%s: got %d session_errored events, want 1", tc.name, len(*sent))
 		}
+		if got := (*sent)[0]["reason"]; got != tc.wantReason {
+			t.Fatalf("%s: reason = %v, want %s — the case is not reaching the branch it names",
+				tc.name, got, tc.wantReason)
+		}
 		for _, k := range []string{"exit_code", "exit_signal"} {
 			got, ok := (*sent)[0][k]
 			if want, wanted := tc.want[k], tc.want[k] != ""; wanted != ok || (ok && got != want) {
 				t.Errorf("%s: %s = %v (present %v), want %q (present %v)", tc.name, k, got, ok, want, wanted)
 			}
+		}
+		// The tmux_gone case answers nil either way, so only the call count can
+		// tell "didn't ask" from "asked and got nothing" — and the cost of asking
+		// is the whole reason that branch passes nil: an uncached, 2s-capped
+		// list-panes per session, spent when a dying tmux server takes them all
+		// down at once.
+		if tc.pane.deadInfoCalls != tc.wantAsks {
+			t.Errorf("%s: PaneDeadInfo called %d times, want %d",
+				tc.name, tc.pane.deadInfoCalls, tc.wantAsks)
 		}
 	}
 }
@@ -170,7 +209,7 @@ func TestSessionErroredOnlyFromALiveStatus(t *testing.T) {
 		{StatusError, nil},
 	} {
 		reasons := recordErrored(t)
-		s := &Session{ID: "dead", Status: tc.old, paneCapturer: &mockPane{dead: true}}
+		s := &Session{ID: "dead", Status: tc.old, paneCapturer: &mockPane{tmuxGone: true}}
 		s.UpdateStatus()
 		if !slices.Equal(*reasons, tc.want) {
 			t.Errorf("from %s: session_errored reasons = %v, want %v", tc.old, *reasons, tc.want)

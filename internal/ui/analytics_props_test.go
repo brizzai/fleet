@@ -4,8 +4,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +24,19 @@ func TestErrorCategoriesAreSnakeCaseEnums(t *testing.T) {
 	fset := token.NewFileSet()
 	snakeCase := regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
 	seen := map[string]bool{}
-	for _, name := range []string{"app.go", "accounts.go", "drawer.go"} {
+	// Every non-test file in the package, derived rather than enumerated: setError
+	// is a method on Home, so any file here can call it, and this package grows a
+	// dialog file every few weeks. A hardcoded list would let the next one ship
+	// unscanned — and the floor below wouldn't notice, since today's callers clear
+	// it on their own.
+	names, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob package files: %v", err)
+	}
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
 		f, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
@@ -53,8 +67,10 @@ func TestErrorCategoriesAreSnakeCaseEnums(t *testing.T) {
 			return true
 		})
 	}
-	// A guard that silently matched nothing (a rename, a moved file, a helper that
-	// stopped being a method call) would pass while every category went unchecked.
+	// A guard that silently matched nothing (a rename, a helper that stopped being
+	// a method call) would pass while every category went unchecked. This catches
+	// the scan breaking wholesale; it cannot catch one unscanned file, which is
+	// why the scan set is globbed rather than listed.
 	if len(seen) < 20 {
 		t.Fatalf("found only %d categories — the scan stopped seeing call sites", len(seen))
 	}
