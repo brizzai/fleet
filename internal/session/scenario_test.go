@@ -16,14 +16,22 @@ import (
 type mockPane struct {
 	content      string
 	dead         bool
-	alive        bool  // controls IsAlive via !IsPaneDead
-	activityUnix int64 // simulated tmux window_activity timestamp
-	hasActivity  bool  // false → GetActivity reports unknown
+	alive        bool   // controls IsAlive via !IsPaneDead
+	exitStatus   string // tmux #{pane_dead_status} once dead
+	exitSignal   string // tmux #{pane_dead_signal} once dead
+	activityUnix int64  // simulated tmux window_activity timestamp
+	hasActivity  bool   // false → GetActivity reports unknown
 }
 
 func (m *mockPane) CapturePane() (string, error) { return m.content, nil }
 func (m *mockPane) IsPaneDead() bool             { return m.dead }
 func (m *mockPane) GetActivity() (int64, bool)   { return m.activityUnix, m.hasActivity }
+
+// PaneDeadInfo always answers (ok=true): the mock stands in for a reachable tmux.
+// A live pane reporting no exit info is how a caller sees "nothing to report".
+func (m *mockPane) PaneDeadInfo() (bool, string, string, bool) {
+	return m.dead, m.exitStatus, m.exitSignal, true
+}
 
 // --- Scenario types ---
 

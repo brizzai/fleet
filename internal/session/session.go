@@ -29,6 +29,9 @@ type PaneCapturer interface {
 	CapturePane() (string, error)
 	IsPaneDead() bool
 	GetActivity() (int64, bool) // window_activity unix ts; ok=false when unknown
+	// PaneDeadInfo is how the pane died: tmux's exit status and signal, with
+	// ok=false when the tmux session is gone and there is nothing to ask.
+	PaneDeadInfo() (dead bool, exitStatus, exitSignal string, ok bool)
 }
 
 // Status represents the current state of a session.
@@ -103,6 +106,7 @@ type Session struct {
 	snoozedUntil time.Time
 
 	hookStatus       string
+	hookReason       string // SessionEnd's reason for the hook above, "" on every other event
 	hookUpdatedAt    time.Time
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
 	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
@@ -374,7 +378,7 @@ func (s *Session) Start() error {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
-		s.reportErrored("start_failed")
+		s.reportErrored("start_failed", nil)
 		debuglog.Logger.Error("session start failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
 	}
@@ -422,7 +426,13 @@ var trackEvent = analytics.Track
 // reportErrored sends session_errored for this session's move into StatusError.
 // reason is a short enum, never error text. Call it for the move, not the status:
 // a status pass has to check newFailure first.
-func (s *Session) reportErrored(reason string) {
+//
+// detail carries what the death itself knows and reason cannot: exit_reason for a
+// hook death, exit_code/exit_signal for a dead pane. Values are enums and small
+// integers tmux and Claude Code choose, never fleet text and never user text; an
+// empty one is dropped rather than sent, so a caller with nothing to add passes
+// nil and the event is exactly what it was before.
+func (s *Session) reportErrored(reason string, detail map[string]string) {
 	s.mu.RLock()
 	props := map[string]interface{}{
 		"agent":                string(s.Agent),
@@ -431,7 +441,28 @@ func (s *Session) reportErrored(reason string) {
 		"resumed":              s.launchResumed,
 	}
 	s.mu.RUnlock()
+	for k, v := range detail {
+		if v != "" {
+			props[k] = v
+		}
+	}
 	trackEvent(analytics.EventSessionErrored, props)
+}
+
+// exitProps is how the pane's process died, as session_errored's exit_code and
+// exit_signal — tmux's own #{pane_dead_status} / #{pane_dead_signal}, which is
+// what separates a clean `/exit` from a SIGKILL the machine ran out of memory
+// for. Nil when tmux can't answer, which is the ordinary tmux_gone case: a
+// session that is already gone has no pane left to ask.
+//
+// One tmux shell-out, so call it only on the transition into error (behind
+// newFailure), never on every pass that finds the session still dead.
+func (s *Session) exitProps() map[string]string {
+	dead, exitStatus, exitSignal, ok := s.getCapturer().PaneDeadInfo()
+	if !ok || !dead {
+		return nil
+	}
+	return map[string]string{"exit_code": exitStatus, "exit_signal": exitSignal}
 }
 
 // newFailure reports whether a status pass that has just put a session into
@@ -648,6 +679,10 @@ type HookStatus struct {
 	// status file written before the field existed). Ownership uses it to ask
 	// whether the conversation currently owning this session is still running.
 	AgentPID int
+	// Reason is SessionEnd's own reason ("clear", "logout", "prompt_input_exit",
+	// "other"), empty on every other event. It is what separates a conversation
+	// rotation from a death in session_errored; nothing here acts on it.
+	Reason string
 }
 
 // UpdateHookStatus updates the session's hook-based status.
@@ -854,6 +889,10 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		}
 	}
 	s.hookStatus = hs.Status
+	// Unconditional, like hookStatus: the reason must describe the hook we are
+	// holding, so a later non-SessionEnd hook clears it rather than leaving the
+	// last death's reason to be attached to the next one.
+	s.hookReason = hs.Reason
 	s.hookUpdatedAt = hs.UpdatedAt
 	if hs.SessionID != "" {
 		s.ClaudeSessionID = hs.SessionID
@@ -987,7 +1026,7 @@ func (s *Session) Restart() error {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
-		s.reportErrored("restart_failed")
+		s.reportErrored("restart_failed", nil)
 		debuglog.Logger.Error("session restart failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
 	}
@@ -1033,7 +1072,7 @@ func (s *Session) RespawnClaude() error {
 		s.mu.Lock()
 		s.Status = StatusError
 		s.mu.Unlock()
-		s.reportErrored("respawn_failed")
+		s.reportErrored("respawn_failed", nil)
 		debuglog.Logger.Error("session respawn failed", "id", s.ID, "title", s.Title, "err", err)
 		return err
 	}
@@ -1151,6 +1190,7 @@ func (s *Session) ResolveLaunchID() (launchID, healedFrom string) {
 func (s *Session) clearHookState() {
 	s.mu.Lock()
 	s.hookStatus = ""
+	s.hookReason = ""
 	s.hookUpdatedAt = time.Time{}
 	s.hookOverriddenAt = time.Time{}
 	s.ownerSessionID = ""
@@ -1191,7 +1231,7 @@ func (s *Session) UpdateStatus() {
 		log.Debug("status: not alive", "old", oldStatus, "new", StatusError)
 		s.triggerCrashDump("tmux_gone")
 		if newFailure(oldStatus) {
-			s.reportErrored("tmux_gone")
+			s.reportErrored("tmux_gone", s.exitProps())
 		}
 		return
 	}
@@ -1202,7 +1242,7 @@ func (s *Session) UpdateStatus() {
 		log.Debug("status: pane dead", "old", oldStatus, "new", StatusError)
 		s.triggerCrashDump("pane_dead")
 		if newFailure(oldStatus) {
-			s.reportErrored("pane_dead")
+			s.reportErrored("pane_dead", s.exitProps())
 		}
 		return
 	}
@@ -1295,6 +1335,7 @@ func (s *Session) UpdateStatus() {
 func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog.Logger) {
 	hookSaysDead := false
 	errReason := ""
+	exitReason := ""
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -1321,6 +1362,10 @@ func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog
 			s.Status = StatusError
 			hookSaysDead = true
 			errReason = "hook_dead"
+			// Read under the same lock that just decided this is a death, so the
+			// reason reported can only be the one belonging to the hook that caused
+			// it — a concurrent UpdateHookStatus can't slide a newer one in between.
+			exitReason = s.hookReason
 		}
 		if s.Status != oldStatus {
 			log.Info("status changed (agent hook)", "old", oldStatus, "new", s.Status, "hookStatus", hookStatus)
@@ -1331,7 +1376,7 @@ func (s *Session) applyHookStatus(oldStatus Status, hookStatus string, log *slog
 		s.triggerCrashDump("hook_dead")
 	}
 	if errReason != "" && newFailure(oldStatus) {
-		s.reportErrored(errReason)
+		s.reportErrored(errReason, map[string]string{"exit_reason": exitReason})
 	}
 }
 
@@ -1375,6 +1420,7 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 	}
 
 	hookSaysDead := false
+	exitReason := ""
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -1391,6 +1437,8 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 			s.lastContentChangeAt = time.Time{}
 			s.Status = StatusError
 			hookSaysDead = true
+			// Under the lock that read the hook, as in applyHookStatus above.
+			exitReason = s.hookReason
 		}
 
 		if s.Status != oldStatus {
@@ -1401,7 +1449,7 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus string, hook
 	if hookSaysDead {
 		s.triggerCrashDump("hook_dead")
 		if newFailure(oldStatus) {
-			s.reportErrored("hook_dead")
+			s.reportErrored("hook_dead", map[string]string{"exit_reason": exitReason})
 		}
 	}
 }
