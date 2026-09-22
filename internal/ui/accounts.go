@@ -942,7 +942,7 @@ func (h *Home) maybePollAccountUsage() {
 // drift apart.
 func (h *Home) persistAccounts(notice string) tea.Cmd {
 	if err := h.accounts.Save(); err != nil {
-		h.setError(fmt.Errorf("could not save accounts: %w", err))
+		h.setError("accounts_save_failed", fmt.Errorf("could not save accounts: %w", err))
 		return nil
 	}
 	session.SetAccountConfigDirFunc(h.accounts.ConfigDirFor)

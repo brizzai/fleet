@@ -1031,7 +1031,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case shellCreateResultMsg:
 		if msg.err != nil {
-			h.setError(msg.err)
+			h.setError("shell_create_failed", msg.err)
 			return h, nil
 		}
 		h.workerMu.Lock()
@@ -1053,7 +1053,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case shellRestartMsg:
 		if msg.err != nil {
-			h.setError(msg.err)
+			h.setError("shell_restart_failed", msg.err)
 			return h, nil
 		}
 		if err := h.storage.UpdateShellTmuxName(msg.id, msg.tmuxName); err != nil {
@@ -1153,7 +1153,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case accountStrategyMsg:
 		h.cfg.AccountStrategy = claudeaccount.ParseStrategy(msg.strategy)
 		if err := h.cfg.Save(); err != nil {
-			h.setError(fmt.Errorf("could not save account strategy: %w", err))
+			h.setError("account_strategy_save_failed", fmt.Errorf("could not save account strategy: %w", err))
 			return h, nil
 		}
 		h.logAction("account strategy", h.cfg.AccountStrategy, true)
@@ -1176,7 +1176,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.cfg.DefaultAccount = msg.email
 		if err := h.cfg.Save(); err != nil {
-			h.setError(fmt.Errorf("could not save default account: %w", err))
+			h.setError("default_account_save_failed", fmt.Errorf("could not save default account: %w", err))
 			return h, nil
 		}
 		return h, h.persistAccounts("Default account: " + msg.email)
@@ -1280,7 +1280,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionDeleteMsg:
 		if msg.err != nil {
-			h.setError(msg.err)
+			h.setError("session_delete_failed", msg.err)
 			return h, nil
 		}
 		// Engagement signals: lifetime, prompt count, and orphaned-flag tell us
@@ -1311,7 +1311,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionRestartMsg:
 		if msg.err != nil {
-			h.setError(fmt.Errorf("restart failed: %w", msg.err))
+			h.setError("restart_failed", fmt.Errorf("restart failed: %w", msg.err))
 		}
 		// Update storage with new status and tmux session name.
 		if s, ok := h.sessionByID[msg.id]; ok {
@@ -1416,7 +1416,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		if err := h.cfg.SetAllowedAccounts(OriginExpandKey(msg.originKey), msg.emails); err != nil {
-			h.setError(fmt.Errorf("could not save account rules: %w", err))
+			h.setError("account_rules_save_failed", fmt.Errorf("could not save account rules: %w", err))
 			return h, nil
 		}
 		h.logAction("allowed accounts", fmt.Sprintf("%s → %s", msg.originKey, allowedSummary(msg.emails)), true)
@@ -1450,7 +1450,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 		}
 		if len(msg.errors) > 0 {
-			h.setError(fmt.Errorf("reloaded %d sessions, %d failed: %s",
+			h.setError("reload_all_failed", fmt.Errorf("reloaded %d sessions, %d failed: %s",
 				msg.restarted, len(msg.errors), strings.Join(msg.errors, ", ")))
 		} else if msg.restarted > 0 {
 			h.setInfo(fmt.Sprintf("Reloaded %d sessions (%d skipped)", msg.restarted, msg.skipped))
@@ -1573,24 +1573,24 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bugReportOpenErrMsg:
 		h.bugReport.submitting = false
-		h.setError(msg.err)
+		h.setError("bug_report_submit_failed", msg.err)
 		return h, nil
 
 	case openEditorMsg:
 		if msg.err != nil {
-			h.setError(fmt.Errorf("editor: %w", msg.err))
+			h.setError("editor_open_failed", fmt.Errorf("editor: %w", msg.err))
 		}
 		return h, nil
 
 	case openPRMsg:
 		if msg.err != nil {
-			h.setError(msg.err)
+			h.setError("pr_open_failed", msg.err)
 		}
 		return h, nil
 
 	case quickApproveMsg:
 		if msg.err != nil {
-			h.setError(fmt.Errorf("approve: %w", msg.err))
+			h.setError("approve_failed", fmt.Errorf("approve: %w", msg.err))
 		}
 		return h, nil
 
@@ -1605,7 +1605,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case branchCheckoutMsg:
 		h.branchDialog.Hide()
 		if msg.err != nil {
-			h.setError(fmt.Errorf("checkout: %w", msg.err))
+			h.setError("checkout_failed", fmt.Errorf("checkout: %w", msg.err))
 			return h, nil
 		}
 		// Refresh git info off the Update goroutine — RefreshGitInfo shells
@@ -1627,7 +1627,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusSnapshotMsg:
 		if msg.err != nil {
-			h.setError(fmt.Errorf("snapshot: %w", msg.err))
+			h.setError("snapshot_failed", fmt.Errorf("snapshot: %w", msg.err))
 		} else {
 			h.setInfo("Snapshot saved: " + msg.path)
 		}
@@ -1660,7 +1660,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			h.worktreeDialog.Hide()
 			h.clearPendingFork()
-			h.setError(fmt.Errorf("worktree list: %w", msg.err))
+			h.setError("worktree_list_failed", fmt.Errorf("worktree list: %w", msg.err))
 			return h, nil
 		}
 		if msg.provider.IsCustom() {
@@ -1815,7 +1815,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.removePendingWorkspace(msg.pendingID)
 
 		if msg.err != nil {
-			h.setError(fmt.Errorf("workspace create failed: %w", msg.err))
+			h.setError("workspace_create_failed", fmt.Errorf("workspace create failed: %w", msg.err))
 			analytics.Track(analytics.EventGitCommandFailure, map[string]interface{}{"command": "worktree_create"})
 			h.clearPendingFork()
 			h.rebuildFlatItems()
@@ -1930,7 +1930,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.destroyAttempted {
 			h.handleWorktreeDestroyResult(msg)
 		} else if msg.workspaceErr != nil {
-			h.setError(fmt.Errorf("workspace destroy: %w", msg.workspaceErr))
+			h.setError("workspace_destroy_failed", fmt.Errorf("workspace destroy: %w", msg.workspaceErr))
 		}
 		return h, nil
 
@@ -2123,11 +2123,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case loadSessionsMsg:
 		if msg.err != nil {
-			h.setError(msg.err)
+			h.setError("load_sessions_failed", msg.err)
 			return h, nil
 		}
 		if msg.warning != "" {
-			h.setError(fmt.Errorf("%s", msg.warning))
+			h.setError("load_sessions_warning", fmt.Errorf("%s", msg.warning))
 		}
 		h.sessions = msg.sessions
 		h.shells = msg.shells
@@ -3758,7 +3758,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		ag = agent.Parse(h.cfg.GetDefaultAgent())
 	}
 	if _, err := exec.LookPath(ag.Binary()); err != nil {
-		h.setError(fmt.Errorf("%s CLI not found: install %s to create sessions", ag.Binary(), ag.DisplayName()))
+		h.setError("agent_cli_missing", fmt.Errorf("%s CLI not found: install %s to create sessions", ag.Binary(), ag.DisplayName()))
 		return h, nil
 	}
 	// Codex prompts to trust a new directory on first launch; pre-seed trust so
@@ -3775,7 +3775,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 			// Refused rather than launched on the ambient login: the allowlist
 			// exists precisely because using an account it excludes is worse than
 			// not proceeding, and the ambient login may be that account.
-			h.setError(errors.New(blocked))
+			h.setError("account_not_allowed", errors.New(blocked))
 			return h, nil
 		}
 		msg.account = account
@@ -3787,7 +3787,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		// enforced in one surface and not the other is worse than not having
 		// one — the cost of a miss here is billing work to the wrong
 		// subscription.
-		h.setError(fmt.Errorf("account not allowed for this repo: %s isn't in allowed_accounts", h.accountLabel(msg.account)))
+		h.setError("account_not_allowed", fmt.Errorf("account not allowed for this repo: %s isn't in allowed_accounts", h.accountLabel(msg.account)))
 		return h, nil
 	}
 	// A conflicting ambient credential outranks the per-session login, so the
@@ -3803,7 +3803,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 	if msg.account != "" {
 		if conflict := claudeaccount.GuardConflictingAuth(); !conflict.Empty() {
 			if conflict.Fatal {
-				h.setError(errors.New(conflict.Message(msg.account)))
+				h.setError("conflicting_auth", errors.New(conflict.Message(msg.account)))
 				return h, nil
 			}
 			h.setInfo(conflict.Message(msg.account))
@@ -4090,7 +4090,7 @@ func (h *Home) moveSelectedToAccount(email string) tea.Cmd {
 		// Refuse rather than half-move: an in-memory move that isn't persisted
 		// would silently revert at the next fleet restart, and a session quietly
 		// returning to a spent account is worse than one that never left.
-		h.setError(fmt.Errorf("could not move account: %w", err))
+		h.setError("account_move_failed", fmt.Errorf("could not move account: %w", err))
 		return nil
 	}
 	s.Account = email
@@ -4244,7 +4244,7 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 		return nil
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
-		h.setError(fmt.Errorf("claude CLI not found: install Claude Code to create sessions"))
+		h.setError("agent_cli_missing", fmt.Errorf("claude CLI not found: install Claude Code to create sessions"))
 		analytics.Track(analytics.EventStartupFailed, map[string]interface{}{"reason": "claude_missing"})
 		return nil
 	}
@@ -4266,7 +4266,7 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 			// Skipped, not aborted: this creates several sessions at once, and one
 			// repo with an unsatisfiable allowlist must not cost the user the rest
 			// of their selection. Named so the gap in the sidebar has a reason.
-			h.setError(fmt.Errorf("launchpad skipped a repo: %s — %s", filepath.Base(it.Path), blocked))
+			h.setError("launchpad_repo_skipped", fmt.Errorf("launchpad skipped a repo: %s — %s", filepath.Base(it.Path), blocked))
 			h.logAction("launchpad skip", it.Path, false)
 			continue
 		}
@@ -4284,7 +4284,7 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 
 func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		h.setError(fmt.Errorf("failed to start session: %w", msg.err))
+		h.setError("session_start_failed", fmt.Errorf("failed to start session: %w", msg.err))
 		return h, nil
 	}
 
@@ -4320,7 +4320,7 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 
 	// Save to storage.
 	if err := h.storage.SaveSession(s.ToRow()); err != nil {
-		h.setError(fmt.Errorf("failed to save session: %w", err))
+		h.setError("session_save_failed", fmt.Errorf("failed to save session: %w", err))
 	}
 
 	// Auto-select the new session.
@@ -5579,7 +5579,7 @@ func (h *Home) forkSelected() tea.Cmd {
 		return nil
 	}
 	if s.GetClaudeSessionID() == "" {
-		h.setError(fmt.Errorf("cannot fork: session has no Claude conversation ID yet"))
+		h.setError("fork_no_conversation_id", fmt.Errorf("cannot fork: session has no Claude conversation ID yet"))
 		return nil
 	}
 	h.logAction("fork session", s.Title, true)
@@ -5682,16 +5682,16 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	// reject any non-Claude agent here rather than dropping the agent and
 	// launching a broken Claude fork. Plain 'f' (in-place fork) handles them.
 	if s.Agent != agent.Claude {
-		h.setError(fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this session in place"))
+		h.setError("fork_worktree_claude_only", fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this session in place"))
 		return nil
 	}
 	if s.GetClaudeSessionID() == "" {
-		h.setError(fmt.Errorf("cannot fork to worktree: session has no Claude conversation ID yet"))
+		h.setError("fork_no_conversation_id", fmt.Errorf("cannot fork to worktree: session has no Claude conversation ID yet"))
 		return nil
 	}
 	repoPath := session.GetRepoRoot(s.ProjectPath)
 	if repoPath == "" {
-		h.setError(fmt.Errorf("cannot fork to worktree: session is not inside a git repo"))
+		h.setError("fork_worktree_not_a_repo", fmt.Errorf("cannot fork to worktree: session is not inside a git repo"))
 		return nil
 	}
 	h.logAction("fork to worktree", s.Title, true)
@@ -6137,7 +6137,7 @@ func (h *Home) getControlClient() *tmux.ControlClient {
 func (h *Home) enterFocusMode() tea.Cmd {
 	s := h.selectedSession()
 	if s == nil {
-		h.setError(fmt.Errorf("cannot focus: session not running"))
+		h.setError("focus_not_running", fmt.Errorf("cannot focus: session not running"))
 		return nil
 	}
 	// Cache-only, like focusTick and handleFocusKey: all three callers are
@@ -6146,7 +6146,7 @@ func (h *Home) enterFocusMode() tea.Cmd {
 	// is nearly every press — behaves exactly as before; only an unknown enters
 	// optimistically, and the next known-dead reading ejects.
 	if alive, known := s.IsAliveCached(); known && !alive {
-		h.setError(fmt.Errorf("cannot focus: session not running"))
+		h.setError("focus_not_running", fmt.Errorf("cannot focus: session not running"))
 		return nil
 	}
 	h.focusMode = true
@@ -6185,7 +6185,7 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	cc := h.getControlClient()
 	if cc == nil {
-		h.setError(fmt.Errorf("failed to connect to tmux"))
+		h.setError("tmux_connect_failed", fmt.Errorf("failed to connect to tmux"))
 		h.focusMode = false
 		h.sidebarDirty = true
 		return h, nil
@@ -6357,7 +6357,7 @@ func (h *Home) undoDelete() (tea.Model, tea.Cmd) {
 
 	// Re-insert into SQLite.
 	if err := h.storage.SaveSession(pd.Row); err != nil {
-		h.setError(fmt.Errorf("undo failed: %w", err))
+		h.setError("undo_delete_failed", fmt.Errorf("undo failed: %w", err))
 		return h, nil
 	}
 
@@ -6552,9 +6552,9 @@ func (h *Home) handleWorktreeDestroyResult(msg deleteCleanupDoneMsg) {
 
 	name := filepath.Base(msg.repoPath)
 	if len(msg.remainingHolders) > 0 {
-		h.setError(fmt.Errorf("couldn't remove worktree %q — still held by %s; d to retry", name, strings.Join(msg.remainingHolders, ", ")))
+		h.setError("worktree_remove_blocked", fmt.Errorf("couldn't remove worktree %q — still held by %s; d to retry", name, strings.Join(msg.remainingHolders, ", ")))
 	} else {
-		h.setError(fmt.Errorf("couldn't remove worktree %q: %w; d to retry", name, msg.workspaceErr))
+		h.setError("worktree_remove_failed", fmt.Errorf("couldn't remove worktree %q: %w; d to retry", name, msg.workspaceErr))
 	}
 }
 
@@ -6888,6 +6888,9 @@ func (h *Home) syncHookStatuses(sessions []*session.Session, resolveRotation boo
 				AgentPID:    hs.AgentPID,
 				UserPrompt:  hs.UserPrompt,
 				PromptCount: hs.PromptCount,
+				// SessionEnd's reason, which is what lets session_errored separate a
+				// /clear or /logout rotation from a session that actually died.
+				Reason: hs.Reason,
 			}, resolveRotation) {
 				changed = append(changed, s.ID)
 			}
@@ -8255,7 +8258,7 @@ func (h *Home) bindCurrentSessionToSlot(slot int) {
 		return
 	}
 	if err := h.storage.BindSlot(slot, s.ID); err != nil {
-		h.setError(fmt.Errorf("bind slot: %w", err))
+		h.setError("slot_bind_failed", fmt.Errorf("bind slot: %w", err))
 		return
 	}
 	for k, v := range h.slotBindings {
@@ -8281,7 +8284,7 @@ func (h *Home) unbindSlot(slot int) {
 		title = s.Title
 	}
 	if err := h.storage.UnbindSlot(slot); err != nil {
-		h.setError(fmt.Errorf("unbind slot: %w", err))
+		h.setError("slot_unbind_failed", fmt.Errorf("unbind slot: %w", err))
 		return
 	}
 	delete(h.slotBindings, slot)
@@ -8305,7 +8308,7 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 	if !ok {
 		delete(h.slotBindings, slot)
 		_ = h.storage.UnbindSlot(slot)
-		h.setError(fmt.Errorf("slot %d was stale, cleared", slot))
+		h.setError("slot_stale", fmt.Errorf("slot %d was stale, cleared", slot))
 		return h, nil
 	}
 
@@ -8687,9 +8690,30 @@ func (h *Home) loadSessions() tea.Msg {
 }
 
 // setError reports a real failure: an error toast, an errorHistory entry (which
-// bug reports carry) and error_occurred. Guidance such as "no PR for this
-// branch" is not a failure — it goes through setInfo, which does none of those.
-func (h *Home) setError(err error) {
+// bug reports carry) and an error_occurred tagged with category. Guidance such as
+// "no PR for this branch" is not a failure — it goes through setInfo, which does
+// none of those.
+//
+// category is a snake_case enum written here at the call site, and it is the ONLY
+// thing about the error that analytics sees. It used to be derived from the
+// message — the text before the first ':', kept when it read as fleet's own prose
+// — which had to refuse anything carrying a digit or a punctuation mark, since a
+// path, a branch name or a wrapped git error is made of exactly those. That
+// refusal was doing its job: it also swallowed most real failures into "other",
+// because fleet's messages say `restart failed: %w` and `slot %d was stale`, so a
+// user's whole first-day error history could read "other" and say nothing about
+// what they hit. A literal at the call site is both accurate and safe by
+// construction — no error text reaches the backend by any route, so the privacy
+// line no longer rests on a regex being strict enough, and rewording a message
+// can't silently retag it.
+//
+// The category is a parameter rather than a defaulted second helper so the
+// compiler asks for it: a variant taking only the error would be the "other" this
+// replaced, quietly reachable again.
+//
+// Keep the categories stable: they are what a funnel is grouped by, so renaming
+// one splits its history in two.
+func (h *Home) setError(category string, err error) {
 	h.err = err
 	h.errTime = time.Now()
 	if err != nil {
@@ -8697,7 +8721,7 @@ func (h *Home) setError(err error) {
 		h.errorHistory.Add(err.Error())
 		h.toasts.Add(ToastError, err.Error())
 		analytics.Track(analytics.EventErrorOccurred, map[string]interface{}{
-			"category": errorCategory(err),
+			"category": category,
 		})
 	}
 }

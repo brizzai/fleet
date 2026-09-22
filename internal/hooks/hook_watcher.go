@@ -26,6 +26,9 @@ type HookStatus struct {
 	// AgentPID is the agent process that fired the hook, or 0 when the status file
 	// predates the field. See StatusFile.AgentPID.
 	AgentPID int
+	// Reason is SessionEnd's own reason ("clear", "logout", "prompt_input_exit",
+	// "other"), empty on every other event. See StatusFile.Reason.
+	Reason string
 }
 
 // HookWatcher watches ~/.config/fleet/hooks/ for status file changes
@@ -214,6 +217,7 @@ func (w *HookWatcher) processFile(filePath string) {
 		UserPrompt:  sf.UserPrompt,
 		PromptCount: sf.PromptCount,
 		AgentPID:    sf.AgentPID,
+		Reason:      sf.Reason,
 	}
 
 	w.mu.Lock()

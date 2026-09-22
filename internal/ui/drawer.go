@@ -159,7 +159,7 @@ func (h *Home) openDrawerTyping() tea.Cmd {
 		return nil
 	}
 	if h.drawerMode == drawerHidden && h.height < drawerMinTermRows {
-		h.setError(fmt.Errorf("terminal too short for the drawer — resize taller"))
+		h.setError("drawer_too_short", fmt.Errorf("terminal too short for the drawer — resize taller"))
 		return nil
 	}
 	h.cfg.NoteFeatureUsed(tipDrawerID, tipLearnedThreshold) // retire the discovery tip once they know it
@@ -602,7 +602,7 @@ func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	cc := h.getControlClient()
 	if cc == nil {
-		h.setError(fmt.Errorf("type-mode unavailable — Ctrl+G to attach"))
+		h.setError("drawer_typing_unavailable", fmt.Errorf("type-mode unavailable — Ctrl+G to attach"))
 		return h, nil
 	}
 	forwardKeyToPane(cc, sh.TmuxName(), msg)

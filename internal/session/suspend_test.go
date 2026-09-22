@@ -11,7 +11,7 @@ import (
 // the top of UpdateStatus and flip it to error + write a spurious crash dump.
 func TestUpdateStatus_SuspendedShortCircuits(t *testing.T) {
 	debuglog.Init()
-	mock := &mockPane{dead: true} // dead pane → IsAlive()=false, IsPaneDead()=true
+	mock := &mockPane{dead: true, tmuxGone: true} // suspend kills the tmux session outright
 	s := &Session{
 		ID:           "00000001-1710000000",
 		Title:        "suspended",
