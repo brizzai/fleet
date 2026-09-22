@@ -105,8 +105,15 @@ const (
 // because this is the line that must not be crossed by accident.
 var traceTokenPattern = regexp.MustCompile(`^[a-z_]+(_x[0-9]+)?$`)
 
-// traceTrack is analytics.Track, swappable so tests can see what was sent.
-var traceTrack = analytics.Track
+// The three seams to the analytics package — Track, QueuePending and the
+// Initialized predicate that chooses between them — swappable so tests can see
+// what was sent, what was parked, and drive both branches without an Init whose
+// client would then leak into every other test in the package.
+var (
+	traceTrack = analytics.Track
+	tracePend  = analytics.QueuePending
+	traceReady = analytics.Initialized
+)
 
 // traceDialog names a dialog lifecycle step: traceDialog("settings", "open").
 func traceDialog(name, phase string) string { return "dialog_" + name + "_" + phase }
@@ -372,7 +379,17 @@ func (h *Home) sendFirstRunTrace(uptimeSeconds int) {
 // the client: sending before Init would drop the event silently, and on a first
 // launch Init doesn't happen until the consent prompt is answered.
 func (h *Home) sendUncleanFirstRunTrace() {
-	if analytics.MilestoneReached(analytics.MilestoneFirstRunTrace) {
+	// A launch is either the recorder or the reporter, never both.
+	// firstRunTraceShouldRecord enforces that at NewHome; this enforces the
+	// same thing at the other end, and it is load-bearing rather than
+	// belt-and-braces: fireStartupAnalytics runs from the consentResultMsg
+	// handler, nine lines after it records consent_full — the recorder's first
+	// record, which writes the file immediately because the debounce has no
+	// previous write to measure against. Without this guard that file is read
+	// back here as someone else's leftover, and the install's whole trace is
+	// sent as ended=unclean trace=["0:consent_full"] with everything after it
+	// unrecorded.
+	if h.firstRun != nil || analytics.MilestoneReached(analytics.MilestoneFirstRunTrace) {
 		return
 	}
 	data, err := os.ReadFile(firstRunTracePath())
@@ -388,26 +405,40 @@ func (h *Home) sendUncleanFirstRunTrace() {
 		return
 	}
 	h.emitFirstRunTrace(payload, "unclean")
+	// No recorder to stop first: the guard at the top of this function means
+	// h.firstRun is nil here, so nothing can re-create the file between the
+	// send and the delete. Deliberately not re-added "just in case" — a record
+	// landing in that window would leave a first_run_trace.json no later launch
+	// ever deletes, because they all return at the milestone check above.
 	removeFirstRunTraceFile()
-	// The milestone is marked, so this launch is no longer recording one.
-	if h.firstRun != nil {
-		h.firstRun.stopAndTake()
-	}
 }
 
 // emitFirstRunTrace sends the event, unless telemetry is off — in which case
 // the milestone is still marked and the file still deleted, so an install that
 // never reports is still one-shot rather than retrying every launch.
+//
+// The clean path can run before analytics has a client: someone who opens
+// fleet, reads the consent prompt and quits never reaches Init, and Track drops
+// what it can't send. That is a churn story this event exists to tell, so the
+// event is parked on disk instead — FlushPending, already called beside Init on
+// the next launch, sends it as the clean quit it actually was, and only once
+// the user has answered consent (answering "off" builds a disabled client and
+// the flush drops it).
 func (h *Home) emitFirstRunTrace(p firstRunTracePayload, ended string) {
 	if h.cfg != nil && h.cfg.GetTelemetryMode() == config.TelemetryOff {
 		return
 	}
-	traceTrack(analytics.EventOnboardingFirstRunTrace, map[string]interface{}{
+	props := map[string]interface{}{
 		"trace":           p.Trace,
 		"ended":           ended,
 		"uptime_seconds":  p.UptimeSeconds,
 		"entries_dropped": p.EntriesDropped,
-	})
+	}
+	if !traceReady() {
+		tracePend(analytics.EventOnboardingFirstRunTrace, props)
+		return
+	}
+	traceTrack(analytics.EventOnboardingFirstRunTrace, props)
 }
 
 func removeFirstRunTraceFile() {

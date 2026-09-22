@@ -17,25 +17,55 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 )
 
-// traceHome builds a Home recording into a temp HOME, plus a sink holding
-// whatever the trace sent.
-func traceHome(t *testing.T) (*Home, *[]map[string]interface{}) {
+// traceSpy captures the two ways the trace can leave: sent through the live
+// client, or parked on disk for the next launch. ready stands in for
+// analytics.Initialized, so both branches are reachable without an Init whose
+// client would leak into every other test in the package.
+type traceSpy struct {
+	sent   []map[string]interface{}
+	parked []map[string]interface{}
+	ready  bool
+}
+
+func traceSpyOn(t *testing.T) *traceSpy {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
-	var sent []map[string]interface{}
-	orig := traceTrack
+	spy := &traceSpy{ready: true}
+	track, pend, ready := traceTrack, tracePend, traceReady
 	traceTrack = func(event string, props map[string]interface{}) {
-		if event != analytics.EventOnboardingFirstRunTrace {
-			return
+		if event == analytics.EventOnboardingFirstRunTrace {
+			spy.sent = append(spy.sent, props)
 		}
-		sent = append(sent, props)
 	}
-	t.Cleanup(func() { traceTrack = orig })
+	tracePend = func(event string, props map[string]any) {
+		if event == analytics.EventOnboardingFirstRunTrace {
+			spy.parked = append(spy.parked, props)
+		}
+	}
+	traceReady = func() bool { return spy.ready }
+	t.Cleanup(func() { traceTrack, tracePend, traceReady = track, pend, ready })
+	return spy
+}
 
+// traceHome is a launch that is *recording* — the first run itself. The app
+// gives such a launch a live recorder and, by firstRunTraceShouldRecord, no
+// leftover file to pick up.
+func traceHome(t *testing.T) (*Home, *traceSpy) {
+	t.Helper()
+	spy := traceSpyOn(t)
 	h := &Home{cfg: &config.Config{TelemetryMode: config.TelemetryFull}}
 	h.firstRun = newFirstRunTrace(time.Now())
-	return h, &sent
+	return h, spy
+}
+
+// reportingHome is a launch that found someone else's trace waiting. The app
+// never gives such a launch a recorder — the two roles are exclusive, which is
+// the invariant TestRecordingLaunchDoesNotReportItsOwnTrace exists to hold.
+func reportingHome(t *testing.T) (*Home, *traceSpy) {
+	t.Helper()
+	spy := traceSpyOn(t)
+	return &Home{cfg: &config.Config{TelemetryMode: config.TelemetryFull}}, spy
 }
 
 // at records an action as though it happened `sec` seconds into the run.
@@ -141,7 +171,7 @@ func TestFirstRunTraceRefusesNonEnums(t *testing.T) {
 // TestFirstRunTraceCleanSendMarksAndDeletes covers the quit path: one event, the
 // milestone marked, and the file gone so the next launch has nothing to resend.
 func TestFirstRunTraceCleanSendMarksAndDeletes(t *testing.T) {
-	h, sent := traceHome(t)
+	h, spy := traceHome(t)
 	h.trace(traceAttach)
 	if _, err := os.Stat(firstRunTracePath()); err != nil {
 		t.Fatalf("recording wrote no file: %v", err)
@@ -150,10 +180,10 @@ func TestFirstRunTraceCleanSendMarksAndDeletes(t *testing.T) {
 	h.sendFirstRunTrace(145)
 	h.sendFirstRunTrace(145) // a second quit path must not resend
 
-	if len(*sent) != 1 {
-		t.Fatalf("sent %d events, want exactly 1", len(*sent))
+	if len(spy.sent) != 1 {
+		t.Fatalf("sent %d events, want exactly 1", len(spy.sent))
 	}
-	props := (*sent)[0]
+	props := spy.sent[0]
 	if props["ended"] != "clean" {
 		t.Errorf(`ended = %v, want "clean"`, props["ended"])
 	}
@@ -172,7 +202,7 @@ func TestFirstRunTraceCleanSendMarksAndDeletes(t *testing.T) {
 // newcomer who closed the terminal instead of quitting. The next launch picks
 // the trace up, sends it once, and leaves nothing behind.
 func TestFirstRunTraceUncleanSendsOnceAndDeletes(t *testing.T) {
-	h, sent := traceHome(t)
+	h, spy := reportingHome(t)
 
 	// A previous run's leftover.
 	leftover := firstRunTracePayload{Trace: []string{"0:consent_basic", "12:esc"}, UptimeSeconds: 31}
@@ -181,10 +211,10 @@ func TestFirstRunTraceUncleanSendsOnceAndDeletes(t *testing.T) {
 	h.sendUncleanFirstRunTrace()
 	h.sendUncleanFirstRunTrace()
 
-	if len(*sent) != 1 {
-		t.Fatalf("sent %d events, want exactly 1", len(*sent))
+	if len(spy.sent) != 1 {
+		t.Fatalf("sent %d events, want exactly 1", len(spy.sent))
 	}
-	props := (*sent)[0]
+	props := spy.sent[0]
 	if props["ended"] != "unclean" {
 		t.Errorf(`ended = %v, want "unclean"`, props["ended"])
 	}
@@ -200,20 +230,94 @@ func TestFirstRunTraceUncleanSendsOnceAndDeletes(t *testing.T) {
 }
 
 // TestFirstRunTraceStopsAtTheMilestone: once the run has been reported, nothing
-// more is recorded — including by the launch that reported someone else's.
+// more is recorded and the file stays gone. A record landing after the delete
+// would leave a first_run_trace.json no later launch ever removes, since they
+// all return at the milestone check.
 func TestFirstRunTraceStopsAtTheMilestone(t *testing.T) {
 	h, _ := traceHome(t)
-	writeTraceFile(t, firstRunTracePayload{Trace: []string{"0:consent_basic"}})
-
-	h.sendUncleanFirstRunTrace()
-	h.trace(traceAttach)
 	h.trace(traceQuit)
+	h.sendFirstRunTrace(30)
+	sent := h.firstRun.stopAndTake().Trace
 
-	if got := h.firstRun.stopAndTake().Trace; len(got) != 0 {
-		t.Fatalf("recorded %q after the milestone was marked", got)
+	h.trace(traceAttach)
+	h.traceOnce(traceSessionWaiting)
+
+	if got := h.firstRun.stopAndTake().Trace; !reflect.DeepEqual(got, sent) {
+		t.Fatalf("recorded after the milestone was marked: %q grew to %q", sent, got)
 	}
 	if _, err := os.Stat(firstRunTracePath()); !os.IsNotExist(err) {
 		t.Error("a stopped recorder rewrote the trace file")
+	}
+}
+
+// TestRecordingLaunchDoesNotReportItsOwnTrace walks the order the consent
+// handler really runs in, which is where this went wrong: h.trace is the
+// recorder's first record, so the debounce has no previous write to measure
+// against and the file lands immediately; fireStartupAnalytics follows nine
+// lines later and its tail is sendUncleanFirstRunTrace. Without the guard that
+// reads the file straight back, spends the one-shot on it, and leaves the rest
+// of the run unrecorded — the install's only event being
+// ended=unclean trace=["0:consent_full"].
+func TestRecordingLaunchDoesNotReportItsOwnTrace(t *testing.T) {
+	h, spy := traceHome(t)
+
+	h.trace(traceConsentFull)
+	if _, err := os.Stat(firstRunTracePath()); err != nil {
+		t.Fatalf("the first record should write the file immediately: %v", err)
+	}
+	h.sendUncleanFirstRunTrace() // fireStartupAnalytics, from the same handler
+
+	if n := len(spy.sent) + len(spy.parked); n != 0 {
+		t.Fatalf("reported %d events at startup — the recorder ate its own trace", n)
+	}
+	if analytics.MilestoneReached(analytics.MilestoneFirstRunTrace) {
+		t.Fatal("the one-shot was spent at startup, so the rest of the run would record nothing")
+	}
+
+	// The run carries on and is reported once, at the quit, as a clean ending.
+	h.trace(traceAttach)
+	h.trace(traceQuit)
+	h.sendFirstRunTrace(145)
+
+	if len(spy.sent) != 1 {
+		t.Fatalf("sent %d events, want exactly 1", len(spy.sent))
+	}
+	props := spy.sent[0]
+	if props["ended"] != "clean" {
+		t.Errorf(`ended = %v, want "clean"`, props["ended"])
+	}
+	want := []string{"0:consent_full", "0:attach", "0:quit"}
+	if got := props["trace"].([]string); !reflect.DeepEqual(got, want) {
+		t.Errorf("trace = %q, want the whole run %q", got, want)
+	}
+}
+
+// TestQuitBeforeConsentParksTheTrace: someone who opens fleet, reads the
+// consent prompt and quits never reaches analytics.Init, and Track drops what
+// it can't send. That is a churn story this event exists to tell, so the event
+// is parked rather than spent — FlushPending sends it on the next launch, still
+// as the clean quit it was.
+func TestQuitBeforeConsentParksTheTrace(t *testing.T) {
+	h, spy := traceHome(t)
+	spy.ready = false // no Init yet: the consent prompt is still up
+
+	h.trace(traceQuit)
+	h.sendFirstRunTrace(8)
+
+	if len(spy.sent) != 0 {
+		t.Errorf("sent %d events with no client — Track would have dropped them", len(spy.sent))
+	}
+	if len(spy.parked) != 1 {
+		t.Fatalf("parked %d events, want exactly 1", len(spy.parked))
+	}
+	if ended := spy.parked[0]["ended"]; ended != "clean" {
+		t.Errorf(`parked ended = %v, want "clean" — the run did reach the quit path`, ended)
+	}
+	if !analytics.MilestoneReached(analytics.MilestoneFirstRunTrace) {
+		t.Error("milestone not marked — the parked event would be sent twice")
+	}
+	if _, err := os.Stat(firstRunTracePath()); !os.IsNotExist(err) {
+		t.Error("trace file left behind beside the parked event")
 	}
 }
 
@@ -221,14 +325,14 @@ func TestFirstRunTraceStopsAtTheMilestone(t *testing.T) {
 // still marked and the file still deleted: an install that never reports is
 // one-shot too, rather than retrying on every launch forever.
 func TestFirstRunTraceSilentWhenTelemetryOff(t *testing.T) {
-	h, sent := traceHome(t)
+	h, spy := traceHome(t)
 	h.cfg.TelemetryMode = config.TelemetryOff
 	h.trace(traceAttach)
 
 	h.sendFirstRunTrace(20)
 
-	if len(*sent) != 0 {
-		t.Fatalf("sent %d events with telemetry off, want 0", len(*sent))
+	if len(spy.sent) != 0 {
+		t.Fatalf("sent %d events with telemetry off, want 0", len(spy.sent))
 	}
 	if !analytics.MilestoneReached(analytics.MilestoneFirstRunTrace) {
 		t.Error("milestone not marked — this would retry every launch")

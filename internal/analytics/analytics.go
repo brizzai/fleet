@@ -512,6 +512,16 @@ func current() *Client {
 	return global
 }
 
+// Initialized reports whether Init has run, i.e. whether Track can reach a
+// client at all. Distinct from "telemetry is on": a disabled client is still
+// initialized and still answers, it just answers no.
+//
+// The difference matters to the one-shot events. Before Init, Track drops
+// silently, so an event that may fire that early — on a first launch nothing is
+// initialized until the consent prompt is answered — has to know to park itself
+// with QueuePending rather than spend its one shot on a send that goes nowhere.
+func Initialized() bool { return current() != nil }
+
 // toProps converts a plain property map into a posthog.Properties. A nil map
 // yields an empty (non-nil) Properties.
 func toProps(m map[string]any) posthog.Properties {
