@@ -167,7 +167,7 @@ func (h *Home) openDrawerTyping() tea.Cmd {
 	if first {
 		h.drawerRepo = h.resolveCurrentRepo()
 		h.drawerActiveTab = 0
-		h.actionLog.Add("open terminal drawer", h.drawerRepo, true)
+		h.logAction("open terminal drawer", h.drawerRepo, true)
 	}
 	h.drawerMode = drawerTyping
 	h.drawerCloseArmed = false
@@ -438,7 +438,7 @@ func (h *Home) createShell(command string) tea.Cmd {
 		return nil
 	}
 	name := h.nextShellName(repo, command)
-	h.actionLog.Add("new shell", name, true)
+	h.logAction("new shell", name, true)
 	return func() tea.Msg {
 		sh := shell.New(name, repo, command)
 		if err := sh.Start(); err != nil {
@@ -491,7 +491,7 @@ func (h *Home) attachShell(sh *shell.Shell) tea.Cmd {
 	// smallest client, so the small drawer-sized reader must be gone before the
 	// attach starts. The stream re-attaches on the next tick after Ctrl+Q returns.
 	h.teardownShellStreamSync()
-	h.actionLog.Add("attach shell", sh.Name, true)
+	h.logAction("attach shell", sh.Name, true)
 	return tea.Exec(attachCmd{session: sh.Tmux()}, func(err error) tea.Msg {
 		h.isAttaching.Store(false)
 		h.attachStartedAt.Store(0)
@@ -526,7 +526,7 @@ func (h *Home) closeShell(sh *shell.Shell) tea.Cmd {
 	// session keeps streaming and renderDrawer shows a blank body until the next
 	// ~120ms tick repoints it.
 	h.syncShellStream()
-	h.actionLog.Add("close shell", sh.Name, true)
+	h.logAction("close shell", sh.Name, true)
 	return func() tea.Msg {
 		_ = sh.Kill()
 		return nil
@@ -539,7 +539,7 @@ func (h *Home) restartShell(sh *shell.Shell) tea.Cmd {
 		return nil
 	}
 	id := sh.ID
-	h.actionLog.Add("restart shell", sh.Name, true)
+	h.logAction("restart shell", sh.Name, true)
 	return func() tea.Msg {
 		err := sh.Restart()
 		return shellRestartMsg{id: id, tmuxName: sh.TmuxName(), err: err}
