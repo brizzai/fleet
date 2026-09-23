@@ -170,9 +170,9 @@ type (
 		// sweep, and the handler leaves pins untouched.
 		pinned map[string]bool
 	}
-	openEditorMsg        struct{ err error }
-	openPRMsg            struct{ err error }
-	copyPRLinkMsg        struct {
+	openEditorMsg struct{ err error }
+	openPRMsg     struct{ err error }
+	copyPRLinkMsg struct {
 		number int
 		err    error
 	}
