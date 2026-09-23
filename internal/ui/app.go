@@ -172,6 +172,10 @@ type (
 	}
 	openEditorMsg        struct{ err error }
 	openPRMsg            struct{ err error }
+	copyPRLinkMsg        struct {
+		number int
+		err    error
+	}
 	quickApproveMsg      struct{ err error }
 	spinnerTickMsg       struct{}
 	whatsNewTickMsg      struct{}
@@ -1586,6 +1590,14 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			h.setError("pr_open_failed", msg.err)
 		}
+		return h, nil
+
+	case copyPRLinkMsg:
+		if msg.err != nil {
+			h.setError("pr_link_copy_failed", msg.err)
+			return h, nil
+		}
+		h.setInfo(fmt.Sprintf("Copied PR #%d link", msg.number))
 		return h, nil
 
 	case quickApproveMsg:
@@ -3328,6 +3340,10 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.logAction("open PR", "", true)
 		analytics.Track(analytics.EventPROpened, nil)
 		return h, h.openPRInBrowser()
+	case "ctrl+p":
+		h.logAction("copy PR link", "", true)
+		analytics.Track(analytics.EventPRLinkCopied, nil)
+		return h, h.copyPRLink()
 	case "P":
 		// Jump to next red (or, failing that, green) PR.
 		h.jumpToNextAttentionPR()
@@ -6283,6 +6299,28 @@ func (h *Home) openPRInBrowser() tea.Cmd {
 	}
 }
 
+// copyPRLink copies the cursor's PR URL to the system clipboard, resolving the
+// PR exactly as openPRInBrowser does.
+func (h *Home) copyPRLink() tea.Cmd {
+	repo := h.resolveCurrentRepo()
+	if repo == "" {
+		h.setInfo("no repo selected")
+		return nil
+	}
+	info := h.gitInfo()[repo]
+	if info == nil || info.PR == nil || info.PR.URL == "" {
+		h.setInfo("no PR for this branch")
+		return nil
+	}
+	prURL, number := info.PR.URL, info.PR.Number
+	return func() tea.Msg {
+		if err := tmux.CopyToClipboard(prURL); err != nil {
+			return copyPRLinkMsg{err: fmt.Errorf("copy PR link: %w", err)}
+		}
+		return copyPRLinkMsg{number: number}
+	}
+}
+
 // deferDelete removes a session from the UI and DB but defers tmux/hook/workspace
 // cleanup for the undo window. Returns a tick command for expiry.
 func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
@@ -8978,6 +9016,11 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 			Note:    "no PR",
 		},
 		{
+			ID: "copy_pr_link", Label: "Copy PR Link", Shortcut: "⌃P", Key: "ctrl+p",
+			Enabled: h.hasPRForCursor(),
+			Note:    "no PR",
+		},
+		{
 			ID: "fork", Label: "Fork Session", Shortcut: "f", Key: "f",
 			Enabled: resumable,
 			Note:    "no session id yet",
@@ -9019,6 +9062,11 @@ func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
 		{ID: "branch", Label: "Switch Branch", Shortcut: "b", Key: "b", Enabled: true},
 		{
 			ID: "open_pr", Label: "Open PR", Shortcut: "p", Key: "p",
+			Enabled: h.hasPRForCursor(),
+			Note:    "no PR",
+		},
+		{
+			ID: "copy_pr_link", Label: "Copy PR Link", Shortcut: "⌃P", Key: "ctrl+p",
 			Enabled: h.hasPRForCursor(),
 			Note:    "no PR",
 		},
@@ -9144,6 +9192,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "rename", Name: "Rename Session", Shortcut: "R"},
 		{Kind: PaletteKindCommand, ID: "editor", Name: "Open in Editor", Shortcut: "e"},
 		{Kind: PaletteKindCommand, ID: "open_pr", Name: "Open PR", Shortcut: "p"},
+		{Kind: PaletteKindCommand, ID: "copy_pr_link", Name: "Copy PR Link", Shortcut: "⌃P"},
 		{Kind: PaletteKindCommand, ID: "approve", Name: "Quick Approve", Shortcut: "Y"},
 		{Kind: PaletteKindCommand, ID: "branch", Name: "Switch Branch", Shortcut: "b"},
 		{Kind: PaletteKindCommand, ID: "filter", Name: "Filter Sessions", Shortcut: "/"},
@@ -9426,6 +9475,10 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.logAction("open PR", "", true)
 		analytics.Track(analytics.EventPROpened, nil)
 		return h, h.openPRInBrowser()
+	case "copy_pr_link":
+		h.logAction("copy PR link", "", true)
+		analytics.Track(analytics.EventPRLinkCopied, nil)
+		return h, h.copyPRLink()
 	case "approve":
 		if s := h.selectedSession(); s != nil {
 			h.logAction("quick approve", s.Title, true)

@@ -36,6 +36,7 @@ const (
 	EventQuickApprove = "quick_approve"
 	EventEditorOpened = "editor_opened"
 	EventPROpened     = "pr_opened"
+	EventPRLinkCopied = "pr_link_copied"
 	EventUndoUsed     = "undo_used"
 	EventForkSession  = "fork_session"
 
