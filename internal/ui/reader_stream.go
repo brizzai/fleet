@@ -168,7 +168,7 @@ func (h *Home) handleReviewSession(msg reviewSessionMsg) (tea.Model, tea.Cmd) {
 
 	r, ok := h.findReviewByKey(msg.key)
 	if !ok || r.URL == "" {
-		h.setError(fmt.Errorf("#%d is not in the review queue — press c to refresh it", msg.key.pr))
+		h.setError("review_not_in_queue", fmt.Errorf("#%d is not in the review queue — press c to refresh it", msg.key.pr))
 		return h, nil
 	}
 	// Straight through startReview, which is what the `c` queue's Enter runs:

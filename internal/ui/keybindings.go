@@ -45,6 +45,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "z", Desc: "Snooze / wake session / repo / worktree", Section: "session"},
 	{Key: "e", Desc: "Open in editor", Section: "session"},
 	{Key: "p", BarKey: "p", BarDesc: "PR", Desc: "Open PR in browser", Section: "session"},
+	{Key: "Ctrl+P", Desc: "Copy PR link", Section: "session"},
 	{Key: "P", Desc: "Jump to next red (else green) PR", Section: "session"},
 	{Key: "Y", BarKey: "Y", BarDesc: "Approve", Desc: "Quick approve permission", Section: "session"},
 	{Key: "b", BarKey: "b", BarDesc: "Branch", Desc: "Switch git branch", Section: "session"},

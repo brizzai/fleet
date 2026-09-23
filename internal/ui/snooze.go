@@ -211,7 +211,7 @@ func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID stri
 		h.setExpanded(sc.groupKey, false)
 	}
 	h.rebuildFlatItems()
-	h.actionLog.Add("snooze "+sc.kind, sc.label, true)
+	h.logAction("snooze "+sc.kind, sc.label, true)
 	analytics.Track(analytics.EventSnoozeSet, map[string]interface{}{
 		"scope":    sc.kind,
 		"duration": durationID,
@@ -243,7 +243,7 @@ func (h *Home) clearSnooze(sc snoozeScope) {
 		h.setExpanded(sc.groupKey, true)
 	}
 	h.rebuildFlatItems()
-	h.actionLog.Add("wake "+sc.kind, sc.label, true)
+	h.logAction("wake "+sc.kind, sc.label, true)
 	analytics.Track(analytics.EventSnoozeCleared, map[string]interface{}{
 		"scope":  sc.kind,
 		"reason": "manual",
@@ -266,10 +266,7 @@ func (h *Home) maybeWakeSnoozed() bool {
 	changed := false
 	for _, s := range h.sessions {
 		if until := s.SnoozedUntil(); !until.IsZero() && !until.After(now) {
-			s.SetSnoozedUntil(time.Time{})
-			if err := h.storage.SetSessionSnooze(s.ID, time.Time{}); err != nil {
-				debuglog.Logger.Error("failed to clear expired session snooze", "id", s.ID, "err", err)
-			}
+			h.expireSessionSnooze(s)
 			changed = true
 		}
 	}
@@ -289,6 +286,31 @@ func (h *Home) maybeWakeSnoozed() bool {
 		h.rebuildFlatItems()
 	}
 	return changed
+}
+
+// expireSessionSnooze clears a session's own lapsed deadline and, if the
+// session has gone idle meanwhile, flags it unread (idle → finished) so it
+// re-enters the Space rotation and the pills. That is what makes a snooze a
+// reminder rather than a mute that quietly runs out: "tomorrow" on an idle
+// session means "put this back in front of me tomorrow". Expiry only — the
+// manual wake (`z` again, "Wake Now") goes through clearSnooze, because you are
+// already standing on the row. Session scope only: a group snooze is "get this
+// repo out of my way", not "remind me about all twelve sessions".
+//
+// Shared by the tick sweep and the startup reconciliation (a "Tomorrow" snooze
+// is the preset most likely to lapse while fleet is closed). The startup path
+// runs before the hook watcher has seeded any hook state, so unlike the `m`
+// key this does not gate on it: on a session that never fired a hook the flip
+// simply doesn't stick — the worker's no-hook path settles it back to idle
+// within a cycle — which is harmless and identical on both paths.
+func (h *Home) expireSessionSnooze(s *session.Session) {
+	s.SetSnoozedUntil(time.Time{})
+	if err := h.storage.SetSessionSnooze(s.ID, time.Time{}); err != nil {
+		debuglog.Logger.Error("failed to clear expired session snooze", "id", s.ID, "err", err)
+	}
+	if s.GetStatus() == session.StatusIdle {
+		h.flagUnread(s)
+	}
 }
 
 // formatSnoozeWake renders a wake time for confirmation copy: a clock time

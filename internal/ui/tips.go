@@ -306,6 +306,9 @@ func (h *Home) refreshTips(tipVisible bool) {
 			}
 		}
 	}
+	if chosen != "" && chosen != h.activeTipID {
+		h.trace(traceTipShown)
+	}
 	h.activeTipID = chosen
 }
 

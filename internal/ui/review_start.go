@@ -86,7 +86,7 @@ func (h *Home) repoForOrigin(ownerRepo string) string {
 func (h *Home) startReview(url string) (tea.Model, tea.Cmd) {
 	r, ok := h.findReview(url)
 	if !ok {
-		h.setError(fmt.Errorf("review not found in the queue"))
+		h.setError("review_not_in_queue", fmt.Errorf("review not found in the queue"))
 		return h, nil
 	}
 
@@ -101,7 +101,7 @@ func (h *Home) startReview(url string) (tea.Model, tea.Cmd) {
 	if repo == "" {
 		// Naming the repo is the whole point of the message: the fix is to
 		// open a session in that clone once so fleet knows where it is.
-		h.setError(fmt.Errorf("no local checkout of %s — open it in fleet once first", r.Repo))
+		h.setError("review_no_checkout", fmt.Errorf("no local checkout of %s — open it in fleet once first", r.Repo))
 		return h, nil
 	}
 
@@ -119,7 +119,7 @@ func (h *Home) startReview(url string) (tea.Model, tea.Cmd) {
 func (h *Home) handleReviewWorktree(msg reviewWorktreeMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		debuglog.Logger.Error("review: worktree failed", "pr", msg.pr, "err", msg.err)
-		h.setError(msg.err)
+		h.setError("review_worktree_failed", msg.err)
 		return h, nil
 	}
 

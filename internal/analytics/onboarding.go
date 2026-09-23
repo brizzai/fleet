@@ -16,6 +16,7 @@ type installState struct {
 	FirstAttachAt         time.Time `json:"first_attach_at,omitempty"`
 	FirstClaudeResponseAt time.Time `json:"first_claude_response_at,omitempty"`
 	FirstQuitAt           time.Time `json:"first_quit_at,omitempty"`
+	FirstRunTraceAt       time.Time `json:"first_run_trace_at,omitempty"`
 }
 
 // Milestone names. Used as both event names (prefixed onboarding_) and as
@@ -26,6 +27,10 @@ const (
 	MilestoneFirstAttach         = "first_attach"
 	MilestoneFirstClaudeResponse = "first_claude_response"
 	MilestoneFirstQuit           = "first_quit"
+	// MilestoneFirstRunTrace gates the one-shot first-run action trace. Unlike
+	// the milestones above it is a stop signal as much as a send-once flag:
+	// recording stops the moment it is marked (see internal/ui/firstrun_trace.go).
+	MilestoneFirstRunTrace = "first_run_trace"
 )
 
 var onboardingMu sync.Mutex
@@ -89,9 +94,7 @@ func MarkOnboardingMilestone(milestone string) bool {
 
 	state, freshInstall := loadInstallState()
 
-	var field *time.Time
-	switch milestone {
-	case MilestoneFirstLaunch:
+	if milestone == MilestoneFirstLaunch {
 		// Synthetic — fresh install IS the first launch. No timestamp field;
 		// the InstalledAt timestamp doubles as first-launch time.
 		if !freshInstall {
@@ -102,19 +105,10 @@ func MarkOnboardingMilestone(milestone string) bool {
 			return false
 		}
 		return true
-	case MilestoneFirstSession:
-		field = &state.FirstSessionAt
-	case MilestoneFirstAttach:
-		field = &state.FirstAttachAt
-	case MilestoneFirstClaudeResponse:
-		field = &state.FirstClaudeResponseAt
-	case MilestoneFirstQuit:
-		field = &state.FirstQuitAt
-	default:
-		return false
 	}
 
-	if !field.IsZero() {
+	field := milestoneField(state, milestone)
+	if field == nil || !field.IsZero() {
 		return false
 	}
 	*field = time.Now()
@@ -122,6 +116,46 @@ func MarkOnboardingMilestone(milestone string) bool {
 		return false
 	}
 	return true
+}
+
+// MilestoneReached reports whether a milestone has already been marked, without
+// marking it. Callers that need to know *before* the milestone's moment — the
+// first-run trace recorder decides at startup whether to record at all — can't
+// use MarkOnboardingMilestone for the question, since asking it would answer it.
+//
+// MilestoneFirstLaunch has no timestamp field of its own (the install being
+// known at all is the mark), so it reports reached for any install already on
+// disk.
+func MilestoneReached(milestone string) bool {
+	onboardingMu.Lock()
+	defer onboardingMu.Unlock()
+
+	state, freshInstall := loadInstallState()
+	if milestone == MilestoneFirstLaunch {
+		return !freshInstall
+	}
+	field := milestoneField(state, milestone)
+	return field != nil && !field.IsZero()
+}
+
+// milestoneField maps a milestone name onto its timestamp in installState, so
+// the marker and the reader can't drift into disagreeing about which field a
+// name means. MilestoneFirstLaunch has no field (see MarkOnboardingMilestone)
+// and an unknown name has none either; both return nil.
+func milestoneField(s *installState, milestone string) *time.Time {
+	switch milestone {
+	case MilestoneFirstSession:
+		return &s.FirstSessionAt
+	case MilestoneFirstAttach:
+		return &s.FirstAttachAt
+	case MilestoneFirstClaudeResponse:
+		return &s.FirstClaudeResponseAt
+	case MilestoneFirstQuit:
+		return &s.FirstQuitAt
+	case MilestoneFirstRunTrace:
+		return &s.FirstRunTraceAt
+	}
+	return nil
 }
 
 // SecondsSinceInstall returns the seconds elapsed since the install was first

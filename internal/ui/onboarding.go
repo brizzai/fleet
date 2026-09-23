@@ -9,9 +9,10 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 )
 
-// onboardingClosedMsg is emitted when the first-run onboarding screen closes
-// (whether the user confirmed a theme or skipped).
-type onboardingClosedMsg struct{}
+// onboardingClosedMsg is emitted when the first-run onboarding screen closes.
+// kept distinguishes the two exits: enter confirmed the previewed theme, s/esc
+// reverted to the one that was already set.
+type onboardingClosedMsg struct{ kept bool }
 
 // OnboardingDialog is the one-time first-run screen: a theme picker beside an
 // annotated sample sidebar that teaches how to read the real one. It persists
@@ -42,8 +43,12 @@ func (d *OnboardingDialog) Show() {
 	}
 }
 
-func (d *OnboardingDialog) Hide()           { d.visible = false }
-func (d *OnboardingDialog) IsVisible() bool { return d.visible }
+func (d *OnboardingDialog) Hide() { d.visible = false }
+
+// ThemeCursor is the index of the previewed theme. Read either side of Update
+// so a cycle is recorded without re-stating which keys cycle.
+func (d *OnboardingDialog) ThemeCursor() int { return d.themeCursor }
+func (d *OnboardingDialog) IsVisible() bool  { return d.visible }
 func (d *OnboardingDialog) SetSize(w, h int) {
 	d.width = w
 	d.height = h
@@ -89,7 +94,7 @@ func (d *OnboardingDialog) finish(confirmed bool) (*OnboardingDialog, tea.Cmd) {
 	d.cfg.DisplayOnboardingSeen = true
 	_ = d.cfg.Save()
 	d.Hide()
-	return d, func() tea.Msg { return onboardingClosedMsg{} }
+	return d, func() tea.Msg { return onboardingClosedMsg{kept: confirmed} }
 }
 
 func (d *OnboardingDialog) View() string {

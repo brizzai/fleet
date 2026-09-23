@@ -330,7 +330,7 @@ func (h *Home) handleReviewSubmitted(msg reviewSubmitResultMsg) (tea.Model, tea.
 		if !h.reader.Visible() {
 			// The sheet carries the reason while the reader is open. Closed, it
 			// has nowhere to land but the main screen's error line.
-			h.setError(msg.err)
+			h.setError("review_submit_failed", msg.err)
 		}
 		return h, nil
 	}

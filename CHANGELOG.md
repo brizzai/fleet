@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.45.0] - 2026-09-23
+
+### Added
+
+- **Copy a PR link** — `Ctrl+P` copies the selected branch's PR URL to your clipboard, ready to paste into Slack or a review request without opening the browser first. Also in `Ctrl+K` and the `.` menu.
+
+## [2.44.0] - 2026-09-22
+
+## [2.43.0] - 2026-09-17
+
+### Improved
+
+- **Snooze now reminds you** — when a session's snooze runs out and it has gone idle, it comes back as finished, so `Space` lands on it again instead of the deadline quietly passing. A `Tomorrow` snooze that lapses overnight fires on the next launch.
+
 ## [2.42.0] - 2026-09-17
 
 ### Improved
@@ -716,7 +730,10 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.42.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.45.0...HEAD
+[2.45.0]: https://github.com/brizzai/fleet/releases/tag/v2.45.0
+[2.44.0]: https://github.com/brizzai/fleet/releases/tag/v2.44.0
+[2.43.0]: https://github.com/brizzai/fleet/releases/tag/v2.43.0
 [2.42.0]: https://github.com/brizzai/fleet/releases/tag/v2.42.0
 [2.41.0]: https://github.com/brizzai/fleet/releases/tag/v2.41.0
 [2.40.1]: https://github.com/brizzai/fleet/releases/tag/v2.40.1

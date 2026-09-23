@@ -204,11 +204,11 @@ func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
 		}
 	}
 	if s := h.sessionsByTicket(tickets)[identifier]; s != nil {
-		h.actionLog.Add("ticket jump", identifier, true)
+		h.logAction("ticket jump", identifier, true)
 		return h.jumpToSessionID(s.ID)
 	}
 
-	h.actionLog.Add("ticket new worktree", identifier, true)
+	h.logAction("ticket new worktree", identifier, true)
 	repoPath := h.resolveWorktreeBaseRepo()
 	if repoPath == "" {
 		h.setInfo("Select a repo first, then pick the ticket")

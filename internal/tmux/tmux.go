@@ -241,6 +241,19 @@ func clipboardCopyCommand() string {
 	return clipboardCopyCommandFor(runtime.GOOS, os.Getenv, hasTool)
 }
 
+// CopyToClipboard writes text to the system clipboard through the same tool
+// copy-mode selections are piped into. Run through sh because the xclip entry
+// carries a redirect.
+func CopyToClipboard(text string) error {
+	copyCmd := clipboardCopyCommand()
+	if copyCmd == "" {
+		return fmt.Errorf("no clipboard tool found (install wl-clipboard, xclip or xsel)")
+	}
+	cmd := exec.Command("sh", "-c", copyCmd)
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
+}
+
 // clipboardCopyCommandFor is the pure core of clipboardCopyCommand, split out
 // so the routing table is testable without a real PATH or display server.
 // Wayland sessions normally export DISPLAY too (XWayland), so checking

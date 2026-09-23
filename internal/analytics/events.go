@@ -36,6 +36,7 @@ const (
 	EventQuickApprove = "quick_approve"
 	EventEditorOpened = "editor_opened"
 	EventPROpened     = "pr_opened"
+	EventPRLinkCopied = "pr_link_copied"
 	EventUndoUsed     = "undo_used"
 	EventForkSession  = "fork_session"
 
@@ -130,6 +131,17 @@ const (
 	EventOnboardingFirstAttach         = "onboarding_first_attach"
 	EventOnboardingFirstClaudeResponse = "onboarding_first_claude_response"
 	EventOnboardingFirstQuit           = "onboarding_first_quit"
+	// EventOnboardingFirstRunTrace is the ordered list of what a newcomer did
+	// between their first launch and their first quit — the nearest thing a TUI
+	// has to a session replay. Props: trace, an array of "<seconds>:<action>"
+	// strings whose action half is an enum from a fixed table (never a path,
+	// title, prompt, repo, branch, error string or typed character); ended,
+	// clean when the quit path sent it and unclean when the previous run's
+	// persisted trace was picked up on the next launch; uptime_seconds;
+	// entries_dropped. The trace is capped at firstRunTraceMaxEntries (300,
+	// internal/ui/firstrun_trace.go) — ~12 bytes each, comfortably inside
+	// PostHog's per-event limit — with the oldest dropped and counted.
+	EventOnboardingFirstRunTrace = "onboarding_first_run_trace"
 
 	// First-run launchpad: the "pick up your recent repos" screen an empty fleet
 	// opens on. Props are counts, never the repos themselves —
