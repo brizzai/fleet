@@ -131,6 +131,29 @@ Every color comes from the palette (`internal/ui/palette.go`). No literals, no
 - **One thing owns a color.** The status dot owns status color; agent glyphs are
   monochrome and carry identity by *shape*. If a second column starts meaning
   green, one of them is wrong.
+
+### Two channels on one cell
+
+The review reader is the one surface where two color languages meet, and it
+works only because they never share a channel:
+
+| channel | owns | where |
+|---|---|---|
+| **background** | added / deleted | row tint + a saturated gutter cell |
+| **foreground** | what the code *is* | keyword, type, string, number, comment |
+
+This is not an exception to "one thing owns a color" — it is what the rule
+requires here. Painting the foreground green to mean *added* spends the only
+channel that can say "this is a string", and it makes word-level diff
+impossible: you cannot brighten the runes that changed inside a line that is
+already one flat color. The reader shipped that way once.
+
+Every review color is **derived** from the palette in `design_review.go`
+(`applyReviewPalette`, called by `ApplyPalette`), never hand-picked per theme:
+six themes times thirteen values is a set nobody keeps in agreement, and a
+derived one gives a new theme a working diff for free.
+`TestReviewColorsDeriveInEveryTheme` fails if the tint ladder collapses;
+`TestDiffStateIsBackgroundAndSyntaxIsForeground` fails if the channels merge.
 - Semantic color is not your accent and does not count against its budget.
 - `ColorTextDim` on `ColorBorder` does not read. That pairing is why
   `SelectionBandSecondary` is `ColorText` — it drops the bold, not the color.
@@ -145,6 +168,23 @@ Shapes, Arrows). Menlo — macOS Terminal's default — has no U+23FE and no U+2
 and renders a fallback box. Check the font before picking a clever glyph.
 
 ---
+
+**The one concession: a word-diff mark.** There the background carries a *third*
+fact — "these are the words that changed" — on top of added/deleted, and the
+syntax colours were chosen for contrast against the row's quiet wash rather than
+against a mark. Reusing them put a comment on a changed word at a WCAG contrast
+ratio of **1.13**, where 1.0 means the text *is* the background. So a marked run
+swaps to a lifted variant of its own syntax colour — toward the text colour, and
+only as far as it has to go, so a string on a changed word is still recognisably
+a string.
+
+Both halves are **searched against a contrast target, never fixed**: the mark's
+own tint until it stands off the row it sits on (and clear of the gutter's tint,
+so the ladder row → gutter → mark stays three distinct steps), and the
+foreground until it clears the mark. A fixed factor is only ever tuned against
+one palette — the first attempt fixed fleet-pink and left five other themes
+unreadable, which is the whole failure mode deriving from the palette exists to
+prevent. `TestWordDiffTextStaysReadable` checks every class on every theme.
 
 ## 6. Interaction
 
@@ -171,6 +211,13 @@ and renders a fallback box. Check the font before picking a clever glyph.
 
 - Build inputs with `NewTextInput()`. **The input owns its prompt** — draw a
   second `>` beside it and you ship `> >`.
+- **A hand-rolled text field reads `msg.Text`, never `msg.String()`.**
+  `String()` returns the key's *name*, so the space bar arrives as the word
+  `"space"` — and the usual `len(s) == 1` test then drops every space the user
+  types. That is a comment box you cannot write a sentence in, and it shipped.
+  `Text` is also what carries the character a non-Latin layout produced, so it
+  is the same fix twice. Skip anything with a Ctrl/Alt/Meta modifier: some
+  terminals set `Text` on a chord.
 - Truncate with `ansi.Truncate`, never by bytes. Pane content is dense with
   3-byte box-drawing runes, so byte slicing cuts at a third of the intended
   columns and can split a rune.
@@ -191,6 +238,11 @@ In `internal/ui/design_test.go`:
   `design.go` fails the build.
 - `TestModeNeverFills` — a mode indicator with any background fails.
 - `TestSelectionDistinguishesFocus` — the focused and blurred weights must differ.
+
+- `TestReviewColorsDeriveInEveryTheme` — the diff tints must stay distinct from
+  each other and from the ground, in all six themes.
+- `TestDiffStateIsBackgroundAndSyntaxIsForeground` — diff state may not leak
+  into the foreground.
 
 Elsewhere: `TestNormalizedDialogsHoldNoTextInput`,
 `TestContextMenuIDsAreDispatchable`,
