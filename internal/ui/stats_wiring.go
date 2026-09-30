@@ -138,7 +138,10 @@ func (h *Home) recordStatus(id string, from, to session.Status) {
 // titles and paths live — is never read. Attaches are counted from their own
 // table (RecordAttach), a session start from handleSessionCreateResult and a
 // delete from its confirmed message (the "delete …" actions log the prompt, not
-// the yes), so none of those appear here.
+// the yes), so none of those appear here. Nor do actions logged before their
+// own guard runs — quick approve, mark unread, open PR, copy PR link, open
+// editor: a press on a session that isn't waiting, or a branch with no PR,
+// would count as done. Those record where they succeed.
 func statsActionFor(action string) string {
 	switch action {
 	case "fork session", "fork to worktree":
@@ -149,22 +152,12 @@ func statsActionFor(action string) string {
 		return stats.ActionRestart
 	case "resume session":
 		return stats.ActionResume
-	case "quick approve":
-		return stats.ActionQuickApprove
 	case "open terminal drawer":
 		return stats.ActionDrawerOpen
 	case "snooze session", "snooze checkout", "snooze origin":
 		return stats.ActionSnooze
 	case "bind slot":
 		return stats.ActionSlotBind
-	case "mark unread":
-		return stats.ActionMarkUnread
-	case "open editor":
-		return stats.ActionEditorOpen
-	case "open PR":
-		return stats.ActionPROpen
-	case "copy PR link":
-		return stats.ActionCopyPRLink
 	}
 	return ""
 }

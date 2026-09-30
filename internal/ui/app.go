@@ -1622,13 +1622,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case openEditorMsg:
 		if msg.err != nil {
 			h.setError("editor_open_failed", fmt.Errorf("editor: %w", msg.err))
+			return h, nil
 		}
+		h.recordStats(stats.ActionEditorOpen)
 		return h, nil
 
 	case openPRMsg:
 		if msg.err != nil {
 			h.setError("pr_open_failed", msg.err)
+			return h, nil
 		}
+		h.recordStats(stats.ActionPROpen)
 		return h, nil
 
 	case copyPRLinkMsg:
@@ -1636,13 +1640,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setError("pr_link_copy_failed", msg.err)
 			return h, nil
 		}
+		h.recordStats(stats.ActionCopyPRLink)
 		h.setInfo(fmt.Sprintf("Copied PR #%d link", msg.number))
 		return h, nil
 
 	case quickApproveMsg:
 		if msg.err != nil {
 			h.setError("approve_failed", fmt.Errorf("approve: %w", msg.err))
+			return h, nil
 		}
+		h.recordStats(stats.ActionQuickApprove)
 		return h, nil
 
 	case branchListMsg:
@@ -9851,6 +9858,9 @@ func (h *Home) markUnreadSelected() {
 		return
 	}
 	analytics.Track(analytics.EventMarkUnread, nil)
+	// Counted here, past the guards, not in flagUnread: snooze expiry flips
+	// sessions through it too, and that isn't the user pressing m.
+	h.recordStats(stats.ActionMarkUnread)
 	h.flagUnread(s)
 	h.rebuildFlatItems()
 	h.setInfo("Marked as unread")

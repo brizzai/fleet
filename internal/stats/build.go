@@ -567,8 +567,14 @@ func (s *Store) Recap(weekStart time.Time) (Recap, error) {
 			}
 		}
 		sort.Strings(names)
+		// The curve plots each bucket's peak, like the Stats chart: a 6-hour
+		// bucket's mean sits under 1 and never reaches the peak the card states.
+		spark := make([]float64, len(sw.peakB))
+		for i, p := range sw.peakB {
+			spark[i] = float64(p)
+		}
 		card := RecapCard{Big: fmt.Sprintf("%d", sw.peak), Caption: "agents at the same moment",
-			Lines: []string{at.In(time.Local).Format("Monday 15:04")}, Spark: sw.mean}
+			Lines: []string{at.In(time.Local).Format("Monday 15:04")}, Spark: spark}
 		if len(names) > 0 {
 			if len(names) > 4 {
 				names = append(names[:4], fmt.Sprintf("+%d", len(names)-4))

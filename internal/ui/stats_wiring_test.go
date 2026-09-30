@@ -174,16 +174,18 @@ var statsEnumRE = regexp.MustCompile(`^[a-z_]+$`)
 func TestStatsActionTableEmitsOnlyEnums(t *testing.T) {
 	for _, action := range []string{
 		"fork session", "fork to worktree", "undo delete", "restart session",
-		"resume session", "quick approve", "open terminal drawer", "snooze session",
-		"snooze checkout", "snooze origin", "bind slot", "mark unread", "open editor",
-		"open PR", "copy PR link",
+		"resume session", "open terminal drawer", "snooze session",
+		"snooze checkout", "snooze origin", "bind slot",
 	} {
 		got := statsActionFor(action)
 		if got == "" || !statsEnumRE.MatchString(got) {
 			t.Errorf("statsActionFor(%q) = %q, want a snake_case enum", action, got)
 		}
 	}
-	for _, action := range []string{"attach session", "attach via slot", "create session", "delete session", "command: stats", "open bug report"} {
+	// Attaches, creates and deletes count from their own tables; the rest are
+	// logged before their guard runs and record where they succeed instead.
+	for _, action := range []string{"attach session", "attach via slot", "create session", "delete session", "command: stats", "open bug report",
+		"quick approve", "mark unread", "open editor", "open PR", "copy PR link"} {
 		if got := statsActionFor(action); got != "" {
 			t.Errorf("statsActionFor(%q) = %q, want nothing", action, got)
 		}
@@ -192,8 +194,8 @@ func TestStatsActionTableEmitsOnlyEnums(t *testing.T) {
 
 func TestStatsTeeLandsInTheLocalStore(t *testing.T) {
 	h := statsTestHome(t, true)
-	h.logAction("quick approve", "a session title that must never be stored", true)
-	h.logAction("quick approve", "", false) // failures don't count
+	h.logAction("fork session", "a session title that must never be stored", true)
+	h.logAction("fork session", "", false) // failures don't count
 	h.statsStore.Flush(2 * time.Second)
 	r, err := h.statsStore.Report(stats.Range7d, time.Now())
 	if err != nil {
@@ -201,12 +203,49 @@ func TestStatsTeeLandsInTheLocalStore(t *testing.T) {
 	}
 	n := 0
 	for _, a := range r.Activity {
-		if a.Action == stats.ActionQuickApprove {
+		if a.Action == stats.ActionFork {
 			n = a.N
 		}
 	}
 	if n != 1 {
-		t.Errorf("quick approves recorded = %d, want 1 (activity: %+v)", n, r.Activity)
+		t.Errorf("forks recorded = %d, want 1 (activity: %+v)", n, r.Activity)
+	}
+}
+
+// Actions logged before their own guard runs count only where they succeed:
+// a Y on a session that isn't waiting, or a p on a branch with no PR, used to
+// count as an approve / a PR opened.
+func TestStatsCountsOnlyActionsThatHappened(t *testing.T) {
+	h := statsTestHome(t, true)
+	// Refused presses: nothing selected to approve / mark, no PR to open.
+	pressKey(t, h, "Y")
+	pressKey(t, h, "m")
+	pressKey(t, h, "p")
+	// Async results: failures don't count, successes do.
+	h.Update(quickApproveMsg{err: errTest})
+	h.Update(openPRMsg{err: errTest})
+	h.Update(copyPRLinkMsg{err: errTest})
+	h.Update(openEditorMsg{err: errTest})
+	h.Update(quickApproveMsg{})
+	h.Update(openPRMsg{})
+	h.Update(copyPRLinkMsg{number: 1})
+	h.Update(openEditorMsg{})
+	h.statsStore.Flush(2 * time.Second)
+	r, err := h.statsStore.Report(stats.Range7d, time.Now())
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	got := map[string]int{}
+	for _, a := range r.Activity {
+		got[a.Action] = a.N
+	}
+	for _, a := range []string{stats.ActionQuickApprove, stats.ActionPROpen, stats.ActionCopyPRLink, stats.ActionEditorOpen} {
+		if got[a] != 1 {
+			t.Errorf("%s = %d, want 1 (activity: %+v)", a, got[a], r.Activity)
+		}
+	}
+	if got[stats.ActionMarkUnread] != 0 {
+		t.Errorf("a refused m counted as marked unread: %+v", r.Activity)
 	}
 }
 
