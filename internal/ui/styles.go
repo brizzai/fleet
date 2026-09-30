@@ -112,7 +112,17 @@ var (
 	// Dim variant of the slot badge — used in the clean-tree sidebar where
 	// the bright orange would fight the calm row layout.
 	SlotBadgeDimStyle lipgloss.Style
+
+	// StatsRamp is the Stats screen's data ramp: statsRampN foreground steps,
+	// the border tone (0) and then data shades from ~40% of the way to the
+	// accent up to the accent itself (last). It is the one sanctioned
+	// exception to "colour means status" — a magnitude scale for charts only,
+	// never put on a status glyph (docs/design-system.md §5).
+	StatsRamp [statsRampN]lipgloss.Style
 )
+
+// statsRampN is the number of steps in StatsRamp.
+const statsRampN = 8
 
 // ApplyPalette reassigns all color vars and rebuilds all style vars from the given palette.
 // Must be called on the main goroutine (Bubble Tea Update/View).
@@ -185,6 +195,16 @@ func ApplyPalette(p Palette) {
 
 	SlotBadgeStyle = lipgloss.NewStyle().Foreground(ColorOrange).Bold(true)
 	SlotBadgeDimStyle = lipgloss.NewStyle().Foreground(ColorTextDim)
+
+	// Step 0 is the true border tone (the heatmap's zero-day dot). The data
+	// steps start ~40% of the way to the accent: blended from the border
+	// itself, the lowest data shade read as chrome, and the "solo" band — most
+	// of the data — looked disabled.
+	StatsRamp[0] = lipgloss.NewStyle().Foreground(ColorBorder)
+	floor := lipgloss.Blend1D(11, ColorBorder, ColorAccent)[4]
+	for i, c := range lipgloss.Blend1D(statsRampN-1, floor, ColorAccent) {
+		StatsRamp[i+1] = lipgloss.NewStyle().Foreground(c)
+	}
 }
 
 // RenderBorderedPanel wraps content in a rounded border with a title inset
