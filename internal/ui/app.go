@@ -40,6 +40,7 @@ import (
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/skill"
+	"github.com/brizzai/fleet/internal/stats"
 	"github.com/brizzai/fleet/internal/termkeys"
 	"github.com/brizzai/fleet/internal/ticket"
 	"github.com/brizzai/fleet/internal/ticketing"
@@ -301,6 +302,21 @@ type Home struct {
 	consentDialog       *ConsentDialog
 	onboardingDialog    *OnboardingDialog
 	releaseNotes        *ReleaseNotesDialog
+
+	// Stats (stats_wiring.go): the local, never-sent personal analytics.
+	// statsStore is set once in NewHome and never reassigned — the worker and the
+	// attach callback tee into it off the Update goroutine — and is nil when
+	// stats.db could not be opened (every recorder method is nil-safe).
+	// statsScanning / statsReportGen / statsRecap* are Update-goroutine only.
+	statsStore       *stats.Store
+	statsView        *StatsView
+	recapView        *RecapView
+	statsScanning    bool
+	statsReportGen   map[stats.Range]int
+	statsRecap       stats.Recap   // last computed recap for the last full week
+	statsRecapUnseen bool          // the "Your week" badge is showing
+	statsRecapWeek   time.Time     // the last full week the tick has asked a recap for
+	statsJumps       statsJumpGate // collapses held-key jump repeats (recordStatsJump)
 
 	// What's New badge: an animated top-right indicator shown while an unseen
 	// highlighted release exists. cachedReleases is loaded once at startup so
@@ -642,6 +658,8 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		consentDialog:          NewConsentDialog(),
 		onboardingDialog:       NewOnboardingDialog(cfg),
 		releaseNotes:           NewReleaseNotesDialog(),
+		statsView:              NewStatsView(),
+		recapView:              NewRecapView(),
 		launchpad:              NewLaunchpad(),
 		bugReport:              NewBugReportDialog(),
 		previewCache:           make(map[string]string),
@@ -663,6 +681,10 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	if firstRunTraceShouldRecord() {
 		h.firstRun = newFirstRunTrace(h.startTime)
 	}
+	h.statsStore = openStatsStoreOrNil()
+	// The startup scan computes this week's recap; the tick only asks again
+	// once the week rolls over (maybeRecapNewWeek).
+	h.statsRecapWeek = stats.LastFullWeekStart(time.Now())
 	h.drawerHeight = cfg.GetDrawerHeight()
 	// Seed the What's New "seen" version only on a genuinely fresh install, so a
 	// brand-new install doesn't light up the badge for releases that predate it.
@@ -796,6 +818,7 @@ func (h *Home) Init() tea.Cmd {
 		h.previewTick(),
 		h.loadReleaseNotes(), // compute the What's New badge without opening the dialog
 		warmTickets(),        // resolve tracker credentials off the Update goroutine
+		statsKickCmd(),       // first incremental transcript scan, after boot settles
 	)
 }
 
@@ -920,6 +943,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, isMouse := msg.(tea.MouseMsg)
 	h.viewDirty = !isMouse
 
+	// Stats' own messages (scan progress, reports, the recap). Command results,
+	// not keys, so routeToModal never sees them.
+	if cmd, ok := h.handleStatsMsg(msg); ok {
+		return h, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
@@ -962,6 +991,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.onboardingDialog.SetSize(msg.Width, msg.Height)
 		h.bugReport.SetSize(msg.Width, msg.Height)
 		h.releaseNotes.SetSize(msg.Width, msg.Height)
+		h.statsView.SetSize(msg.Width, msg.Height)
+		h.recapView.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
 		// The dropdown is pinned to a sidebar row, and a resize moves that row
 		// (syncViewport may also re-scroll). Re-anchor so it doesn't strand.
@@ -1302,12 +1333,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		analytics.Track(analytics.EventSessionDeleted, nil)
+		h.recordStats(stats.ActionDelete) // here, not at the confirm prompt: this is the yes
 		return h.deferDelete(msg)
 
 	case repoDeleteMsg:
+		h.recordStats(stats.ActionDelete)
 		return h.deferDeleteRepo(msg)
 
 	case originDeleteMsg:
+		h.recordStats(stats.ActionDelete)
 		return h.deferDeleteOrigin(msg)
 
 	case pendingDeleteExpireMsg:
@@ -1322,6 +1356,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := h.storage.UpdateStatus(s.ID, string(s.GetStatus())); err != nil {
 				debuglog.Logger.Error("storage: UpdateStatus after restart", "id", s.ID, "err", err)
 			}
+			// The relaunch ran off-loop and set the status there, so the status it
+			// left behind is the one fact we have.
+			h.recordStatus(s.ID, "", s.GetStatus())
 			if err := h.storage.UpdateTmuxSession(s.ID, s.TmuxSessionName); err != nil {
 				debuglog.Logger.Error("storage: UpdateTmuxSession after restart", "id", s.ID, "err", err)
 			}
@@ -1334,6 +1371,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Resume failed — return the row to Suspended so Enter can retry,
 				// instead of stranding it in Starting/Error (which Enter can't wake).
 				if s, ok := h.sessionByID[msg.id]; ok {
+					h.recordStatus(s.ID, s.GetStatus(), session.StatusSuspended)
 					s.SetStatus(session.StatusSuspended)
 					if err := h.storage.UpdateStatus(s.ID, string(session.StatusSuspended)); err != nil {
 						debuglog.Logger.Error("storage: UpdateStatus after failed resume", "id", s.ID, "err", err)
@@ -1471,6 +1509,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.Title = msg.newTitle
 			s.ManuallyRenamed = true
 			analytics.Track(analytics.EventSessionRenamed, nil)
+			h.recordStats(stats.ActionRename)
 			if err := h.storage.UpdateTitle(s.ID, msg.newTitle); err != nil {
 				debuglog.Logger.Error("storage: UpdateTitle (rename)", "id", s.ID, "err", err)
 			}
@@ -1583,13 +1622,17 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case openEditorMsg:
 		if msg.err != nil {
 			h.setError("editor_open_failed", fmt.Errorf("editor: %w", msg.err))
+			return h, nil
 		}
+		h.recordStats(stats.ActionEditorOpen)
 		return h, nil
 
 	case openPRMsg:
 		if msg.err != nil {
 			h.setError("pr_open_failed", msg.err)
+			return h, nil
 		}
+		h.recordStats(stats.ActionPROpen)
 		return h, nil
 
 	case copyPRLinkMsg:
@@ -1597,13 +1640,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setError("pr_link_copy_failed", msg.err)
 			return h, nil
 		}
+		h.recordStats(stats.ActionCopyPRLink)
 		h.setInfo(fmt.Sprintf("Copied PR #%d link", msg.number))
 		return h, nil
 
 	case quickApproveMsg:
 		if msg.err != nil {
 			h.setError("approve_failed", fmt.Errorf("approve: %w", msg.err))
+			return h, nil
 		}
+		h.recordStats(stats.ActionQuickApprove)
 		return h, nil
 
 	case branchListMsg:
@@ -1857,6 +1903,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 
+		h.recordStats(stats.ActionWorktreeNew)
 		if ctx := h.pendingForkCtx; ctx != nil {
 			h.clearPendingFork()
 			return h, h.dispatchForkToWorktree(ctx, msg.info.Path, msg.info.Name)
@@ -2144,6 +2191,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.sessions = msg.sessions
 		h.shells = msg.shells
 		h.rebuildSessionMap()
+		h.noteStatsSessions(msg.sessions...)
 		// Keep only bindings whose session is present in the loaded view. Do
 		// NOT delete absent bindings from storage here: FLEET_DEMO_PREFIX and
 		// similar filters shrink the session set transiently, and writing back
@@ -2402,6 +2450,17 @@ func (h *Home) composeScreen() string {
 		badgeW := lipgloss.Width(badge)
 		base = overlayAt(badge, base, rightEdge-badgeW, 0)
 		rightEdge -= badgeW + 2
+	} else if h.statsRecapUnseen && !h.modalOpen() {
+		// The weekly recap badge takes the same corner, and yields it to What's
+		// New when both are due: a release is rarer than a week. It is sized to
+		// the room the breadcrumb leaves — dropping its key hint, then itself —
+		// rather than overprinting a session title mid-word.
+		room := rightEdge - lipgloss.Width(h.renderHeader()) - accountReadoutGap
+		if badge := fitStatsRecapBadge(room); badge != "" {
+			badgeW := lipgloss.Width(badge)
+			base = overlayAt(badge, base, rightEdge-badgeW, 0)
+			rightEdge -= badgeW + 2
+		}
 	}
 	if AccountUsageStyle != config.AccountUsageOff && !h.modalOpen() {
 		// The budget is the space left of rightEdge, not rightEdge itself.
@@ -2431,6 +2490,17 @@ func (h *Home) composeScreen() string {
 		y := (h.height - lipgloss.Height(pv)) / 2
 		h.recordOverlay(pv, x, y, h.commandPalette)
 		base = overlayAt(pv, base, x, y)
+	}
+	// Weekly recap reel: a centred card over a dimmed backdrop, like the palette.
+	// It holds no clickable rows, and the sidebar behind it must not take clicks
+	// meant for the reel either.
+	if h.recapView.IsVisible() {
+		h.layout.sidebar = mouseRect{}
+		base = dimBackdrop(base)
+		rv := h.recapView.View()
+		x := (h.width - lipgloss.Width(rv)) / 2
+		y := (h.height - lipgloss.Height(rv)) / 2
+		base = overlayAt(rv, base, x, y)
 	}
 	// Context menu: a dropdown pinned to the cursor's sidebar row. Deliberately
 	// no dimBackdrop — it's a small box sitting beside the row it acts on, and
@@ -2550,6 +2620,8 @@ func (h *Home) modalOpen() bool {
 		h.onboardingDialog.IsVisible() ||
 		h.helpOverlay.IsVisible() ||
 		h.releaseNotes.IsVisible() ||
+		h.statsView.IsVisible() ||
+		h.recapView.IsVisible() ||
 		h.bugReport.IsVisible() ||
 		h.settingsDialog.IsVisible() ||
 		h.createWorkspaceDialog.IsVisible() ||
@@ -2598,6 +2670,10 @@ func (h *Home) renderBody() string {
 	}
 	if h.releaseNotes.IsVisible() {
 		return h.releaseNotes.View()
+	}
+	if h.statsView.IsVisible() {
+		h.statsView.SetCovered(h.recapView.IsVisible())
+		return h.statsView.View()
 	}
 	if h.bugReport.IsVisible() {
 		return h.bugReport.View()
@@ -2896,6 +2972,15 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.releaseNotes.IsVisible():
 		dialog, cmd := h.releaseNotes.Update(cmdMsg)
 		h.releaseNotes = dialog
+		return cmd, true
+	case h.recapView.IsVisible():
+		// Above statsView: the reel can open on top of the Stats screen.
+		view, cmd := h.recapView.Update(cmdMsg)
+		h.recapView = view
+		return cmd, true
+	case h.statsView.IsVisible():
+		view, cmd := h.statsView.Update(cmdMsg)
+		h.statsView = view
 		return cmd, true
 	case h.consentDialog.IsVisible():
 		dialog, cmd := h.consentDialog.Update(cmdMsg)
@@ -3423,6 +3508,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 	case "ctrl+k":
+		h.recordStats(stats.ActionPaletteOpen)
 		h.commandPalette.Show(h.buildPaletteItems(), h.recentPaletteIDs)
 		h.cfg.NoteFeatureUsed(tipCmdPaletteID, tipLearnedThreshold) // retire the discovery tip once they know it
 		analytics.Track(analytics.EventCommandPalette, nil)
@@ -3434,6 +3520,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			h.setInfo("No ticket tracker connected — Ctrl+K → Connect Linear or Connect Jira")
 			return h, nil
 		}
+		h.recordStats(stats.ActionPaletteOpen)
 		h.commandPalette.ShowOnTab(h.buildPaletteItems(), h.recentPaletteIDs, PaletteTabTickets)
 		analytics.Track(analytics.EventCommandPalette, nil)
 		return h, h.maybeLoadPaletteTickets()
@@ -3443,6 +3530,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "W":
 		return h.openReleaseNotes(true)
+	case "i":
+		return h, h.openStats()
 	case "X":
 		h.dismissActiveTip()
 		return h, nil
@@ -3461,6 +3550,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "?":
 		h.helpOverlay.Show()
+		h.recordStats(stats.ActionHelpOpen)
 		return h, nil
 	case "ctrl+c":
 		return h, h.beginQuit("ctrl+c")
@@ -3575,6 +3665,10 @@ func (h *Home) performShutdown() tea.Cmd {
 			})
 		}
 		h.sendFirstRunTrace(int(uptime))
+		// Drains the recorder queue, so the last few seconds of activity land.
+		if err := h.statsStore.Close(); err != nil {
+			debuglog.Logger.Warn("stats: close failed", "err", err)
+		}
 
 		analytics.Shutdown()
 		return tea.Quit()
@@ -3681,6 +3775,7 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 		// near-zero "uptime" would be noise in the distribution.
 		if err == nil {
 			attached := time.Since(attachStart)
+			h.statsStore.RecordAttach(s.ID, attachStart, attached)
 			analytics.Distribution(analytics.MetricAttachedSessionUptimeSecs, attached.Seconds(), nil)
 			if attached < attachBailThreshold {
 				h.trace(traceDetachBail)
@@ -4322,6 +4417,8 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 	h.sessions = append(h.sessions, s)
 	h.rebuildSessionMap()
 	h.workerMu.Unlock()
+	h.noteStatsSessions(s)
+	h.recordStats(stats.ActionSessionNew)
 
 	// Ensure the repo group is expanded for the new session and pin it.
 	repo := session.GetRepoRoot(s.ProjectPath)
@@ -4380,6 +4477,7 @@ func (h *Home) handleAdoptSessions(msg adoptSessionsMsg) (tea.Model, tea.Cmd) {
 	h.sessions = append(h.sessions, fresh...)
 	h.rebuildSessionMap()
 	h.workerMu.Unlock()
+	h.noteStatsSessions(fresh...)
 
 	cmds := make([]tea.Cmd, 0, len(fresh))
 	for _, s := range fresh {
@@ -5133,6 +5231,7 @@ func (h *Home) resumeSelected(s *session.Session) tea.Cmd {
 	// healed/respawn branch here: this path is always a full Restart.
 	h.healAccountBeforeRelaunch(s)
 	h.attachAfterResumeID = s.ID
+	h.recordStatus(s.ID, s.GetStatus(), session.StatusStarting)
 	s.SetStatus(session.StatusStarting)
 	h.rebuildFlatItems()
 	id := s.ID
@@ -5245,6 +5344,7 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 		if err := h.storage.UpdateStatus(c.s.ID, string(session.StatusSuspended)); err != nil {
 			debuglog.Logger.Error("storage: UpdateStatus after suspend", "id", c.s.ID, "err", err)
 		}
+		h.recordStatus(c.s.ID, session.StatusIdle, session.StatusSuspended)
 		h.logAction("suspend session", c.s.Title, true)
 		n++
 	}
@@ -5526,6 +5626,7 @@ func (h *Home) suspendIdleNow() tea.Cmd {
 	// teardown, so the status worker sees Suspended and short-circuits instead of
 	// racing tmux death into a spurious StatusError (and the ◌ shows immediately).
 	for _, s := range targets {
+		h.recordStatus(s.ID, s.GetStatus(), session.StatusSuspended)
 		s.SetStatus(session.StatusSuspended)
 		if err := h.storage.UpdateStatus(s.ID, string(session.StatusSuspended)); err != nil {
 			debuglog.Logger.Error("storage: UpdateStatus (pre-suspend)", "id", s.ID, "err", err)
@@ -5572,6 +5673,7 @@ func (h *Home) suspendSelected() tea.Cmd {
 	}
 	// Optimistically mark Suspended on the Update thread before the teardown so the
 	// status worker short-circuits instead of racing tmux death into StatusError.
+	h.recordStatus(s.ID, s.GetStatus(), session.StatusSuspended)
 	s.SetStatus(session.StatusSuspended)
 	if err := h.storage.UpdateStatus(s.ID, string(session.StatusSuspended)); err != nil {
 		debuglog.Logger.Error("storage: UpdateStatus (pre-suspend)", "id", s.ID, "err", err)
@@ -5942,8 +6044,12 @@ func (h *Home) jumpToNextAttentionSession() {
 	// that header instead of restarting at the top. A collapsed origin header
 	// has no children in cand, so the scan simply moves on to the next group.
 	start := -1
+	prevID := "" // the session the cursor starts on, for recordStatsJump
 	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
 		cur := h.flatItems[h.cursor]
+		if cur.Session != nil {
+			prevID = cur.Session.ID
+		}
 		for i, it := range cand {
 			switch {
 			case cur.Session != nil && it.Session != nil && it.Session.ID == cur.Session.ID:
@@ -5991,6 +6097,8 @@ func (h *Home) jumpToNextAttentionSession() {
 	for i, it := range h.flatItems {
 		if !it.IsRepoHeader && it.Session != nil && it.Session.ID == target.ID {
 			debuglog.Logger.Debug("spacejump: landed", "targetID", target.ID, "newCursor", i)
+			// Counted only on landing somewhere new, and once per held key.
+			h.recordStatsJump(stats.ActionSpaceJump, stats.ActionSpaceJump, prevID != target.ID)
 			h.cursor = i
 			h.syncViewport()
 			return
@@ -6039,6 +6147,7 @@ func (h *Home) jumpToNextAttentionPR() {
 	if n == 0 {
 		return
 	}
+	prev := h.targetForCursor() // for recordStatsJump
 	gitInfo := h.gitInfo()
 	now := time.Now()
 	findNext := func(want prBadgeVerdict) int {
@@ -6078,6 +6187,8 @@ func (h *Home) jumpToNextAttentionPR() {
 			}
 		}
 	}
+	// Compared by row identity, not index: the reveal's rebuild shifts rows.
+	h.recordStatsJump(stats.ActionPRJump, stats.ActionPRJump, h.targetForCursor() != prev)
 	h.syncViewport()
 }
 
@@ -6722,7 +6833,7 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	// Re-arm the badge shimmer if it should be running but isn't (e.g. it
 	// stopped while a modal was open, and the modal has since closed).
-	return h, tea.Batch(h.tick(), h.ensureWhatsNewShimmer())
+	return h, tea.Batch(h.tick(), h.ensureWhatsNewShimmer(), h.maybeRecapNewWeek(time.Now()))
 }
 
 // bootstrapRepoSet returns the union of repo roots derived from sessions and
@@ -6937,6 +7048,9 @@ func (h *Home) syncHookStatuses(sessions []*session.Session, resolveRotation boo
 				if err := h.storage.UpdateClaudeSessionID(s.ID, s.ClaudeSessionID); err != nil {
 					debuglog.Logger.Error("storage: UpdateClaudeSessionID", "id", s.ID, "err", err)
 				}
+				// Every id a session has had is kept, so the transcript written
+				// before a /clear still counts.
+				h.noteStatsSessions(s)
 			}
 			// Persist prompt changes. Re-titling on later prompts is driven by
 			// Claude's own ai-title (read from the JSONL in the worker cycle),
@@ -6980,6 +7094,7 @@ func (h *Home) updateAndPersistStatus(s *session.Session) bool {
 		if err := h.storage.UpdateStatus(s.ID, string(newStatus)); err != nil {
 			debuglog.Logger.Error("storage: UpdateStatus", "id", s.ID, "status", newStatus, "err", err)
 		}
+		h.recordStatus(s.ID, oldStatus, newStatus)
 		return true
 	}
 	return false
@@ -8355,6 +8470,7 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 	// becomes visible and selectable. (Expanding only the checkout left a
 	// collapsed origin hiding the row — it then read as "hidden by filter".)
 	repo := session.GetRepoRoot(s.ProjectPath)
+	moved := h.targetForCursor() != contextMenuTarget{sessionID: sessID} // before the rebuild shifts rows
 	h.revealCheckout(repo)
 	h.rebuildFlatItems()
 
@@ -8373,6 +8489,9 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 
 	isDoubleTap := h.lastSlotTapSlot == slot &&
 		time.Since(h.lastSlotTapAt) < 400*time.Millisecond
+	if !isDoubleTap { // the double-tap is an attach, counted as one
+		h.recordStatsJump(stats.ActionSlotJump, fmt.Sprintf("%s:%d", stats.ActionSlotJump, slot), moved)
+	}
 	h.cursor = idx
 	h.syncViewport()
 	if isDoubleTap {
@@ -9201,6 +9320,8 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
 		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "Shift+W"},
 		{Kind: PaletteKindCommand, ID: "release_notes", Name: "Release Notes"},
+		{Kind: PaletteKindCommand, ID: "stats", Name: "Your Stats", Shortcut: "i"},
+		{Kind: PaletteKindCommand, ID: "stats_recap", Name: "Your Week (Recap)"},
 		{Kind: PaletteKindCommand, ID: "reload_all", Name: "Reload All Sessions"},
 		{Kind: PaletteKindCommand, ID: "frost_gate", Name: frost.Gate().Label, Haystack: frost.Gate().Label + " " + frost.Gate().Keywords, Hidden: true},
 		{Kind: PaletteKindCommand, ID: "suspend_session", Name: "Suspend This Session"},
@@ -9505,7 +9626,12 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h.openBugReport()
 	case "help":
 		h.helpOverlay.Show()
+		h.recordStats(stats.ActionHelpOpen)
 		return h, nil
+	case "stats":
+		return h, h.openStats()
+	case "stats_recap":
+		return h, h.openRecap()
 	case "whats_new":
 		return h.openReleaseNotes(true)
 	case "release_notes":
@@ -9732,6 +9858,9 @@ func (h *Home) markUnreadSelected() {
 		return
 	}
 	analytics.Track(analytics.EventMarkUnread, nil)
+	// Counted here, past the guards, not in flagUnread: snooze expiry flips
+	// sessions through it too, and that isn't the user pressing m.
+	h.recordStats(stats.ActionMarkUnread)
 	h.flagUnread(s)
 	h.rebuildFlatItems()
 	h.setInfo("Marked as unread")
@@ -9740,7 +9869,9 @@ func (h *Home) markUnreadSelected() {
 // flagUnread flips an idle session back to finished and persists both halves.
 // Shared by the `m` key and a lapsed snooze (expireSessionSnooze).
 func (h *Home) flagUnread(s *session.Session) {
+	prev := s.GetStatus()
 	s.MarkUnread()
+	h.recordStatus(s.ID, prev, s.GetStatus())
 	if err := h.storage.UpdateStatus(s.ID, string(session.StatusFinished)); err != nil {
 		debuglog.Logger.Error("storage: UpdateStatus", "id", s.ID, "err", err)
 	}

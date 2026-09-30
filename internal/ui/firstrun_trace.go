@@ -248,6 +248,12 @@ func (h *Home) logAction(action, detail string, success bool) {
 	if token := traceForAction(action); token != "" {
 		h.trace(token)
 	}
+	// The local Stats tee: same rule, its own fixed table, action name only.
+	if success {
+		if a := statsActionFor(action); a != "" {
+			h.recordStats(a)
+		}
+	}
 }
 
 func (t *firstRunTrace) record(action string) { t.add(action, false) }
@@ -511,6 +517,10 @@ func (h *Home) traceDialogName() string {
 		return "help"
 	case h.releaseNotes.IsVisible():
 		return "release_notes"
+	case h.recapView.IsVisible():
+		return "stats_recap"
+	case h.statsView.IsVisible():
+		return "stats"
 	case h.consentDialog.IsVisible():
 		return ""
 	case h.onboardingDialog.IsVisible():

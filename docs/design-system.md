@@ -132,6 +132,13 @@ Every color comes from the palette (`internal/ui/palette.go`). No literals, no
   monochrome and carry identity by *shape*. If a second column starts meaning
   green, one of them is wrong.
 - Semantic color is not your accent and does not count against its budget.
+- **The one sanctioned exception to "color means status": Stats charts.** The
+  Stats screen's charts (concurrency bars, share bar, heatmap, repo/action bars,
+  the recap spark) use `StatsRamp` — a magnitude ramp toward `ColorAccent`,
+  built in `ApplyPalette` so every theme gets its own. Step 0 is `ColorBorder`
+  (the heatmap's empty day); the data steps start well clear of it, or the
+  lowest band reads as disabled chrome. It is a data scale, foreground only (never a fill), and it never
+  lands on a status glyph, a mode or a selection. Nothing else may borrow it.
 - `ColorTextDim` on `ColorBorder` does not read. That pairing is why
   `SelectionBandSecondary` is `ColorText` — it drops the bold, not the color.
 - Add a style to the table in `styles.go`? It is constructed **only** in

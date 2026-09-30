@@ -3,6 +3,8 @@ package ui
 import (
 	"os"
 	"testing"
+
+	"github.com/brizzai/fleet/internal/stats"
 )
 
 // TestMain points HOME at a throwaway directory for the whole package.
@@ -26,6 +28,9 @@ func TestMain(m *testing.M) {
 		panic("test home: " + err.Error())
 	}
 	os.Setenv("HOME", home)
+	// Every NewHome would otherwise open (and never close) its own stats.db.
+	// Tests that exercise the store swap in their own.
+	statsOpenStore = func() (*stats.Store, error) { return nil, nil }
 	code := m.Run()
 	os.RemoveAll(home)
 	os.Exit(code)
