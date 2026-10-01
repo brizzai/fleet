@@ -1,0 +1,40 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+  ╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.90 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+ ● Tip: /feedback
+   └ Provide feedback about the CLI
+
+ ❯ Run exactly this shell command and nothing else: sleep 12 && touch fx.txt                                     11:30
+
+ $ Shell Sleep briefly and create fx.txt
+   sleep 12 && touch fx.txt
+
+
+
+
+
+
+
+
+
+
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Sleep briefly and create fx.txt                                                                                      │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ sleep 12 && touch fx.txt                                                                                         │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                                      │
+│ Do you want to run this command?                                                                                     │
+│                                                                                                                      │
+│ ❯ 1. Yes                                                                                                             │
+│   2. Yes, and don't ask again for `sleep` and `touch` in this directory (/Users/dev/repo          │
+│   3. No, and tell Copilot what to do differently (Esc to stop)                                                       │
+│                                                                                                                      │
+│ ↑/↓ to navigate · enter to select · esc to cancel                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

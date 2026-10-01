@@ -1221,12 +1221,14 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ag == "" {
 			ag = agent.Parse(h.cfg.GetDefaultAgent())
 		}
-		analytics.Track(analytics.EventForkSession, map[string]interface{}{"agent": string(ag)})
-		if ag == agent.Codex {
-			if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), msg.path); err != nil {
-				debuglog.Logger.Error("codex dir trust seeding failed", "path", msg.path, "err", err)
-			}
+		if !ag.SupportsFork() {
+			// forkSelected refuses first; this keeps any other sender from
+			// resuming — and taking over — the parent's conversation.
+			h.setInfo("cannot fork: " + ag.DisplayName() + " has no fork")
+			return h, nil
 		}
+		analytics.Track(analytics.EventForkSession, map[string]interface{}{"agent": string(ag)})
+		seedDirTrust(ag, msg.path)
 		s := session.NewSession(msg.title, msg.path)
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
@@ -3862,6 +3864,22 @@ func (h *Home) markOnboardingSeen() {
 	}
 }
 
+// seedDirTrust pre-trusts path for agents that otherwise open on a blocking
+// folder-trust prompt. A small local file write on the Update loop — accepted,
+// as it always was for Codex.
+func seedDirTrust(ag agent.Type, path string) {
+	var err error
+	switch ag {
+	case agent.Codex:
+		err = hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), path)
+	case agent.Copilot:
+		err = hooks.EnsureCopilotDirTrust(hooks.GetCopilotConfigDir(), path)
+	}
+	if err != nil {
+		debuglog.Logger.Error("dir trust seeding failed", "agent", ag, "path", path, "err", err)
+	}
+}
+
 func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 	// Empty agent → configured default.
 	ag := msg.agent
@@ -3872,13 +3890,9 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		h.setError("agent_cli_missing", fmt.Errorf("%s CLI not found: install %s to create sessions", ag.Binary(), ag.DisplayName()))
 		return h, nil
 	}
-	// Codex prompts to trust a new directory on first launch; pre-seed trust so
-	// the session opens straight to the prompt.
-	if ag == agent.Codex {
-		if err := hooks.EnsureCodexDirTrust(hooks.GetCodexConfigDir(), msg.path); err != nil {
-			debuglog.Logger.Error("codex dir trust seeding failed", "path", msg.path, "err", err)
-		}
-	}
+	// Codex and Copilot prompt to trust a new directory on first launch;
+	// pre-seed trust so the session opens straight to the prompt.
+	seedDirTrust(ag, msg.path)
 	msg.agent = ag
 	if msg.account == "" {
 		account, blocked := h.resolveAccount(ag, msg.path)
@@ -5431,6 +5445,9 @@ func (h *Home) maybeRepairClaudeHooks() {
 				"dir", dir, "command", hooks.GetHookCommand())
 		}
 	}
+	if _, err := hooks.RepairCopilotHooks(hooks.GetCopilotConfigDir()); err != nil {
+		debuglog.Logger.Error("copilot hook repair failed", "err", err)
+	}
 }
 
 // adoptSweepInterval throttles the externally-created-session sweep to its own
@@ -5696,6 +5713,10 @@ func (h *Home) forkSelected() tea.Cmd {
 		h.setInfo("cannot fork: no session selected")
 		return nil
 	}
+	if !s.Agent.SupportsFork() {
+		h.setInfo("cannot fork: " + s.Agent.DisplayName() + " has no fork")
+		return nil
+	}
 	if s.GetClaudeSessionID() == "" {
 		h.setError("fork_no_conversation_id", fmt.Errorf("cannot fork: session has no Claude conversation ID yet"))
 		return nil
@@ -5798,7 +5819,12 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 	// `claude --resume --fork-session` finds it — a Claude-only mechanism. Codex
 	// and OpenCode resume from their own stores and have no such staging, so
 	// reject any non-Claude agent here rather than dropping the agent and
-	// launching a broken Claude fork. Plain 'f' (in-place fork) handles them.
+	// launching a broken Claude fork. Plain 'f' (in-place fork) handles Codex
+	// and OpenCode; Copilot can't fork at all.
+	if !s.Agent.SupportsFork() {
+		h.setInfo("cannot fork: " + s.Agent.DisplayName() + " has no fork")
+		return nil
+	}
 	if s.Agent != agent.Claude {
 		h.setError("fork_worktree_claude_only", fmt.Errorf("fork to worktree is Claude-only; use 'f' to fork this session in place"))
 		return nil
@@ -6238,10 +6264,16 @@ func (h *Home) quickApproveSelected() tea.Cmd {
 	h.markSessionAccessed(s)
 	ts := s.GetTmuxSession()
 	debuglog.Logger.Info("quick approve", "id", s.ID, "title", s.Title)
+	typeY := s.Agent != agent.Copilot
 	return func() tea.Msg {
 		// Send "y" then Enter: menu-style prompts ignore "y" and Enter confirms;
 		// (Y/n) and (y/N) prompts accept "y" as approval, Enter submits.
-		_ = ts.SendKeys("y")
+		// Copilot's menus are numbered with "1. Yes" pre-highlighted, and a typed
+		// letter there can land in the "No, and tell Copilot…" text row — so
+		// Enter alone.
+		if typeY {
+			_ = ts.SendKeys("y")
+		}
 		err := ts.SendKeys("Enter")
 		return quickApproveMsg{err: err}
 	}
@@ -7039,7 +7071,8 @@ func (h *Home) syncHookStatuses(sessions []*session.Session, resolveRotation boo
 				PromptCount: hs.PromptCount,
 				// SessionEnd's reason, which is what lets session_errored separate a
 				// /clear or /logout rotation from a session that actually died.
-				Reason: hs.Reason,
+				Reason:          hs.Reason,
+				PromptSessionID: hs.PromptSessionID,
 			}, resolveRotation) {
 				changed = append(changed, s.ID)
 			}
@@ -7310,7 +7343,7 @@ func (h *Home) statusWorkerCycle() {
 				continue
 			}
 
-			// Re-read the agent's own title (Claude's JSONL, Codex's state DB). A
+			// Re-read the agent's own title (Claude's JSONL, Codex's state DB, Copilot's workspace.yaml). A
 			// freshly-created session with no title yet is polled every cycle so
 			// it adopts its ai-title promptly; otherwise (already titled, or old
 			// enough that its transcript is large) we re-check ~every 30s to
@@ -7449,8 +7482,8 @@ drainPriority:
 	// above — the throttle makes that safe.
 	h.maybeSyncExternalSessions(sessions)
 
-	// 5d. Re-point Claude's hooks if the command they name has been deleted.
-	// Self-throttled; stats a file and may rewrite settings.json, which is why it
+	// 5d. Re-point Claude's and Copilot's hooks if the command they name has been
+	// deleted. Self-throttled; stats a file and may rewrite settings.json, which is why it
 	// lives here rather than on the Update loop.
 	h.maybeRepairClaudeHooks()
 
@@ -8807,6 +8840,12 @@ func (h *Home) loadSessions() tea.Msg {
 			debuglog.Logger.Error("opencode plugin inject failed", "err", err)
 		}
 	}
+	// Copilot hooks, same gating — never create ~/.copilot for users without it.
+	if _, err := exec.LookPath("copilot"); err == nil {
+		if _, err := hooks.InjectCopilotHooks(hooks.GetCopilotConfigDir()); err != nil {
+			debuglog.Logger.Error("copilot hook inject failed", "err", err)
+		}
+	}
 	// Route tmux copy-mode selections to the system clipboard (pbcopy on
 	// macOS; wl-copy/xclip/xsel on Linux), so drag/click-to-copy works on
 	// terminals that block OSC 52 (iTerm2 default) or don't support it (Apple
@@ -9083,6 +9122,16 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		unread.Enabled = true
 	}
 
+	fork := ContextMenuItem{ID: "fork", Label: "Fork Session", Shortcut: "f", Key: "f"}
+	switch {
+	case !s.Agent.SupportsFork():
+		fork.Note = s.Agent.DisplayName() + " can't fork"
+	case !resumable:
+		fork.Note = "no session id yet"
+	default:
+		fork.Enabled = true
+	}
+
 	forkWorktree := ContextMenuItem{ID: "fork_worktree", Label: "Fork to Worktree", Shortcut: "F", Key: "F"}
 	switch {
 	case s.Agent != agent.Claude:
@@ -9139,11 +9188,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 			Enabled: h.hasPRForCursor(),
 			Note:    "no PR",
 		},
-		{
-			ID: "fork", Label: "Fork Session", Shortcut: "f", Key: "f",
-			Enabled: resumable,
-			Note:    "no session id yet",
-		},
+		fork,
 		forkWorktree,
 		suspend,
 		h.snoozeMenuItem(),

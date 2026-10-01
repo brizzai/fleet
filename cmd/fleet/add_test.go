@@ -78,6 +78,11 @@ func TestParseAddArgs(t *testing.T) {
 			want: addOpts{path: ".", agentName: "opencode"},
 		},
 		{
+			name: "copilot is a known agent",
+			args: []string{".", "--agent", "copilot", "--effort", "high"},
+			want: addOpts{path: ".", agentName: "copilot", effort: "high"},
+		},
+		{
 			// The account is a claude.ai credential the other agents never read.
 			name:    "account with a non-claude agent is rejected",
 			args:    []string{".", "--agent", "codex", "--account", "a@b.com"},

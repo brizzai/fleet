@@ -25,6 +25,7 @@ func TestEveryEnvironmentFieldIsScrubbed(t *testing.T) {
 		"TmuxVersion":     func(r *Report) { r.TmuxVersion = secret },
 		"ClaudeVersion":   func(r *Report) { r.ClaudeVersion = secret },
 		"CodexVersion":    func(r *Report) { r.CodexVersion = secret },
+		"CopilotVersion":  func(r *Report) { r.CopilotVersion = secret },
 		"GhVersion":       func(r *Report) { r.GhVersion = secret },
 		"TERM":            func(r *Report) { r.TerminalEnv.TERM = secret },
 		"TermProgram":     func(r *Report) { r.TerminalEnv.TermProgram = secret },

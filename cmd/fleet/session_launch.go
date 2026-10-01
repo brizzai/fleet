@@ -232,6 +232,14 @@ func installAgentHooks(ag agent.Type, projectPath string) {
 		if _, err := hooks.InjectOpenCodePlugin(hooks.GetOpenCodeConfigDir()); err != nil {
 			debuglog.Logger.Error("opencode plugin inject failed", "err", err)
 		}
+	case agent.Copilot:
+		if _, err := hooks.InjectCopilotHooks(hooks.GetCopilotConfigDir()); err != nil {
+			debuglog.Logger.Error("copilot hook inject failed", "err", err)
+		}
+		// Without trust the pane opens on a folder-trust menu and no hook fires.
+		if err := hooks.EnsureCopilotDirTrust(hooks.GetCopilotConfigDir(), projectPath); err != nil {
+			debuglog.Logger.Error("copilot dir trust seeding failed", "path", projectPath, "err", err)
+		}
 	default:
 		if _, err := hooks.InjectClaudeHooks(hooks.GetClaudeConfigDir()); err != nil {
 			debuglog.Logger.Error("claude hook inject failed", "err", err)

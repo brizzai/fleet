@@ -33,14 +33,6 @@ const (
 	StatusExited  Status = "exited"  // the pane's process exited (pane_dead)
 )
 
-// idleCommands are the foreground commands that mean "at a prompt". Login
-// shells report a dash-prefixed name (e.g. "-zsh").
-var idleCommands = map[string]bool{
-	"zsh": true, "bash": true, "sh": true, "fish": true, "tcsh": true,
-	"-zsh": true, "-bash": true, "-sh": true, "-fish": true, "-tcsh": true,
-	"": true, // unknown (not in cache yet) reads as idle at rest
-}
-
 // Shell is a single drawer terminal.
 //
 // Name/RepoPath/Command/CreatedAt are immutable after creation (set once). The
@@ -249,11 +241,11 @@ func (s *Shell) RefreshStatus() Status {
 // IsShellCommand reports whether paneCmd is an interactive shell sitting at its
 // prompt — i.e. nothing is running in the pane's foreground.
 //
-// Unlike the idleCommands lookup it wraps, "" (not in the cache yet) is NOT a
-// shell: callers use this to decide whether typing into a pane is safe, and
-// "unknown" must not read as "definitely a shell prompt".
+// "" (not in the cache yet) is NOT a shell: callers use this to decide whether
+// typing into a pane is safe, and "unknown" must not read as "definitely a
+// shell prompt".
 func IsShellCommand(paneCmd string) bool {
-	return paneCmd != "" && idleCommands[paneCmd]
+	return tmux.IsShellCommand(paneCmd)
 }
 
 // DeriveStatus computes a shell's status from its tmux pane state. Pure.
@@ -261,7 +253,8 @@ func DeriveStatus(dead bool, paneCmd string) Status {
 	if dead {
 		return StatusExited
 	}
-	if idleCommands[paneCmd] {
+	// Unknown (not in the cache yet) reads as idle at rest.
+	if paneCmd == "" || tmux.IsShellCommand(paneCmd) {
 		return StatusIdle
 	}
 	return StatusRunning

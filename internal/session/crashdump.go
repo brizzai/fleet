@@ -62,8 +62,12 @@ func (s *Session) triggerCrashDump(reason string) {
 		cachedPane = tmuxSession.CachedPane()
 	}
 
-	go writeCrashDump(id, title, tmuxName, reason, cachedPane)
+	go crashDumpWriter(id, title, tmuxName, reason, cachedPane)
 }
+
+// crashDumpWriter is writeCrashDump; tests swap it out, since the real one
+// writes under HOME and captures a live tmux pane.
+var crashDumpWriter = writeCrashDump
 
 func writeCrashDump(sessionID, title, tmuxName, reason, cachedPane string) {
 	defer func() {

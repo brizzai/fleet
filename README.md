@@ -5,7 +5,7 @@
     <strong>Run 10 coding agents. Stay sane.</strong>
   </p>
   <p align="center">
-    A terminal cockpit for orchestrating Claude Code, Codex &amp; OpenCode sessions in parallel.
+    A terminal cockpit for orchestrating Claude Code, Codex, OpenCode &amp; Copilot sessions in parallel.
     <br />
     See which agents need you. Jump in, direct, jump out.
   </p>
@@ -84,7 +84,7 @@ sudo apt install ./fleet_*.deb
 
 - macOS or Linux
 - [tmux](https://github.com/tmux/tmux) — `brew install tmux` / `apt install tmux` (≥ 3.3 recommended on Linux; older versions work with terminal passthrough disabled)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex), or [OpenCode](https://opencode.ai) — at least one
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex), or [OpenCode](https://opencode.ai), or [GitHub Copilot CLI](https://github.com/github/copilot-cli) — at least one
 - Linux clipboard (optional): `wl-clipboard`, `xclip`, or `xsel` for copy-mode → system clipboard; without one, fleet falls back to OSC 52
 
 ## Quick Start
@@ -94,16 +94,16 @@ sudo apt install ./fleet_*.deb
 fleet
 
 # 'a' — new session in current repo (default agent)
-# 'A' — new session, pick the agent (Claude Code / Codex / OpenCode)
+# 'A' — new session, pick the agent (Claude Code / Codex / OpenCode / Copilot)
 # 'n' — new session at any path (autocomplete)
 # '?' — all keybindings
 ```
 
 ## Features
 
-### Claude Code, Codex, or OpenCode — per session
+### Claude Code, Codex, OpenCode, or Copilot — per session
 
-Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run Claude, Codex, and OpenCode sessions side by side in the same repo. Status, resume, and auto-naming work identically across all three — driven by each agent's own hook events, with pane heuristics filling the rare states that fire no hook.
+Pick the agent when you create a session: **`a`** fires instantly with your default agent, **`A`** opens a picker. Run Claude, Codex, OpenCode, and Copilot sessions side by side in the same repo. Status and resume work identically across all four — driven by each agent's own hook events, with pane heuristics filling the rare states that fire no hook.
 
 ### Real-Time Status
 
@@ -125,7 +125,7 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 ### Fork Sessions
 
-**`f`** forks a session — branches off the agent's conversation at that point. Try a different approach without losing the original. Both sessions keep running independently.
+**`f`** forks a session — branches off the agent's conversation at that point. Try a different approach without losing the original. Both sessions keep running independently. (Copilot has no fork, so `f` is off for Copilot sessions.)
 
 ### Terminal drawer
 
@@ -133,11 +133,11 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 ### Teach your agents to drive fleet
 
-**`fleet skill install`** writes an [Agent Skill](https://agentskills.io) that teaches Claude Code, Codex, Cursor, and OpenCode how to use fleet's CLI — so an agent can hand independent work to a fresh worktree session (`fleet wt fix-242 -p "…"`), message one that's already running (`fleet send`), and see what's in flight, instead of asking you to run the commands. Opt-in, never prompts, and `fleet skill uninstall` takes it back out.
+**`fleet skill install`** writes an [Agent Skill](https://agentskills.io) that teaches Claude Code, Codex, Cursor, OpenCode, and Copilot how to use fleet's CLI — so an agent can hand independent work to a fresh worktree session (`fleet wt fix-242 -p "…"`), message one that's already running (`fleet send`), and see what's in flight, instead of asking you to run the commands. Opt-in, never prompts, and `fleet skill uninstall` takes it back out.
 
 ### And more
 
-- **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume` / `opencode --session`)
+- **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume` / `opencode --session` / `copilot --session-id`)
 - **Idle-session suspend** — when memory runs low, fleet hibernates your most-idle sessions (each resumed agent holds ~400MB) and brings them back right where they were on **`Enter`**
 - **Full terminal attach** — **`Enter`** for full PTY, **`Tab`** for split mode (beta), **`Ctrl+Q`** to detach
 - **Auto-naming** — sessions title themselves from your prompt
@@ -149,7 +149,7 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 There are a dozen multi-agent session managers now. Most try to support every AI CLI under the sun by shimming keystrokes and scraping terminal output — broad support, shallow understanding of any one agent.
 
-fleet goes the other way: **deep integration with the agents that expose real hooks — Claude Code, Codex, and OpenCode.** Every feature is built on how those agents actually work — hook events, conversation resume, session IDs, prompt structure — not a generic "send keystrokes and hope" layer. Pick the agent per session (**`A`**), or set a default and fire with **`a`**.
+fleet goes the other way: **deep integration with the agents that expose real hooks — Claude Code, Codex, OpenCode, and GitHub Copilot CLI.** Every feature is built on how those agents actually work — hook events, conversation resume, session IDs, prompt structure — not a generic "send keystrokes and hope" layer. Pick the agent per session (**`A`**), or set a default and fire with **`a`**.
 
 ### vs. the alternatives
 
@@ -162,14 +162,14 @@ fleet goes the other way: **deep integration with the agents that expose real ho
 | **Open PR in browser**             | ✅ | — | — | — |
 | **Session resume**                  | ✅ | — | — | ✅ |
 | **Git worktrees**                   | ✅ | ✅ | ✅ | ✅ |
-| **Hook-based multi-agent**          | ✅ Claude + Codex + OpenCode | — | — | — |
+| **Hook-based multi-agent**          | ✅ Claude + Codex + OpenCode + Copilot | — | — | — |
 | **Many agents** (Gemini, Aider…)    | — | ✅ | ✅ | ✅ |
 | **Linux**                           | ✅ | ✅ | ✅ | ✅ |
 | **No tmux dependency**              | — | — | ✅ | — |
 
-**The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code, Codex, and OpenCode, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
+**The trade-off is intentional.** claude-squad and ccmanager support 5+ agents — but treat them all the same, scraping the terminal and hoping. fleet supports Claude Code, Codex, OpenCode, and Copilot, and *knows what they are*: it reads their hook events for instant status, resumes their conversations by session ID, knows your PR has 2 unresolved threads, names sessions from your actual prompt. That depth is only possible by going deep on the agents built to support it.
 
-If you drive Claude Code, Codex, or OpenCode and want the tightest integration, this is it.
+If you drive Claude Code, Codex, OpenCode, or Copilot and want the tightest integration, this is it.
 
 ## Keybindings
 
@@ -182,7 +182,7 @@ If you drive Claude Code, Codex, or OpenCode and want the tightest integration, 
 | `Space` | Jump to next waiting/finished session |
 | `P` | Jump to next PR with something to fix (red badge), else next one ready to merge (green) |
 | `a` | New session (current repo, default agent) |
-| `A` | New session (pick agent: Claude Code / Codex / OpenCode) |
+| `A` | New session (pick agent: Claude Code / Codex / OpenCode / Copilot) |
 | `n` | New session (any path, autocomplete) |
 | `w` | New worktree session |
 | `Y` | Quick approve waiting prompt |

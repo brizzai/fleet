@@ -98,16 +98,16 @@ func TestSkillCoversTheCLISurface(t *testing.T) {
 func TestInstallWritesOncePerSharedRoot(t *testing.T) {
 	isolate(t)
 
-	// codex, cursor and opencode all read ~/.agents/skills, so they resolve to
-	// one file rather than three racing writes to the same path.
-	results := Install(agentsNamed(t, "claude", "codex", "cursor", "opencode"))
+	// codex, cursor, opencode and copilot all read ~/.agents/skills, so they
+	// resolve to one file rather than four racing writes to the same path.
+	results := Install(agentsNamed(t, "claude", "codex", "cursor", "opencode", "copilot"))
 
 	claudePath := resultFor(results, "claude").Path
 	agentsPath := resultFor(results, "codex").Path
 	if claudePath == agentsPath {
 		t.Fatalf("claude and codex must not share a path, got %q", claudePath)
 	}
-	for _, name := range []string{"cursor", "opencode"} {
+	for _, name := range []string{"cursor", "opencode", "copilot"} {
 		if got := resultFor(results, name).Path; got != agentsPath {
 			t.Errorf("%s path = %q, want the shared %q", name, got, agentsPath)
 		}
@@ -154,8 +154,8 @@ func TestUnselectedAgentsAreSkippedNotWritten(t *testing.T) {
 	}
 }
 
-// Selection is by name, the operation is by path, and codex/cursor/opencode
-// share one path. An unselected agent whose file was written anyway must say so
+// Selection is by name, the operation is by path, and codex/cursor/opencode/
+// copilot share one path. An unselected agent whose file was written anyway must say so
 // — reporting it as skipped claims the skill isn't there while the agent is
 // already loading it.
 func TestSharedRootReportsInstalledNotSkipped(t *testing.T) {
@@ -166,7 +166,7 @@ func TestSharedRootReportsInstalledNotSkipped(t *testing.T) {
 	if got := resultFor(results, "codex"); got.Outcome != Written || got.SharedWith != "" {
 		t.Errorf("codex = %+v, want written with no SharedWith (it was selected)", got)
 	}
-	for _, name := range []string{"cursor", "opencode"} {
+	for _, name := range []string{"cursor", "opencode", "copilot"} {
 		got := resultFor(results, name)
 		if got.Outcome != Written {
 			t.Errorf("%s outcome = %q, want written — it shares codex's root", name, got.Outcome)
@@ -188,7 +188,7 @@ func TestSharedRootReportsRemovedNotSkipped(t *testing.T) {
 	Install(agentsNamed(t, "codex"))
 
 	results := Uninstall(agentsNamed(t, "codex"))
-	for _, name := range []string{"cursor", "opencode"} {
+	for _, name := range []string{"cursor", "opencode", "copilot"} {
 		got := resultFor(results, name)
 		if got.Outcome != Removed {
 			t.Errorf("%s outcome = %q, want removed — its file is gone", name, got.Outcome)
@@ -207,7 +207,7 @@ func TestSharedRootReportsRemovedNotSkipped(t *testing.T) {
 func TestSharedWithIsEmptyForSelectedAgents(t *testing.T) {
 	isolate(t)
 
-	for _, r := range Install(agentsNamed(t, "codex", "cursor", "opencode")) {
+	for _, r := range Install(agentsNamed(t, "codex", "cursor", "opencode", "copilot")) {
 		if r.Outcome == Skipped {
 			continue
 		}
@@ -265,7 +265,7 @@ func TestStatusHonoursSelectionWithoutSharing(t *testing.T) {
 	if got := resultFor(results, "codex").Outcome; got != Installed {
 		t.Errorf("codex status = %q, want installed", got)
 	}
-	for _, name := range []string{"claude", "cursor", "opencode"} {
+	for _, name := range []string{"claude", "cursor", "opencode", "copilot"} {
 		got := resultFor(results, name)
 		if got.Outcome != Skipped {
 			t.Errorf("%s status = %q, want skipped — it wasn't asked about", name, got.Outcome)

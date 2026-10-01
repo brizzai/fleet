@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/session"
 )
@@ -78,5 +79,47 @@ func TestSyncHookStatusesPropagatesAgentPID(t *testing.T) {
 	}
 	if snap.OwnerPID != agentPID {
 		t.Fatalf("syncHookStatuses dropped AgentPID: ownerPID = %d, want %d", snap.OwnerPID, agentPID)
+	}
+}
+
+// The Copilot half of the same trap: prompt_session_id is what lets a session
+// follow /new or /clear, and a watcher or sync that drops it leaves the session
+// on the old conversation while every unit test feeding UpdateHookStatus passes.
+func TestSyncHookStatusesPropagatesPromptSessionID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const instanceID = "inst-copilot"
+	if err := hooks.WriteStatusFile(hooks.GetHooksDir(), instanceID, &hooks.StatusFile{
+		Status:          "finished",
+		SessionID:       "new-conversation",
+		Event:           "Stop",
+		Timestamp:       time.Now().Unix(),
+		PromptSessionID: "new-conversation",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w, err := hooks.NewHookWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go w.Start()
+	t.Cleanup(w.Stop)
+	for range 200 {
+		if w.GetStatus(instanceID) != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	db, err := session.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	h := &Home{hookWatcher: w, storage: db}
+	s := &session.Session{ID: instanceID, Agent: agent.Copilot, ClaudeSessionID: "old-conversation", ProjectPath: t.TempDir()}
+	h.syncHookStatuses([]*session.Session{s}, false)
+
+	if got := s.GetClaudeSessionID(); got != "new-conversation" {
+		t.Fatalf("resume id = %q, want new-conversation (prompt_session_id lost on the way)", got)
 	}
 }

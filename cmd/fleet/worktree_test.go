@@ -120,7 +120,7 @@ func TestParseWorktreeArgs(t *testing.T) {
 	})
 
 	t.Run("known agents accepted", func(t *testing.T) {
-		for _, name := range []string{"claude", "codex", "opencode"} {
+		for _, name := range []string{"claude", "codex", "opencode", "copilot"} {
 			if _, err := parseWorktreeArgs([]string{"--agent", name, "fix-login"}); err != nil {
 				t.Errorf("agent %q: unexpected error %v", name, err)
 			}
