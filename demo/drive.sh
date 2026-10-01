@@ -52,7 +52,7 @@ tmux_() {
 }
 
 # Helper: the environment every fleet process in the sandbox must inherit.
-# The three *_CONFIG_DIR overrides are not redundant with HOME — those lookups
+# The four *_CONFIG_DIR/*_HOME overrides are not redundant with HOME — those lookups
 # check the env var first and fall back to HOME only if it is unset, so an
 # ambient one inherited from the caller's shell would punch straight through
 # the sandbox and let InjectClaudeHooks rewrite the real settings.json.
@@ -62,6 +62,7 @@ fleet_env() {
     echo "-e CLAUDE_CONFIG_DIR=$SANDBOX/.claude"
     echo "-e CODEX_HOME=$SANDBOX/.codex"
     echo "-e OPENCODE_CONFIG_DIR=$SANDBOX/.config/opencode"
+    echo "-e COPILOT_HOME=$SANDBOX/.copilot"
     echo "-e PATH=$SANDBOX/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     echo "-e FLEET_DEMO_PREFIX=$REPOS"
     echo "-e FLEET_AUTO_UPDATE_DISABLED=1"
@@ -167,11 +168,11 @@ ensure_sandbox() {
 JSONEOF
 
     # The hard guarantee behind "no real agents". BuildLaunchCmd emits the bare
-    # words claude/codex/opencode, resolved through the pane's PATH — so with
+    # words claude/codex/opencode/copilot, resolved through the pane's PATH — so with
     # these first, a stray `r` or a Ctrl+K "Reload All Sessions" from whoever is
     # driving launches `cat`, not a real agent burning real quota. Everything
     # else in this script is a promise not to press a key; this is a mechanism.
-    for a in claude codex opencode; do
+    for a in claude codex opencode copilot; do
         printf '#!/bin/sh\nexec cat\n' > "$SANDBOX/bin/$a"
         chmod +x "$SANDBOX/bin/$a"
     done
@@ -320,6 +321,17 @@ launch_tui() {
     # otherwise the pane vanishes and the only diagnosis is "it didn't work".
     tmux_ new-session -d -s "$DRIVE_SESSION" -x "$w" -y "$h" \
         -c "$ROOT_DIR" "${envargs[@]}" "$FLEET"
+    # Agent panes fleet creates inherit the SERVER's environment, not the -e
+    # values above, so an agent launched for real (e.g. a Copilot session)
+    # would otherwise read and write the user's own config dirs.
+    local kv
+    for kv in "${envargs[@]}"; do
+        case "$kv" in
+        HOME=* | CLAUDE_CONFIG_DIR=* | CODEX_HOME=* | OPENCODE_CONFIG_DIR=* | COPILOT_HOME=*)
+            tmux_ set-environment -g "${kv%%=*}" "${kv#*=}"
+            ;;
+        esac
+    done
     tmux_ set-option -t "$DRIVE_SESSION" remain-on-exit on >/dev/null 2>&1 || true
     tmux_ set-option -t "$DRIVE_SESSION" window-size manual >/dev/null 2>&1 || true
     # Per-session, not -g: the session carries its own explicit value that a

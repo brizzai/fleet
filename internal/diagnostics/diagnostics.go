@@ -14,22 +14,23 @@ import (
 
 // Report holds collected diagnostic information.
 type Report struct {
-	Version       string
-	GoVersion     string
-	OS            string
-	Arch          string
-	MacOSVersion  string
-	LinuxDistro   string // PRETTY_NAME from /etc/os-release (Linux only)
-	KernelVersion string // uname -r (Linux only)
-	TmuxVersion   string
-	ClaudeVersion string
-	CodexVersion  string
-	GhVersion     string
-	Config        string
-	SessionCount  int
-	RecentErrors  []string // pre-formatted from ErrorHistory
-	RecentActions []string // pre-formatted from ActionLog
-	RecentLogs    string   // last 100 lines of debug.log
+	Version        string
+	GoVersion      string
+	OS             string
+	Arch           string
+	MacOSVersion   string
+	LinuxDistro    string // PRETTY_NAME from /etc/os-release (Linux only)
+	KernelVersion  string // uname -r (Linux only)
+	TmuxVersion    string
+	ClaudeVersion  string
+	CodexVersion   string
+	CopilotVersion string
+	GhVersion      string
+	Config         string
+	SessionCount   int
+	RecentErrors   []string // pre-formatted from ErrorHistory
+	RecentActions  []string // pre-formatted from ActionLog
+	RecentLogs     string   // last 100 lines of debug.log
 
 	// Terminal environment (helps diagnose rendering/scrolling issues).
 	TerminalEnv TerminalEnv
@@ -71,6 +72,7 @@ func Collect(version string, sessionCount int) *Report {
 	r.TmuxVersion = runCmd("tmux", "-V")
 	r.ClaudeVersion = runCmd("claude", "--version")
 	r.CodexVersion = firstLine(runCmd("codex", "--version"))
+	r.CopilotVersion = firstLine(runCmd("copilot", "--version"))
 	r.GhVersion = firstLine(runCmd("gh", "--version"))
 
 	r.TerminalEnv = collectTerminalEnv()
@@ -245,6 +247,9 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 	}
 	if r.CodexVersion != "" {
 		fmt.Fprintf(&b, "- **Codex CLI**: %s\n", sanitize(r.CodexVersion))
+	}
+	if r.CopilotVersion != "" {
+		fmt.Fprintf(&b, "- **Copilot CLI**: %s\n", sanitize(r.CopilotVersion))
 	}
 	if r.GhVersion != "" {
 		fmt.Fprintf(&b, "- **gh CLI**: %s\n", sanitize(r.GhVersion))

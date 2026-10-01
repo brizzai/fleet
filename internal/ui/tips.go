@@ -133,7 +133,7 @@ var tipRegistry = []Tip{
 		Priority: 9, // between the palette (10) and drawer (8) tips
 		active:   func(h *Home) bool { return !h.agentSkillInstalled && len(h.sessions) >= 1 },
 		text: func(h *Home) string {
-			return "Tip: run `fleet skill install` in a terminal — it teaches Claude Code, Codex, and Cursor " +
+			return "Tip: run `fleet skill install` in a terminal — it teaches Claude Code, Codex, Copilot and Cursor " +
 				"to drive fleet themselves, so an agent can spin up a worktree session or message another one."
 		},
 	},
@@ -199,7 +199,9 @@ func findTip(id string) *Tip {
 // on purpose — as are Starting ones, which simply haven't fired SessionStart yet.
 // Drives the hooks-repaired tip, so it must stay cheap: in-memory reads only.
 //
-// Claude only, because that is all maybeRepairClaudeHooks repairs. Codex and
+// Claude only. maybeRepairClaudeHooks also repairs Copilot's hooks file, but a
+// Copilot fires no hook until its first prompt, so a hookless Copilot row is
+// normal and can't be counted here. Codex and
 // OpenCode bake the same binary path (InjectCodexHooks builds its entries through
 // the shared mergeHookEvent -> GetHookCommand, and InjectOpenCodePlugin embeds
 // FleetBinaryPath in the generated .ts), so one deleted binary silences all three

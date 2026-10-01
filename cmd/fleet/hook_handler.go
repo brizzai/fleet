@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -21,6 +22,87 @@ type hookPayload struct {
 	Prompt        string          `json:"prompt,omitempty"`
 	// Reason is set on SessionEnd: "clear", "logout", "prompt_input_exit", "other".
 	Reason string `json:"reason,omitempty"`
+
+	// Copilot CLI's camelCase payload. Its event name arrives in argv instead
+	// (see copilotHookArgs); notification is the one event that also carries it.
+	CopilotSessionID string `json:"sessionId,omitempty"`
+	NotificationType string `json:"notification_type,omitempty"`
+}
+
+// copilotHookArgs reads the `--agent copilot --event <name>` suffix fleet's
+// Copilot hooks file appends to the hook command. ok is false for any other
+// agent's invocation.
+func copilotHookArgs(args []string) (event string, ok bool) {
+	var ag string
+	for i := 0; i+1 < len(args); i++ {
+		switch args[i] {
+		case "--agent":
+			ag = args[i+1]
+		case "--event":
+			event = args[i+1]
+		}
+	}
+	return event, ag == "copilot" && event != ""
+}
+
+// normalizeCopilotEvent maps a Copilot hook onto the Claude event name the rest
+// of the handler keys on, and the status it means. Copilot's SessionEnd also
+// fires on /clear with the same reason as /exit, so it is never "dead" here:
+// the TUI reads a pane back at a shell as the exit.
+func normalizeCopilotEvent(event string, p *hookPayload) (claudeEvent, status string) {
+	p.SessionID = p.CopilotSessionID
+	// A reason marks a SessionEnd (it keeps a dead session's crash dump from
+	// re-arming), so no other event may carry one through.
+	reason := p.Reason
+	p.Reason = ""
+	switch event {
+	case "userPromptSubmitted":
+		return "UserPromptSubmit", "running"
+	case "postToolUse", "postToolUseFailure":
+		// Approving a permission fires no hook; the tool finishing is the first
+		// sign the session left the prompt.
+		return "PostToolUse", "running"
+	case "notification":
+		switch p.NotificationType {
+		case "permission_prompt", "elicitation_dialog":
+			return "Notification", "waiting"
+		}
+		return "Notification", ""
+	case "agentStop":
+		return "Stop", "finished"
+	case "sessionEnd":
+		p.Reason = sanitizeExitReason(reason)
+		return "SessionEnd", "finished"
+	}
+	return event, ""
+}
+
+// isCopilotSubagent reports whether a Copilot hook came from a subagent. A
+// subagent fires the same hooks as a conversation — userPromptSubmitted
+// included — under its own session id, but logs into its parent's events.jsonl
+// and gets no session-state/<id>/ of its own. A real conversation always has
+// one by the time its first hook runs (session.start precedes it).
+func isCopilotSubagent(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	_, err := os.Stat(hooks.CopilotSessionDir(sessionID))
+	return os.IsNotExist(err)
+}
+
+// sanitizeExitReason keeps a reason only when it is a short snake_case enum: it
+// reaches analytics as exit_reason, and must be non-empty, since an empty one
+// would no longer mark the hook as a SessionEnd.
+func sanitizeExitReason(r string) string {
+	if r == "" || len(r) > 32 {
+		return "other"
+	}
+	for _, c := range r {
+		if (c < 'a' || c > 'z') && c != '_' {
+			return "other"
+		}
+	}
+	return r
 }
 
 // mapEventToStatus maps a hook event to a fleet status string. Claude and Codex
@@ -81,6 +163,13 @@ func isCompactSessionStart(event, source string) bool {
 // Reads JSON from stdin, maps the event to a status, and writes a status file.
 // Always exits 0 to avoid blocking Claude Code.
 func handleHookHandler() {
+	copilotEvent, isCopilot := copilotHookArgs(os.Args[2:])
+	// Copilot runs hooks synchronously and for every Copilot session on the
+	// machine, fleet's or not. Leave before touching the log for the ones that
+	// aren't fleet's, or each of their tool calls would add a line to debug.log.
+	if isCopilot && os.Getenv("FLEET_INSTANCE_ID") == "" {
+		return
+	}
 	debuglog.Init()
 	defer debuglog.Close()
 	log := debuglog.Logger
@@ -120,10 +209,19 @@ func handleHookHandler() {
 		return
 	}
 
-	status := mapEventToStatus(payload.HookEventName)
+	var status string
+	if isCopilot {
+		payload.HookEventName, status = normalizeCopilotEvent(copilotEvent, &payload)
+		if isCopilotSubagent(payload.SessionID) {
+			log.Debug("hook-handler: copilot subagent hook dropped", "event", payload.HookEventName, "instance", instanceID)
+			return
+		}
+	} else {
+		status = mapEventToStatus(payload.HookEventName)
+	}
 
 	// Special handling for Notification events.
-	if payload.HookEventName == "Notification" && payload.Matcher != nil {
+	if !isCopilot && payload.HookEventName == "Notification" && payload.Matcher != nil {
 		var matcher string
 		if err := json.Unmarshal(payload.Matcher, &matcher); err == nil {
 			switch matcher {
@@ -140,13 +238,6 @@ func handleHookHandler() {
 		return
 	}
 
-	log.Info("hook-handler: writing status",
-		"instance", instanceID,
-		"event", payload.HookEventName,
-		"status", status,
-		"claudeSession", payload.SessionID,
-	)
-
 	// Extract user prompt and prompt count.
 	var userPrompt string
 	var promptCount int
@@ -157,7 +248,10 @@ func handleHookHandler() {
 	// Preserve user_prompt and prompt_count from previous status file.
 	hooksDir := hooks.GetHooksDir()
 	existingPath := filepath.Join(hooksDir, instanceID+".json")
+	var existingStatus, existingSessionID, promptSessionID string
 	if existing, err := hooks.ReadStatusFile(existingPath); err == nil {
+		existingStatus, existingSessionID = existing.Status, existing.SessionID
+		promptSessionID = existing.PromptSessionID
 		promptCount = existing.PromptCount
 		if userPrompt == "" && existing.UserPrompt != "" {
 			userPrompt = existing.UserPrompt
@@ -167,16 +261,31 @@ func handleHookHandler() {
 	// Increment prompt count on new user prompt submissions.
 	if payload.HookEventName == "UserPromptSubmit" {
 		promptCount++
+		promptSessionID = payload.SessionID
 	}
 
+	// Copilot fires PostToolUse for every tool call; it only matters as the
+	// waiting → running edge, so a repeat would just rewrite the file and log.
+	if payload.HookEventName == "PostToolUse" && existingStatus == status && existingSessionID == payload.SessionID {
+		return
+	}
+
+	log.Info("hook-handler: writing status",
+		"instance", instanceID,
+		"event", payload.HookEventName,
+		"status", status,
+		"claudeSession", payload.SessionID,
+	)
+
 	sf := &hooks.StatusFile{
-		Status:      status,
-		SessionID:   payload.SessionID,
-		Event:       payload.HookEventName,
-		Timestamp:   time.Now().Unix(),
-		UserPrompt:  userPrompt,
-		PromptCount: promptCount,
-		Reason:      payload.Reason,
+		Status:          status,
+		SessionID:       payload.SessionID,
+		Event:           payload.HookEventName,
+		Timestamp:       time.Now().Unix(),
+		UserPrompt:      userPrompt,
+		PromptCount:     promptCount,
+		Reason:          payload.Reason,
+		PromptSessionID: promptSessionID,
 		// The agent runs the hook command directly, so our parent IS the agent
 		// process whose conversation this status describes. Recording it lets the
 		// TUI later ask whether that conversation is still alive.
@@ -187,8 +296,11 @@ func handleHookHandler() {
 		log.Error("hook-handler: write failed", "err", err)
 	}
 
-	// Opportunistic cleanup of stale files.
-	cleanStaleHookFiles(hooksDir)
+	// Opportunistic cleanup of stale files — but not per tool call: Copilot
+	// blocks on its hooks, and PostToolUse fires for every one.
+	if payload.HookEventName != "PostToolUse" {
+		cleanStaleHookFiles(hooksDir)
+	}
 }
 
 // handleHooksCmd handles the "hooks" CLI subcommand for manual hook management.
@@ -213,6 +325,17 @@ func handleHooksCmd(args []string) {
 		} else {
 			fmt.Println("Claude Code hooks are already installed.")
 		}
+		if _, err := exec.LookPath("copilot"); err == nil {
+			copilotDir := hooks.GetCopilotConfigDir()
+			if installed, err := hooks.InjectCopilotHooks(copilotDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Error installing Copilot hooks: %v\n", err)
+				os.Exit(1)
+			} else if installed {
+				fmt.Printf("Copilot hooks installed: %s/hooks/fleet.json\n", copilotDir)
+			} else {
+				fmt.Println("Copilot hooks are already installed.")
+			}
+		}
 	case "uninstall":
 		removed, err := hooks.RemoveClaudeHooks(configDir)
 		if err != nil {
@@ -224,6 +347,12 @@ func handleHooksCmd(args []string) {
 		} else {
 			fmt.Println("No fleet hooks found to remove.")
 		}
+		if removed, err := hooks.RemoveCopilotHooks(hooks.GetCopilotConfigDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "Error removing Copilot hooks: %v\n", err)
+			os.Exit(1)
+		} else if removed {
+			fmt.Println("Copilot hooks removed successfully.")
+		}
 	case "status":
 		installed := hooks.AreHooksInstalled(configDir)
 		if installed {
@@ -232,6 +361,13 @@ func handleHooksCmd(args []string) {
 		} else {
 			fmt.Println("Status: NOT INSTALLED")
 			fmt.Println("Run 'fleet hooks install' to install.")
+		}
+		if _, err := exec.LookPath("copilot"); err == nil {
+			if hooks.CopilotHooksInstalled(hooks.GetCopilotConfigDir()) {
+				fmt.Println("Copilot: INSTALLED")
+			} else {
+				fmt.Println("Copilot: NOT INSTALLED (run 'fleet hooks install')")
+			}
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown hooks subcommand: %s\n", args[0])

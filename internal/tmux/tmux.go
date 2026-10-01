@@ -1155,6 +1155,20 @@ func RefreshSessionCache() {
 	sessionCacheMu.Unlock()
 }
 
+// shellCommands are the foreground commands that mean "at a shell prompt".
+// Login shells report with a leading dash.
+var shellCommands = map[string]bool{
+	"zsh": true, "bash": true, "sh": true, "fish": true, "tcsh": true,
+	"-zsh": true, "-bash": true, "-sh": true, "-fish": true, "-tcsh": true,
+}
+
+// IsShellCommand reports whether paneCmd is an interactive shell sitting at its
+// prompt — nothing running in the pane's foreground. "" (not in the cache yet)
+// is NOT a shell: unknown must not read as "definitely at a prompt".
+func IsShellCommand(paneCmd string) bool {
+	return shellCommands[paneCmd]
+}
+
 // PaneCurrentCommand returns the cached foreground command for a session's pane
 // (e.g. "zsh", "node", "vite"), or "" when unknown (not in the last refresh).
 // Cache-only — no shell-out; RefreshSessionCache populates it once per tick.

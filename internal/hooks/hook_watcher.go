@@ -29,6 +29,8 @@ type HookStatus struct {
 	// Reason is SessionEnd's own reason ("clear", "logout", "prompt_input_exit",
 	// "other"), empty on every other event. See StatusFile.Reason.
 	Reason string
+	// PromptSessionID: see StatusFile.PromptSessionID.
+	PromptSessionID string
 }
 
 // HookWatcher watches ~/.config/fleet/hooks/ for status file changes
@@ -210,14 +212,15 @@ func (w *HookWatcher) processFile(filePath string) {
 	instanceID := strings.TrimSuffix(base, ".json")
 
 	hookStatus := &HookStatus{
-		Status:      sf.Status,
-		SessionID:   sf.SessionID,
-		Event:       sf.Event,
-		UpdatedAt:   time.Unix(sf.Timestamp, 0),
-		UserPrompt:  sf.UserPrompt,
-		PromptCount: sf.PromptCount,
-		AgentPID:    sf.AgentPID,
-		Reason:      sf.Reason,
+		Status:          sf.Status,
+		SessionID:       sf.SessionID,
+		Event:           sf.Event,
+		UpdatedAt:       time.Unix(sf.Timestamp, 0),
+		UserPrompt:      sf.UserPrompt,
+		PromptCount:     sf.PromptCount,
+		AgentPID:        sf.AgentPID,
+		Reason:          sf.Reason,
+		PromptSessionID: sf.PromptSessionID,
 	}
 
 	w.mu.Lock()

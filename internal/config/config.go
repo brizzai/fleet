@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
 )
@@ -194,19 +195,15 @@ type Config struct {
 // (e.g. theme onboarding) on launches that skip the consent prompt.
 func (c *Config) IsFirstRun() bool { return !c.loadedFromDisk }
 
-// GetDefaultAgent returns the default coding agent for new sessions ("claude",
-// "codex", or "opencode"). The stored value is normalized (trimmed +
+// GetDefaultAgent returns the default coding agent for new sessions (one of
+// agent.All). The stored value is normalized (trimmed +
 // lower-cased) so hand-edited configs like "Codex" or " codex " resolve
 // correctly instead of silently falling back.
 func (c *Config) GetDefaultAgent() string {
-	switch strings.TrimSpace(strings.ToLower(c.DefaultAgent)) {
-	case "codex":
-		return "codex"
-	case "opencode":
-		return "opencode"
-	default:
-		return "claude"
+	if a := strings.TrimSpace(strings.ToLower(c.DefaultAgent)); agent.Known(a) {
+		return a
 	}
+	return string(agent.Default)
 }
 
 // GetAccountStrategy returns the normalized Claude-account assignment strategy.
