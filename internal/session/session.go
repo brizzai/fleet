@@ -22,6 +22,7 @@ import (
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/tmux"
+	"github.com/google/uuid"
 )
 
 // PaneCapturer abstracts the tmux session view used by status detection, for testing.
@@ -93,8 +94,8 @@ type Session struct {
 	// `--model opus`, `--effort xhigh`. Transient and one-shot on exactly the
 	// same terms as InitialPrompt, and cleared by the same call.
 	//
-	// Not persisted, and that is a decision rather than an omission: all three
-	// agents treat these as session-scoped (Claude's --effort is documented as
+	// Not persisted, and that is a decision rather than an omission: the agents
+	// treat these as session-scoped (Claude's --effort is documented as
 	// non-persistent; Codex's /model popup writes its own config), and every one
 	// of them lets the user change model mid-session. A value fleet stored would
 	// be re-imposed on the next restart, silently undoing that choice.
@@ -117,7 +118,13 @@ type Session struct {
 	hookOverriddenAt time.Time // timestamp of hook that was overridden by pane; prevents re-evaluation of same stale hook
 	ownerSessionID   string    // Claude session_id that owns this fleet session; hooks from other (nested) Claudes are ignored
 	ownerPID         int       // agent process behind ownerSessionID (0 = unknown: pre-AgentPID status file)
-	forkParentID     string    // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
+	retiredPID       int       // agent process a relaunch killed; its late hooks (a SessionEnd death rattle) are dropped
+	retiredAt        time.Time // when retiredPID was set; it is only honoured for retiredHookWindow
+	relaunching      int       // Restart/RespawnClaude calls in flight (they can overlap); UpdateStatus leaves the row alone
+	relaunchQuietTo  time.Time // until then, with no hook accepted since a relaunch, a Copilot SessionEnd is the killed process's (set for every agent, read for Copilot only)
+	suspendedPID     int       // agent a Suspend just killed; only the next Restart waits on it (see resumeWaitPID). Not retiredPID: RespawnClaude signals that one
+	suspendedAt      time.Time
+	forkParentID     string // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
 
 	// Negative cache for the rotation check, keyed by the FOREIGN session id that
 	// was rejected. A persistent foreign id (a nested agent) would otherwise rescan
@@ -181,7 +188,11 @@ type Session struct {
 	tmuxSession  *tmux.Session
 	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
 	convActiveFn func() bool  // optional override for testing; if nil, reads the real transcript
-	mu           sync.RWMutex
+	// Copilot test seams; nil reads tmux's pane-command cache / the real events.jsonl.
+	paneCmdFn        func() string
+	copilotAbortedFn func() bool
+	ownerAliveFn     func() bool
+	mu               sync.RWMutex
 }
 
 // rotReject is one rejected foreign session id: which owner it was rejected
@@ -213,7 +224,7 @@ func NewSession(title, projectPath string) *Session {
 
 // buildAgentCmd returns the launch command for this session's agent, with
 // optional resume/fork details. ClaudeSessionID stores the agent's own
-// conversation id (Claude or Codex) captured from hooks.
+// conversation id, captured from hooks (or minted by fleet, for Copilot).
 func (s *Session) buildAgentCmd() string {
 	return agent.Parse(string(s.Agent)).BuildLaunchCmd(agent.LaunchOpts{
 		ResumeID: s.ClaudeSessionID,
@@ -225,10 +236,10 @@ func (s *Session) buildAgentCmd() string {
 }
 
 // initialRunStatus is the status to show right after launching the agent.
-// Codex and OpenCode fire no event until their first turn, so they start idle
+// Codex, OpenCode and Copilot fire no event until their first turn, so they start idle
 // (sitting at their prompt) rather than flashing running.
 func (s *Session) initialRunStatus() Status {
-	if s.Agent == agent.Codex || s.Agent == agent.OpenCode {
+	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Copilot {
 		return StatusIdle
 	}
 	return StatusRunning
@@ -283,8 +294,8 @@ func (s *Session) sessionEnv() []string {
 		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
 	}
-	// Per-account auth. Claude only: this points at a claude.ai login that
-	// Codex and OpenCode neither read nor need.
+	// Per-account auth. Claude only: this points at a claude.ai login the
+	// other agents neither read nor need.
 	//
 	// CLAUDE_CONFIG_DIR gives the session a complete Claude Code home of its
 	// own, whose Keychain item holds that account's login. Nothing is layered
@@ -376,7 +387,7 @@ func (s *Session) Start() error {
 	debuglog.Logger.Info("session start", "id", s.ID, "title", s.Title, "path", s.ProjectPath)
 	s.mu.Lock()
 	s.Status = StatusStarting
-	s.launchResumed = s.ClaudeSessionID != "" || s.ForkFromID != ""
+	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
 	cmd := s.buildAgentCmd()
@@ -402,6 +413,18 @@ func (s *Session) Start() error {
 	s.mu.Unlock()
 	debuglog.Logger.Info("session started", "id", s.ID, "title", s.Title)
 	return nil
+}
+
+// launchWillResumeLocked mints a Copilot session's conversation id on its first
+// launch and reports whether this launch continues an existing conversation.
+// A freshly minted id is not a resume, though it reaches argv the same way.
+// Caller holds mu.
+func (s *Session) launchWillResumeLocked() bool {
+	if agent.Parse(string(s.Agent)).PreMintsSessionID() && s.ClaudeSessionID == "" {
+		s.ClaudeSessionID = uuid.NewString()
+		return false
+	}
+	return s.ClaudeSessionID != "" || s.ForkFromID != ""
 }
 
 // consumeLaunchOverridesLocked clears the one-shot launch overrides — the
@@ -571,7 +594,7 @@ func (s *Session) conversationActivePastHook() bool {
 	cacheTS := s.convLeadTimestamp
 	s.mu.RUnlock()
 
-	if agentType == agent.Codex || claudeID == "" {
+	if agent.Parse(string(agentType)) != agent.Claude || claudeID == "" {
 		return false
 	}
 
@@ -692,6 +715,9 @@ type HookStatus struct {
 	// "other"), empty on every other event. It is what separates a conversation
 	// rotation from a death in session_errored; nothing here acts on it.
 	Reason string
+	// PromptSessionID is the conversation the user last typed into (see
+	// hooks.StatusFile.PromptSessionID); Copilot ownership follows it.
+	PromptSessionID string
 }
 
 // UpdateHookStatus updates the session's hook-based status.
@@ -713,6 +739,33 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	// stale dead hook that resurfaces the moment we resume. Resume goes through
 	// Restart() (→ StatusStarting), so genuine post-resume hooks are accepted again.
 	if s.GetStatus() == StatusSuspended {
+		return false
+	}
+
+	// A relaunch kills the old agent, which can still fire a SessionEnd after the
+	// hook state was cleared. It carries the same conversation id as the new
+	// process, so only its pid tells it apart.
+	// Time-bound: the rattle lands within ~2s of the kill, and an unbounded
+	// pid would silence every hook from a later agent the OS hands that pid to.
+	s.mu.RLock()
+	retired := s.retiredPID
+	recent := time.Since(s.retiredAt) < retiredHookWindow
+	s.mu.RUnlock()
+	if hs.AgentPID > 0 && hs.AgentPID == retired && recent {
+		return false
+	}
+
+	if s.Agent == agent.Copilot && !s.copilotHookAccepted(hs) {
+		return false
+	}
+
+	// A Copilot that never fired a hook has no pid to retire, yet still sends a
+	// SessionEnd (it carries a reason) when the relaunch kills it. Copilot fires
+	// nothing at startup, so a SessionEnd before any other hook is that one.
+	s.mu.RLock()
+	quiet := time.Now().Before(s.relaunchQuietTo)
+	s.mu.RUnlock()
+	if s.Agent == agent.Copilot && quiet && hs.Reason != "" {
 		return false
 	}
 
@@ -742,7 +795,8 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		negCached := owner != "" && s.rotRejects[hs.SessionID] != nil && s.rotRejects[hs.SessionID].owner == owner
 		frozenHook, frozenHookAt := s.hookStatus, s.hookUpdatedAt
 		s.mu.RUnlock()
-		if owner != "" && hs.SessionID != owner {
+		// Copilot's ownership was settled by copilotHookAccepted above.
+		if owner != "" && hs.SessionID != owner && s.Agent != agent.Copilot {
 			switch {
 			case forkParent != "" && owner == forkParent:
 				// This session was forked (`claude --resume <parent> --fork-session`).
@@ -864,6 +918,7 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 			return false
 		}
 		s.ownerSessionID = hs.SessionID
+		s.relaunchQuietTo = time.Time{}
 		// Track the process behind the owning conversation. Every hook re-stamps it,
 		// so a resume that reuses the same session id under a new process is followed
 		// too. 0 (a status file older than the field) is recorded as-is: "unknown"
@@ -892,8 +947,10 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		// A non-dead hook means Claude is alive again. Re-arm the crash-dump
 		// trigger so the NEXT real death gets a dump even if a prior false
 		// transition (e.g. brief stale-hook flash before this fresh hook
-		// landed) already consumed the once-per-life dump quota.
-		if hs.Status != "" && hs.Status != "dead" {
+		// landed) already consumed the once-per-life dump quota. A SessionEnd
+		// (it carries a reason) is never life: Copilot reports its own as
+		// "finished", since it sends the same one for /clear.
+		if hs.Status != "" && hs.Status != "dead" && hs.Reason == "" {
 			s.deathRecorded = false
 		}
 	}
@@ -1004,10 +1061,15 @@ func (s *Session) negCacheRotation(owner, foreign string, foreignPID int) {
 // Restart kills and recreates the tmux session with the same config.
 func (s *Session) Restart() error {
 	debuglog.Logger.Info("session restart", "id", s.ID, "title", s.Title)
+	s.beginRelaunch()
+	defer s.endRelaunch()
 	// Resolve the id to resume BEFORE clearHookState() wipes the rejection state it
 	// is derived from. Otherwise a session frozen on a dead conversation restarts
 	// straight back into it (issue #226).
 	s.adoptResolvedLaunchID("restart")
+	oldAgentPID := s.resumeWaitPID()
+	// Before the kill: the killed agent's SessionEnd can land the moment it dies.
+	s.markRelaunchQuiet()
 	// Kill old tmux session if it still exists.
 	if s.tmuxSession.Exists() {
 		_ = s.tmuxSession.Kill()
@@ -1018,6 +1080,7 @@ func (s *Session) Restart() error {
 	// hook event, which flips the freshly-restarted session straight back to
 	// error and triggers a misleading crash dump.
 	s.clearHookState()
+	s.awaitRetiredCopilot(oldAgentPID, false)
 
 	// Recreate tmux session with same config. Mutate s.tmuxSession under
 	// s.mu so concurrent triggerCrashDump readers see a consistent pointer.
@@ -1027,12 +1090,13 @@ func (s *Session) Restart() error {
 	s.TmuxSessionName = newTmux.Name
 	s.Status = StatusStarting
 	s.deathRecorded = false
-	s.launchResumed = s.ClaudeSessionID != "" || s.ForkFromID != ""
+	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
 	cmd := s.buildAgentCmd()
 	if err := newTmux.Start(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
+		s.relaunchQuietTo = time.Time{}
 		s.Status = StatusError
 		s.mu.Unlock()
 		s.reportErrored("restart_failed", nil)
@@ -1046,6 +1110,32 @@ func (s *Session) Restart() error {
 	s.mu.Unlock()
 	debuglog.Logger.Info("session restarted", "id", s.ID, "title", s.Title)
 	return nil
+}
+
+// beginRelaunch marks the session starting and keeps UpdateStatus off it until
+// endRelaunch. Between the kill and the new launch the old tmux is gone (or the
+// pane is at a shell) — for up to retiredExitTimeout while a Copilot exits — and
+// the liveness gates would read that as a crash, with a crash dump to match.
+func (s *Session) beginRelaunch() {
+	s.mu.Lock()
+	s.relaunching++
+	s.Status = StatusStarting
+	s.mu.Unlock()
+}
+
+func (s *Session) markRelaunchQuiet() {
+	s.mu.Lock()
+	// Bounded: the killed process's SessionEnd lands within ~2s (44ms idle,
+	// ~1.8s busy, measured), while a real /exit before the first prompt must
+	// still read as an exit.
+	s.relaunchQuietTo = time.Now().Add(retiredExitTimeout)
+	s.mu.Unlock()
+}
+
+func (s *Session) endRelaunch() {
+	s.mu.Lock()
+	s.relaunching--
+	s.mu.Unlock()
 }
 
 // adoptResolvedLaunchID promotes a healed conversation id onto ClaudeSessionID so
@@ -1067,18 +1157,27 @@ func (s *Session) adoptResolvedLaunchID(why string) {
 func (s *Session) RespawnClaude() error {
 	resuming := s.ClaudeSessionID != ""
 	debuglog.Logger.Info("session respawn", "id", s.ID, "title", s.Title, "resuming", resuming)
+	s.beginRelaunch()
+	defer s.endRelaunch()
 	// Same ordering constraint as Restart: resolve before the state is cleared.
 	s.adoptResolvedLaunchID("respawn")
+	oldAgentPID := s.ownerAgentPID()
 	s.clearHookState()
+	s.markRelaunchQuiet()
+	// respawn-pane kills and relaunches in one step, leaving no gap to wait in,
+	// so a Copilot is stopped first.
+	s.awaitRetiredCopilot(oldAgentPID, true)
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
-	s.launchResumed = s.ClaudeSessionID != "" || s.ForkFromID != ""
+	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
 	cmd := s.buildAgentCmd()
 	if err := s.tmuxSession.RespawnPane(cmd, s.sessionEnv()...); err != nil {
 		s.mu.Lock()
+		s.retiredPID = 0 // nothing replaced the old agent; its hooks are live
+		s.relaunchQuietTo = time.Time{}
 		s.Status = StatusError
 		s.mu.Unlock()
 		s.reportErrored("respawn_failed", nil)
@@ -1112,9 +1211,16 @@ func (s *Session) Suspend() error {
 	// fails (the session is still alive, so it must not read as suspended).
 	oldStatus := s.GetStatus()
 	s.SetStatus(StatusSuspended)
+	s.mu.Lock()
+	s.suspendedPID, s.suspendedAt = s.ownerPID, time.Now()
+	s.mu.Unlock()
 	s.clearHookState()
 	if s.tmuxSession.Exists() {
 		if err := s.tmuxSession.Kill(); err != nil {
+			// The agent lives on: its hooks must not be dropped as a death rattle.
+			s.mu.Lock()
+			s.retiredPID = 0
+			s.mu.Unlock()
 			s.SetStatus(oldStatus)
 			debuglog.Logger.Error("session suspend: kill failed", "id", s.ID, "title", s.Title, "err", err)
 			return err
@@ -1203,6 +1309,9 @@ func (s *Session) clearHookState() {
 	s.hookUpdatedAt = time.Time{}
 	s.hookOverriddenAt = time.Time{}
 	s.ownerSessionID = ""
+	if s.ownerPID > 0 {
+		s.retiredPID, s.retiredAt = s.ownerPID, time.Now()
+	}
 	s.ownerPID = 0
 	// Drop the rejections along with the owner they were judged against — and with
 	// them both clocks, so a restart re-arms the "hook dropped" line instead of
@@ -1232,6 +1341,12 @@ func (s *Session) UpdateStatus() {
 	// error and write a spurious crash dump every cycle. Leave it untouched until a
 	// resume (Restart) moves it to StatusStarting.
 	if oldStatus == StatusSuspended {
+		return
+	}
+	s.mu.RLock()
+	relaunching := s.relaunching > 0
+	s.mu.RUnlock()
+	if relaunching {
 		return
 	}
 
@@ -1306,42 +1421,13 @@ func (s *Session) UpdateStatus() {
 		return
 	}
 
+	if s.Agent == agent.Copilot {
+		s.updateCopilotStatus(oldStatus, hasHook, hookStatus, hookReason, log)
+		return
+	}
+
 	if s.Agent == agent.Codex {
-		paneWaiting, paneRunning := false, false
-		captured := false
-		if content, err := s.getCapturer().CapturePane(); err == nil {
-			clean := StripANSI(content)
-			paneWaiting = codexPaneWaiting(clean)
-			paneRunning = codexPaneRunning(clean)
-			captured = true
-		} else {
-			log.Warn("codex pane capture failed", "err", err)
-		}
-		// A transient capture failure must not downgrade an active session: with
-		// no pane signal and no hook to fall back on, preserve the current status.
-		if !captured && !hasHook {
-			return
-		}
-		switch {
-		case paneWaiting:
-			if oldStatus != StatusWaiting {
-				s.SetStatus(StatusWaiting)
-				log.Info("status changed (codex pane)", "old", oldStatus, "new", StatusWaiting)
-			}
-		case paneRunning:
-			if oldStatus != StatusRunning {
-				s.SetStatus(StatusRunning)
-				log.Info("status changed (codex pane)", "old", oldStatus, "new", StatusRunning)
-			}
-		case hasHook:
-			// Pane at rest — it can't tell running from finished from idle at the
-			// prompt, so the hook decides.
-			s.applyHookStatus(oldStatus, hookStatus, hookReason, log)
-		case oldStatus != StatusIdle:
-			// At its prompt with no active turn and no hook — settle to idle.
-			s.SetStatus(StatusIdle)
-			log.Info("status changed (codex no-hook)", "old", oldStatus, "new", StatusIdle)
-		}
+		s.updatePaneLedStatus("codex", oldStatus, hasHook, hookStatus, hookReason, codexPaneWaiting, codexPaneRunning, nil, log)
 		return
 	}
 
@@ -1356,8 +1442,9 @@ func (s *Session) UpdateStatus() {
 // applyHookStatus maps an authoritative hook/plugin status string
 // (running/waiting/finished/dead) onto the session, honoring the acknowledged
 // flag (finished→idle once acknowledged) and triggering a crash dump on dead.
-// Used by Codex (when its pane is at rest, the hook decides) and OpenCode (which
-// is purely plugin-driven with no pane fallback).
+// Used by Codex and Copilot (when the pane is at rest, the hook decides; Copilot
+// also for "dead" once its pane is back at a shell) and OpenCode (which is
+// purely plugin-driven with no pane fallback).
 func (s *Session) applyHookStatus(oldStatus Status, hookStatus, hookReason string, log *slog.Logger) {
 	hookSaysDead := false
 	errReason := ""
@@ -2007,7 +2094,7 @@ type StatusSnapshot struct {
 	LastContentHash     string
 	LastContentChangeAt time.Time
 
-	DetectedPaneStatus Status // what detectStatus returns on the raw pane right now
+	DetectedPaneStatus Status // what the pane alone says right now (detectPaneStatusFor)
 }
 
 // SnapshotData captures a point-in-time copy of all internal status fields.
@@ -2033,8 +2120,24 @@ func (s *Session) SnapshotData(rawPane string) StatusSnapshot {
 	}
 	s.mu.RUnlock()
 
-	snap.DetectedPaneStatus = detectStatus(StripANSI(rawPane), debuglog.Logger)
+	snap.DetectedPaneStatus = detectPaneStatusFor(s.Agent, StripANSI(rawPane))
 	return snap
+}
+
+// detectPaneStatusFor is what the pane alone says, for the wrong-status report:
+// Copilot's own footers for Copilot ("" when its pane is at rest), Claude's
+// detector otherwise.
+func detectPaneStatusFor(a agent.Type, clean string) Status {
+	if a == agent.Copilot {
+		switch {
+		case copilotPaneWaiting(clean):
+			return StatusWaiting
+		case copilotPaneRunning(clean):
+			return StatusRunning
+		}
+		return ""
+	}
+	return detectStatus(clean, debuglog.Logger)
 }
 
 // FromRow reconstructs a Session from a storage row, reconnecting to tmux.
@@ -2111,17 +2214,53 @@ var codexWaitPatterns = []string{
 
 // codexPaneWaiting reports whether Codex's pane shows a prompt awaiting the user.
 func codexPaneWaiting(content string) bool {
-	if content == "" {
-		return false
+	return recentContains(content, codexWaitPatterns)
+}
+
+// updatePaneLedStatus is the status rule for agents whose hooks are incomplete
+// (Codex, Copilot): a definite pane state — a wait prompt, or a working footer —
+// overrides a possibly stale hook; only an at-rest pane lets the hook decide
+// running/finished/idle, and with no hook at all it settles to idle.
+// adjustHook, when set, may rewrite the hook status before it is applied.
+func (s *Session) updatePaneLedStatus(name string, oldStatus Status, hasHook bool, hookStatus, hookReason string,
+	waiting, running func(string) bool, adjustHook func(string) string, log *slog.Logger) {
+	paneWaiting, paneRunning, captured := false, false, false
+	if content, err := s.getCapturer().CapturePane(); err == nil {
+		clean := StripANSI(content)
+		paneWaiting = waiting(clean)
+		paneRunning = running(clean)
+		captured = true
+	} else {
+		log.Warn(name+" pane capture failed", "err", err)
 	}
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	recent := strings.Join(extractRecentLines(lines, 15), "\n")
-	for _, p := range codexWaitPatterns {
-		if strings.Contains(recent, p) {
-			return true
+	// A transient capture failure must not downgrade an active session: with
+	// no pane signal and no hook to fall back on, preserve the current status.
+	if !captured && !hasHook {
+		return
+	}
+	switch {
+	case paneWaiting:
+		if oldStatus != StatusWaiting {
+			s.SetStatus(StatusWaiting)
+			log.Info("status changed ("+name+" pane)", "old", oldStatus, "new", StatusWaiting)
 		}
+	case paneRunning:
+		if oldStatus != StatusRunning {
+			s.SetStatus(StatusRunning)
+			log.Info("status changed ("+name+" pane)", "old", oldStatus, "new", StatusRunning)
+		}
+	case hasHook:
+		// Pane at rest — it can't tell running from finished from idle at the
+		// prompt, so the hook decides.
+		if adjustHook != nil {
+			hookStatus = adjustHook(hookStatus)
+		}
+		s.applyHookStatus(oldStatus, hookStatus, hookReason, log)
+	case oldStatus != StatusIdle:
+		// At its prompt with no active turn and no hook — settle to idle.
+		s.SetStatus(StatusIdle)
+		log.Info("status changed ("+name+" no-hook)", "old", oldStatus, "new", StatusIdle)
 	}
-	return false
 }
 
 // codexRunPatterns mark a Codex turn in progress. Codex shows this footer only
@@ -2139,15 +2278,24 @@ var codexRunPatterns = []string{
 // interrupt while answering), so a waiting pane takes precedence — running means
 // an active turn that is NOT blocked on the user.
 func codexPaneRunning(content string) bool {
+	return !codexPaneWaiting(content) && recentContains(content, codexRunPatterns)
+}
+
+// recentContains reports whether any pattern appears in the pane's last 15
+// lines, so the same words in scrollback can't match.
+func recentContains(content string, patterns []string) bool {
+	return bottomContains(content, patterns, 15)
+}
+
+// bottomContains reports whether any pattern appears in the pane's last n
+// non-blank lines.
+func bottomContains(content string, patterns []string, n int) bool {
 	if content == "" {
 		return false
 	}
-	if codexPaneWaiting(content) {
-		return false
-	}
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	recent := strings.Join(extractRecentLines(lines, 15), "\n")
-	for _, p := range codexRunPatterns {
+	recent := strings.Join(extractRecentLines(lines, n), "\n")
+	for _, p := range patterns {
 		if strings.Contains(recent, p) {
 			return true
 		}
@@ -2818,6 +2966,8 @@ func PaneIndicatesWaiting(a agent.Type, rawPane string) bool {
 	switch a {
 	case agent.Codex:
 		return codexPaneWaiting(clean)
+	case agent.Copilot:
+		return copilotPaneWaiting(clean)
 	case agent.OpenCode:
 		return false
 	default:

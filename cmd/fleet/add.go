@@ -46,7 +46,7 @@ func addFlagSet(o *addOpts) *flag.FlagSet {
 	fs := flag.NewFlagSet("fleet add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
-	fs.StringVar(&o.agentName, "agent", "", "agent to run: claude, codex, or opencode (default: default_agent config)")
+	fs.StringVar(&o.agentName, "agent", "", "agent to run: "+agent.NameList()+" (default: default_agent config)")
 	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config)")
 	fs.StringVar(&o.prompt, "prompt", "", "first message for the agent, which it starts working on (use - to read stdin)")
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
@@ -125,10 +125,8 @@ func parseAddArgs(args []string) (addOpts, error) {
 	// agent.Parse falls back to Claude for anything it doesn't recognize, so a
 	// typo would silently launch the wrong agent. Reject it here instead.
 	if o.agentName != "" {
-		switch agent.Type(o.agentName) {
-		case agent.Claude, agent.Codex, agent.OpenCode:
-		default:
-			return o, fmt.Errorf("unknown agent %q — expected claude, codex, or opencode", o.agentName)
+		if !agent.Known(o.agentName) {
+			return o, fmt.Errorf("unknown agent %q — expected %s", o.agentName, agent.NameList())
 		}
 	}
 	// The account token is a claude.ai credential; the other agents never read

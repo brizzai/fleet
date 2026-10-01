@@ -1,0 +1,15 @@
+ ● Asking which color to use.
+
+ ○ Asking user Waiting for response
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Copilot needs information.                                                                                           │
+│                                                                                                                      │
+│ Which color should the button be?                                                                                    │
+│                                                                                                                      │
+│ ❯ red                                                                                                                │
+│   blue                                                                                                               │
+│   Other (type your answer)                                                                                           │
+│                                                                                                                      │
+│ ↑/↓ select · enter accept · ctrl+d decline · esc cancel                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

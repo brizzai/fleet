@@ -1,5 +1,5 @@
 // Package agent describes the coding agents fleet can launch in a session
-// (Claude Code, OpenAI Codex, and OpenCode) and owns the per-agent divergence:
+// (Claude Code, OpenAI Codex, OpenCode, and GitHub Copilot CLI) and owns the per-agent divergence:
 // the binary name, display name, and the launch command (including resume/fork
 // forms).
 package agent
@@ -7,6 +7,8 @@ package agent
 import (
 	"fmt"
 	"regexp"
+	"slices"
+	"strings"
 )
 
 // Type identifies which coding agent a session runs.
@@ -16,24 +18,41 @@ const (
 	Claude   Type = "claude"
 	Codex    Type = "codex"
 	OpenCode Type = "opencode"
+	Copilot  Type = "copilot"
 
 	// Default is the agent assumed when none is recorded (legacy sessions, empty config).
 	Default = Claude
 )
 
+// All is every agent fleet can launch, in the order pickers offer them.
+var All = []Type{Claude, Codex, OpenCode, Copilot}
+
+// Known reports whether s names an agent exactly. Parse falls back to Claude,
+// so a caller taking a user-typed name checks this first.
+func Known(s string) bool { return slices.Contains(All, Type(s)) }
+
+// Names is All as the strings config and flags use.
+func Names() []string {
+	names := make([]string, len(All))
+	for i, a := range All {
+		names[i] = string(a)
+	}
+	return names
+}
+
+// NameList is "claude, codex, opencode, or copilot", for help and errors.
+func NameList() string {
+	names := Names()
+	return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
+}
+
 // Parse normalizes a stored/config string into a Type, falling back to Default
 // for empty or unrecognized values.
 func Parse(s string) Type {
-	switch Type(s) {
-	case Claude:
-		return Claude
-	case Codex:
-		return Codex
-	case OpenCode:
-		return OpenCode
-	default:
-		return Default
+	if Known(s) {
+		return Type(s)
 	}
+	return Default
 }
 
 // Binary returns the executable name to look up on PATH and launch.
@@ -43,6 +62,8 @@ func (t Type) Binary() string {
 		return "codex"
 	case OpenCode:
 		return "opencode"
+	case Copilot:
+		return "copilot"
 	default:
 		return "claude"
 	}
@@ -55,6 +76,8 @@ func (t Type) DisplayName() string {
 		return "Codex"
 	case OpenCode:
 		return "OpenCode"
+	case Copilot:
+		return "Copilot"
 	default:
 		return "Claude"
 	}
@@ -94,9 +117,14 @@ const promptRef = `"$` + PromptEnvVar + `"`
 // positional (verified against Claude 2.1 / Codex 0.5x). OpenCode's positional
 // is a project path, so its prompt rides --prompt and needs the `=` form: with
 // a space, yargs reads the next word as a fresh option instead of the value.
+// Copilot takes its interactive first prompt through --interactive, with the
+// same `=` requirement (`-i "--fix"` exits with "Invalid command format").
 func (t Type) promptArg() string {
-	if t == OpenCode {
+	switch t {
+	case OpenCode:
 		return "--prompt=" + promptRef
+	case Copilot:
+		return "--interactive=" + promptRef
 	}
 	return "-- " + promptRef
 }
@@ -161,19 +189,53 @@ func ValidateLaunchValue(flag, v string) error {
 // `--model` is unaffected: the default command's handler reads args.model.
 func (t Type) SupportsEffort() bool { return t != OpenCode }
 
+// SupportsFork reports whether this agent can start a new conversation forked
+// from an existing one. Copilot has no fork flag: launching it with the
+// parent's id would resume — and take over — the parent's conversation.
+func (t Type) SupportsFork() bool { return t != Copilot }
+
+// PreMintsSessionID reports whether fleet chooses this agent's conversation id
+// itself rather than capturing it from a hook. Copilot's `--session-id <uuid>`
+// creates a session with that id when none exists and resumes it when one
+// does, so one command covers the first launch and every relaunch, and `r`
+// works before the agent has fired a single hook.
+func (t Type) PreMintsSessionID() bool { return t == Copilot }
+
 // effortArg is the reasoning-effort flag as each agent spells it, and the two
-// spellings are why this lives here rather than in the callers: Claude has
-// --effort, and Codex has no flag at all — only a `-c key=value` override of
+// spellings are why this lives here rather than in the callers: Claude and
+// Copilot have --effort, and Codex has no flag at all — only a `-c key=value` override of
 // the config.toml key its own /model popup writes.
 //
 // Codex's value needs no quoting: `-c` parses the value as TOML and falls back
 // to the raw string when that fails, so a bare `high` arrives intact and the
 // shell has nothing to chew on.
 func (t Type) effortArg(effort string) string {
-	if t == Codex {
+	switch t {
+	case Codex:
 		return " -c model_reasoning_effort=" + effort
+	case Copilot:
+		return " --reasoning-effort " + effort // documented; --effort is an alias
 	}
 	return " --effort " + effort
+}
+
+// copilotEfforts are the only values Copilot's --reasoning-effort accepts; it
+// exits on anything else (1.0.91), leaving a session at a bare shell.
+var copilotEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// ValidEffort reports whether the agent will start with this effort value.
+// Claude only warns on an unknown one; Copilot refuses to start.
+func (t Type) ValidEffort(effort string) bool {
+	return t != Copilot || slices.Contains(copilotEfforts, effort)
+}
+
+// EffortChoices names the accepted values for an error message ("" when the
+// agent takes any).
+func (t Type) EffortChoices() string {
+	if t == Copilot {
+		return strings.Join(copilotEfforts, ", ")
+	}
+	return ""
 }
 
 // BuildLaunchCmd returns the shell command to run in the session's tmux pane.
@@ -197,16 +259,25 @@ func (t Type) effortArg(effort string) string {
 //	opencode --session <id>
 //	opencode --session <id> --fork         (fork)
 //
+// Copilot (folder trust + hooks are seeded out-of-band; the id is minted by
+// fleet, so the same form both creates and resumes — see PreMintsSessionID):
+//
+//	copilot --session-id=<id>
+//
+// Copilot cannot fork (SupportsFork); a fork id is dropped rather than turned
+// into a resume of the parent.
+//
 // Model and Effort append their per-agent flags to any of those, ahead of the
 // prompt — the prompt argument must stay last, since `--` ends option parsing
-// and anything after it is no longer read as a flag. All three agents spell the
+// and anything after it is no longer read as a flag. Every agent spells the
 // model flag `--model`; effort is two spellings and one agent that has none at
 // all (see effortArg and SupportsEffort).
 //
 // An initial prompt appends the agent's own prompt argument to any of those —
-// `-- <prompt>` for Claude and Codex, `--prompt=<prompt>` for OpenCode (see
-// promptArg for why the separator matters). All three accept it alongside
-// resume/fork, so a resumed conversation can be handed a message too.
+// `-- <prompt>` for Claude and Codex, `--prompt=<prompt>` for OpenCode,
+// `--interactive=<prompt>` for Copilot (see promptArg for why the separator
+// matters). All accept it alongside resume/fork, so a resumed conversation can
+// be handed a message too.
 func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	var cmd string
 	switch t {
@@ -228,6 +299,12 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 			cmd = fmt.Sprintf("opencode --session %s", o.ResumeID)
 		default:
 			cmd = "opencode"
+		}
+
+	case Copilot:
+		cmd = "copilot"
+		if o.ResumeID != "" {
+			cmd += " --session-id=" + o.ResumeID
 		}
 
 	default: // Claude

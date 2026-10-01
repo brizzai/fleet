@@ -124,7 +124,7 @@ type RepoTime struct {
 }
 
 type AgentTime struct {
-	Agent     string // "claude" | "codex" | "opencode"
+	Agent     string // "claude" | "codex" | "opencode" | "copilot"
 	AgentTime time.Duration
 	Sessions  int
 }

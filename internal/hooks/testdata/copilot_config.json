@@ -1,0 +1,19 @@
+// User settings belong in settings.json.
+// This file is managed automatically.
+{
+  "firstLaunchAt": "2026-07-05T08:58:28.682Z",
+  "appTipShown": true,
+  "lastLoggedInUser": {
+    "host": "https://github.com",
+    "login": "octocat"
+  },
+  "loggedInUsers": [
+    {
+      "host": "https://github.com",
+      "login": "octocat"
+    }
+  ],
+  "trustedFolders": [
+    "/Users/dev/already-trusted"
+  ]
+}

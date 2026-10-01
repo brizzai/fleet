@@ -10,6 +10,7 @@ func TestParse(t *testing.T) {
 		"claude":   Claude,
 		"codex":    Codex,
 		"opencode": OpenCode,
+		"copilot":  Copilot,
 		"":         Claude, // empty → default
 		"unknown":  Claude, // unrecognized → default
 	}
@@ -39,6 +40,10 @@ func TestBuildLaunchCmd(t *testing.T) {
 		{"opencode resume", OpenCode, LaunchOpts{ResumeID: "abc"}, "opencode --session abc"},
 		{"opencode fork", OpenCode, LaunchOpts{ForkID: "abc"}, "opencode --session abc --fork"},
 		{"opencode fork wins over resume", OpenCode, LaunchOpts{ResumeID: "r", ForkID: "f"}, "opencode --session f --fork"},
+		// Copilot's id is minted by fleet, so one form both creates and resumes.
+		{"copilot new", Copilot, LaunchOpts{}, "copilot"},
+		{"copilot with id", Copilot, LaunchOpts{ResumeID: "abc"}, "copilot --session-id=abc"},
+		{"copilot prompt", Copilot, LaunchOpts{ResumeID: "abc", Prompt: "fix it"}, `copilot --session-id=abc --interactive="$FLEET_INITIAL_PROMPT"`},
 		// A prompt is the agent's own argument, behind a separator that ends
 		// option parsing — `--` for Claude/Codex, `--prompt=` for OpenCode,
 		// whose positional is a project path instead.
@@ -65,7 +70,7 @@ func TestBuildLaunchCmd(t *testing.T) {
 // instead, leaving only the expansion in the command.
 func TestBuildLaunchCmdNeverEmbedsPromptText(t *testing.T) {
 	nasty := "fix $(touch /tmp/pwned) `id` \"quoted\" 'single'\nsecond line"
-	for _, typ := range []Type{Claude, Codex, OpenCode} {
+	for _, typ := range []Type{Claude, Codex, OpenCode, Copilot} {
 		cmd := typ.BuildLaunchCmd(LaunchOpts{Prompt: nasty})
 		for _, leak := range []string{"touch", "$(", "`", "\n", "second line"} {
 			if strings.Contains(cmd, leak) {
@@ -88,6 +93,7 @@ func TestBuildLaunchCmdSeparatesPromptFromOptions(t *testing.T) {
 		Claude:   `-- "$FLEET_INITIAL_PROMPT"`,
 		Codex:    `-- "$FLEET_INITIAL_PROMPT"`,
 		OpenCode: `--prompt="$FLEET_INITIAL_PROMPT"`, // `--prompt <val>` makes yargs read the value as an option
+		Copilot:  `--interactive="$FLEET_INITIAL_PROMPT"`,
 	}
 	for typ, want := range cases {
 		cmd := typ.BuildLaunchCmd(LaunchOpts{Prompt: "--force is not a flag here"})
@@ -98,6 +104,9 @@ func TestBuildLaunchCmdSeparatesPromptFromOptions(t *testing.T) {
 }
 
 func TestBinaryAndDisplayName(t *testing.T) {
+	if Copilot.Binary() != "copilot" || Copilot.DisplayName() != "Copilot" {
+		t.Errorf("unexpected Copilot: binary=%q display=%q", Copilot.Binary(), Copilot.DisplayName())
+	}
 	if Claude.Binary() != "claude" || Codex.Binary() != "codex" || OpenCode.Binary() != "opencode" {
 		t.Errorf("unexpected Binary(): claude=%q codex=%q opencode=%q", Claude.Binary(), Codex.Binary(), OpenCode.Binary())
 	}
@@ -122,6 +131,7 @@ func TestBuildLaunchCmdModelAndEffortPerAgent(t *testing.T) {
 		{"claude both", Claude, LaunchOpts{Model: "claude-opus-5", Effort: "high"}, "claude --model claude-opus-5 --effort high"},
 		{"codex effort is a config override", Codex, LaunchOpts{Model: "gpt-5.1-codex-max", Effort: "high"}, "codex --model gpt-5.1-codex-max -c model_reasoning_effort=high"},
 		{"opencode takes a model but never an effort", OpenCode, LaunchOpts{Model: "anthropic/claude-sonnet-5", Effort: "max"}, "opencode --model anthropic/claude-sonnet-5"},
+		{"copilot takes --model and --effort", Copilot, LaunchOpts{Model: "gpt-5.4", Effort: "high"}, "copilot --model gpt-5.4 --reasoning-effort high"},
 		{"neither set changes nothing", Claude, LaunchOpts{}, "claude"},
 	}
 	for _, tt := range tests {
@@ -136,7 +146,7 @@ func TestBuildLaunchCmdModelAndEffortPerAgent(t *testing.T) {
 // The prompt argument ends option parsing (`--`), so anything appended after it
 // stops being read as a flag and is handed to the agent as prompt text instead.
 func TestModelAndEffortPrecedeThePrompt(t *testing.T) {
-	for _, ag := range []Type{Claude, Codex, OpenCode} {
+	for _, ag := range []Type{Claude, Codex, OpenCode, Copilot} {
 		cmd := ag.BuildLaunchCmd(LaunchOpts{Model: "opus", Effort: "high", Prompt: "do the thing"})
 		promptAt := strings.Index(cmd, PromptEnvVar)
 		if promptAt < 0 {
@@ -215,5 +225,50 @@ func TestOpenCodeNeverReceivesAnEffortFlag(t *testing.T) {
 				t.Errorf("opencode command %q must not carry %q", cmd, banned)
 			}
 		}
+	}
+}
+
+// Copilot has no fork flag. Launching it with the parent's id would resume the
+// parent's conversation and take it over, so a fork id must never reach argv.
+func TestCopilotForkIDNeverResumesParent(t *testing.T) {
+	if Copilot.SupportsFork() {
+		t.Fatal("Copilot must not report fork support")
+	}
+	for _, o := range []LaunchOpts{{ForkID: "parent"}, {ResumeID: "own", ForkID: "parent"}} {
+		if cmd := Copilot.BuildLaunchCmd(o); strings.Contains(cmd, "parent") {
+			t.Errorf("fork id leaked into the launch command: %q", cmd)
+		}
+	}
+	for _, ag := range []Type{Claude, Codex, OpenCode} {
+		if !ag.SupportsFork() {
+			t.Errorf("%s: fork support must be unchanged", ag)
+		}
+	}
+}
+
+func TestKnownAndNameList(t *testing.T) {
+	for _, a := range All {
+		if !Known(string(a)) {
+			t.Errorf("Known(%q) = false", a)
+		}
+	}
+	if Known("claud") || Known("") {
+		t.Error("Known accepted a name that isn't an agent")
+	}
+	if got, want := NameList(), "claude, codex, opencode, or copilot"; got != want {
+		t.Errorf("NameList() = %q, want %q", got, want)
+	}
+}
+
+// Copilot exits on an effort value outside its list; Claude only warns.
+func TestValidEffort(t *testing.T) {
+	if !Copilot.ValidEffort("high") || !Copilot.ValidEffort("max") {
+		t.Error("Copilot rejected a value it accepts")
+	}
+	if Copilot.ValidEffort("ultracode") {
+		t.Error("Copilot accepted a value it exits on")
+	}
+	if !Claude.ValidEffort("ultracode") || !Codex.ValidEffort("anything") {
+		t.Error("ValidEffort must only restrict Copilot")
 	}
 }

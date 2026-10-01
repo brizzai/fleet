@@ -33,7 +33,7 @@ const Name = "fleet"
 // two roots, not four, because the agents overlap:
 //
 //	~/.claude/skills  Claude Code (also read by OpenCode and Cursor)
-//	~/.agents/skills  Codex, Cursor, OpenCode
+//	~/.agents/skills  Codex, Cursor, OpenCode, Copilot
 //
 // Codex reads only `.agents/skills` and Claude Code reads only `.claude/skills`,
 // so neither root alone covers both. Cursor and OpenCode read both, and are
@@ -99,6 +99,10 @@ var agents = []Agent{
 	{Name: "codex", binary: "codex", configDir: hooks.GetCodexConfigDir, root: agentsSkillsRoot},
 	{Name: "cursor", binary: "cursor", configDir: func() string { return filepath.Join(homeDir(), ".cursor") }, root: agentsSkillsRoot},
 	{Name: "opencode", binary: "opencode", configDir: hooks.GetOpenCodeConfigDir, root: agentsSkillsRoot},
+	// Copilot CLI reads personal skills from ~/.copilot/skills or
+	// ~/.agents/skills, so it shares the agents root. Binary only, like Claude:
+	// the VS Code Copilot extension creates ~/.copilot too, without the CLI.
+	{Name: "copilot", binary: "copilot", root: agentsSkillsRoot},
 }
 
 // Agents returns every agent fleet can install the skill for.

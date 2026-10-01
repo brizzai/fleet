@@ -38,6 +38,11 @@ type StatusFile struct {
 	// editing settings.json today, but keep the installed command simple: the
 	// failure is a silently inverted ownership gate, not a missing signal.
 	AgentPID int `json:"agent_pid,omitempty"`
+	// PromptSessionID is the conversation the user last submitted a prompt in,
+	// kept across later events. Copilot can hold several conversations in one
+	// process (/new keeps the old one open), and this is how fleet tells which
+	// one is in the pane.
+	PromptSessionID string `json:"prompt_session_id,omitempty"`
 }
 
 // WriteStatusFile atomically writes a status file to the hooks directory.

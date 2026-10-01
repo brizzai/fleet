@@ -343,8 +343,9 @@ func confirmDelivered(ts *tmux.Session, message string) bool {
 		if pane, err := ts.CapturePaneFresh(); err == nil {
 			hay := squashSpace(session.StripANSI(pane))
 			// Claude collapses a multi-line paste to a "[Pasted text #1 +N lines]"
-			// placeholder, so the text itself is never on screen to match.
-			if strings.Contains(hay, needle) || strings.Contains(hay, "[Pastedtext") {
+			// placeholder and Copilot one over 10 lines to "[Paste #1 - 12 lines]",
+			// so the text itself is never on screen to match. hay is squashed.
+			if strings.Contains(hay, needle) || strings.Contains(hay, "[Pastedtext") || strings.Contains(hay, "[Paste#") {
 				return true
 			}
 		}
