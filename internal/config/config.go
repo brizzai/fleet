@@ -81,6 +81,7 @@ type Config struct {
 	Telemetry    *bool  `json:"telemetry,omitempty"`
 	DefaultAgent string `json:"default_agent,omitempty"` // "claude" or "codex"
 	DrawerHeight int    `json:"drawer_height,omitempty"` // terminal-drawer body rows (default 12)
+	SidebarWidth int    `json:"sidebar_width,omitempty"` // session-list columns in the dual layout (default 65)
 	// SessionSuspendMode controls auto-hibernation of idle sessions under memory
 	// pressure: "off", "light" (default), "balanced", or "aggressive". Read via
 	// GetSessionSuspendMode. See internal/ui suspend sweep.
@@ -609,6 +610,29 @@ func (c *Config) GetDrawerHeight() int {
 		return DrawerHeightMax
 	}
 	return c.DrawerHeight
+}
+
+// SidebarWidthMin/Max bound the session-list width in the dual layout. The
+// layout still caps the rendered width at 45% of the terminal, so a wide
+// setting only shows in full on a wide terminal.
+const (
+	SidebarWidthMin     = 22
+	SidebarWidthMax     = 160
+	SidebarWidthDefault = 65
+)
+
+// GetSidebarWidth returns the sidebar width in columns (default 65 when unset),
+// clamped to [SidebarWidthMin, SidebarWidthMax].
+func (c *Config) GetSidebarWidth() int {
+	return ClampSidebarWidth(c.SidebarWidth)
+}
+
+// ClampSidebarWidth maps any width onto the allowed range; <= 0 means default.
+func ClampSidebarWidth(w int) int {
+	if w <= 0 {
+		return SidebarWidthDefault
+	}
+	return max(SidebarWidthMin, min(w, SidebarWidthMax))
 }
 
 // boolDefaultTrue resolves an optional bool flag, defaulting to true when unset.
