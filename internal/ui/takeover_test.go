@@ -52,3 +52,22 @@ func TestTakeoverPicker(t *testing.T) {
 		t.Error("enter should close the picker and start the resumes")
 	}
 }
+
+func TestRightArrowOpensASessionRow(t *testing.T) {
+	h, s := scrollTestHome(t)
+	h.cfg.EnterMode = "split" // Enter's split mode focuses instead of attaching: observable without tmux
+	h.flatItems = []SidebarItem{{IsCheckoutHeader: true, RepoPath: "/tmp/scroll-test"}, {Session: s, RepoPath: "/tmp/scroll-test"}}
+
+	h.cursor = 0
+	h.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if h.focusMode {
+		t.Fatal("→ on a header opened a session; it should only expand")
+	}
+
+	h.flatItems = []SidebarItem{{IsCheckoutHeader: true, RepoPath: "/tmp/scroll-test"}, {Session: s, RepoPath: "/tmp/scroll-test"}}
+	h.cursor = 1
+	h.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if !h.focusMode {
+		t.Error("→ on a session row did not open it the way Enter does")
+	}
+}

@@ -3390,6 +3390,12 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.collapseRepoAtCursor()
 		return h, nil
 	case "right", "l":
+		// On a session row there is nothing to expand: open it, as Enter does.
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+			if it := h.flatItems[h.cursor]; it.Session != nil && !it.IsRepoHeader && !it.IsOriginHeader && !it.IsCheckoutHeader {
+				return h, h.activateCursorRow()
+			}
+		}
 		h.expandRepoAtCursor()
 		return h, nil
 	case "a":

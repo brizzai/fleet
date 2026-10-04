@@ -30,7 +30,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "Tab", BarKey: "⇥", BarDesc: "Focus", Desc: "Focus preview / attach (swap)", Section: "session"},
 	{Key: "Space", BarKey: "␣", BarDesc: "Jump", Desc: "Jump to next waiting/finished", Section: "session"},
 	{Key: "← / h", Desc: "Collapse group", Section: "session"},
-	{Key: "→ / l", Desc: "Expand group", Section: "session"},
+	{Key: "→ / l", Desc: "Expand group / open session", Section: "session"},
 	{Key: "a", BarKey: "a", BarDesc: "New", Desc: "New session (default agent)", Section: "session"},
 	{Key: "A", Desc: "New session (pick agent)", Section: "session"},
 	{Key: "n", BarKey: "n", BarDesc: "Repo", Desc: "New session (any repo)", Section: "session"},
