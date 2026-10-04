@@ -47,7 +47,7 @@ func (h *Home) notePreview(inner string, s *session.Session, x, y, w, hgt int) s
 	h.layout.previewFit = [2]int{w - previewIndent, rows}
 	h.previewLines = strings.Split(inner, "\n")
 	if !h.previewSel.shown {
-		return h.paintPreviewScrollbar(inner, w)
+		return paintScrollbar(h.previewScroll, inner, w)
 	}
 	lines := append([]string(nil), h.previewLines...)
 	h.forEachSelectedRow(func(row, c0, c1 int) {
@@ -56,7 +56,7 @@ func (h *Home) notePreview(inner string, s *session.Session, x, y, w, hgt int) s
 			selectionStyle.Render(ansi.Strip(ansi.Cut(line, c0, c1))) +
 			ansi.TruncateLeft(line, c1, "")
 	})
-	return h.paintPreviewScrollbar(strings.Join(lines, "\n"), w)
+	return paintScrollbar(h.previewScroll, strings.Join(lines, "\n"), w)
 }
 
 // forEachSelectedRow calls fn for each preview line the selection covers, with

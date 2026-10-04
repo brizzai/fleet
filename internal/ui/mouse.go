@@ -85,6 +85,7 @@ type screenLayout struct {
 	// drawerMaxRows the tallest body the layout leaves room for. Zero while
 	// the drawer is closed.
 	drawerEdge    mouseRect
+	drawerBody    mouseRect // inside the drawer's border: where the wheel scrolls
 	drawerBottom  int
 	drawerMaxRows int
 	// previewText is the preview's text area (inside the border, past the
@@ -245,6 +246,9 @@ func (h *Home) handleWheel(m tea.Mouse) (tea.Model, tea.Cmd) {
 	}
 	if h.layout.previewText.contains(m.X, m.Y) {
 		return h.scrollPreview(delta)
+	}
+	if h.layout.drawerBody.contains(m.X, m.Y) {
+		return h.scrollDrawer(delta)
 	}
 	if !h.layout.sidebar.contains(m.X, m.Y) {
 		return h, nil

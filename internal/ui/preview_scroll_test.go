@@ -45,11 +45,11 @@ func TestPreviewWheelScrollsIntoHistory(t *testing.T) {
 	}
 
 	// The first capture lands for offset 3; the user is at 6 by now.
-	_, cmd := h.Update(previewScrollMsg{sessionID: s.ID, want: 3, offset: 3, history: 100, content: "old"})
+	_, cmd := h.Update(previewScrollMsg{id: s.ID, want: 3, offset: 3, history: 100, content: "old"})
 	if cmd == nil || h.previewScroll.content != "" {
 		t.Fatal("a stale capture must be dropped and a new one requested")
 	}
-	h.Update(previewScrollMsg{sessionID: s.ID, want: 6, offset: 6, history: 100, content: "history"})
+	h.Update(previewScrollMsg{id: s.ID, want: 6, offset: 6, history: 100, content: "history"})
 	if _, content := h.selectedPreview(); content != "history" {
 		t.Errorf("preview shows %q, want the scrolled capture", content)
 	}
@@ -68,7 +68,7 @@ func TestPreviewWheelScrollsIntoHistory(t *testing.T) {
 func TestPreviewWheelClampsToHistory(t *testing.T) {
 	h, s := scrollTestHome(t)
 	wheel(h, true)
-	h.Update(previewScrollMsg{sessionID: s.ID, want: 3, offset: 2, history: 2, content: "top"})
+	h.Update(previewScrollMsg{id: s.ID, want: 3, offset: 2, history: 2, content: "top"})
 	if h.previewScroll.offset != 2 {
 		t.Fatalf("offset %d, want it clamped to the 2 history lines", h.previewScroll.offset)
 	}
@@ -87,11 +87,11 @@ func TestPreviewWheelClampsToHistory(t *testing.T) {
 func TestPreviewScrollbarOnlyWhileScrolled(t *testing.T) {
 	h, _ := scrollTestHome(t)
 	plain := strings.Join(h.previewLines, "\n")
-	if got := h.paintPreviewScrollbar(plain, 30); got != plain {
+	if got := paintScrollbar(h.previewScroll, plain, 30); got != plain {
 		t.Error("scrollbar drawn at the live bottom")
 	}
 	h.previewScroll = previewScrollState{offset: 5, history: 20, content: "x"}
-	painted := h.paintPreviewScrollbar(plain, 30)
+	painted := paintScrollbar(h.previewScroll, plain, 30)
 	if !strings.Contains(painted, "▐") {
 		t.Fatal("no scrollbar thumb while scrolled")
 	}
@@ -99,5 +99,11 @@ func TestPreviewScrollbarOnlyWhileScrolled(t *testing.T) {
 		if w := ansi.StringWidth(line); w != 30 {
 			t.Errorf("row %d is %d wide with the scrollbar, want 30", i, w)
 		}
+	}
+}
+
+func TestExpandTabsPadsToTabStops(t *testing.T) {
+	if got := expandTabs("ab\tc\n\x1b[1mx\x1b[0m\ty"); got != "ab      c\n\x1b[1mx\x1b[0m       y" {
+		t.Errorf("expandTabs = %q", got)
 	}
 }

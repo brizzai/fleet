@@ -13,6 +13,7 @@ import (
 func (h *Home) noteDrawerEdge(x, top, w, outerH int) {
 	h.layout.drawerEdge = mouseRect{x: x, y: top, w: w, h: 1}
 	h.layout.drawerBottom = top + outerH - 1
+	h.layout.drawerBody = mouseRect{x: x + 1, y: top + 1, w: w - 2, h: outerH - 2}
 }
 
 // dragDrawer follows the pointer while the drawer's top border is held: the

@@ -561,6 +561,7 @@ func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// has to arrive as typed. Cost: that one letter reaches the shell only via
 	// Ctrl+G full attach, which intercepts nothing — the same trade already made
 	// for Ctrl+T and Ctrl+W.
+	h.resetScroll(&h.drawerScroll) // any key returns the drawer to live
 	switch normalizeKey(msg).String() {
 	case "`":
 		return h, h.closeDrawer()
@@ -713,6 +714,8 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 	switch {
 	case len(shells) == 0:
 		raw = []string{drawerEmptyCTA()}
+	case h.drawerScroll.content != "" && h.drawerScroll.sessionID == shells[h.clampTab(len(shells))].TmuxName():
+		raw = strings.Split(stripOSC8(h.drawerScroll.content), "\n")
 	case h.shellTerm != nil && h.shellStreamTarget == shells[h.clampTab(len(shells))].TmuxName():
 		raw = strings.Split(strings.TrimRight(stripOSC8(h.shellTerm.Render()), "\n"), "\n")
 		cursorX, cursorY = h.shellTerm.Cursor()
@@ -786,8 +789,12 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 		}
 	}
 
+	bodyStr := strings.Join(body, "\n")
+	if h.drawerScroll.content != "" {
+		bodyStr = paintScrollbar(h.drawerScroll, ensureExactWidth(bodyStr, innerWidth), innerWidth)
+	}
 	return RenderBorderedPanelFull(
-		strings.Join(body, "\n"),
+		bodyStr,
 		h.drawerTitle(shells),
 		h.drawerModeLabel(shells),
 		h.drawerCwdLabel(),

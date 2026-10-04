@@ -452,6 +452,7 @@ type Home struct {
 	previewLines    []string           // last frame's preview lines, unhighlighted, for copying
 	previewSizes    map[string][2]int  // per session: the window size last sent by previewResize
 	previewScroll   previewScrollState // wheel scroll back through tmux history (preview_scroll.go)
+	drawerScroll    previewScrollState // the same, for the drawer's active shell
 	takeover        *Launchpad         // "take over running sessions" picker; nil when closed (takeover.go)
 
 	// Filter.
