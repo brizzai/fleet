@@ -81,10 +81,19 @@ func TestPreviewSelectionLifecycle(t *testing.T) {
 	}
 
 	_, cmd := h.Update(tea.MouseReleaseMsg{X: 16, Y: 2, Button: tea.MouseLeft})
-	if cmd == nil || !h.previewSel.shown {
-		t.Fatal("release should keep the highlight and return the copy command")
+	if cmd != nil || !h.previewSel.shown {
+		t.Fatal("release should keep the highlight and copy nothing")
 	}
 
+	_, cmd = h.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil || h.quitting {
+		t.Fatal("Ctrl+C with a selection should copy, not quit")
+	}
+	if h.previewSel.active() {
+		t.Error("copying did not clear the selection")
+	}
+
+	drag(h, 12, 2, 16, 2)
 	h.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if h.previewSel.active() {
 		t.Error("a key press did not clear the selection")
@@ -92,5 +101,13 @@ func TestPreviewSelectionLifecycle(t *testing.T) {
 	h.Update(previewMsg{sessionID: "x", content: "new output"})
 	if h.previewCache["x"] != "new output" {
 		t.Error("the preview did not resume refreshing after the selection cleared")
+	}
+}
+
+func TestCtrlCWithoutSelectionStillQuits(t *testing.T) {
+	h := selectTestHome(t)
+	h.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if !h.quitting {
+		t.Error("Ctrl+C with nothing selected must keep quitting fleet")
 	}
 }

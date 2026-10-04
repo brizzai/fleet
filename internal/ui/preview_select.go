@@ -13,10 +13,11 @@ import (
 
 // Drag-to-select in the preview pane. The terminal's own selection runs across
 // the whole screen row, sidebar included; this one stays inside the pane. Press
-// records an anchor, a drag highlights from it, release copies, and the next
-// click or key press clears it. While a selection exists the preview stops
+// records an anchor, a drag highlights from it, and the next click or key press
+// clears it. While a selection exists the preview stops
 // refreshing (see previewMsg), so agent output can't scroll text out from
-// under the highlight.
+// under the highlight. Ctrl+C (or Ctrl+Shift+C) copies, like herdr with
+// copy_on_select off.
 
 // previewIndent is the two columns RenderPreview puts before every line. They
 // are never text, so the selectable area starts after them.
@@ -121,19 +122,22 @@ func (h *Home) dragPreviewSelection(m tea.Mouse) (tea.Model, tea.Cmd) {
 	return h, h.markMouseRepaint()
 }
 
-// endPreviewSelection copies the selection on release. The highlight stays up
-// so it is clear what went to the clipboard.
+// endPreviewSelection ends the drag; the highlight stays up until it is copied
+// or cleared.
 func (h *Home) endPreviewSelection() (tea.Model, tea.Cmd) {
 	h.previewSel.dragging = false
-	if !h.previewSel.shown {
-		return h, nil
-	}
+	return h, nil
+}
+
+// copyPreviewSelection copies the highlighted text and clears the highlight.
+func (h *Home) copyPreviewSelection() tea.Cmd {
 	text := h.selectedPreviewText()
+	h.clearPreviewSelection()
 	if strings.TrimSpace(text) == "" {
-		return h, nil
+		return nil
 	}
 	lines := strings.Count(text, "\n") + 1
-	return h, func() tea.Msg {
+	return func() tea.Msg {
 		if err := tmux.CopyToClipboard(text); err != nil {
 			return copySelectionMsg{err: fmt.Errorf("copy selection: %w", err)}
 		}

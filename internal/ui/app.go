@@ -3152,6 +3152,16 @@ func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 }
 
 func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Copy wins over everything below, focus mode included, so the agent never
+	// sees this Ctrl+C. Ctrl+Shift+C reaches us as plain Ctrl+C on terminals
+	// without extended keys (VTE, Terminal.app) — when the terminal lets it
+	// through at all — so both mean copy, as in herdr.
+	if h.previewSel.shown {
+		switch msg.String() {
+		case "ctrl+c", "ctrl+shift+c":
+			return h, h.copyPreviewSelection()
+		}
+	}
 	h.clearPreviewSelection()
 	// An active frost run owns every key until the user leaves it — except
 	// fleet's own quit key, which ends the run and quits, as the help bar says.
