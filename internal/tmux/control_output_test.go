@@ -1,6 +1,12 @@
 package tmux
 
-import "testing"
+import (
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestDecodeControlOutput(t *testing.T) {
 	cases := []struct {
@@ -61,4 +67,44 @@ func TestParseControlOutput(t *testing.T) {
 			}
 		}
 	})
+}
+
+// tmux ignores a control client's PTY size, so without refresh-client -C the
+// pane stays 80x24 while the drawer draws it wider and the shell's line
+// wrapping lands on the wrong rows.
+func TestOutputReaderSizesThePane(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	t.Setenv("TMUX", "")
+	os.Unsetenv("TMUX")
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "sz").CombinedOutput(); err != nil {
+		t.Fatalf("new-session: %v: %s", err, out)
+	}
+	defer exec.Command("tmux", "kill-server").Run()
+
+	paneSize := func(want string) {
+		t.Helper()
+		var got string
+		for i := 0; i < 50; i++ {
+			out, _ := exec.Command("tmux", "display", "-p", "-t", "sz", "#{window_width}x#{window_height}").Output()
+			if got = strings.TrimSpace(string(out)); got == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("pane size = %s, want %s", got, want)
+	}
+
+	r, err := NewOutputReader("sz", 150, 10, func([]byte) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	paneSize("150x10")
+	if err := r.Resize(120, 7); err != nil {
+		t.Fatal(err)
+	}
+	paneSize("120x7")
 }
