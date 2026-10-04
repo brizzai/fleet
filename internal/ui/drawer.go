@@ -614,45 +614,58 @@ func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // own line-editing keeps working; the drawer's reserved chords are intercepted
 // before this is ever reached.
 func forwardKeyToPane(cc *tmux.ControlClient, target string, msg tea.KeyPressMsg) {
+	if name := paneKeyName(msg); name != "" {
+		cc.SendKeys(target, name)
+		return
+	}
+	// Plain Ctrl chords → tmux "C-x"; printable text passes through literally.
+	if c, ok := ctrlChord(msg.String()); ok {
+		cc.SendKeys(target, c)
+		return
+	}
+	if msg.Text != "" {
+		cc.SendLiteralKeys(target, msg.Text)
+	}
+}
+
+// paneKeyName is the tmux key name for a non-text key, or "" for anything
+// forwarded as a chord or literal text.
+func paneKeyName(msg tea.KeyPressMsg) string {
 	switch msg.Code {
 	case tea.KeyEnter:
-		cc.SendKeys(target, "Enter")
+		return "Enter"
 	case tea.KeyBackspace:
-		cc.SendKeys(target, "BSpace")
+		return "BSpace"
 	case tea.KeyTab:
-		cc.SendKeys(target, "Tab")
+		// Shift+Tab is how Claude cycles its mode (accept edits, plan, …).
+		if msg.Mod.Contains(tea.ModShift) {
+			return "BTab"
+		}
+		return "Tab"
 	case tea.KeySpace:
-		cc.SendKeys(target, "Space")
+		return "Space"
 	case tea.KeyEsc:
-		cc.SendKeys(target, "Escape")
+		return "Escape"
 	case tea.KeyUp:
-		cc.SendKeys(target, "Up")
+		return "Up"
 	case tea.KeyDown:
-		cc.SendKeys(target, "Down")
+		return "Down"
 	case tea.KeyLeft:
-		cc.SendKeys(target, "Left")
+		return "Left"
 	case tea.KeyRight:
-		cc.SendKeys(target, "Right")
+		return "Right"
 	case tea.KeyHome:
-		cc.SendKeys(target, "Home")
+		return "Home"
 	case tea.KeyEnd:
-		cc.SendKeys(target, "End")
+		return "End"
 	case tea.KeyDelete:
-		cc.SendKeys(target, "DC")
+		return "DC"
 	case tea.KeyPgUp:
-		cc.SendKeys(target, "PageUp")
+		return "PageUp"
 	case tea.KeyPgDown:
-		cc.SendKeys(target, "PageDown")
-	default:
-		// Plain Ctrl chords → tmux "C-x"; printable text passes through literally.
-		if c, ok := ctrlChord(msg.String()); ok {
-			cc.SendKeys(target, c)
-			return
-		}
-		if msg.Text != "" {
-			cc.SendLiteralKeys(target, msg.Text)
-		}
+		return "PageDown"
 	}
+	return ""
 }
 
 // ctrlChord maps a single-letter Ctrl combo ("ctrl+k") to its tmux key name

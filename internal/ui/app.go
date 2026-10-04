@@ -6424,45 +6424,7 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	target := s.GetTmuxSession().Name
 
-	switch msg.Code {
-	case tea.KeyEscape:
-		cc.SendKeys(target, "Escape")
-	case tea.KeyEnter:
-		cc.SendKeys(target, "Enter")
-	case tea.KeyBackspace:
-		cc.SendKeys(target, "BSpace")
-	case tea.KeyTab:
-		cc.SendKeys(target, "Tab")
-	case tea.KeySpace:
-		cc.SendKeys(target, "Space")
-	case tea.KeyUp:
-		cc.SendKeys(target, "Up")
-	case tea.KeyDown:
-		cc.SendKeys(target, "Down")
-	case tea.KeyLeft:
-		cc.SendKeys(target, "Left")
-	case tea.KeyRight:
-		cc.SendKeys(target, "Right")
-	case tea.KeyHome:
-		cc.SendKeys(target, "Home")
-	case tea.KeyEnd:
-		cc.SendKeys(target, "End")
-	case tea.KeyPgUp:
-		cc.SendKeys(target, "PageUp")
-	case tea.KeyPgDown:
-		cc.SendKeys(target, "PageDown")
-	case tea.KeyDelete:
-		cc.SendKeys(target, "DC")
-	default:
-		// Ctrl chords (⌃C/⌃D/⌃A/⌃U/⌃L/⌃W/⌃K/…) map to tmux "C-x" so the
-		// session's own line-editing keeps working; printable text passes
-		// through literally.
-		if c, ok := ctrlChord(msg.String()); ok {
-			cc.SendKeys(target, c)
-		} else if msg.Text != "" {
-			cc.SendLiteralKeys(target, msg.Text)
-		}
-	}
+	forwardKeyToPane(cc, target, msg)
 	// Capture right away so what was typed shows without waiting for the tick.
 	return h, h.fetchPreviewFresh(s)
 }
