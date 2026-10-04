@@ -438,12 +438,13 @@ type Home struct {
 	// Focus mode (split view).
 	focusMode       bool
 	controlClient   *tmux.ControlClient
-	cachedSidebar   string           // cached sidebar render for focus mode
-	sidebarDirty    bool             // true when sidebar needs rebuild
-	sidebarWidth    int              // preferred dual-layout sidebar columns (from config; capped at render)
-	draggingSidebar bool             // left button went down on the sidebar border; motion resizes until release
-	previewSel      previewSelection // drag-to-select in the preview pane (preview_select.go)
-	previewLines    []string         // last frame's preview lines, unhighlighted, for copying
+	cachedSidebar   string            // cached sidebar render for focus mode
+	sidebarDirty    bool              // true when sidebar needs rebuild
+	sidebarWidth    int               // preferred dual-layout sidebar columns (from config; capped at render)
+	draggingSidebar bool              // left button went down on the sidebar border; motion resizes until release
+	previewSel      previewSelection  // drag-to-select in the preview pane (preview_select.go)
+	previewLines    []string          // last frame's preview lines, unhighlighted, for copying
+	previewSizes    map[string][2]int // per session: the window size last sent by previewResize
 
 	// Filter.
 	filterInput  textinput.Model
@@ -2823,7 +2824,7 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
 		// Below the sidebar panel and the one-row gap.
-		previewInner = h.notePreview(previewInner, 1, sidebarContentTop+sidebarHeight+1, innerW, previewHeight-2)
+		previewInner = h.notePreview(previewInner, s, 1, sidebarContentTop+sidebarHeight+1, innerW, previewHeight-2)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
@@ -2886,7 +2887,7 @@ func (h *Home) renderBody() string {
 		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
-		previewInner = h.notePreview(previewInner, sidebarWidth+gap+1, sidebarContentTop, previewInnerW, previewInnerH)
+		previewInner = h.notePreview(previewInner, s, sidebarWidth+gap+1, sidebarContentTop, previewInnerW, previewInnerH)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
@@ -3799,6 +3800,9 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 	h.attachedSessionID = s.ID
 	h.workerMu.Unlock()
 	attachStart := time.Now()
+	// The attach hands the window back to the terminal's size, so the next
+	// preview fetch has to fit it to the preview again.
+	delete(h.previewSizes, s.ID)
 
 	return tea.Exec(attachCmd{session: s.GetTmuxSession()}, func(err error) tea.Msg {
 		// CRITICAL: Clear isAttaching before returning the message.
@@ -6402,7 +6406,9 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (h *Home) fetchPreviewFresh(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
+	resize := h.previewResize(s)
 	return func() tea.Msg {
+		resize()
 		content, _ := ts.CapturePaneFresh()
 		return previewMsg{sessionID: id, content: content}
 	}
@@ -8235,7 +8241,9 @@ func copyClaudeSettingsFile(srcRepo, dstRepo string) {
 func (h *Home) fetchPreview(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
+	resize := h.previewResize(s)
 	return func() tea.Msg {
+		resize()
 		content, _ := ts.CapturePane()
 		return previewMsg{sessionID: id, content: content}
 	}

@@ -83,6 +83,9 @@ type screenLayout struct {
 	// previewText is the preview's text area (inside the border, past the
 	// indent): where a drag selects. Dual and stacked layouts only.
 	previewText mouseRect
+	// previewFit is the agent window size that fills the preview without
+	// cutting it off (see previewResize). Zero when no preview is drawn.
+	previewFit [2]int
 
 	// The topmost dropdown or palette, if one is up. Recorded by composeScreen,
 	// which is where the box's x/y are already known — the dialogs themselves

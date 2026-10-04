@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/tmux"
 )
 
@@ -34,11 +35,16 @@ func (s previewSelection) active() bool { return s.dragging || s.shown }
 
 var selectionStyle = lipgloss.NewStyle().Reverse(true)
 
-// notePreview records the frame's preview geometry and lines (for hit-testing
-// and copying), then paints the selection over them. inner is the rendered
-// preview at exactly w×hgt, placed at screen cell (x, y).
-func (h *Home) notePreview(inner string, x, y, w, hgt int) string {
+// notePreview records the frame's preview geometry and lines (for hit-testing,
+// copying and fitting the agent window), then paints the selection over them.
+// inner is s's rendered preview at exactly w×hgt, placed at screen cell (x, y).
+func (h *Home) notePreview(inner string, s *session.Session, x, y, w, hgt int) string {
 	h.layout.previewText = mouseRect{x: x + previewIndent, y: y, w: w - previewIndent, h: hgt}
+	rows := hgt
+	if s != nil && s.FirstPrompt != "" {
+		rows-- // RenderPreview's prompt strip
+	}
+	h.layout.previewFit = [2]int{w - previewIndent, rows}
 	h.previewLines = strings.Split(inner, "\n")
 	if !h.previewSel.shown {
 		return inner
@@ -157,4 +163,24 @@ func (h *Home) clearPreviewSelection() {
 		h.previewSel = previewSelection{}
 		h.viewDirty = true
 	}
+}
+
+// previewResize returns the step that fits s's tmux window to the preview, or a
+// no-op when it already fits — the way herdr sizes each pane's terminal to the
+// pane, so the agent redraws at the preview's width instead of being cut off.
+// Called on the Update goroutine; the returned func runs inside the fetch Cmd.
+//
+// ponytail: only the session being previewed is fitted (others when selected),
+// and one also attached in another terminal gets the preview's size there.
+func (h *Home) previewResize(s *session.Session) func() {
+	size := h.layout.previewFit
+	if size[0] <= 0 || size[1] <= 0 || h.previewSizes[s.ID] == size {
+		return func() {}
+	}
+	if h.previewSizes == nil {
+		h.previewSizes = map[string][2]int{}
+	}
+	h.previewSizes[s.ID] = size
+	ts := s.GetTmuxSession()
+	return func() { _ = ts.ResizeWindow(size[0], size[1]) }
 }

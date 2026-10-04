@@ -937,6 +937,17 @@ func (s *Session) Kill() error {
 }
 
 // CapturePane reads the terminal output with caching and singleflight dedup.
+// ResizeWindow sizes the agent's window to w×h cells, so the app inside
+// redraws at the preview's width instead of being cut off by it. tmux marks the
+// window `window-size manual`; attachArgs clears that again for a full-screen
+// attach.
+func (s *Session) ResizeWindow(w, h int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "tmux", "resize-window", "-t", s.Name,
+		"-x", strconv.Itoa(w), "-y", strconv.Itoa(h)).Run()
+}
+
 // DetachClient detaches every client attached to this session, returning the
 // user to whatever they were in before. The session itself keeps running.
 func (s *Session) DetachClient() error {

@@ -6,6 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/brizzai/fleet/internal/session"
 )
 
 // selectTestHome has a 30×3 preview whose text starts at screen cell (12, 2),
@@ -17,7 +19,7 @@ func selectTestHome(t *testing.T) *Home {
 		"  second line" + strings.Repeat(" ", 17),
 		"  third" + strings.Repeat(" ", 23),
 	}, "\n")
-	h.notePreview(inner, 10, 2, 30, 3)
+	h.notePreview(inner, nil, 10, 2, 30, 3)
 	return h
 }
 
@@ -51,7 +53,7 @@ func TestPreviewSelectionHighlightKeepsWidth(t *testing.T) {
 	h := selectTestHome(t)
 	drag(h, 14, 2, 15, 3)
 	plain := strings.Join(h.previewLines, "\n")
-	painted := h.notePreview(plain, 10, 2, 30, 3)
+	painted := h.notePreview(plain, nil, 10, 2, 30, 3)
 	if painted == plain {
 		t.Fatal("selection was not painted")
 	}
@@ -109,5 +111,31 @@ func TestCtrlCWithoutSelectionStillQuits(t *testing.T) {
 	h.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if !h.quitting {
 		t.Error("Ctrl+C with nothing selected must keep quitting fleet")
+	}
+}
+
+func TestPreviewResizeOnlyWhenTheFitChanges(t *testing.T) {
+	h := selectTestHome(t)
+	s := session.NewSession("s", "/tmp/fit-test")
+
+	h.layout.previewFit = [2]int{}
+	h.previewResize(s)
+	if _, sent := h.previewSizes[s.ID]; sent {
+		t.Error("resized before any preview was drawn")
+	}
+
+	h.layout.previewFit = [2]int{100, 30}
+	h.previewResize(s)
+	if h.previewSizes[s.ID] != [2]int{100, 30} {
+		t.Fatalf("first fit not sent: %v", h.previewSizes[s.ID])
+	}
+
+	h.previewSizes[s.ID] = [2]int{1, 1} // marker: a repeat call must not overwrite it
+	h.layout.previewFit = [2]int{1, 1}
+	h.previewResize(s)
+	h.layout.previewFit = [2]int{90, 30} // sidebar got wider
+	h.previewResize(s)
+	if h.previewSizes[s.ID] != [2]int{90, 30} {
+		t.Errorf("new fit not sent after the preview narrowed: %v", h.previewSizes[s.ID])
 	}
 }
