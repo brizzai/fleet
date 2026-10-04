@@ -955,7 +955,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// arrives in bursts of hundreds per second and v2 renders after every one
 	// (see mouse.go). A handler that changes something sets this back.
 	_, isMouse := msg.(tea.MouseMsg)
-	h.viewDirty = !isMouse
+	h.viewDirty = !isMouse && !h.isIdlePreviewPoll(msg)
 
 	// Stats' own messages (scan progress, reports, the recap). Command results,
 	// not keys, so routeToModal never sees them.
@@ -2067,6 +2067,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s == nil {
 			h.focusMode = false
 			h.sidebarDirty = true
+			h.viewDirty = true
 			return h, nil
 		}
 		// Only a *known* dead session drops focus mode. focusTick is 100ms, so
@@ -2076,6 +2077,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if alive, known := s.IsAliveCached(); known && !alive {
 			h.focusMode = false
 			h.sidebarDirty = true
+			h.viewDirty = true
 			return h, nil
 		}
 		return h, tea.Batch(h.fetchPreviewFresh(s), h.focusTick())
@@ -6369,6 +6371,20 @@ func (h *Home) focusTick() tea.Cmd {
 	return tea.Tick(focusTickInterval, func(t time.Time) tea.Msg {
 		return focusTickMsg(t)
 	})
+}
+
+// isIdlePreviewPoll reports a message from the split view's ~30fps poll that
+// changes nothing on screen: the tick itself, or a capture identical to the
+// one already shown. Repainting for those is most of the split view's CPU.
+func (h *Home) isIdlePreviewPoll(msg tea.Msg) bool {
+	switch m := msg.(type) {
+	case focusTickMsg:
+		return true
+	case previewMsg:
+		old, ok := h.previewCache[m.sessionID]
+		return ok && old == m.content
+	}
+	return false
 }
 
 // isFocusExitKey: Ctrl+Q leaves the split, as it detaches a full-screen
