@@ -216,7 +216,7 @@ Styles in `styles.go` are declared **bare** and constructed **only** in `ApplyPa
 - Hook handler: `fleet hook-handler` (invoked by Claude Code hooks, reads FLEET_INSTANCE_ID env)
 - Hooks auto-installed into `~/.claude/settings.json` on TUI launch
 - Debug log: `~/.config/fleet/debug.log` (slog, init in TUI and hook-handler)
-- Config file: `~/.config/fleet/config.json` (tick_interval_sec, default_project_path, editor, theme, auto_name_sessions, copy_claude_settings, confirm_before_restart, origin_delete_removes_worktrees, drawer_height, session_suspend_mode, account_strategy, default_account, allowed_accounts, ticket_start_state (legacy linear_ticket_start still read), account_usage_style, stats_recap_seen_week)
+- Config file: `~/.config/fleet/config.json` (tick_interval_sec, default_project_path, editor, theme, auto_name_sessions, copy_claude_settings, confirm_before_restart, origin_delete_removes_worktrees, drawer_height, sidebar_width, session_suspend_mode, account_strategy, default_account, allowed_accounts, ticket_start_state (legacy linear_ticket_start still read), account_usage_style, stats_recap_seen_week)
 - Ticket credentials: OS keychain items `fleet-linear` and `fleet-jira` (or `secret-tool`, or `~/.config/fleet/{linear,jira}.json` at 0600). Never in `config.json`, never in a session's tmux environment
 - Claude accounts: `~/.config/fleet/accounts.json` (0600) records emails/orgs/config-dir paths; the logins themselves live in the macOS Keychain, one item per account dir. Per-account Claude Code homes: `~/.config/fleet/accounts/<8hex>/`
 - Workspace: built-in git worktree support (zero config), per-repo `.fleet.json` (or legacy `.bc.json`) overrides with custom shell commands
