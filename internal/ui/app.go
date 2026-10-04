@@ -447,6 +447,7 @@ type Home struct {
 	previewLines    []string           // last frame's preview lines, unhighlighted, for copying
 	previewSizes    map[string][2]int  // per session: the window size last sent by previewResize
 	previewScroll   previewScrollState // wheel scroll back through tmux history (preview_scroll.go)
+	takeover        *Launchpad         // "take over running sessions" picker; nil when closed (takeover.go)
 
 	// Filter.
 	filterInput  textinput.Model
@@ -1736,6 +1737,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case previewScrollMsg:
 		return h.handlePreviewScroll(msg)
 
+	case takeoverScanMsg:
+		return h.openTakeover(msg)
+
 	case previewMsg:
 		if h.previewSel.active() || h.previewScroll.offset > 0 {
 			return h, nil // hold the text still under the highlight / scrolled view; refetched after
@@ -2749,6 +2753,9 @@ func (h *Home) renderBody() string {
 	if h.launchpadActive() {
 		return h.launchpad.View(h.width, h.height)
 	}
+	if h.takeover != nil {
+		return h.takeover.View(h.width, h.height)
+	}
 
 	var b strings.Builder
 
@@ -3186,6 +3193,9 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Route to the active modal dialog/overlay first (keys + paste share this).
 	if cmd, handled := h.routeToModal(msg); handled {
 		return h, cmd
+	}
+	if h.takeover != nil {
+		return h.handleTakeoverKey(msg)
 	}
 
 	// First-run launchpad: drive the recent-repos picker. Space multi-selects,
@@ -4420,6 +4430,12 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 		"selected":   len(items),
 		"discovered": h.launchpad.ItemCount(),
 	})
+	return h.resumeSet(items, "launchpad")
+}
+
+// resumeSet starts one Claude session per item, each resuming the item's
+// conversation in its folder. source names the caller in the action log.
+func (h *Home) resumeSet(items []discovery.Recent, source string) tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(items))
 	// startSessionCmd is called directly here rather than through
 	// handleSessionCreate, so the account has to be resolved per item — without
@@ -4434,11 +4450,11 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 			// Skipped, not aborted: this creates several sessions at once, and one
 			// repo with an unsatisfiable allowlist must not cost the user the rest
 			// of their selection. Named so the gap in the sidebar has a reason.
-			h.setError("launchpad_repo_skipped", fmt.Errorf("launchpad skipped a repo: %s — %s", filepath.Base(it.Path), blocked))
-			h.logAction("launchpad skip", it.Path, false)
+			h.setError("launchpad_repo_skipped", fmt.Errorf("%s skipped a repo: %s — %s", source, filepath.Base(it.Path), blocked))
+			h.logAction(source+" skip", it.Path, false)
 			continue
 		}
-		h.logAction("launchpad add", it.Path, true)
+		h.logAction(source+" add", it.Path, true)
 		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
 			path:           it.Path,
 			title:          it.Title,
@@ -9380,6 +9396,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "branch", Name: "Switch Branch", Shortcut: "b"},
 		{Kind: PaletteKindCommand, ID: "filter", Name: "Filter Sessions", Shortcut: "/"},
 		{Kind: PaletteKindCommand, ID: "settings", Name: "Settings", Shortcut: "S"},
+		{Kind: PaletteKindCommand, ID: "takeover", Name: "Take Over Running Claude Sessions"},
 		{Kind: PaletteKindCommand, ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
 		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
 		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "Shift+W"},
@@ -9686,6 +9703,8 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
+	case "takeover":
+		return h, h.scanTakeover()
 	case "bug_report":
 		return h.openBugReport()
 	case "help":
