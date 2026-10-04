@@ -2940,7 +2940,7 @@ func (h *Home) renderBody() string {
 		border := lipgloss.NewStyle().Foreground(ColorAccent).Render(strings.Repeat("─", h.width))
 		b.WriteString("\n")
 		b.WriteString(border + "\n")
-		b.WriteString(" " + HelpKeyStyle.Render("esc") + " " + HelpDescStyle.Render("Unfocus") + "  " +
+		b.WriteString(" " + HelpKeyStyle.Render("⌃Q") + " " + HelpDescStyle.Render("Unfocus") + "  " +
 			DimStyle.Render("all keys forwarded to session"))
 		lineCount += 2 // border + shortcut line
 	} else if h.filterActive {
@@ -6367,6 +6367,11 @@ func (h *Home) focusTick() tea.Cmd {
 	})
 }
 
+// isFocusExitKey: Ctrl+Q leaves the split, as it detaches a full-screen
+// attach; Esc goes to the agent, which needs it (interrupting Claude, closing
+// its menus).
+func isFocusExitKey(msg tea.KeyPressMsg) bool { return msg.String() == "ctrl+q" }
+
 func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := h.selectedSession()
 	if s == nil {
@@ -6382,7 +6387,7 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	if msg.Code == tea.KeyEsc {
+	if isFocusExitKey(msg) {
 		h.focusMode = false
 		h.sidebarDirty = true
 		h.logAction("unfocus preview", s.Title, true)
@@ -6400,6 +6405,8 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	target := s.GetTmuxSession().Name
 
 	switch msg.Code {
+	case tea.KeyEscape:
+		cc.SendKeys(target, "Escape")
 	case tea.KeyEnter:
 		cc.SendKeys(target, "Enter")
 	case tea.KeyBackspace:

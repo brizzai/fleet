@@ -84,7 +84,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "`", Desc: "Close drawer → sidebar", Section: "drawer"},
 
 	// Focus mode (shown in overlay only, separated by blank line).
-	{Key: "Esc", Desc: "Unfocus preview", Section: "focus"},
+	{Key: "Ctrl+Q", Desc: "Unfocus preview", Section: "focus"},
 	{Key: "all keys", Desc: "Forwarded to session", Section: "focus"},
 
 	// Attach mode (shown in overlay only, separated by blank line).

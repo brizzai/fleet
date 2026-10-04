@@ -71,3 +71,14 @@ func TestRightArrowOpensASessionRow(t *testing.T) {
 		t.Error("→ on a session row did not open it the way Enter does")
 	}
 }
+
+func TestSplitViewLeavesOnCtrlQNotEsc(t *testing.T) {
+	// The decision only: driving handleFocusKey would start a tmux control
+	// client on the real server.
+	if isFocusExitKey(tea.KeyPressMsg{Code: tea.KeyEscape}) {
+		t.Error("Esc leaves the split; it must go to the agent")
+	}
+	if !isFocusExitKey(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl}) {
+		t.Error("Ctrl+Q does not leave the split")
+	}
+}
