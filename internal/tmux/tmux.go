@@ -19,7 +19,7 @@ import (
 
 const (
 	SessionPrefix   = "fleet_"
-	captureCacheTTL = 400 * time.Millisecond
+	captureCacheTTL = 200 * time.Millisecond
 	captureTimeout  = 3 * time.Second
 	sessionCacheTTL = 2 * time.Second
 	// listPanesTimeout caps tmux list-panes shell-outs from IsPaneDead /

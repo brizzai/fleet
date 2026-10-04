@@ -50,9 +50,13 @@ import (
 )
 
 const (
-	tickInterval           = 2 * time.Second
-	activeStatusInterval   = 500 * time.Millisecond // fast pane re-check for active sessions
-	previewTickInterval    = 500 * time.Millisecond
+	tickInterval         = 2 * time.Second
+	activeStatusInterval = 500 * time.Millisecond // fast pane re-check for active sessions
+	previewTickInterval  = 250 * time.Millisecond
+	// focusTickInterval is the split view's refresh: ~30fps, each a tmux
+	// capture-pane fork. ponytail: polling; the drawer's event-driven %output
+	// reader (control_output.go) is the upgrade if this costs too much CPU.
+	focusTickInterval      = 33 * time.Millisecond
 	whatsNewTickInterval   = 60 * time.Millisecond // shimmer cadence for the What's New badge
 	previewCacheTTL        = 500 * time.Millisecond
 	quitConfirmWindow      = 2 * time.Second
@@ -6362,7 +6366,7 @@ func (h *Home) enterFocusMode() tea.Cmd {
 }
 
 func (h *Home) focusTick() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(focusTickInterval, func(t time.Time) tea.Msg {
 		return focusTickMsg(t)
 	})
 }
@@ -6443,7 +6447,8 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cc.SendLiteralKeys(target, msg.Text)
 		}
 	}
-	return h, nil
+	// Capture right away so what was typed shows without waiting for the tick.
+	return h, h.fetchPreviewFresh(s)
 }
 
 func (h *Home) fetchPreviewFresh(s *session.Session) tea.Cmd {
