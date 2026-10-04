@@ -39,7 +39,7 @@ func printSkillUsage(w io.Writer) {
 	fmt.Fprintln(w, "from a shell. Written to the skill directory each agent reads:")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  ~/.claude/skills/fleet/  Claude Code")
-	fmt.Fprintln(w, "  ~/.agents/skills/fleet/  Codex, Cursor, OpenCode")
+	fmt.Fprintln(w, "  ~/.agents/skills/fleet/  Codex, Cursor, OpenCode, Copilot")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Never prompts, so an agent can run `fleet skill install` for itself.")
 	fmt.Fprintln(w)
@@ -85,7 +85,7 @@ func runSkill(args []string) {
 			os.Exit(1)
 		}
 		if len(selected) == 0 {
-			fmt.Fprintln(os.Stderr, "No supported agent found on this machine (looked for claude, codex, cursor, opencode).")
+			fmt.Fprintln(os.Stderr, "No supported agent found on this machine (looked for claude, codex, cursor, opencode, copilot).")
 			fmt.Fprintln(os.Stderr, "Run 'fleet skill install -agent all' to install anyway.")
 			os.Exit(1)
 		}
@@ -153,7 +153,7 @@ func resolveAgents(sel string, fallback []skill.Agent) ([]skill.Agent, error) {
 		}
 		a, ok := skill.Find(name)
 		if !ok {
-			return nil, fmt.Errorf("unknown agent %q: expected one of claude, codex, cursor, opencode, all", name)
+			return nil, fmt.Errorf("unknown agent %q: expected one of claude, codex, cursor, opencode, copilot, all", name)
 		}
 		chosen = append(chosen, a)
 	}

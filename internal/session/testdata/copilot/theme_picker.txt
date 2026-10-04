@@ -1,0 +1,40 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+  ╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.90 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+ ● Tip: /usage
+   └ Display session usage metrics and statistics
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Select a Color Mode                                                                                                  │
+│ Color modes control Copilot's semantic colors.                                                                       │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│                                                                                                                      │
+│    1. Default               1 -   function getUser(id: string): User {                                               │
+│  ❯ 2. GitHub ✓              1 +   function getUserProfile(id: string): UserProfile {                                 │
+│    3. Dim                   2     return db.find(id); // selected                                                    │
+│    4. Contrast              3     }                                                                                  │
+│    5. Colorblind            4                                                                                        │
+│                             5 -   export default getUser;                                                            │
+│  GitHub Dark & Light        5 +   export default getUserProfile;                                                     │
+│  theme                                                                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓ to navigate · enter to select · esc to cancel

@@ -210,6 +210,15 @@ func TestContextMenuNotesNameTheRealReason(t *testing.T) {
 			s.ClaudeSessionID = ""
 		}, "no session id yet"},
 
+		// Copilot has no fork flag; "no session id yet" would be false — it has one.
+		{"fork, copilot", "fork", func(s *session.Session) {
+			s.Agent = agent.Copilot
+			s.ClaudeSessionID = "abc"
+		}, "Copilot can't fork"},
+		{"fork, claude without a resume id", "fork", func(s *session.Session) {
+			s.ClaudeSessionID = ""
+		}, "no session id yet"},
+
 		{"suspend, wrong status", "suspend_session", func(s *session.Session) {
 			s.SetStatus(session.StatusRunning)
 			s.ClaudeSessionID = "abc"

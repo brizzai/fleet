@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Drives fleet, a CLI that runs parallel Claude Code, Codex, and OpenCode sessions in git worktrees or existing directories. Use when handing independent work to a background agent session, creating a git worktree to work in, starting a session on a chosen agent/model/effort, sending a message to or checking on a running session, or when the user mentions fleet, `fleet wt`, `fleet add`, `fleet send`, worktree sessions, or running agents in parallel.
+description: Drives fleet, a CLI that runs parallel Claude Code, Codex, OpenCode, and Copilot sessions in git worktrees or existing directories. Use when handing independent work to a background agent session, creating a git worktree to work in, starting a session on a chosen agent/model/effort, sending a message to or checking on a running session, or when the user mentions fleet, `fleet wt`, `fleet add`, `fleet send`, worktree sessions, or running agents in parallel.
 ---
 
 <!-- Installed by `fleet skill install`. Local edits are overwritten on reinstall. -->
@@ -47,7 +47,7 @@ Worth knowing:
 - `--base <branch>` branches from something other than the repo's default branch.
 - `--path <repo>` picks the repo (defaults to cwd). It resolves to the repo's **main**
   worktree, so running it from inside one worktree doesn't nest names.
-- `--agent claude|codex|opencode` overrides the user's configured default agent.
+- `--agent claude|codex|opencode|copilot` overrides the user's configured default agent.
 - `--account <email>` picks which Claude subscription the session bills to. Claude only —
   passing it with another agent is an error, not a silent no-op.
 - `--ticket BRZ-3182` materializes a Linear issue (description, comments, screenshots)
@@ -80,14 +80,14 @@ fleet add <path>   --agent codex --model gpt-5.1-codex-max --effort high
 
 - `--model` takes whatever that agent accepts: an alias or full id for Claude (`opus`,
   `claude-opus-5`), a model id for Codex, and `provider/model` for OpenCode
-  (`anthropic/claude-sonnet-5`). fleet passes it through and does not translate between
+  (`anthropic/claude-sonnet-5`), and Copilot's own ids. fleet passes it through and does not translate between
   agents, so use the spelling the chosen agent uses.
-- `--effort` works for **Claude and Codex only** — it becomes `--effort` for Claude and a
-  `model_reasoning_effort` config override for Codex. Claude accepts
-  `low|medium|high|xhigh|max|ultracode`; Codex takes its own levels. Passing it with
-  `--agent opencode` is an error, not a silent no-op: the command fleet launches OpenCode
-  with has no option for it, so it can only be set inside the agent. `--model` works for
-  all three.
+- `--effort` works for **Claude, Codex and Copilot** — it becomes `--effort` for Claude
+  and Copilot and a `model_reasoning_effort` config override for Codex. Claude accepts
+  `low|medium|high|xhigh|max|ultracode`; Codex and Copilot take their own levels. Passing
+  it with `--agent opencode` is an error, not a silent no-op: the command fleet launches
+  OpenCode with has no option for it, so it can only be set inside the agent. `--model`
+  works for all four (Copilot falls back to `auto` on a model it doesn't know).
 - Both apply to the **launch only**. The user can change model in-session (`/model`), and
   a later restart uses the agent's own defaults rather than re-imposing these.
 - Values must be bare names — anything with a space or a shell metacharacter is rejected

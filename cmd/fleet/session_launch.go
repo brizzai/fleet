@@ -148,6 +148,10 @@ func guardEffortSupported(ag agent.Type, effort string) {
 		fmt.Fprintf(os.Stderr, "--effort has no effect on %s sessions — it can only be set inside the agent\n", ag)
 		os.Exit(1)
 	}
+	if effort != "" && !ag.ValidEffort(effort) {
+		fmt.Fprintf(os.Stderr, "--effort %q isn't accepted by %s — expected one of: %s\n", effort, ag.DisplayName(), ag.EffortChoices())
+		os.Exit(1)
+	}
 }
 
 // launchOverrides carries the per-launch choices a command hands to the agent.
@@ -231,6 +235,14 @@ func installAgentHooks(ag agent.Type, projectPath string) {
 	case agent.OpenCode:
 		if _, err := hooks.InjectOpenCodePlugin(hooks.GetOpenCodeConfigDir()); err != nil {
 			debuglog.Logger.Error("opencode plugin inject failed", "err", err)
+		}
+	case agent.Copilot:
+		if _, err := hooks.InjectCopilotHooks(hooks.GetCopilotConfigDir()); err != nil {
+			debuglog.Logger.Error("copilot hook inject failed", "err", err)
+		}
+		// Without trust the pane opens on a folder-trust menu and no hook fires.
+		if err := hooks.EnsureCopilotDirTrust(hooks.GetCopilotConfigDir(), projectPath); err != nil {
+			debuglog.Logger.Error("copilot dir trust seeding failed", "path", projectPath, "err", err)
 		}
 	default:
 		if _, err := hooks.InjectClaudeHooks(hooks.GetClaudeConfigDir()); err != nil {

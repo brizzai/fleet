@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"os/exec"
@@ -14,22 +15,23 @@ import (
 
 // Report holds collected diagnostic information.
 type Report struct {
-	Version       string
-	GoVersion     string
-	OS            string
-	Arch          string
-	MacOSVersion  string
-	LinuxDistro   string // PRETTY_NAME from /etc/os-release (Linux only)
-	KernelVersion string // uname -r (Linux only)
-	TmuxVersion   string
-	ClaudeVersion string
-	CodexVersion  string
-	GhVersion     string
-	Config        string
-	SessionCount  int
-	RecentErrors  []string // pre-formatted from ErrorHistory
-	RecentActions []string // pre-formatted from ActionLog
-	RecentLogs    string   // last 100 lines of debug.log
+	Version        string
+	GoVersion      string
+	OS             string
+	Arch           string
+	MacOSVersion   string
+	LinuxDistro    string // PRETTY_NAME from /etc/os-release (Linux only)
+	KernelVersion  string // uname -r (Linux only)
+	TmuxVersion    string
+	ClaudeVersion  string
+	CodexVersion   string
+	CopilotVersion string
+	GhVersion      string
+	Config         string
+	SessionCount   int
+	RecentErrors   []string // pre-formatted from ErrorHistory
+	RecentActions  []string // pre-formatted from ActionLog
+	RecentLogs     string   // last 100 lines of debug.log
 
 	// Terminal environment (helps diagnose rendering/scrolling issues).
 	TerminalEnv TerminalEnv
@@ -71,6 +73,9 @@ func Collect(version string, sessionCount int) *Report {
 	r.TmuxVersion = runCmd("tmux", "-V")
 	r.ClaudeVersion = runCmd("claude", "--version")
 	r.CodexVersion = firstLine(runCmd("codex", "--version"))
+	if v := copilotVersion.Load(); v != nil {
+		r.CopilotVersion = *v
+	}
 	r.GhVersion = firstLine(runCmd("gh", "--version"))
 
 	r.TerminalEnv = collectTerminalEnv()
@@ -246,6 +251,9 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 	if r.CodexVersion != "" {
 		fmt.Fprintf(&b, "- **Codex CLI**: %s\n", sanitize(r.CodexVersion))
 	}
+	if r.CopilotVersion != "" {
+		fmt.Fprintf(&b, "- **Copilot CLI**: %s\n", sanitize(r.CopilotVersion))
+	}
 	if r.GhVersion != "" {
 		fmt.Fprintf(&b, "- **gh CLI**: %s\n", sanitize(r.GhVersion))
 	}
@@ -312,8 +320,24 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 	return b.String()
 }
 
+// copilotVersion is filled by WarmCopilotVersion. Collect runs on the UI
+// thread, and `copilot --version` can take ~2.7s on its first run (it unpacks
+// itself), so Collect only reads what the background warm already found.
+var copilotVersion atomic.Pointer[string]
+
+// WarmCopilotVersion looks up the Copilot CLI version for bug reports. It
+// blocks, so call it on its own goroutine.
+func WarmCopilotVersion() {
+	v := firstLine(runCmdTimeout(10*time.Second, "copilot", "--version"))
+	copilotVersion.Store(&v)
+}
+
 func runCmd(name string, args ...string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	return runCmdTimeout(2*time.Second, name, args...)
+}
+
+func runCmdTimeout(timeout time.Duration, name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, name, args...).Output()
 	if err != nil {

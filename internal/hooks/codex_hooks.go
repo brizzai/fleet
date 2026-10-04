@@ -120,6 +120,8 @@ func EnsureCodexDirTrust(configDir, projectPath string) error {
 	if projectPath == "" {
 		return nil
 	}
+	trustMu.Lock()
+	defer trustMu.Unlock()
 	tomlPath := filepath.Join(configDir, "config.toml")
 	header := fmt.Sprintf(`[projects.%q]`, projectPath)
 
@@ -152,6 +154,9 @@ func EnsureCodexDirTrust(configDir, projectPath string) error {
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
+	// In place, as on master: a rename fails with EBUSY on a config.toml
+	// bind-mounted as a single file, and would replace a dotfiles symlink.
+	// trustMu keeps concurrent seeds in this process from interleaving.
 	if err := os.WriteFile(tomlPath, []byte(b.String()), 0644); err != nil {
 		return fmt.Errorf("write config.toml: %w", err)
 	}

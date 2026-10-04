@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/editor"
@@ -30,7 +31,6 @@ var (
 	chevronStyleSet      = []string{"triangle", "plusminus"}
 	densitySet           = []string{"normal", "compact"}
 	enterModeSet         = []string{"attach", "split"}
-	defaultAgentSet      = []string{"claude", "codex", "opencode"}
 	accountStrategySet   = claudeaccount.Strategies
 	telemetryModeSet     = []string{config.TelemetryFull, config.TelemetryMinimal, config.TelemetryOff}
 	suspendModeSet       = []string{config.SuspendOff, config.SuspendLight, config.SuspendBalanced, config.SuspendAggressive}
@@ -717,18 +717,17 @@ func buildSettingsCategories() []settingsCategory {
 			{
 				label: "Default agent",
 				value: func(c *config.Config) string {
-					switch c.GetDefaultAgent() {
-					case "codex":
-						return "Codex"
-					case "opencode":
-						return "OpenCode"
-					default:
-						return "Claude"
-					}
+					return agent.Parse(c.GetDefaultAgent()).DisplayName()
 				},
-				valueW: func() int { return maxStrW([]string{"Claude", "Codex", "OpenCode"}) },
+				valueW: func() int {
+					names := make([]string, len(agent.All))
+					for i, a := range agent.All {
+						names[i] = a.DisplayName()
+					}
+					return maxStrW(names)
+				},
 				cycle: func(d *SettingsDialog, dir int) {
-					d.cfg.DefaultAgent = cycleString(d.cfg.GetDefaultAgent(), defaultAgentSet, dir)
+					d.cfg.DefaultAgent = cycleString(d.cfg.GetDefaultAgent(), agent.Names(), dir)
 				},
 			},
 			{

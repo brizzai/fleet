@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -190,9 +191,9 @@ func (d *SessionCreateDialog) cycle(delta int) {
 	d.cycleAgent(delta)
 }
 
-// agentCycle is the order the picker steps through (left/right). New agents are
-// appended; the create path validates the binary is installed and errors if not.
-var agentCycle = []agent.Type{agent.Claude, agent.Codex, agent.OpenCode}
+// agentCycle is the order the picker steps through (left/right); the create
+// path validates the binary is installed and errors if not.
+var agentCycle = slices.Clone(agent.All)
 
 // cycleAgent advances the selected agent by delta (+1 next, -1 prev), wrapping.
 func (d *SessionCreateDialog) cycleAgent(delta int) {

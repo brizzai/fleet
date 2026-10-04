@@ -52,7 +52,7 @@ tmux_() {
 }
 
 # Helper: the environment every fleet process in the sandbox must inherit.
-# The three *_CONFIG_DIR overrides are not redundant with HOME — those lookups
+# The four *_CONFIG_DIR/*_HOME overrides are not redundant with HOME — those lookups
 # check the env var first and fall back to HOME only if it is unset, so an
 # ambient one inherited from the caller's shell would punch straight through
 # the sandbox and let InjectClaudeHooks rewrite the real settings.json.
@@ -62,6 +62,7 @@ fleet_env() {
     echo "-e CLAUDE_CONFIG_DIR=$SANDBOX/.claude"
     echo "-e CODEX_HOME=$SANDBOX/.codex"
     echo "-e OPENCODE_CONFIG_DIR=$SANDBOX/.config/opencode"
+    echo "-e COPILOT_HOME=$SANDBOX/.copilot"
     echo "-e PATH=$SANDBOX/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     echo "-e FLEET_DEMO_PREFIX=$REPOS"
     echo "-e FLEET_AUTO_UPDATE_DISABLED=1"
@@ -167,13 +168,29 @@ ensure_sandbox() {
 JSONEOF
 
     # The hard guarantee behind "no real agents". BuildLaunchCmd emits the bare
-    # words claude/codex/opencode, resolved through the pane's PATH — so with
+    # words claude/codex/opencode/copilot, resolved through the pane's PATH — so with
     # these first, a stray `r` or a Ctrl+K "Reload All Sessions" from whoever is
     # driving launches `cat`, not a real agent burning real quota. Everything
     # else in this script is a promise not to press a key; this is a mechanism.
-    for a in claude codex opencode; do
+    for a in claude codex opencode copilot; do
         printf '#!/bin/sh\nexec cat\n' > "$SANDBOX/bin/$a"
         chmod +x "$SANDBOX/bin/$a"
+    done
+    # New agent panes start a login shell, and macOS's /etc/zprofile
+    # (path_helper) rebuilds PATH with /usr/local/bin and /opt/homebrew/bin in
+    # front of anything inherited, so a Homebrew-installed agent would beat its
+    # stub. These rc files run after it (the pane's HOME is the sandbox) and
+    # put the stubs first. launch_tui pins the shell so they are the ones read.
+    # fleet itself runs on the sandbox PATH (launch_tui), and still needs these.
+    local t f p
+    for t in tmux git gh sqlite3; do
+        # -f: replace a link left dangling by an earlier run (a moved tmux).
+        if p="$(command -v "$t")"; then
+            ln -sfn "$p" "$SANDBOX/bin/$t"
+        fi
+    done
+    for f in .zshrc .bash_profile; do
+        printf 'export PATH="%s/bin:$PATH"\n' "$SANDBOX" > "$SANDBOX/$f"
     done
 }
 
@@ -318,8 +335,35 @@ launch_tui() {
 
     # remain-on-exit keeps the error text on screen when fleet dies on launch —
     # otherwise the pane vanishes and the only diagnosis is "it didn't work".
+    # PATH rides `env` inside the command: tmux drops a `-e PATH=` and gives
+    # the pane the creating client's PATH (the caller's real one). fleet
+    # passes its own PATH to every pane it creates or respawns, and a respawn
+    # runs the agent with no shell to correct it, so this is the one PATH that
+    # decides whether `r` launches a stub or a real agent.
+    local kv sbpath=""
+    for kv in "${envargs[@]}"; do
+        case "$kv" in PATH=*) sbpath="${kv#PATH=}" ;; esac
+    done
     tmux_ new-session -d -s "$DRIVE_SESSION" -x "$w" -y "$h" \
-        -c "$ROOT_DIR" "${envargs[@]}" "$FLEET"
+        -c "$ROOT_DIR" "${envargs[@]}" env "PATH=$sbpath" "$FLEET"
+    # Agent panes fleet creates inherit the SERVER's environment, not the -e
+    # values above, so an agent launched for real (e.g. a Copilot session)
+    # would otherwise read and write the user's own config dirs. PATH too:
+    # `r` respawns the pane with no shell, so the sandbox .zshrc never runs
+    # and the agent resolves from the server's PATH — the caller's real one.
+    for kv in "${envargs[@]}"; do
+        case "$kv" in
+        HOME=* | PATH=* | CLAUDE_CONFIG_DIR=* | CODEX_HOME=* | OPENCODE_CONFIG_DIR=* | COPILOT_HOME=*)
+            tmux_ set-environment -g "${kv%%=*}" "${kv#*=}"
+            ;;
+        esac
+    done
+    # The server reads the user's own ~/.tmux.conf, which may set another shell
+    # or a non-login default-command, and their env may carry ZDOTDIR — any of
+    # which skips the sandbox rc files above and lets a real agent win.
+    tmux_ set-environment -gu ZDOTDIR >/dev/null 2>&1 || true
+    tmux_ set-option -g default-shell /bin/zsh >/dev/null 2>&1 || true
+    tmux_ set-option -g default-command "" >/dev/null 2>&1 || true
     tmux_ set-option -t "$DRIVE_SESSION" remain-on-exit on >/dev/null 2>&1 || true
     tmux_ set-option -t "$DRIVE_SESSION" window-size manual >/dev/null 2>&1 || true
     # Per-session, not -g: the session carries its own explicit value that a
