@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.47.0] - 2026-10-04
+
+### Added
+
+- **GitHub Copilot sessions** — You can now pick Copilot as a session's agent (`A`, Settings → Default agent, or `fleet wt --agent copilot`), with live status from Copilot's own hooks.
+
 ## [2.46.0] - 2026-09-30
 
 ### Highlights
@@ -740,7 +746,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.46.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.47.0...HEAD
+[2.47.0]: https://github.com/brizzai/fleet/releases/tag/v2.47.0
 [2.46.0]: https://github.com/brizzai/fleet/releases/tag/v2.46.0
 [2.45.0]: https://github.com/brizzai/fleet/releases/tag/v2.45.0
 [2.44.0]: https://github.com/brizzai/fleet/releases/tag/v2.44.0
