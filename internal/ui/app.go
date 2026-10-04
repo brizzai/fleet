@@ -438,10 +438,12 @@ type Home struct {
 	// Focus mode (split view).
 	focusMode       bool
 	controlClient   *tmux.ControlClient
-	cachedSidebar   string // cached sidebar render for focus mode
-	sidebarDirty    bool   // true when sidebar needs rebuild
-	sidebarWidth    int    // preferred dual-layout sidebar columns (from config; capped at render)
-	draggingSidebar bool   // left button went down on the sidebar border; motion resizes until release
+	cachedSidebar   string           // cached sidebar render for focus mode
+	sidebarDirty    bool             // true when sidebar needs rebuild
+	sidebarWidth    int              // preferred dual-layout sidebar columns (from config; capped at render)
+	draggingSidebar bool             // left button went down on the sidebar border; motion resizes until release
+	previewSel      previewSelection // drag-to-select in the preview pane (preview_select.go)
+	previewLines    []string         // last frame's preview lines, unhighlighted, for copying
 
 	// Filter.
 	filterInput  textinput.Model
@@ -955,6 +957,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
+		h.clearPreviewSelection() // its cells no longer line up with the text
 		resized := msg.Width != h.width || msg.Height != h.height
 		// Only log resizes after the initial one (startup always sends one).
 		if h.width > 0 && resized {
@@ -1640,6 +1643,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.recordStats(stats.ActionPROpen)
 		return h, nil
 
+	case copySelectionMsg:
+		if msg.err != nil {
+			h.setError("selection_copy_failed", msg.err)
+			return h, nil
+		}
+		if msg.lines == 1 {
+			h.setInfo("Copied 1 line")
+		} else {
+			h.setInfo(fmt.Sprintf("Copied %d lines", msg.lines))
+		}
+		return h, nil
+
 	case copyPRLinkMsg:
 		if msg.err != nil {
 			h.setError("pr_link_copy_failed", msg.err)
@@ -1715,6 +1730,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case previewMsg:
+		if h.previewSel.active() {
+			return h, nil // hold the text still under the highlight; refetched after it clears
+		}
 		h.previewCache[msg.sessionID] = msg.content
 		h.previewCacheTime[msg.sessionID] = time.Now()
 		return h, nil
@@ -2804,6 +2822,8 @@ func (h *Home) renderBody() string {
 		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
+		// Below the sidebar panel and the one-row gap.
+		previewInner = h.notePreview(previewInner, 1, sidebarContentTop+sidebarHeight+1, innerW, previewHeight-2)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
@@ -2866,6 +2886,7 @@ func (h *Home) renderBody() string {
 		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
+		previewInner = h.notePreview(previewInner, sidebarWidth+gap+1, sidebarContentTop, previewInnerW, previewInnerH)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
@@ -3131,6 +3152,7 @@ func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 }
 
 func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	h.clearPreviewSelection()
 	// An active frost run owns every key until the user leaves it — except
 	// fleet's own quit key, which ends the run and quits, as the help bar says.
 	if h.frost != nil {

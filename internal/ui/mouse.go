@@ -80,6 +80,9 @@ type screenLayout struct {
 	// sidebarEdge is the sidebar's right border plus the gap after it — the
 	// strip a drag grabs to resize. Dual layout only; zero elsewhere.
 	sidebarEdge mouseRect
+	// previewText is the preview's text area (inside the border, past the
+	// indent): where a drag selects. Dual and stacked layouts only.
+	previewText mouseRect
 
 	// The topmost dropdown or palette, if one is up. Recorded by composeScreen,
 	// which is where the box's x/y are already known — the dialogs themselves
@@ -164,15 +167,27 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			h.draggingSidebar = true
 			return h, nil
 		}
+		// Same reasoning for selecting text: reading the preview is not
+		// focusing it, so it works in focus mode and with the drawer open.
+		if h.layout.overlayRows == nil && h.layout.previewText.contains(m.X, m.Y) {
+			return h.startPreviewSelection(m)
+		}
+		h.clearPreviewSelection()
 		return h.handleClick(m)
 	case tea.MouseMotionMsg:
 		if h.draggingSidebar {
 			return h.dragSidebar(m)
 		}
+		if h.previewSel.dragging {
+			return h.dragPreviewSelection(m)
+		}
 	case tea.MouseReleaseMsg:
 		if h.draggingSidebar {
 			h.draggingSidebar = false
 			return h, h.saveSidebarWidth()
+		}
+		if h.previewSel.dragging {
+			return h.endPreviewSelection()
 		}
 	}
 	// Release and motion carry nothing fleet acts on. Drag lands here too:
