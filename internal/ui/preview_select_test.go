@@ -106,11 +106,23 @@ func TestPreviewSelectionLifecycle(t *testing.T) {
 	}
 }
 
-func TestCtrlCWithoutSelectionStillQuits(t *testing.T) {
+func TestCtrlCQuitsOnTheSecondPress(t *testing.T) {
 	h := selectTestHome(t)
 	h.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if h.quitting {
+		t.Fatal("one Ctrl+C quit fleet; it should only arm the quit")
+	}
+	h.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	if !h.quitting {
-		t.Error("Ctrl+C with nothing selected must keep quitting fleet")
+		t.Error("a second Ctrl+C within the window should quit")
+	}
+
+	h = selectTestHome(t)
+	h.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	h.quitArmedAt = h.quitArmedAt.Add(-quitConfirmWindow) // the window ran out
+	h.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if h.quitting {
+		t.Error("a Ctrl+C after the window expired quit; it should re-arm")
 	}
 }
 

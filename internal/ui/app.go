@@ -55,6 +55,7 @@ const (
 	previewTickInterval    = 500 * time.Millisecond
 	whatsNewTickInterval   = 60 * time.Millisecond // shimmer cadence for the What's New badge
 	previewCacheTTL        = 500 * time.Millisecond
+	quitConfirmWindow      = 2 * time.Second
 	layoutBreakpointSingle = 50
 	layoutBreakpointDual   = 80
 	helpBarHeight          = 1 // single row of contextual hotkeys, no top rule
@@ -603,6 +604,7 @@ type Home struct {
 	// box overlaid, while the blocking teardown runs off the Update loop.
 	// `shutdownFrame` advances the box's spinner.
 	quitting      bool
+	quitArmedAt   time.Time // first Ctrl+C; a second within quitConfirmWindow quits
 	shutdownFrame int
 	frozenFrame   string
 
@@ -3598,7 +3600,14 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.recordStats(stats.ActionHelpOpen)
 		return h, nil
 	case "ctrl+c":
-		return h, h.beginQuit("ctrl+c")
+		// Two presses quit, so a stray Ctrl+C — easy now that it also copies a
+		// preview selection — can't take the whole fleet down.
+		if time.Since(h.quitArmedAt) < quitConfirmWindow {
+			return h, h.beginQuit("ctrl+c")
+		}
+		h.quitArmedAt = time.Now()
+		h.setInfo("Press Ctrl+C again to quit")
+		return h, nil
 	}
 
 	return h, nil
