@@ -630,8 +630,28 @@ func forwardKeyToPane(cc *tmux.ControlClient, target string, msg tea.KeyPressMsg
 }
 
 // paneKeyName is the tmux key name for a non-text key, or "" for anything
-// forwarded as a chord or literal text.
+// forwarded as a chord or literal text. Modifiers ride along as tmux prefixes
+// (C-Left, M-Right, S-Home), so Ctrl+arrow word jumps reach the pane instead
+// of arriving as a bare arrow.
 func paneKeyName(msg tea.KeyPressMsg) string {
+	name := paneKeyBase(msg)
+	if name == "" || name == "BTab" {
+		return name
+	}
+	prefix := ""
+	if msg.Mod.Contains(tea.ModCtrl) {
+		prefix += "C-"
+	}
+	if msg.Mod.Contains(tea.ModAlt) {
+		prefix += "M-"
+	}
+	if msg.Mod.Contains(tea.ModShift) {
+		prefix += "S-"
+	}
+	return prefix + name
+}
+
+func paneKeyBase(msg tea.KeyPressMsg) string {
 	switch msg.Code {
 	case tea.KeyEnter:
 		return "Enter"

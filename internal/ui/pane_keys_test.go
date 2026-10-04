@@ -19,3 +19,20 @@ func TestShiftTabReachesPaneAsBTab(t *testing.T) {
 		t.Errorf("text key = %q, want empty", got)
 	}
 }
+
+// Ctrl+←/→ is word navigation in Claude's input box and in readline; sending
+// a bare arrow moved one character instead.
+func TestModifiedArrowsKeepTheirModifiers(t *testing.T) {
+	cases := map[string]tea.KeyPressMsg{
+		"C-Left":   {Code: tea.KeyLeft, Mod: tea.ModCtrl},
+		"C-Right":  {Code: tea.KeyRight, Mod: tea.ModCtrl},
+		"M-Left":   {Code: tea.KeyLeft, Mod: tea.ModAlt},
+		"C-S-Home": {Code: tea.KeyHome, Mod: tea.ModCtrl | tea.ModShift},
+		"Left":     {Code: tea.KeyLeft},
+	}
+	for want, msg := range cases {
+		if got := paneKeyName(msg); got != want {
+			t.Errorf("%v = %q, want %q", msg, got, want)
+		}
+	}
+}
