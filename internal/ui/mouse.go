@@ -176,6 +176,7 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return h.startPreviewSelection(m)
 		}
 		h.clearPreviewSelection()
+		h.resetPreviewScroll()
 		return h.handleClick(m)
 	case tea.MouseMotionMsg:
 		if h.draggingSidebar {
@@ -223,6 +224,9 @@ func (h *Home) handleWheel(m tea.Mouse) (tea.Model, tea.Cmd) {
 			key = tea.KeyDown
 		}
 		return h, tea.Batch(h.sendToModal(tea.KeyPressMsg{Code: key}), h.markMouseRepaint())
+	}
+	if h.layout.previewText.contains(m.X, m.Y) {
+		return h.scrollPreview(delta)
 	}
 	if !h.layout.sidebar.contains(m.X, m.Y) {
 		return h, nil

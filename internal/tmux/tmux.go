@@ -948,6 +948,27 @@ func (s *Session) ResizeWindow(w, h int) error {
 		"-x", strconv.Itoa(w), "-y", strconv.Itoa(h)).Run()
 }
 
+// CapturePaneRange captures rows lines of the pane ending offset lines above
+// the bottom of the visible screen, with ANSI kept — the preview's scrolled
+// view. offset is clamped to the history tmux holds; the clamped value comes
+// back so the caller can't scroll past the top.
+func (s *Session) CapturePaneRange(offset, rows int) (content string, clamped, history int, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", s.Name, "#{history_size}").Output()
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("history size: %w", err)
+	}
+	history, _ = strconv.Atoi(strings.TrimSpace(string(out)))
+	clamped = max(0, min(offset, history))
+	out, err = exec.CommandContext(ctx, "tmux", "capture-pane", "-t", s.Name, "-p", "-e",
+		"-S", strconv.Itoa(-clamped), "-E", strconv.Itoa(rows-1-clamped)).Output()
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("capture-pane range: %w", err)
+	}
+	return string(out), clamped, history, nil
+}
+
 // DetachClient detaches every client attached to this session, returning the
 // user to whatever they were in before. The session itself keeps running.
 func (s *Session) DetachClient() error {

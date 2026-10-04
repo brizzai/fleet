@@ -438,13 +438,14 @@ type Home struct {
 	// Focus mode (split view).
 	focusMode       bool
 	controlClient   *tmux.ControlClient
-	cachedSidebar   string            // cached sidebar render for focus mode
-	sidebarDirty    bool              // true when sidebar needs rebuild
-	sidebarWidth    int               // preferred dual-layout sidebar columns (from config; capped at render)
-	draggingSidebar bool              // left button went down on the sidebar border; motion resizes until release
-	previewSel      previewSelection  // drag-to-select in the preview pane (preview_select.go)
-	previewLines    []string          // last frame's preview lines, unhighlighted, for copying
-	previewSizes    map[string][2]int // per session: the window size last sent by previewResize
+	cachedSidebar   string             // cached sidebar render for focus mode
+	sidebarDirty    bool               // true when sidebar needs rebuild
+	sidebarWidth    int                // preferred dual-layout sidebar columns (from config; capped at render)
+	draggingSidebar bool               // left button went down on the sidebar border; motion resizes until release
+	previewSel      previewSelection   // drag-to-select in the preview pane (preview_select.go)
+	previewLines    []string           // last frame's preview lines, unhighlighted, for copying
+	previewSizes    map[string][2]int  // per session: the window size last sent by previewResize
+	previewScroll   previewScrollState // wheel scroll back through tmux history (preview_scroll.go)
 
 	// Filter.
 	filterInput  textinput.Model
@@ -1730,9 +1731,12 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return h, nil
 
+	case previewScrollMsg:
+		return h.handlePreviewScroll(msg)
+
 	case previewMsg:
-		if h.previewSel.active() {
-			return h, nil // hold the text still under the highlight; refetched after it clears
+		if h.previewSel.active() || h.previewScroll.offset > 0 {
+			return h, nil // hold the text still under the highlight / scrolled view; refetched after
 		}
 		h.previewCache[msg.sessionID] = msg.content
 		h.previewCacheTime[msg.sessionID] = time.Now()
@@ -3164,6 +3168,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	h.clearPreviewSelection()
+	h.resetPreviewScroll()
 	// An active frost run owns every key until the user leaves it — except
 	// fleet's own quit key, which ends the run and quits, as the help bar says.
 	if h.frost != nil {
@@ -8567,6 +8572,9 @@ func (h *Home) selectedPreview() (*session.Session, string) {
 	s := h.selectedSession()
 	if s == nil {
 		return nil, ""
+	}
+	if sc := h.previewScroll; sc.offset > 0 && sc.content != "" && sc.sessionID == s.ID {
+		return s, sc.content
 	}
 	content := h.previewCache[s.ID]
 	return s, content
