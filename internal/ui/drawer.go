@@ -49,7 +49,7 @@ const (
 )
 
 const (
-	drawerMaxBodyRows    = 14                     // body cap when open (also clamped so panels keep ≥3 rows)
+	drawerMaxBodyRows    = 60                     // body cap when open (also clamped so panels keep ≥3 rows)
 	drawerMinBodyRows    = 3                      // never smaller than this when open
 	drawerMinPreviewRows = 5                      // in the dual split, leave the preview at least this many rows
 	drawerMinTermRows    = 12                     // refuse to open the drawer below this total terminal height
@@ -693,6 +693,7 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 	// the available rows (clamped), not content-fit. Recorded for syncShellStream,
 	// which sizes the reader + emulator to match so wrap points line up.
 	dispRows := maxOuterH - 2
+	h.layout.drawerMaxRows = min(dispRows, drawerMaxBodyRows)
 	if dispRows > drawerMaxBodyRows {
 		dispRows = drawerMaxBodyRows
 	}

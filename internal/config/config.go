@@ -593,7 +593,7 @@ func (c *Config) GetStatusIndicator() string {
 // config, settings, and rendered height all agree.
 const (
 	DrawerHeightMin     = 4
-	DrawerHeightMax     = 14
+	DrawerHeightMax     = 60
 	DrawerHeightDefault = 12
 )
 

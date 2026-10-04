@@ -80,6 +80,13 @@ type screenLayout struct {
 	// sidebarEdge is the sidebar's right border plus the gap after it — the
 	// strip a drag grabs to resize. Dual layout only; zero elsewhere.
 	sidebarEdge mouseRect
+	// drawerEdge is the terminal drawer's top border — the row a drag grabs to
+	// resize it. drawerBottom is the drawer's bottom border row and
+	// drawerMaxRows the tallest body the layout leaves room for. Zero while
+	// the drawer is closed.
+	drawerEdge    mouseRect
+	drawerBottom  int
+	drawerMaxRows int
 	// previewText is the preview's text area (inside the border, past the
 	// indent): where a drag selects. Dual and stacked layouts only.
 	previewText mouseRect
@@ -170,6 +177,10 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			h.draggingSidebar = true
 			return h, nil
 		}
+		if h.layout.overlayRows == nil && h.layout.drawerEdge.contains(m.X, m.Y) {
+			h.draggingDrawer = true
+			return h, nil
+		}
 		// Same reasoning for selecting text: reading the preview is not
 		// focusing it, so it works in focus mode and with the drawer open.
 		if h.layout.overlayRows == nil && h.layout.previewText.contains(m.X, m.Y) {
@@ -182,6 +193,9 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if h.draggingSidebar {
 			return h.dragSidebar(m)
 		}
+		if h.draggingDrawer {
+			return h.dragDrawer(m)
+		}
 		if h.previewSel.dragging {
 			return h.dragPreviewSelection(m)
 		}
@@ -189,6 +203,10 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if h.draggingSidebar {
 			h.draggingSidebar = false
 			return h, h.saveSidebarWidth()
+		}
+		if h.draggingDrawer {
+			h.draggingDrawer = false
+			return h, h.saveDrawerHeight()
 		}
 		if h.previewSel.dragging {
 			return h.endPreviewSelection()

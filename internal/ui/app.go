@@ -446,6 +446,7 @@ type Home struct {
 	cachedSidebar   string             // cached sidebar render for focus mode
 	sidebarDirty    bool               // true when sidebar needs rebuild
 	sidebarWidth    int                // preferred dual-layout sidebar columns (from config; capped at render)
+	draggingDrawer  bool               // left button went down on the drawer's top border; motion resizes until release
 	draggingSidebar bool               // left button went down on the sidebar border; motion resizes until release
 	previewSel      previewSelection   // drag-to-select in the preview pane (preview_select.go)
 	previewLines    []string           // last frame's preview lines, unhighlighted, for copying
@@ -2798,6 +2799,7 @@ func (h *Home) renderBody() string {
 		if contentHeight < 1 {
 			contentHeight = 1
 		}
+		h.noteDrawerEdge(0, 1+contentHeight, h.width, lipgloss.Height(bottomDrawer))
 	}
 
 	// Status counts ride the Sessions panel's top-right border (inset into
@@ -2895,6 +2897,7 @@ func (h *Home) renderBody() string {
 			if previewPanelH < drawerMinPreviewRows {
 				previewPanelH = drawerMinPreviewRows
 			}
+			h.noteDrawerEdge(sidebarWidth+gap, 1+previewPanelH, previewWidth, lipgloss.Height(rightDrawer))
 		}
 		previewInnerH := previewPanelH - 2
 		if previewInnerH < 1 {
