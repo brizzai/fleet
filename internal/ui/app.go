@@ -437,10 +437,12 @@ type Home struct {
 	hookWatcher *hooks.HookWatcher
 
 	// Focus mode (split view).
-	focusMode     bool
-	controlClient *tmux.ControlClient
-	cachedSidebar string // cached sidebar render for focus mode
-	sidebarDirty  bool   // true when sidebar needs rebuild
+	focusMode       bool
+	controlClient   *tmux.ControlClient
+	cachedSidebar   string // cached sidebar render for focus mode
+	sidebarDirty    bool   // true when sidebar needs rebuild
+	sidebarWidth    int    // preferred dual-layout sidebar columns (from config; capped at render)
+	draggingSidebar bool   // left button went down on the sidebar border; motion resizes until release
 
 	// Filter.
 	filterInput  textinput.Model
@@ -687,6 +689,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// once the week rolls over (maybeRecapNewWeek).
 	h.statsRecapWeek = stats.LastFullWeekStart(time.Now())
 	h.drawerHeight = cfg.GetDrawerHeight()
+	h.sidebarWidth = cfg.GetSidebarWidth()
 	// Seed the What's New "seen" version only on a genuinely fresh install, so a
 	// brand-new install doesn't light up the badge for releases that predate it.
 	// An existing user meeting this feature for the first time also has an empty
@@ -1540,6 +1543,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
+		h.sidebarWidth = h.cfg.GetSidebarWidth()
+		h.sidebarDirty = true
 		// Display toggles are live, but the density flag changes BuildFlatItems
 		// output (inter-group spacer rows), so rebuild the flattened list.
 		h.rebuildFlatItems()
@@ -2813,14 +2818,14 @@ func (h *Home) renderBody() string {
 		// ~40%, on a wide monitor (~250 cols) it shrinks to ~25% so the
 		// preview keeps its share. Cap at 45% of total so it never dominates
 		// a small terminal; floor at 22 cols so the headers don't collapse.
-		const sidebarTargetCols = 65
-		sidebarWidth := sidebarTargetCols
-		if cap := h.width * 45 / 100; sidebarWidth > cap {
-			sidebarWidth = cap
+		// The target is the user's sidebar_width (default 65), resizable with
+		// [ / ] or by dragging the border.
+		sidebarWidth := min(h.sidebarWidth, h.sidebarMaxWidth())
+		if sidebarWidth < config.SidebarWidthMin {
+			sidebarWidth = config.SidebarWidthMin
 		}
-		if sidebarWidth < 22 {
-			sidebarWidth = 22
-		}
+		// The border column plus the gap after it: the strip a drag grabs.
+		h.layout.sidebarEdge = mouseRect{x: sidebarWidth - 1, y: sidebarContentTop - 1, w: 1 + gap, h: contentHeight}
 		previewWidth := h.width - sidebarWidth - gap
 
 		sidebarInnerW := sidebarWidth - 2
@@ -3271,6 +3276,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "`": // open the terminal drawer + move focus into it
 		return h, h.openDrawerTyping()
+	case "[", "]":
+		return h, h.stepSidebarWidth(msg.String())
 	case "j", "down":
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
 		h.syncViewport()
