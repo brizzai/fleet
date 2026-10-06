@@ -51,11 +51,16 @@ import (
 )
 
 const (
-	tickInterval           = 2 * time.Second
-	activeStatusInterval   = 500 * time.Millisecond // fast pane re-check for active sessions
-	previewTickInterval    = 500 * time.Millisecond
+	tickInterval         = 2 * time.Second
+	activeStatusInterval = 500 * time.Millisecond // fast pane re-check for active sessions
+	previewTickInterval  = 250 * time.Millisecond
+	// focusTickInterval is the split view's refresh: ~30fps, each a tmux
+	// capture-pane fork. ponytail: polling; the drawer's event-driven %output
+	// reader (control_output.go) is the upgrade if this costs too much CPU.
+	focusTickInterval      = 33 * time.Millisecond
 	whatsNewTickInterval   = 60 * time.Millisecond // shimmer cadence for the What's New badge
 	previewCacheTTL        = 500 * time.Millisecond
+	quitConfirmWindow      = 2 * time.Second
 	layoutBreakpointSingle = 50
 	layoutBreakpointDual   = 80
 	helpBarHeight          = 1 // single row of contextual hotkeys, no top rule
@@ -437,10 +442,19 @@ type Home struct {
 	hookWatcher *hooks.HookWatcher
 
 	// Focus mode (split view).
-	focusMode     bool
-	controlClient *tmux.ControlClient
-	cachedSidebar string // cached sidebar render for focus mode
-	sidebarDirty  bool   // true when sidebar needs rebuild
+	focusMode       bool
+	controlClient   *tmux.ControlClient
+	cachedSidebar   string             // cached sidebar render for focus mode
+	sidebarDirty    bool               // true when sidebar needs rebuild
+	sidebarWidth    int                // preferred dual-layout sidebar columns (from config; capped at render)
+	draggingDrawer  bool               // left button went down on the drawer's top border; motion resizes until release
+	draggingSidebar bool               // left button went down on the sidebar border; motion resizes until release
+	previewSel      previewSelection   // drag-to-select in the preview pane (preview_select.go)
+	previewLines    []string           // last frame's preview lines, unhighlighted, for copying
+	previewSizes    map[string][2]int  // per session: the window size last sent by previewResize
+	previewScroll   previewScrollState // wheel scroll back through tmux history (preview_scroll.go)
+	drawerScroll    previewScrollState // the same, for the drawer's active shell
+	takeover        *Launchpad         // "take over running sessions" picker; nil when closed (takeover.go)
 
 	// Filter.
 	filterInput  textinput.Model
@@ -598,6 +612,7 @@ type Home struct {
 	// box overlaid, while the blocking teardown runs off the Update loop.
 	// `shutdownFrame` advances the box's spinner.
 	quitting      bool
+	quitArmedAt   time.Time // first Ctrl+C; a second within quitConfirmWindow quits
 	shutdownFrame int
 	frozenFrame   string
 
@@ -687,6 +702,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// once the week rolls over (maybeRecapNewWeek).
 	h.statsRecapWeek = stats.LastFullWeekStart(time.Now())
 	h.drawerHeight = cfg.GetDrawerHeight()
+	h.sidebarWidth = cfg.GetSidebarWidth()
 	// Seed the What's New "seen" version only on a genuinely fresh install, so a
 	// brand-new install doesn't light up the badge for releases that predate it.
 	// An existing user meeting this feature for the first time also has an empty
@@ -942,7 +958,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// arrives in bursts of hundreds per second and v2 renders after every one
 	// (see mouse.go). A handler that changes something sets this back.
 	_, isMouse := msg.(tea.MouseMsg)
-	h.viewDirty = !isMouse
+	h.viewDirty = !isMouse && !h.isIdlePreviewPoll(msg)
 
 	// Stats' own messages (scan progress, reports, the recap). Command results,
 	// not keys, so routeToModal never sees them.
@@ -953,6 +969,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
+		h.clearPreviewSelection() // its cells no longer line up with the text
 		resized := msg.Width != h.width || msg.Height != h.height
 		// Only log resizes after the initial one (startup always sends one).
 		if h.width > 0 && resized {
@@ -1540,6 +1557,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
+		h.sidebarWidth = h.cfg.GetSidebarWidth()
+		h.sidebarDirty = true
 		// Display toggles are live, but the density flag changes BuildFlatItems
 		// output (inter-group spacer rows), so rebuild the flattened list.
 		h.rebuildFlatItems()
@@ -1638,6 +1657,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.recordStats(stats.ActionPROpen)
 		return h, nil
 
+	case copySelectionMsg:
+		if msg.err != nil {
+			h.setError("selection_copy_failed", msg.err)
+			return h, nil
+		}
+		if msg.lines == 1 {
+			h.setInfo("Copied 1 line")
+		} else {
+			h.setInfo(fmt.Sprintf("Copied %d lines", msg.lines))
+		}
+		return h, nil
+
 	case copyPRLinkMsg:
 		if msg.err != nil {
 			h.setError("pr_link_copy_failed", msg.err)
@@ -1712,7 +1743,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return h, nil
 
+	case previewScrollMsg:
+		return h.handlePreviewScroll(msg)
+
+	case takeoverScanMsg:
+		return h.openTakeover(msg)
+
 	case previewMsg:
+		if h.previewSel.active() || h.previewScroll.offset > 0 {
+			return h, nil // hold the text still under the highlight / scrolled view; refetched after
+		}
 		h.previewCache[msg.sessionID] = msg.content
 		h.previewCacheTime[msg.sessionID] = time.Now()
 		return h, nil
@@ -2032,6 +2072,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s == nil {
 			h.focusMode = false
 			h.sidebarDirty = true
+			h.viewDirty = true
 			return h, nil
 		}
 		// Only a *known* dead session drops focus mode. focusTick is 100ms, so
@@ -2041,6 +2082,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if alive, known := s.IsAliveCached(); known && !alive {
 			h.focusMode = false
 			h.sidebarDirty = true
+			h.viewDirty = true
 			return h, nil
 		}
 		return h, tea.Batch(h.fetchPreviewFresh(s), h.focusTick())
@@ -2722,6 +2764,9 @@ func (h *Home) renderBody() string {
 	if h.launchpadActive() {
 		return h.launchpad.View(h.width, h.height)
 	}
+	if h.takeover != nil {
+		return h.takeover.View(h.width, h.height)
+	}
 
 	var b strings.Builder
 
@@ -2758,6 +2803,7 @@ func (h *Home) renderBody() string {
 		if contentHeight < 1 {
 			contentHeight = 1
 		}
+		h.noteDrawerEdge(0, 1+contentHeight, h.width, lipgloss.Height(bottomDrawer))
 	}
 
 	// Status counts ride the Sessions panel's top-right border (inset into
@@ -2802,6 +2848,8 @@ func (h *Home) renderBody() string {
 		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
+		// Below the sidebar panel and the one-row gap.
+		previewInner = h.notePreview(previewInner, s, 1, sidebarContentTop+sidebarHeight+1, innerW, previewHeight-2)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
@@ -2813,14 +2861,14 @@ func (h *Home) renderBody() string {
 		// ~40%, on a wide monitor (~250 cols) it shrinks to ~25% so the
 		// preview keeps its share. Cap at 45% of total so it never dominates
 		// a small terminal; floor at 22 cols so the headers don't collapse.
-		const sidebarTargetCols = 65
-		sidebarWidth := sidebarTargetCols
-		if cap := h.width * 45 / 100; sidebarWidth > cap {
-			sidebarWidth = cap
+		// The target is the user's sidebar_width (default 65), resizable with
+		// [ / ] or by dragging the border.
+		sidebarWidth := min(h.sidebarWidth, h.sidebarMaxWidth())
+		if sidebarWidth < config.SidebarWidthMin {
+			sidebarWidth = config.SidebarWidthMin
 		}
-		if sidebarWidth < 22 {
-			sidebarWidth = 22
-		}
+		// The border column plus the gap after it: the strip a drag grabs.
+		h.layout.sidebarEdge = mouseRect{x: sidebarWidth - 1, y: sidebarContentTop - 1, w: 1 + gap, h: contentHeight}
 		previewWidth := h.width - sidebarWidth - gap
 
 		sidebarInnerW := sidebarWidth - 2
@@ -2853,6 +2901,7 @@ func (h *Home) renderBody() string {
 			if previewPanelH < drawerMinPreviewRows {
 				previewPanelH = drawerMinPreviewRows
 			}
+			h.noteDrawerEdge(sidebarWidth+gap, 1+previewPanelH, previewWidth, lipgloss.Height(rightDrawer))
 		}
 		previewInnerH := previewPanelH - 2
 		if previewInnerH < 1 {
@@ -2864,6 +2913,7 @@ func (h *Home) renderBody() string {
 		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
+		previewInner = h.notePreview(previewInner, s, sidebarWidth+gap+1, sidebarContentTop, previewInnerW, previewInnerH)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
@@ -2903,7 +2953,7 @@ func (h *Home) renderBody() string {
 		border := lipgloss.NewStyle().Foreground(ColorAccent).Render(strings.Repeat("─", h.width))
 		b.WriteString("\n")
 		b.WriteString(border + "\n")
-		b.WriteString(" " + HelpKeyStyle.Render("esc") + " " + HelpDescStyle.Render("Unfocus") + "  " +
+		b.WriteString(" " + HelpKeyStyle.Render("⌃Q") + " " + HelpDescStyle.Render("Unfocus") + "  " +
 			DimStyle.Render("all keys forwarded to session"))
 		lineCount += 2 // border + shortcut line
 	} else if h.filterActive {
@@ -3129,6 +3179,18 @@ func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 }
 
 func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Copy wins over everything below, focus mode included, so the agent never
+	// sees this Ctrl+C. Ctrl+Shift+C reaches us as plain Ctrl+C on terminals
+	// without extended keys (VTE, Terminal.app) — when the terminal lets it
+	// through at all — so both mean copy, as in herdr.
+	if h.previewSel.shown {
+		switch msg.String() {
+		case "ctrl+c", "ctrl+shift+c":
+			return h, h.copyPreviewSelection()
+		}
+	}
+	h.clearPreviewSelection()
+	h.resetPreviewScroll()
 	// An active frost run owns every key until the user leaves it — except
 	// fleet's own quit key, which ends the run and quits, as the help bar says.
 	if h.frost != nil {
@@ -3144,6 +3206,9 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Route to the active modal dialog/overlay first (keys + paste share this).
 	if cmd, handled := h.routeToModal(msg); handled {
 		return h, cmd
+	}
+	if h.takeover != nil {
+		return h.handleTakeoverKey(msg)
 	}
 
 	// First-run launchpad: drive the recent-repos picker. Space multi-selects,
@@ -3271,6 +3336,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "`": // open the terminal drawer + move focus into it
 		return h, h.openDrawerTyping()
+	case "[", "]":
+		return h, h.stepSidebarWidth(msg.String())
 	case "j", "down":
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
 		h.syncViewport()
@@ -3336,6 +3403,12 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.collapseRepoAtCursor()
 		return h, nil
 	case "right", "l":
+		// On a session row there is nothing to expand: open it, as Enter does.
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+			if it := h.flatItems[h.cursor]; it.Session != nil && !it.IsRepoHeader && !it.IsOriginHeader && !it.IsCheckoutHeader {
+				return h, h.activateCursorRow()
+			}
+		}
 		h.expandRepoAtCursor()
 		return h, nil
 	case "a":
@@ -3556,7 +3629,14 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.recordStats(stats.ActionHelpOpen)
 		return h, nil
 	case "ctrl+c":
-		return h, h.beginQuit("ctrl+c")
+		// Two presses quit, so a stray Ctrl+C — easy now that it also copies a
+		// preview selection — can't take the whole fleet down.
+		if time.Since(h.quitArmedAt) < quitConfirmWindow {
+			return h, h.beginQuit("ctrl+c")
+		}
+		h.quitArmedAt = time.Now()
+		h.setInfo("Press Ctrl+C again to quit")
+		return h, nil
 	}
 
 	return h, nil
@@ -3763,6 +3843,9 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 	h.attachedSessionID = s.ID
 	h.workerMu.Unlock()
 	attachStart := time.Now()
+	// The attach hands the window back to the terminal's size, so the next
+	// preview fetch has to fit it to the preview again.
+	delete(h.previewSizes, s.ID)
 
 	return tea.Exec(attachCmd{session: s.GetTmuxSession()}, func(err error) tea.Msg {
 		// CRITICAL: Clear isAttaching before returning the message.
@@ -4382,6 +4465,12 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 		"selected":   len(items),
 		"discovered": h.launchpad.ItemCount(),
 	})
+	return h.resumeSet(items, "launchpad")
+}
+
+// resumeSet starts one Claude session per item, each resuming the item's
+// conversation in its folder. source names the caller in the action log.
+func (h *Home) resumeSet(items []discovery.Recent, source string) tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(items))
 	// startSessionCmd is called directly here rather than through
 	// handleSessionCreate, so the account has to be resolved per item — without
@@ -4396,11 +4485,11 @@ func (h *Home) launchLaunchpadSet(items []discovery.Recent) tea.Cmd {
 			// Skipped, not aborted: this creates several sessions at once, and one
 			// repo with an unsatisfiable allowlist must not cost the user the rest
 			// of their selection. Named so the gap in the sidebar has a reason.
-			h.setError("launchpad_repo_skipped", fmt.Errorf("launchpad skipped a repo: %s — %s", filepath.Base(it.Path), blocked))
-			h.logAction("launchpad skip", it.Path, false)
+			h.setError("launchpad_repo_skipped", fmt.Errorf("%s skipped a repo: %s — %s", source, filepath.Base(it.Path), blocked))
+			h.logAction(source+" skip", it.Path, false)
 			continue
 		}
-		h.logAction("launchpad add", it.Path, true)
+		h.logAction(source+" add", it.Path, true)
 		cmds = append(cmds, h.startSessionCmd(sessionCreateMsg{
 			path:           it.Path,
 			title:          it.Title,
@@ -6320,10 +6409,29 @@ func (h *Home) enterFocusMode() tea.Cmd {
 }
 
 func (h *Home) focusTick() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(focusTickInterval, func(t time.Time) tea.Msg {
 		return focusTickMsg(t)
 	})
 }
+
+// isIdlePreviewPoll reports a message from the split view's ~30fps poll that
+// changes nothing on screen: the tick itself, or a capture identical to the
+// one already shown. Repainting for those is most of the split view's CPU.
+func (h *Home) isIdlePreviewPoll(msg tea.Msg) bool {
+	switch m := msg.(type) {
+	case focusTickMsg:
+		return true
+	case previewMsg:
+		old, ok := h.previewCache[m.sessionID]
+		return ok && old == m.content
+	}
+	return false
+}
+
+// isFocusExitKey: Ctrl+Q leaves the split, as it detaches a full-screen
+// attach; Esc goes to the agent, which needs it (interrupting Claude, closing
+// its menus).
+func isFocusExitKey(msg tea.KeyPressMsg) bool { return msg.String() == "ctrl+q" }
 
 func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	s := h.selectedSession()
@@ -6340,7 +6448,7 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	}
 
-	if msg.Code == tea.KeyEsc {
+	if isFocusExitKey(msg) {
 		h.focusMode = false
 		h.sidebarDirty = true
 		h.logAction("unfocus preview", s.Title, true)
@@ -6357,50 +6465,17 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	target := s.GetTmuxSession().Name
 
-	switch msg.Code {
-	case tea.KeyEnter:
-		cc.SendKeys(target, "Enter")
-	case tea.KeyBackspace:
-		cc.SendKeys(target, "BSpace")
-	case tea.KeyTab:
-		cc.SendKeys(target, "Tab")
-	case tea.KeySpace:
-		cc.SendKeys(target, "Space")
-	case tea.KeyUp:
-		cc.SendKeys(target, "Up")
-	case tea.KeyDown:
-		cc.SendKeys(target, "Down")
-	case tea.KeyLeft:
-		cc.SendKeys(target, "Left")
-	case tea.KeyRight:
-		cc.SendKeys(target, "Right")
-	case tea.KeyHome:
-		cc.SendKeys(target, "Home")
-	case tea.KeyEnd:
-		cc.SendKeys(target, "End")
-	case tea.KeyPgUp:
-		cc.SendKeys(target, "PageUp")
-	case tea.KeyPgDown:
-		cc.SendKeys(target, "PageDown")
-	case tea.KeyDelete:
-		cc.SendKeys(target, "DC")
-	default:
-		// Ctrl chords (⌃C/⌃D/⌃A/⌃U/⌃L/⌃W/⌃K/…) map to tmux "C-x" so the
-		// session's own line-editing keeps working; printable text passes
-		// through literally.
-		if c, ok := ctrlChord(msg.String()); ok {
-			cc.SendKeys(target, c)
-		} else if msg.Text != "" {
-			cc.SendLiteralKeys(target, msg.Text)
-		}
-	}
-	return h, nil
+	forwardKeyToPane(cc, target, msg)
+	// Capture right away so what was typed shows without waiting for the tick.
+	return h, h.fetchPreviewFresh(s)
 }
 
 func (h *Home) fetchPreviewFresh(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
+	resize := h.previewResize(s)
 	return func() tea.Msg {
+		resize()
 		content, _ := ts.CapturePaneFresh()
 		return previewMsg{sessionID: id, content: content}
 	}
@@ -8234,7 +8309,9 @@ func copyClaudeSettingsFile(srcRepo, dstRepo string) {
 func (h *Home) fetchPreview(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
+	resize := h.previewResize(s)
 	return func() tea.Msg {
+		resize()
 		content, _ := ts.CapturePane()
 		return previewMsg{sessionID: id, content: content}
 	}
@@ -8558,6 +8635,9 @@ func (h *Home) selectedPreview() (*session.Session, string) {
 	s := h.selectedSession()
 	if s == nil {
 		return nil, ""
+	}
+	if sc := h.previewScroll; sc.offset > 0 && sc.content != "" && sc.sessionID == s.ID {
+		return s, sc.content
 	}
 	content := h.previewCache[s.ID]
 	return s, content
@@ -9370,6 +9450,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "branch", Name: "Switch Branch", Shortcut: "b"},
 		{Kind: PaletteKindCommand, ID: "filter", Name: "Filter Sessions", Shortcut: "/"},
 		{Kind: PaletteKindCommand, ID: "settings", Name: "Settings", Shortcut: "S"},
+		{Kind: PaletteKindCommand, ID: "takeover", Name: "Take Over Running Claude Sessions"},
 		{Kind: PaletteKindCommand, ID: "bug_report", Name: "Bug Report", Shortcut: "!"},
 		{Kind: PaletteKindCommand, ID: "help", Name: "Help", Shortcut: "?"},
 		{Kind: PaletteKindCommand, ID: "whats_new", Name: "What's New", Shortcut: "Shift+W"},
@@ -9676,6 +9757,8 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.settingsDialog.Show()
 		analytics.Track(analytics.EventSettingsOpened, nil)
 		return h, nil
+	case "takeover":
+		return h, h.scanTakeover()
 	case "bug_report":
 		return h.openBugReport()
 	case "help":

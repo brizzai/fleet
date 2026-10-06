@@ -72,7 +72,9 @@ func TestAttachArgsKeepsTheInheritedSocket(t *testing.T) {
 	t.Run("inside tmux, -S names the inherited socket", func(t *testing.T) {
 		t.Setenv("TMUX", "/private/tmp/tmux-501/work,62039,14")
 		got := attachArgs("fleet_demo_abc")
-		want := []string{"-S", "/private/tmp/tmux-501/work", "attach-session", "-t", "fleet_demo_abc"}
+		want := []string{"-S", "/private/tmp/tmux-501/work",
+			"set-option", "-wu", "-t", "fleet_demo_abc", "window-size", ";",
+			"attach-session", "-t", "fleet_demo_abc"}
 		if strings.Join(got, " ") != strings.Join(want, " ") {
 			t.Errorf("attachArgs() = %v, want %v", got, want)
 		}
