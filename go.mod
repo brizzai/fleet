@@ -13,7 +13,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
 	github.com/posthog/posthog-go v1.17.5
-	github.com/sahilm/fuzzy v0.1.2
+	github.com/sahilm/fuzzy v0.1.3
 	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
