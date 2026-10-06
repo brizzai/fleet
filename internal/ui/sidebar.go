@@ -397,11 +397,11 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 		case item.IsSpacer:
 			// Blank line between origin groups.
 		case item.IsOriginHeader:
-			b.WriteString(renderOriginHeader(item, width, i == cursor))
+			b.WriteString(fitSidebarRow(renderOriginHeader(item, width, i == cursor), width))
 		case item.IsCheckoutHeader:
-			b.WriteString(renderCheckoutHeader(item, gitInfo[item.RepoPath], width, i == cursor))
+			b.WriteString(fitSidebarRow(renderCheckoutHeader(item, gitInfo[item.RepoPath], width, i == cursor), width))
 		case item.Pending != nil:
-			b.WriteString(renderPendingItem(item.Pending, width, i == cursor))
+			b.WriteString(fitSidebarRow(renderPendingItem(item.Pending, width, i == cursor), width))
 		default:
 			slot := -1
 			if item.Session != nil {
@@ -409,7 +409,7 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 					slot = n
 				}
 			}
-			b.WriteString(renderSessionItem(item, width, i == cursor, slot))
+			b.WriteString(fitSidebarRow(renderSessionItem(item, width, i == cursor, slot), width))
 		}
 		if i < visibleEnd-1 {
 			b.WriteString("\n")
@@ -558,6 +558,16 @@ func renderGroupSnooze(until time.Time) string {
 	return "  " + DimStyle.Render(SnoozeGlyph+" "+formatSnoozeRemaining(until, time.Now()))
 }
 
+// fitSidebarRow ends a row that is still wider than the sidebar in "…" rather
+// than letting the panel's MaxWidth chop it mid-word with no sign anything is
+// missing.
+func fitSidebarRow(row string, width int) string {
+	if ansi.StringWidth(row) <= width {
+		return row
+	}
+	return ansi.Truncate(row, width, "…")
+}
+
 // renderCheckoutHeader → "   ⎇ branch * #PR"  for a git checkout,
 // or "   <folder>" (no glyph, dim) for a non-git folder.
 func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, selected bool) string {
@@ -571,9 +581,6 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	branch := repoInfo.Branch
 	if idx := strings.LastIndex(branch, "/"); idx != -1 {
 		branch = branch[idx+1:]
-	}
-	if len(branch) > 22 {
-		branch = branch[:19] + "…"
 	}
 	label := branch
 
@@ -622,6 +629,12 @@ func renderCheckoutHeader(item SidebarItem, repoInfo *git.RepoInfo, width int, s
 	if item.RemovalFailed {
 		summarySuffix += "  " + ErrorStyle.Render("✕ removal failed — d to retry")
 	}
+
+	// The branch gets whatever the badges leave, herdr-style: the fixed parts
+	// keep their width and the text ends in "…". 6 = indent, chevron, space and
+	// the selected pill's padding.
+	budget := width - 6 - ansi.StringWidth(dirty+prBadge+summarySuffix)
+	label = ansi.Truncate(label, max(budget, 8), "…")
 
 	if selected {
 		icon := SelectionMarker(true).Render(chevron)
