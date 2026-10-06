@@ -437,10 +437,16 @@ type Home struct {
 	hookWatcher *hooks.HookWatcher
 
 	// Focus mode (split view).
-	focusMode     bool
-	controlClient *tmux.ControlClient
-	cachedSidebar string // cached sidebar render for focus mode
-	sidebarDirty  bool   // true when sidebar needs rebuild
+	focusMode       bool
+	controlClient   *tmux.ControlClient
+	cachedSidebar   string             // cached sidebar render for focus mode
+	sidebarDirty    bool               // true when sidebar needs rebuild
+	sidebarWidth    int                // preferred dual-layout sidebar columns (from config; capped at render)
+	draggingSidebar bool               // left button went down on the sidebar border; motion resizes until release
+	previewSel      previewSelection   // drag-to-select in the preview pane (preview_select.go)
+	previewLines    []string           // last frame's preview lines, unhighlighted, for copying
+	previewSizes    map[string][2]int  // per session: the window size last sent by previewResize
+	previewScroll   previewScrollState // wheel scroll back through tmux history (preview_scroll.go)
 
 	// Filter.
 	filterInput  textinput.Model
@@ -687,6 +693,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// once the week rolls over (maybeRecapNewWeek).
 	h.statsRecapWeek = stats.LastFullWeekStart(time.Now())
 	h.drawerHeight = cfg.GetDrawerHeight()
+	h.sidebarWidth = cfg.GetSidebarWidth()
 	// Seed the What's New "seen" version only on a genuinely fresh install, so a
 	// brand-new install doesn't light up the badge for releases that predate it.
 	// An existing user meeting this feature for the first time also has an empty
@@ -953,6 +960,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.renderStats.RecordResize(msg.Width, msg.Height)
+		h.clearPreviewSelection() // its cells no longer line up with the text
 		resized := msg.Width != h.width || msg.Height != h.height
 		// Only log resizes after the initial one (startup always sends one).
 		if h.width > 0 && resized {
@@ -1540,6 +1548,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
+		h.sidebarWidth = h.cfg.GetSidebarWidth()
+		h.sidebarDirty = true
 		// Display toggles are live, but the density flag changes BuildFlatItems
 		// output (inter-group spacer rows), so rebuild the flattened list.
 		h.rebuildFlatItems()
@@ -1638,6 +1648,18 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.recordStats(stats.ActionPROpen)
 		return h, nil
 
+	case copySelectionMsg:
+		if msg.err != nil {
+			h.setError("selection_copy_failed", msg.err)
+			return h, nil
+		}
+		if msg.lines == 1 {
+			h.setInfo("Copied 1 line")
+		} else {
+			h.setInfo(fmt.Sprintf("Copied %d lines", msg.lines))
+		}
+		return h, nil
+
 	case copyPRLinkMsg:
 		if msg.err != nil {
 			h.setError("pr_link_copy_failed", msg.err)
@@ -1712,7 +1734,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return h, nil
 
+	case previewScrollMsg:
+		return h.handlePreviewScroll(msg)
+
 	case previewMsg:
+		if h.previewSel.active() || h.previewScroll.offset > 0 {
+			return h, nil // hold the text still under the highlight / scrolled view; refetched after
+		}
 		h.previewCache[msg.sessionID] = msg.content
 		h.previewCacheTime[msg.sessionID] = time.Now()
 		return h, nil
@@ -2802,6 +2830,8 @@ func (h *Home) renderBody() string {
 		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
+		// Below the sidebar panel and the one-row gap.
+		previewInner = h.notePreview(previewInner, s, 1, sidebarContentTop+sidebarHeight+1, innerW, previewHeight-2)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
@@ -2813,14 +2843,14 @@ func (h *Home) renderBody() string {
 		// ~40%, on a wide monitor (~250 cols) it shrinks to ~25% so the
 		// preview keeps its share. Cap at 45% of total so it never dominates
 		// a small terminal; floor at 22 cols so the headers don't collapse.
-		const sidebarTargetCols = 65
-		sidebarWidth := sidebarTargetCols
-		if cap := h.width * 45 / 100; sidebarWidth > cap {
-			sidebarWidth = cap
+		// The target is the user's sidebar_width (default 65), resizable with
+		// [ / ] or by dragging the border.
+		sidebarWidth := min(h.sidebarWidth, h.sidebarMaxWidth())
+		if sidebarWidth < config.SidebarWidthMin {
+			sidebarWidth = config.SidebarWidthMin
 		}
-		if sidebarWidth < 22 {
-			sidebarWidth = 22
-		}
+		// The border column plus the gap after it: the strip a drag grabs.
+		h.layout.sidebarEdge = mouseRect{x: sidebarWidth - 1, y: sidebarContentTop - 1, w: 1 + gap, h: contentHeight}
 		previewWidth := h.width - sidebarWidth - gap
 
 		sidebarInnerW := sidebarWidth - 2
@@ -2864,6 +2894,7 @@ func (h *Home) renderBody() string {
 		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
+		previewInner = h.notePreview(previewInner, s, sidebarWidth+gap+1, sidebarContentTop, previewInnerW, previewInnerH)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
@@ -3129,6 +3160,18 @@ func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 }
 
 func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Copy wins over everything below, focus mode included, so the agent never
+	// sees this Ctrl+C. Ctrl+Shift+C reaches us as plain Ctrl+C on terminals
+	// without extended keys (VTE, Terminal.app) — when the terminal lets it
+	// through at all — so both mean copy, as in herdr.
+	if h.previewSel.shown {
+		switch msg.String() {
+		case "ctrl+c", "ctrl+shift+c":
+			return h, h.copyPreviewSelection()
+		}
+	}
+	h.clearPreviewSelection()
+	h.resetPreviewScroll()
 	// An active frost run owns every key until the user leaves it — except
 	// fleet's own quit key, which ends the run and quits, as the help bar says.
 	if h.frost != nil {
@@ -3271,6 +3314,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "`": // open the terminal drawer + move focus into it
 		return h, h.openDrawerTyping()
+	case "[", "]":
+		return h, h.stepSidebarWidth(msg.String())
 	case "j", "down":
 		h.cursor = NextSelectableItem(h.flatItems, h.cursor, 1)
 		h.syncViewport()
@@ -3763,6 +3808,9 @@ func (h *Home) attachSession(s *session.Session) tea.Cmd {
 	h.attachedSessionID = s.ID
 	h.workerMu.Unlock()
 	attachStart := time.Now()
+	// The attach hands the window back to the terminal's size, so the next
+	// preview fetch has to fit it to the preview again.
+	delete(h.previewSizes, s.ID)
 
 	return tea.Exec(attachCmd{session: s.GetTmuxSession()}, func(err error) tea.Msg {
 		// CRITICAL: Clear isAttaching before returning the message.
@@ -6400,7 +6448,9 @@ func (h *Home) handleFocusKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (h *Home) fetchPreviewFresh(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
+	resize := h.previewResize(s)
 	return func() tea.Msg {
+		resize()
 		content, _ := ts.CapturePaneFresh()
 		return previewMsg{sessionID: id, content: content}
 	}
@@ -8234,7 +8284,9 @@ func copyClaudeSettingsFile(srcRepo, dstRepo string) {
 func (h *Home) fetchPreview(s *session.Session) tea.Cmd {
 	id := s.ID
 	ts := s.GetTmuxSession()
+	resize := h.previewResize(s)
 	return func() tea.Msg {
+		resize()
 		content, _ := ts.CapturePane()
 		return previewMsg{sessionID: id, content: content}
 	}
@@ -8558,6 +8610,9 @@ func (h *Home) selectedPreview() (*session.Session, string) {
 	s := h.selectedSession()
 	if s == nil {
 		return nil, ""
+	}
+	if sc := h.previewScroll; sc.offset > 0 && sc.content != "" && sc.sessionID == s.ID {
+		return s, sc.content
 	}
 	content := h.previewCache[s.ID]
 	return s, content
