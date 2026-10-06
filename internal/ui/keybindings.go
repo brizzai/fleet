@@ -63,6 +63,7 @@ var allKeyBindings = []KeyBinding{
 	// Global.
 	{Key: "`", BarKey: "`", BarDesc: "Term", Desc: "Toggle terminal drawer", Section: "global"},
 	{Key: "Ctrl+K", BarKey: "⌃K", BarDesc: "Cmd", Desc: "Command palette", Section: "global"},
+	{Key: "[ / ]", Desc: "Narrow / widen sidebar", Section: "global"},
 	{Key: "t", Desc: "My tickets", Section: "global"},
 	{Key: "i", Desc: "Your stats", Section: "global"},
 	{Key: "S", BarKey: "S", BarDesc: "Set", Desc: "Open settings", Section: "global"},
@@ -70,7 +71,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "X", Desc: "Dismiss on-screen tip", Section: "global"},
 	{Key: "!", BarKey: "!", BarDesc: "Bug", Desc: "Bug report / diagnostics", Section: "global"},
 	{Key: "?", BarKey: "?", BarDesc: "Help", Desc: "Toggle help", Section: "global"},
-	{Key: "Ctrl+C", BarKey: "⌃C", BarDesc: "Quit", Desc: "Quit", Section: "global"},
+	{Key: "Ctrl+C", BarKey: "⌃C", BarDesc: "Quit", Desc: "Quit (press twice)", Section: "global"},
 
 	// Terminal drawer (shown in overlay only, separated by blank line). It's
 	// always-typing — keys go to the shell; Ctrl chords drive the chrome.
