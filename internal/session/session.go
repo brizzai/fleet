@@ -112,6 +112,12 @@ type Session struct {
 	// Guarded by mu (written by the worker's wake sweep, read while rendering).
 	snoozedUntil time.Time
 
+	// groupID is the session group this session belongs to ("" = ungrouped).
+	// SQLite is authoritative: another fleet process (a child spawned through
+	// `fleet wt`) can move this session into a group, and the UI's sync sweep
+	// mirrors that here. Guarded by mu.
+	groupID string
+
 	hookStatus       string
 	hookReason       string // SessionEnd's reason for the hook above, "" on every other event
 	hookUpdatedAt    time.Time
@@ -288,10 +294,15 @@ func accountConfigDir(email string) string {
 	return fn(email)
 }
 
+// InstanceIDEnvVar names the variable every session pane exports with its own
+// fleet session id. Hooks read it to know which session fired; `fleet wt` /
+// `fleet add` read it to know which session launched them (group inheritance).
+const InstanceIDEnvVar = "FLEET_INSTANCE_ID"
+
 // sessionEnv returns the env vars to set on the tmux session for this fleet session.
 func (s *Session) sessionEnv() []string {
 	env := []string{
-		fmt.Sprintf("FLEET_INSTANCE_ID=%s", s.ID),
+		InstanceIDEnvVar + "=" + s.ID,
 		"ZSH_DOTENV_PROMPT=false", // Auto-source .env without prompting (oh-my-zsh dotenv plugin).
 	}
 	// Per-account auth. Claude only: this points at a claude.ai login the
@@ -550,6 +561,21 @@ func (s *Session) SetSnoozedUntil(until time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snoozedUntil = until
+}
+
+// GroupID returns the session group this session belongs to ("" = ungrouped).
+func (s *Session) GroupID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.groupID
+}
+
+// SetGroupID moves the session into a group ("" = out of every group). Memory
+// only — callers persist through StateDB.SetSessionGroup.
+func (s *Session) SetGroupID(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.groupID = id
 }
 
 // IsSnoozed reports whether the session's own snooze is still in effect at now.
@@ -2065,6 +2091,7 @@ func (s *Session) ToRow() *SessionRow {
 		TitleGenerated:  s.TitleGenerated,
 		PromptCount:     s.PromptCount,
 		SnoozedUntil:    s.snoozedUntil,
+		GroupID:         s.groupID,
 	}
 }
 
@@ -2172,6 +2199,7 @@ func FromRow(row *SessionRow) *Session {
 		// reminder and clear the row. Every reader treats a past deadline as
 		// not snoozed, so nothing renders stale in the meantime.
 		snoozedUntil: row.SnoozedUntil,
+		groupID:      row.GroupID,
 		tmuxSession:  ts,
 	}
 }

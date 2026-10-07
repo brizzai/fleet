@@ -99,6 +99,7 @@ const (
 	BarContextOrigin                     // cursor on an origin header (▾ brizzai 16)
 	BarContextCheckout                   // cursor on a checkout header (▾ new-ui #100)
 	BarContextSession                    // cursor on a real session row
+	BarContextGroup                      // cursor on a session group's header (▾ BRZ-12 · Fix login 3)
 )
 
 // HelpBarBindings returns ALL bar bindings; kept for places that want the
@@ -152,6 +153,10 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 	case BarContextOrigin:
 		context = []struct{ Key, Desc string }{
 			{"⏎", "Expand"}, {"d", "Forget"}, {"w", "Wktree"}, {".", "Menu"},
+		}
+	case BarContextGroup:
+		context = []struct{ Key, Desc string }{
+			{"⏎", "Expand"}, {"R", "Rename"}, {"z", "Snooze"}, {"d", "Del"}, {"n", "New"}, {".", "Menu"},
 		}
 	default: // empty
 		context = []struct{ Key, Desc string }{

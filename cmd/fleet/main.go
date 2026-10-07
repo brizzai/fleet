@@ -253,17 +253,50 @@ func runList() {
 		return
 	}
 
+	groups, err := storage.LoadGroups()
+	if err != nil {
+		groups = nil // the listing is still useful without the column filled in
+	}
+	labels := cliGroupLabels(groups, rows)
+
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tPATH")
+	fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tGROUP\tPATH")
 	for _, r := range rows {
 		// Show short ID.
 		shortID := r.ID
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", shortID, r.Title, r.Status, r.ProjectPath)
+		group := labels[r.GroupID]
+		if group == "" {
+			group = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", shortID, r.Title, r.Status, group, r.ProjectPath)
 	}
 	w.Flush()
+}
+
+// cliGroupLabels names each group for `fleet list`: its explicit name, else
+// its lead session's title — the same rule the sidebar applies, minus the
+// ticket prefix (which needs git and tracker config a listing shouldn't pay
+// for).
+func cliGroupLabels(groups []*session.Group, rows []*session.SessionRow) map[string]string {
+	titles := make(map[string]string, len(rows))
+	for _, r := range rows {
+		titles[r.ID] = r.Title
+	}
+	out := make(map[string]string, len(groups))
+	for _, g := range groups {
+		label := g.Name
+		if label == "" {
+			label = titles[g.LeadSessionID]
+		}
+		if label == "" {
+			label = "group " + g.ID
+		}
+		out[g.ID] = label
+	}
+	return out
 }
 
 func runRemove(idPrefix string) {
@@ -303,6 +336,16 @@ func runRemove(idPrefix string) {
 		_ = ts.Kill()
 	}
 
+	// A group this session led keeps the label it was showing rather than
+	// renaming itself after whichever member survives.
+	if groups, err := storage.LoadGroups(); err == nil {
+		for _, g := range groups {
+			if g.LeadSessionID == match.ID {
+				_ = storage.RetireGroupLead(g.ID, match.Title)
+			}
+		}
+	}
+
 	if err := storage.DeleteSession(match.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to delete session: %v\n", err)
 		os.Exit(1)
@@ -332,12 +375,16 @@ func printUsage() {
 Usage:
   fleet              Launch TUI
   fleet add [path]   Add a new session in a directory (default: current)
-                           (--agent, --account, --prompt, --model, --effort)
+                           (--agent, --account, --prompt, --model, --effort,
+                            --group, --no-group)
   fleet list         List all sessions
   fleet remove <id>  Remove a session
   fleet worktree <branch>  Create a git worktree and start a session in it
                            (--base, --path, --agent, --account, --no-session,
-                            --prompt, --ticket, --model, --effort)
+                            --prompt, --ticket, --model, --effort,
+                            --group, --no-group)
+                           Run from inside a fleet session, add and worktree
+                           put the new session in that session's sidebar group.
   fleet send <session> <message>  Send a message to a running session
   fleet skill <install|uninstall|status>  Install the fleet agent skill, which
                            teaches Claude Code, Codex, Cursor, OpenCode, and Copilot how

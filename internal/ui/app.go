@@ -103,6 +103,11 @@ type (
 	repoDeleteMsg struct {
 		repoPath         string
 		destroyWorkspace bool
+		// scope is the session group the header sits in ("" = the top-level
+		// tree). Only sessions rendering in that scope are deleted: a checkout
+		// can hold sessions in a group and at the top level at once, and a
+		// delete never reaches past the header it was pressed on.
+		scope string
 	}
 	// originDeleteMsg forgets a whole origin group: every checkout under it
 	// (the main repo plus any worktrees) and all their sessions. Each target
@@ -117,6 +122,7 @@ type (
 	originDeleteTarget struct {
 		repoPath string
 		destroy  bool
+		scope    string // see repoDeleteMsg.scope
 	}
 	pendingDeleteExpireMsg struct {
 		nonce string
@@ -148,6 +154,7 @@ type (
 		ghAvailable  bool
 		warning      string
 		prCache      map[string]*session.PRCacheRow
+		groups       []*session.Group
 		err          error
 	}
 	// adoptSessionsMsg carries session rows found in SQLite that this TUI
@@ -380,6 +387,24 @@ type Home struct {
 	// idle-suspend sweep, which lives there because it probes sysctl, expiry is
 	// clock arithmetic and a tiny SQLite write.)
 	groupSnooze map[string]time.Time
+	// sessionGroups are the session groups, oldest first — the sidebar order.
+	// SQLite is authoritative (a `fleet wt` run from inside a session creates
+	// and joins groups from another process); the sync sweep reconciles this
+	// copy. Update-goroutine only.
+	sessionGroups []*session.Group
+	// groupGen counts local group mutations. The sync sweep stamps the value it
+	// read SQLite under, and a reply stamped before a later local change is
+	// dropped rather than reverting that change in memory for a sweep.
+	groupGen atomic.Int64
+	// createGroup is the session group the in-flight create joins: the group
+	// the cursor was in when the user started it (`a`/`A`/`n`/`w`). Captured at
+	// the keypress, because a worktree create finishes long after the cursor
+	// has moved on. "" = top level.
+	createGroup string
+	// ticketKeysByRepo memoizes ticketing.Keys per checkout for group labels,
+	// which are resolved on every rebuild (Update goroutine) and would
+	// otherwise re-read .fleet.json each time.
+	ticketKeysByRepo map[string][]string
 	// snoozeMuted is the resolved "is this session attention-muted" answer for
 	// every session, recomputed in rebuildFlatItems. Exists so fleet-wide
 	// consumers (statusCountsLine) consult the same resolution the sidebar rows
@@ -1233,6 +1258,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.WorkspaceName = msg.workspaceName
 		s.ForkFromID = msg.parentClaudeSessionID
 		s.Agent = ag
+		if h.groupByID(msg.group) != nil {
+			s.SetGroupID(msg.group)
+		}
 		// Inherit rather than re-pick: the fork resumes the parent's
 		// conversation, so it has to authenticate as the account that
 		// conversation belongs to. A fork whose account was chosen afresh would
@@ -1293,6 +1321,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case adoptSessionsMsg:
 		return h.handleAdoptSessions(msg)
+
+	case groupSyncMsg:
+		return h.handleGroupSync(msg)
 
 	case externalRemovalsMsg:
 		return h.handleExternalRemovals(msg)
@@ -1476,7 +1507,13 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setInfo("That row is gone — nothing to act on")
 			return h, nil
 		}
-		h.logAction("context menu: "+msg.id, "", true)
+		// The group picker's ids carry a group id; the action log and the
+		// first-run trace get the enum part only.
+		logged := msg.id
+		if strings.HasPrefix(logged, moveToGroupPrefix) {
+			logged = strings.TrimSuffix(moveToGroupPrefix, ":")
+		}
+		h.logAction("context menu: "+logged, "", true)
 		return h.dispatchCommand(msg.id)
 
 	case reloadAllResultMsg:
@@ -1501,6 +1538,14 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setInfo(fmt.Sprintf("Reloaded %d sessions (%d skipped)", msg.restarted, msg.skipped))
 		}
 		return h, nil
+
+	case groupRenameMsg:
+		h.renameGroup(msg.id, msg.name)
+		return h, nil
+
+	case groupCreateMsg:
+		h.createGroupForSession(msg.sessionID, msg.name)
+		return h, h.fetchPreviewForSelected()
 
 	case sessionRenameMsg:
 		if s, ok := h.sessionByID[msg.id]; ok {
@@ -1795,14 +1840,20 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ID:       generatePendingID(),
 			Name:     msg.name,
 			RepoPath: msg.repoPath,
+			// Decided now: the create finishes seconds later, by which time the
+			// cursor — and the next create's group — may be anywhere.
+			GroupID: h.takeCreateGroup(),
 		}
 		h.pendingWorkspaces = append(h.pendingWorkspaces, pw)
 
 		// Expand the origin group and the checkout, then rebuild sidebar so the
 		// phantom is visible — when creation is triggered from an origin header the
 		// group may be collapsed, which would otherwise hide the phantom row.
-		h.setExpanded(OriginExpandKey(h.originOf(msg.repoPath)), true)
-		h.setExpanded(msg.repoPath, true)
+		if pw.GroupID != "" {
+			h.setExpanded(GroupExpandKey(pw.GroupID), true)
+		}
+		h.setExpanded(scopedKey(pw.GroupID, OriginExpandKey(h.originOf(msg.repoPath))), true)
+		h.setExpanded(scopedKey(pw.GroupID, msg.repoPath), true)
 		h.rebuildFlatItems()
 
 		// Auto-select the phantom entry.
@@ -1873,6 +1924,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}, spinnerTickCmd)
 
 	case workspaceCreateResultMsg:
+		createdGroup := h.pendingGroup(msg.pendingID)
 		h.removePendingWorkspace(msg.pendingID)
 
 		if msg.err != nil {
@@ -1923,6 +1975,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			title:         msg.info.Name,
 			workspaceName: msg.info.Name,
 			prompt:        prompt,
+			group:         createdGroup,
+			groupSet:      true,
 		})
 
 	case paletteTicketsMsg:
@@ -2191,6 +2245,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.warning != "" {
 			h.setError("load_sessions_warning", fmt.Errorf("%s", msg.warning))
 		}
+		h.sessionGroups = msg.groups
 		h.sessions = msg.sessions
 		h.shells = msg.shells
 		h.rebuildSessionMap()
@@ -3340,6 +3395,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "a":
 		// Instant session at current repo path.
+		h.beginCreate()
 		repoPath := h.resolveCurrentRepo()
 		if repoPath == "" {
 			h.newDialog.Show()
@@ -3353,6 +3409,7 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		})
 	case "A":
 		// Session creation dialog with agent picker.
+		h.beginCreate()
 		repoPath := h.resolveCurrentRepo()
 		if repoPath == "" {
 			h.newDialog.Show()
@@ -3362,10 +3419,12 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "n":
 		// New session at any repo path.
+		h.beginCreate()
 		h.newDialog.Show()
 		return h, nil
 	case "w":
 		// New worktree session (works on a session, checkout header, or origin header).
+		h.beginCreate()
 		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
 			h.setInfo("no repo selected")
@@ -3938,6 +3997,12 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 			h.setInfo(conflict.Message(msg.account))
 		}
 	}
+	if !msg.groupSet {
+		msg.group = h.takeCreateGroup()
+	}
+	if h.groupByID(msg.group) == nil {
+		msg.group = "" // dissolved while the create was in flight
+	}
 	// msg.prompt is whatever the caller set and nothing more. Deliberately no
 	// inference here: a seeded first message is the worktree-creation gesture
 	// ("start on this ticket"), and a session added by hand to a checkout that
@@ -4349,6 +4414,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	s.WorkspaceName = msg.workspaceName
 	s.Agent = msg.agent
 	s.Account = msg.account
+	s.SetGroupID(msg.group)
 	if msg.resumeClaudeID != "" {
 		s.ClaudeSessionID = msg.resumeClaudeID
 	}
@@ -4439,9 +4505,11 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 	h.noteStatsSessions(s)
 	h.recordStats(stats.ActionSessionNew)
 
-	// Ensure the repo group is expanded for the new session and pin it.
+	// Ensure the repo group is expanded for the new session and pin it —
+	// inside its session group, when it joined one.
 	repo := session.GetRepoRoot(s.ProjectPath)
-	h.setExpanded(repo, true)
+	h.revealSession(s)
+	h.setExpanded(scopedKey(h.effectiveGroup(s), repo), true)
 	if !h.pinnedRepos[repo] {
 		h.pinnedRepos[repo] = true
 		if err := h.storage.PinRepo(repo); err != nil {
@@ -4674,6 +4742,9 @@ func (h *Home) canAutoExpand(repo string) bool {
 func (h *Home) deleteAtCursor() tea.Cmd {
 	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
 		item := h.flatItems[h.cursor]
+		if item.IsGroupHeader {
+			return h.confirmDeleteGroup(item)
+		}
 		if item.IsOriginHeader {
 			return h.confirmDeleteOrigin(item)
 		}
@@ -4725,14 +4796,16 @@ type worktreeHoldersScannedMsg struct {
 // header "forgets" the repo from fleet (deletes its sessions + unpins, folder kept).
 func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	repoPath := item.RepoPath
-	count := h.countSessionsForRepo(repoPath)
+	scope := item.GroupID
+	count := len(h.sessionsInScope(repoPath, scope))
+	outside := h.countSessionsOutsideScope(repoPath, scope)
 	// A worktree whose removal previously failed leaves an orphaned dir that git
 	// may no longer classify as a worktree; treat it as one so the retry routes
 	// to destroy (not instant-unpin) and actually removes the leftover.
 	isWorktree := h.repoIsWorktree(repoPath) || h.failedWorktreeRemovals[repoPath]
 
 	// Empty plain repo: instant unpin, no dialog (unchanged behavior).
-	if count == 0 && !isWorktree {
+	if count == 0 && !isWorktree && outside == 0 {
 		return h.unpinRepoHeader(repoPath)
 	}
 
@@ -4740,6 +4813,20 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	var title string
 	var details []string
 	switch {
+	case outside > 0:
+		// Sessions in another tree (a session group, or the top level) still
+		// live in this checkout, so the directory stays whatever it is.
+		title = "Delete sessions?"
+		details = []string{
+			fmt.Sprintf("Deletes %d session(s) here", count),
+			keptOutsideNote(outside, scope),
+			"Press u to undo within 5s",
+		}
+		h.logAction("delete scoped sessions", base, true)
+		h.confirmDialog.ShowDanger(title, base, details, func() tea.Msg {
+			return repoDeleteMsg{repoPath: repoPath, scope: scope}
+		})
+		return nil
 	case isWorktree && count > 0:
 		title = "Remove Worktree?"
 		details = append([]string{fmt.Sprintf("Deletes %d session(s) + the worktree directory", count)}, h.worktreeDeleteWarnings(repoPath)...)
@@ -4757,7 +4844,7 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 
 	h.logAction("delete "+map[bool]string{true: "worktree", false: "repo"}[isWorktree], base, true)
 	h.confirmDialog.ShowDanger(title, base, details, func() tea.Msg {
-		return repoDeleteMsg{repoPath: repoPath, destroyWorkspace: isWorktree}
+		return repoDeleteMsg{repoPath: repoPath, destroyWorkspace: isWorktree, scope: scope}
 	})
 
 	// Removing a worktree kills the dev processes still holding it. The lsof
@@ -4830,7 +4917,8 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 	// worktree is created, when OriginKey/IsWorktreeRepo are still settling.
 	gitSnap := h.gitInfo()
 
-	checkouts := h.checkoutsForOriginIn(gitSnap, item.OriginKey)
+	scope := item.GroupID
+	checkouts := h.checkoutsInScope(gitSnap, item.OriginKey, scope)
 	if len(checkouts) == 0 {
 		return nil
 	}
@@ -4848,10 +4936,15 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 	var destroyDirs []string
 	dirtyWorktrees := 0
 	hasImmediateDestroy := false
+	keptWorktrees := 0
 	for _, repo := range checkouts {
 		isWorktree := repoIsWorktreeIn(gitSnap, repo) || h.failedWorktreeRemovals[repo]
 		destroy := removeWorktrees && isWorktree
-		targets = append(targets, originDeleteTarget{repoPath: repo, destroy: destroy})
+		if destroy && h.countSessionsOutsideScope(repo, scope) > 0 {
+			destroy = false // still used by a session this delete doesn't reach
+			keptWorktrees++
+		}
+		targets = append(targets, originDeleteTarget{repoPath: repo, destroy: destroy, scope: scope})
 		if destroy {
 			destroyDirs = append(destroyDirs, repo)
 			if info := gitSnap[repo]; info != nil && info.IsDirty {
@@ -4859,7 +4952,7 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 			}
 			// An empty worktree is removed immediately (deferDeleteRepo's
 			// len(sess)==0 branch) — that removal is not undoable.
-			if h.countSessionsForRepo(repo) == 0 {
+			if len(h.sessionsInScope(repo, scope)) == 0 {
 				hasImmediateDestroy = true
 			}
 		}
@@ -4869,7 +4962,7 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 	// warnings worktreeDeleteWarnings surfaces for a single checkout).
 	sessionCount, runningCount := 0, 0
 	for _, s := range h.sessions {
-		if !inScope[session.GetRepoRoot(s.ProjectPath)] {
+		if !inScope[session.GetRepoRoot(s.ProjectPath)] || h.effectiveGroup(s) != scope {
 			continue
 		}
 		sessionCount++
@@ -4891,6 +4984,9 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 		}
 	} else {
 		details = append(details, "No directories removed — checkouts just un-tracked")
+	}
+	if keptWorktrees > 0 {
+		details = append(details, fmt.Sprintf("Keeps %d worktree(s) used outside this %s", keptWorktrees, scopeNoun(scope)))
 	}
 	// Surface the same safety warnings the single-checkout path shows, aggregated.
 	if dirtyWorktrees > 0 {
@@ -4971,7 +5067,7 @@ func checkoutPathLines(checkouts []string) []string {
 func (h *Home) deferDeleteOrigin(msg originDeleteMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, t := range msg.targets {
-		_, cmd := h.deferDeleteRepo(repoDeleteMsg{repoPath: t.repoPath, destroyWorkspace: t.destroy})
+		_, cmd := h.deferDeleteRepo(repoDeleteMsg{repoPath: t.repoPath, destroyWorkspace: t.destroy, scope: t.scope})
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -5111,12 +5207,19 @@ func (h *Home) unpinRepoHeader(repoPath string) tea.Cmd {
 // session carries the container-level side effects (unpin, optional worktree destroy).
 // An empty worktree (no sessions) is removed directly in the background.
 func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
-	var sess []*session.Session
-	for _, s := range h.sessions {
-		if session.GetRepoRoot(s.ProjectPath) == msg.repoPath {
-			sess = append(sess, s)
-		}
+	sess := h.sessionsInScope(msg.repoPath, msg.scope)
+	// Re-checked at execution, not trusted from the dialog: a session can join
+	// this checkout from another tree (a `fleet wt` child, a move) while the
+	// confirm is up, and removing the directory would delete its work.
+	outside := h.countSessionsOutsideScope(msg.repoPath, msg.scope)
+	if outside > 0 {
+		msg.destroyWorkspace = false
 	}
+	// The pin belongs to the repo, not to a session group: a group-scoped
+	// delete unpins only a checkout it is removing from disk. At the top level
+	// the long-standing rule holds — forgetting a repo unpins it — as long as
+	// no grouped session still lives there.
+	unpin := outside == 0 && (msg.scope == "" || msg.destroyWorkspace)
 
 	// Remove the worktree's shells up front so their tmux sessions (and the dev
 	// servers they host) don't pin the dir against `git worktree remove`. Only
@@ -5130,6 +5233,9 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 
 	var cmds []tea.Cmd
 	if len(sess) == 0 {
+		if !unpin {
+			return h, nil
+		}
 		// Empty worktree: unpin + background `git worktree remove` (not undoable;
 		// the confirm dialog is the safety gate, nothing live to lose).
 		h.unpinRepoHeader(msg.repoPath)
@@ -5163,8 +5269,8 @@ func (h *Home) deferDeleteRepo(msg repoDeleteMsg) (tea.Model, tea.Cmd) {
 
 	for i, s := range sess {
 		dm := sessionDeleteMsg{id: s.ID}
-		if i == len(sess)-1 {
-			dm.unpinRepo = true
+		if i == len(sess)-1 && (unpin || msg.destroyWorkspace) {
+			dm.unpinRepo = unpin
 			dm.repoPath = msg.repoPath
 			if msg.destroyWorkspace {
 				dm.destroyWorkspace = true
@@ -5477,6 +5583,8 @@ func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	}
 	h.lastAdoptSweepAt = time.Now()
 
+	// Stamped before the read — see groupSyncMsg.gen.
+	groupGen := h.groupGen.Load()
 	rows, err := h.storage.LoadSessions()
 	if err != nil {
 		debuglog.Logger.Error("adopt sweep: failed to load sessions", "err", err)
@@ -5484,6 +5592,9 @@ func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	}
 	h.adoptExternalSessions(rows, known)
 	h.sendExternalRemovals(rows, known)
+	// After the adopt send, so a CLI-created child and the group it joined
+	// land in the same pass.
+	h.sendGroupSync(groupGen, rows)
 }
 
 // sendExternalRemovals reports what another process took away, every sweep: the
@@ -5734,6 +5845,7 @@ func (h *Home) forkSelected() tea.Cmd {
 	workspaceName := s.WorkspaceName
 	parentAgent := s.Agent
 	parentAccount := s.Account
+	parentGroup := h.effectiveGroup(s)
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		claudeSessionID, stale := s.ResolveLaunchID()
@@ -5749,6 +5861,7 @@ func (h *Home) forkSelected() tea.Cmd {
 			agent:                 parentAgent,
 			account:               parentAccount,
 			accountSet:            true,
+			group:                 parentGroup,
 		}
 	}
 }
@@ -5793,6 +5906,7 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 	// something that doesn't hold that conversation.
 	parentAgent := parent.Agent
 	parentAccount := parent.Account
+	parentGroup := h.effectiveGroup(parent)
 	return func() tea.Msg {
 		// Off the Update loop: ResolveLaunchID may read transcripts.
 		parentClaudeSessionID, stale := parent.ResolveLaunchID()
@@ -5808,6 +5922,7 @@ func (h *Home) dispatchForkToWorktree(ctx *forkContext, destPath, destWorkspaceN
 			agent:                 parentAgent,
 			account:               parentAccount,
 			accountSet:            true,
+			group:                 parentGroup,
 		}
 	}
 }
@@ -5844,6 +5959,7 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 		return nil
 	}
 	h.logAction("fork to worktree", s.Title, true)
+	h.beginCreate()
 	h.pendingForkCtx = &forkContext{
 		parentSession:     s,
 		parentSessionID:   s.ID,
@@ -5855,16 +5971,17 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 }
 
 // expandKeyFor returns the repoExpanded key for the header at cursor — the
-// origin key (prefixed) for origin headers, the repo path for checkouts.
-// Empty when the cursor isn't on a header.
+// group key for a session group, the origin key (prefixed) for origin headers,
+// the repo path for checkouts, each scoped to the group the row renders in.
+// A session row answers with its checkout's key. Empty otherwise.
 func (h *Home) expandKeyFor(item SidebarItem) string {
 	switch {
+	case item.IsGroupHeader:
+		return GroupExpandKey(item.GroupID)
 	case item.IsOriginHeader:
-		return OriginExpandKey(item.OriginKey)
-	case item.IsCheckoutHeader:
-		return item.RepoPath
-	case item.Session != nil:
-		return session.GetRepoRoot(item.Session.ProjectPath)
+		return item.originFoldKey()
+	case item.IsCheckoutHeader, item.Session != nil:
+		return item.checkoutFoldKey()
 	}
 	return ""
 }
@@ -5968,7 +6085,7 @@ func (h *Home) toggleRepoGroup() {
 		return
 	}
 	item := h.flatItems[h.cursor]
-	if !item.IsOriginHeader && !item.IsCheckoutHeader {
+	if !item.IsGroupHeader && !item.IsOriginHeader && !item.IsCheckoutHeader {
 		return
 	}
 	key := h.expandKeyFor(item)
@@ -5979,8 +6096,7 @@ func (h *Home) toggleRepoGroup() {
 	h.rebuildFlatItems()
 	// Keep cursor on the same header.
 	for i, it := range h.flatItems {
-		if (it.IsOriginHeader && it.OriginKey == item.OriginKey && item.IsOriginHeader) ||
-			(it.IsCheckoutHeader && it.RepoPath == item.RepoPath && item.IsCheckoutHeader) {
+		if sameRow(it, item) {
 			h.cursor = i
 			break
 		}
@@ -6012,13 +6128,14 @@ func (h *Home) collapseRepoAtCursor() {
 	}
 	h.setExpanded(key, false)
 	h.rebuildFlatItems()
-	// Move cursor to the matching header row.
+	// Move cursor to the matching header row: the header itself, or — from a
+	// session row — its checkout header in the same tree.
+	header := item
+	if item.Session != nil {
+		header = SidebarItem{IsCheckoutHeader: true, GroupID: item.GroupID, RepoPath: item.RepoPath}
+	}
 	for i, fi := range h.flatItems {
-		if item.IsOriginHeader && fi.IsOriginHeader && fi.OriginKey == item.OriginKey {
-			h.cursor = i
-			break
-		}
-		if !item.IsOriginHeader && fi.IsCheckoutHeader && fi.RepoPath == h.expandKeyFor(item) {
+		if sameRow(fi, header) {
 			h.cursor = i
 			break
 		}
@@ -6082,21 +6199,14 @@ func (h *Home) jumpToNextAttentionSession() {
 			prevID = cur.Session.ID
 		}
 		for i, it := range cand {
-			switch {
-			case cur.Session != nil && it.Session != nil && it.Session.ID == cur.Session.ID:
+			if sameRow(it, cur) {
 				start = i
-			case cur.IsOriginHeader && it.IsOriginHeader && it.OriginKey == cur.OriginKey:
-				start = i
-			case cur.IsCheckoutHeader && it.IsCheckoutHeader && it.RepoPath == cur.RepoPath:
-				start = i
-			}
-			if start != -1 {
 				break
 			}
 		}
 	}
 
-	findNext := func(status session.Status) *session.Session {
+	findNext := func(status session.Status) (SidebarItem, bool) {
 		for off := 1; off <= n; off++ {
 			it := cand[(start+off+n)%n] // +n keeps the index non-negative when start == -1
 			// Snoozed sessions are muted from the rotation — that IS the
@@ -6106,24 +6216,26 @@ func (h *Home) jumpToNextAttentionSession() {
 				continue
 			}
 			if !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status {
-				return it.Session
+				return it, true
 			}
 		}
-		return nil
+		return SidebarItem{}, false
 	}
 
-	target := findNext(session.StatusWaiting)
-	if target == nil {
-		target = findNext(session.StatusFinished)
+	hit, ok := findNext(session.StatusWaiting)
+	if !ok {
+		hit, ok = findNext(session.StatusFinished)
 	}
-	if target == nil {
+	if !ok {
 		debuglog.Logger.Debug("spacejump: no waiting/finished target outside collapsed origins", "cursor", h.cursor)
 		return // Silent no-op.
 	}
+	target := hit.Session
 
 	// Reveal just the target's checkout (its origin is already expanded — a
-	// collapsed origin would have excluded it above), then land on it.
-	h.repoExpanded[session.GetRepoRoot(target.ProjectPath)] = true
+	// collapsed origin would have excluded it above), then land on it. The key
+	// is the row's own, so a checkout inside a session group opens there.
+	h.repoExpanded[hit.checkoutFoldKey()] = true
 	h.rebuildFlatItems()
 	for i, it := range h.flatItems {
 		if !it.IsRepoHeader && it.Session != nil && it.Session.ID == target.ID {
@@ -6143,12 +6255,12 @@ func (h *Home) jumpToNextAttentionSession() {
 func (h *Home) buildJumpTree() []SidebarItem {
 	exp := make(map[string]bool, len(h.repoExpanded))
 	for k, v := range h.repoExpanded {
-		if strings.HasPrefix(k, originExpandPrefix) {
-			exp[k] = v // keep origin collapse; drop checkout keys → default expanded
+		if !isCheckoutExpandKey(k) {
+			exp[k] = v // keep origin and group collapse; drop checkout keys → default expanded
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
-	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
+	return BuildFlatItems(h.sessions, h.pendingWorkspaces, h.sidebarGroups(), exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
 }
 
 // jumpToNextAttentionPR moves the cursor to the first session of the next
@@ -6188,7 +6300,7 @@ func (h *Home) jumpToNextAttentionPR() {
 			if !it.IsCheckoutHeader {
 				continue
 			}
-			if snoozeState(nil, it.OriginKey, it.RepoPath, h.groupSnooze, now).Muted {
+			if snoozeState(nil, it.GroupID, it.OriginKey, it.RepoPath, h.groupSnooze, now).Muted {
 				continue
 			}
 			info := gitInfo[it.RepoPath]
@@ -6209,10 +6321,10 @@ func (h *Home) jumpToNextAttentionPR() {
 	}
 	h.cursor = target
 	if hdr := h.flatItems[target]; hdr.SessionCount > 0 {
-		h.repoExpanded[hdr.RepoPath] = true
+		h.repoExpanded[hdr.checkoutFoldKey()] = true
 		h.rebuildFlatItems()
 		for i, it := range h.flatItems {
-			if it.Session != nil && it.RepoPath == hdr.RepoPath {
+			if it.Session != nil && it.RepoPath == hdr.RepoPath && it.GroupID == hdr.GroupID {
 				h.cursor = i
 				break
 			}
@@ -6224,7 +6336,21 @@ func (h *Home) jumpToNextAttentionPR() {
 }
 
 func (h *Home) renameSelected() tea.Cmd {
-	if h.cursor < 0 || h.cursor >= len(h.flatItems) || h.flatItems[h.cursor].IsRepoHeader {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return nil
+	}
+	if item := h.flatItems[h.cursor]; item.IsGroupHeader {
+		// Prefilled with the explicit name only: an unnamed group's label is
+		// derived, and committing it unchanged would freeze a label that is
+		// meant to follow its lead.
+		name := ""
+		if g := h.groupByID(item.GroupID); g != nil {
+			name = g.Name
+		}
+		h.renameDialog.ShowGroup(item.GroupID, name)
+		return nil
+	}
+	if h.flatItems[h.cursor].IsRepoHeader {
 		return nil
 	}
 	s := h.flatItems[h.cursor].Session
@@ -6483,6 +6609,10 @@ func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
 	row := s.ToRow()
 	repoPath := session.GetRepoRoot(s.ProjectPath)
 
+	// A group this session led keeps the label it is showing now, rather than
+	// falling back to "group · N sessions" once its lead is gone.
+	h.retireLeadIfLeaving(s, h.effectiveGroup(s))
+
 	// Delete from SQLite immediately (crash-safe).
 	if err := h.storage.DeleteSession(msg.id); err != nil {
 		debuglog.Logger.Error("failed to delete session from storage", "id", msg.id, "err", err)
@@ -6561,8 +6691,9 @@ func (h *Home) undoDelete() (tea.Model, tea.Cmd) {
 	h.rebuildSessionMap()
 	h.workerMu.Unlock()
 
-	// Expand repo group and rebuild sidebar.
-	h.repoExpanded[pd.RepoPath] = true
+	// Expand repo group and rebuild sidebar — in the session group it
+	// returns to, when it had one.
+	h.repoExpanded[scopedKey(h.effectiveGroup(pd.Session), pd.RepoPath)] = true
 	h.rebuildFlatItems()
 
 	// Move cursor to restored session.
@@ -6598,6 +6729,17 @@ func (h *Home) handlePendingDeleteExpire(msg pendingDeleteExpireMsg) (tea.Model,
 	// Move into finalizingDeletes so an in-flight cleanup is visible to
 	// finalizeAllPendingDeletes if the user quits mid-finalize.
 	h.finalizingDeletes = append(h.finalizingDeletes, pd)
+
+	// The undo window was what kept an emptied session group alive.
+	if pd.Row != nil && pd.Row.GroupID != "" {
+		before := len(h.sessionGroups)
+		h.collectEmptyGroups()
+		if len(h.sessionGroups) != before {
+			h.rebuildFlatItems()
+			h.clampCursor()
+			h.syncViewport()
+		}
+	}
 
 	return h, h.finalizeDelete(pd)
 }
@@ -8283,6 +8425,8 @@ func (h *Home) cursorBarContext() BarContext {
 	}
 	item := h.flatItems[h.cursor]
 	switch {
+	case item.IsGroupHeader:
+		return BarContextGroup
 	case item.IsOriginHeader:
 		return BarContextOrigin
 	case item.IsCheckoutHeader:
@@ -8310,6 +8454,20 @@ func (h *Home) cursorBreadcrumb(bg color.Color) string {
 	sep := dimSeg.Render(" › ")
 
 	var parts []string
+	if item.GroupID != "" {
+		// Inside a session group the group is the outermost container, and
+		// the only thing on the row that says why it sits apart from its repo.
+		label := item.GroupLabel
+		if label == "" {
+			if g := h.groupByID(item.GroupID); g != nil {
+				label = h.groupLabel(g)
+			}
+		}
+		if len(label) > 30 {
+			label = label[:29] + "…"
+		}
+		parts = append(parts, segStyle.Render(label))
+	}
 	if item.OriginKey != "" {
 		// Show the full origin (e.g. "brizzai/fleet") so the breadcrumb
 		// names both the owner AND the repo, not just the repo. Local
@@ -8507,9 +8665,8 @@ func (h *Home) jumpToSlot(slot int) (tea.Model, tea.Cmd) {
 	// collapsed, so a bound session folded away under either header still
 	// becomes visible and selectable. (Expanding only the checkout left a
 	// collapsed origin hiding the row — it then read as "hidden by filter".)
-	repo := session.GetRepoRoot(s.ProjectPath)
 	moved := h.targetForCursor() != contextMenuTarget{sessionID: sessID} // before the rebuild shifts rows
-	h.revealCheckout(repo)
+	h.revealSession(s)
 	h.rebuildFlatItems()
 
 	idx := -1
@@ -8609,7 +8766,7 @@ func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
 	now := time.Now()
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf)
+	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.sidebarGroups(), h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf)
 
 	// Resolve the attention-mute for EVERY session, not just the visible ones,
 	// so callers that count the whole fleet (statusCountsLine) read the same
@@ -8622,9 +8779,10 @@ func (h *Home) rebuildFlatItems() {
 	// including the ~60ms What's New shimmer tick, and originResolvers() takes
 	// the gitInfo lock and builds three maps each time.
 	muted := make(map[string]bool, len(h.sessions))
+	known := h.knownGroups()
 	for _, s := range h.sessions {
 		repo := session.GetRepoRoot(s.ProjectPath)
-		if snoozeState(s, originOf(repo), repo, h.groupSnooze, now).Muted {
+		if snoozeState(s, sessionGroupOf(s, known), originOf(repo), repo, h.groupSnooze, now).Muted {
 			muted[s.ID] = true
 		}
 	}
@@ -8669,9 +8827,19 @@ func originOfIn(m map[string]*git.RepoInfo, repoRoot string) string {
 // flat tree. The two levels collapse independently (see IsExpanded /
 // OriginExpandKey), so revealing a row means expanding both keys. Callers must
 // rebuildFlatItems afterward.
+//
+// A checkout can also render inside session groups (wherever a grouped session
+// lives in it), so every such copy is revealed too: a caller looking for "the
+// header of this repo" finds one whichever tree holds it.
 func (h *Home) revealCheckout(repo string) {
 	h.repoExpanded[OriginExpandKey(h.originOf(repo))] = true
 	h.repoExpanded[repo] = true
+	known := h.knownGroups()
+	for _, s := range h.sessions {
+		if g := sessionGroupOf(s, known); g != "" && session.GetRepoRoot(s.ProjectPath) == repo {
+			h.revealSession(s)
+		}
+	}
 }
 
 func (h *Home) removePendingWorkspace(id string) {
@@ -8819,6 +8987,13 @@ func (h *Home) loadSessions() tea.Msg {
 		slotBindings = map[int]string{}
 	}
 
+	// A failure only costs the sections: every session then renders under its
+	// origin, as a dangling group id always does.
+	groups, err := h.storage.LoadGroups()
+	if err != nil {
+		debuglog.Logger.Error("failed to load session groups", "err", err)
+	}
+
 	// Load + reconnect shells (drawer terminals). No liveness check — the
 	// worker derives status from tmux; a dead shell renders as exited.
 	shellRows, err := h.storage.LoadShells()
@@ -8891,6 +9066,7 @@ func (h *Home) loadSessions() tea.Msg {
 		ghAvailable:  ghAvailable,
 		warning:      warning,
 		prCache:      prCache,
+		groups:       groups,
 	}
 }
 
@@ -8981,6 +9157,11 @@ type contextMenuTarget struct {
 	sessionID string // session rows
 	repoPath  string // checkout headers
 	originKey string // origin headers
+	// groupID scopes a checkout or origin header to the session group it
+	// renders in (the same checkout can appear inside a group and at the top
+	// level); on its own, with groupHeader, it names a group's header.
+	groupID     string
+	groupHeader bool
 	// pendingID identifies a "Creating…" phantom row. The context menu never
 	// sets it — a phantom has no actions — but cursor preservation needs it:
 	// handleWorkspaceCreate auto-selects the phantom, so without this case the
@@ -8997,12 +9178,16 @@ func (t contextMenuTarget) find(items []SidebarItem) int {
 			if item.Session != nil && item.Session.ID == t.sessionID {
 				return i
 			}
+		case t.groupHeader:
+			if item.IsGroupHeader && item.GroupID == t.groupID {
+				return i
+			}
 		case t.repoPath != "":
-			if item.IsCheckoutHeader && item.RepoPath == t.repoPath {
+			if item.IsCheckoutHeader && item.RepoPath == t.repoPath && item.GroupID == t.groupID {
 				return i
 			}
 		case t.originKey != "":
-			if item.IsOriginHeader && item.OriginKey == t.originKey {
+			if item.IsOriginHeader && item.OriginKey == t.originKey && item.GroupID == t.groupID {
 				return i
 			}
 		case t.pendingID != "":
@@ -9021,10 +9206,12 @@ func (h *Home) targetForCursor() contextMenuTarget {
 	}
 	item := h.flatItems[h.cursor]
 	switch {
+	case item.IsGroupHeader:
+		return contextMenuTarget{groupID: item.GroupID, groupHeader: true}
 	case item.IsOriginHeader:
-		return contextMenuTarget{originKey: item.OriginKey}
+		return contextMenuTarget{originKey: item.OriginKey, groupID: item.GroupID}
 	case item.IsCheckoutHeader:
-		return contextMenuTarget{repoPath: item.RepoPath}
+		return contextMenuTarget{repoPath: item.RepoPath, groupID: item.GroupID}
 	case item.Session != nil:
 		return contextMenuTarget{sessionID: item.Session.ID}
 	case item.Pending != nil:
@@ -9065,6 +9252,8 @@ func (h *Home) buildContextMenuItems() (string, []ContextMenuItem) {
 		return h.checkoutContextMenu()
 	case BarContextOrigin:
 		return h.originContextMenu()
+	case BarContextGroup:
+		return h.groupContextMenu()
 	default:
 		return "", nil
 	}
@@ -9185,6 +9374,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		{ID: "restart", Label: "Restart", Shortcut: "r", Key: "r", Enabled: true},
 		moveAccount,
 		{ID: "rename", Label: "Rename", Shortcut: "R", Key: "R", Enabled: true},
+		{ID: "move_group", Label: "Move to Group…", Enabled: true},
 		unread,
 		{ID: "editor", Label: "Open in Editor", Shortcut: "e", Key: "e", Enabled: true},
 		{
@@ -9220,10 +9410,18 @@ func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
 	// three-way branch confirmDeleteHeader takes. The title names the same kind,
 	// so the menu can't call a row a repo while offering to remove a worktree.
 	kind, deleteLabel := "repo", "Forget Repo"
+	outside := h.countSessionsOutsideScope(repo, item.GroupID)
 	switch {
+	case outside > 0:
+		// Another tree still uses this checkout, so the header's delete only
+		// reaches its own rows (confirmDeleteHeader's first case).
+		deleteLabel = "Delete Sessions Here"
+		if h.repoIsWorktree(repo) {
+			kind = "worktree"
+		}
 	case h.repoIsWorktree(repo) || h.failedWorktreeRemovals[repo]:
 		kind, deleteLabel = "worktree", "Remove Worktree"
-	case h.countSessionsForRepo(repo) == 0:
+	case len(h.sessionsInScope(repo, item.GroupID)) == 0:
 		deleteLabel = "Unpin Repo"
 	}
 
@@ -9507,6 +9705,12 @@ func (h *Home) jumpToRepoHeader(repoPath string) (tea.Model, tea.Cmd) {
 
 // dispatchCommand executes a command selected from the palette.
 func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
+	// The group picker's rows carry a group id, so they can't be case
+	// literals; every other id below is one.
+	if gid, ok := strings.CutPrefix(id, moveToGroupPrefix); ok {
+		h.moveSessionToGroup(gid)
+		return h, h.fetchPreviewForSelected()
+	}
 	switch id {
 	case "attach":
 		if s := h.selectedSession(); s != nil {
@@ -9549,6 +9753,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		analytics.Track(analytics.EventPRJump, nil)
 		return h, h.fetchPreviewForSelected()
 	case "new_session":
+		h.beginCreate()
 		repoPath := h.resolveCurrentRepo()
 		if repoPath == "" {
 			h.newDialog.Show()
@@ -9560,6 +9765,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 			title: filepath.Base(repoPath),
 		})
 	case "new_session_pick":
+		h.beginCreate()
 		repoPath := h.resolveCurrentRepo()
 		if repoPath == "" {
 			h.newDialog.Show()
@@ -9596,9 +9802,11 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		h.connectLinear.Show()
 		return h, nil
 	case "new_repo":
+		h.beginCreate()
 		h.newDialog.Show()
 		return h, nil
 	case "new_worktree":
+		h.beginCreate()
 		repoPath := h.resolveWorktreeBaseRepo()
 		if repoPath == "" {
 			h.setInfo("no repo selected")
@@ -9640,6 +9848,20 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.suspendIdleNow()
 	case "rename":
 		return h, h.renameSelected()
+	case "move_group":
+		h.openGroupPicker()
+		return h, nil
+	case "move_to_new_group":
+		if s := h.selectedSession(); s != nil {
+			h.renameDialog.ShowNewGroup(s.ID)
+		}
+		return h, nil
+	case "remove_from_group":
+		h.moveSessionToGroup("")
+		return h, h.fetchPreviewForSelected()
+	case "ungroup":
+		h.ungroupAtCursor()
+		return h, h.fetchPreviewForSelected()
 	case "editor":
 		if s := h.selectedSession(); s != nil {
 			h.logAction("open editor", fmt.Sprintf("%q at %s", h.cfg.GetEditor(), s.ProjectPath), true)

@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // sessionCreateMsg is sent when the user confirms creating a new session.
@@ -34,6 +35,13 @@ type sessionCreateMsg struct {
 	// rather than start). Empty for every other creation path, which is the
 	// long-standing behaviour.
 	prompt string
+	// group is the session group the new session joins. Unless groupSet, it is
+	// taken from Home.createGroup — the group the cursor was in when the user
+	// started this create — which is what lets a dialog emit this message
+	// without knowing about groups at all. groupSet marks a decision already
+	// made (a worktree create that finished after the cursor moved on).
+	group    string
+	groupSet bool
 }
 
 // forkSessionMsg is sent when the user forks an existing session.
@@ -61,6 +69,9 @@ type forkSessionMsg struct {
 	// the second re-picks an account for a fork whose conversation belongs to
 	// the ambient login — it would then authenticate as someone else.
 	account string
+	// group is the parent's session group: a fork is more of the same work, so
+	// it sits beside its parent.
+	group string
 }
 
 // Claude-account management messages, emitted by AccountsDialog and handled in
@@ -105,6 +116,9 @@ type NewSessionDialog struct {
 	suggestions      []string
 	suggestionCursor int
 	lastInput        string // track input changes for recomputing suggestions
+	// groupLabel names the session group the new session will join ("" =
+	// none). Shown so creating inside a group is never a surprise.
+	groupLabel string
 }
 
 // NewNewSessionDialog creates a new session dialog.
@@ -288,10 +302,16 @@ func (d *NewSessionDialog) shortenSuggestions() {
 }
 
 // View renders the dialog.
+// SetGroupLabel names the session group the next session joins ("" = none).
+func (d *NewSessionDialog) SetGroupLabel(label string) { d.groupLabel = label }
+
 func (d *NewSessionDialog) View() string {
 	var b strings.Builder
 
 	b.WriteString(TitleStyle.Render("New Session"))
+	if d.groupLabel != "" {
+		b.WriteString(DimStyle.Render("  · group: " + ansi.Truncate(d.groupLabel, 30, "…")))
+	}
 	b.WriteString("\n\n")
 	b.WriteString(DimStyle.Render("Project directory:"))
 	b.WriteString("\n")
@@ -356,13 +376,38 @@ type sessionRenameMsg struct {
 	newTitle string
 }
 
-// RenameDialog handles session rename flow.
+// groupRenameMsg renames a session group; an empty name returns it to the
+// label derived from its lead session.
+type groupRenameMsg struct {
+	id   string
+	name string
+}
+
+// groupCreateMsg starts a new session group led by sessionID.
+type groupCreateMsg struct {
+	sessionID string
+	name      string
+}
+
+// renameMode is what the rename dialog is naming.
+type renameMode int
+
+const (
+	renameSession  renameMode = iota
+	renameGroup               // an existing session group
+	renameNewGroup            // a group about to be created for sessionID
+)
+
+// RenameDialog handles session rename flow, and names session groups — the
+// same one-field prompt, so it is the same dialog.
 type RenameDialog struct {
 	titleInput textinput.Model
 	visible    bool
 	width      int
 	height     int
 	sessionID  string
+	mode       renameMode
+	groupID    string
 }
 
 // NewRenameDialog creates a new rename dialog.
@@ -380,11 +425,28 @@ func NewRenameDialog() *RenameDialog {
 
 // Show makes the dialog visible, pre-filled with the current title.
 func (d *RenameDialog) Show(sessionID, currentTitle string) {
+	d.mode = renameSession
+	d.titleInput.Placeholder = "session name"
 	d.visible = true
 	d.sessionID = sessionID
 	d.titleInput.SetValue(currentTitle)
 	d.titleInput.Focus()
 	d.titleInput.CursorEnd()
+}
+
+// ShowGroup renames a session group, prefilled with its explicit name.
+func (d *RenameDialog) ShowGroup(groupID, currentName string) {
+	d.Show("", currentName)
+	d.mode = renameGroup
+	d.groupID = groupID
+	d.titleInput.Placeholder = "blank = follow the lead session's title"
+}
+
+// ShowNewGroup names a new group the session sessionID will lead.
+func (d *RenameDialog) ShowNewGroup(sessionID string) {
+	d.Show(sessionID, "")
+	d.mode = renameNewGroup
+	d.titleInput.Placeholder = "blank = this session's title"
 }
 
 func (d *RenameDialog) Hide()           { d.visible = false; d.titleInput.Blur() }
@@ -409,6 +471,18 @@ func (d *RenameDialog) Update(msg tea.Msg) (*RenameDialog, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			newTitle := strings.TrimSpace(d.titleInput.Value())
+			// A group's name may be blank — that is how it goes back to being
+			// labelled from its lead — but a session's title may not.
+			switch d.mode {
+			case renameGroup:
+				id := d.groupID
+				d.Hide()
+				return d, func() tea.Msg { return groupRenameMsg{id: id, name: newTitle} }
+			case renameNewGroup:
+				id := d.sessionID
+				d.Hide()
+				return d, func() tea.Msg { return groupCreateMsg{sessionID: id, name: newTitle} }
+			}
 			if newTitle == "" {
 				return d, nil
 			}
@@ -432,13 +506,24 @@ func (d *RenameDialog) Update(msg tea.Msg) (*RenameDialog, tea.Cmd) {
 func (d *RenameDialog) View() string {
 	var b strings.Builder
 
-	b.WriteString(TitleStyle.Render("Rename Session"))
+	title, label := "Rename Session", "New title:"
+	switch d.mode {
+	case renameGroup:
+		title, label = "Rename Group", "Group name:"
+	case renameNewGroup:
+		title, label = "New Group", "Group name:"
+	}
+	b.WriteString(TitleStyle.Render(title))
 	b.WriteString("\n\n")
-	b.WriteString(DimStyle.Render("New title:"))
+	b.WriteString(DimStyle.Render(label))
 	b.WriteString("\n")
 	b.WriteString(d.titleInput.View())
 	b.WriteString("\n\n")
-	b.WriteString(DimStyle.Render("enter: rename • esc: cancel"))
+	hint := "enter: rename • esc: cancel"
+	if d.mode == renameNewGroup {
+		hint = "enter: create • esc: cancel"
+	}
+	b.WriteString(DimStyle.Render(hint))
 
 	dialogWidth := d.width - 4
 	if dialogWidth > 64 {

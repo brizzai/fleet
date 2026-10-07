@@ -68,8 +68,22 @@ someone made earlier, a scratch clone, a non-git folder — and prefer `fleet wt
 since a session sharing a tree with the one you're editing will collide with you.
 
 It takes the same session-shaping flags as `fleet wt`: `-p` (including `-p -` for stdin),
-`--agent`, `--account`, `--model`, `--effort`. Bare `fleet add` with no arguments prints
+`--agent`, `--account`, `--model`, `--effort`, `--group`, `--no-group`. Bare `fleet add` with no arguments prints
 usage rather than starting anything.
+
+## Sessions you start are grouped with you
+
+When you run `fleet wt` or `fleet add` from inside a fleet session, the new session joins
+**your session's sidebar group**. If you have no group yet, one is created with you as its
+lead, and you move into it too. So the investigation you fan out across three services
+shows up to the user as one section, not three entries scattered under three repos.
+Sessions you start from a session you started join the same group (groups never nest).
+
+- `--group <name>` puts the session in the group with exactly that name, creating it if
+  needed. Use it when the work has a name the user will recognize, like a ticket key.
+- `--no-group` launches it ungrouped, for unrelated work you are handing off.
+- The command prints which group the session joined. Grouping never fails a launch: a
+  grouping error costs the sidebar section, never the session.
 
 ## Choose the model and effort
 
@@ -129,7 +143,7 @@ check `fleet list` before sending again — a duplicate send submits the task tw
 fleet list
 ```
 
-Columns: id, title, status, path. A status of `waiting` means that session needs a human,
+Columns: id, title, status, group, path. A status of `waiting` means that session needs a human,
 so tell the user rather than trying to answer it for them.
 
 ## Two things not to do
