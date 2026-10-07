@@ -38,6 +38,8 @@ type addOpts struct {
 	prompt string
 	model  string
 	effort string
+	// group is --group / --no-group.
+	group groupFlags
 }
 
 // addFlagSet builds the `fleet add` flag set, binding into o. The flag package
@@ -52,6 +54,7 @@ func addFlagSet(o *addOpts) *flag.FlagSet {
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
 	fs.StringVar(&o.model, "model", "", "model to launch on, e.g. opus or anthropic/claude-sonnet-5 (default: the agent's own)")
 	fs.StringVar(&o.effort, "effort", "", "reasoning effort to launch at, e.g. high or xhigh (default: the agent's own)")
+	registerGroupFlags(fs, &o.group)
 	return fs
 }
 
@@ -136,6 +139,9 @@ func parseAddArgs(args []string) (addOpts, error) {
 	}
 
 	if err := validateLaunchOverrides(o.model, o.effort, o.agentName); err != nil {
+		return o, err
+	}
+	if err := validateGroupFlags(fs, &o.group); err != nil {
 		return o, err
 	}
 	return o, nil
@@ -257,14 +263,18 @@ func runAdd(args []string) {
 
 	s := session.NewSession(title, path)
 	s.TitleGenerated = titleGenerated
-	launchSession(s, ag, launchOverrides{
+	groupNote := launchSession(s, ag, launchOverrides{
 		account: account,
 		prompt:  prompt,
 		model:   opts.model,
 		effort:  opts.effort,
+		group:   opts.group,
 	}, storage, launchNotes{})
 
 	fmt.Printf("Created %s session '%s' (%s) in %s\n", ag.DisplayName(), title, s.ID, path)
+	if groupNote != "" {
+		fmt.Println(groupNote)
+	}
 	// Echo the prompt back: with `-p -` the text came from a pipe the user never
 	// saw, and this is the only confirmation that what arrived is what they meant.
 	if prompt != "" {

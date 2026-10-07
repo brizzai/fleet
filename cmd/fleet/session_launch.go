@@ -1,10 +1,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
@@ -160,6 +162,7 @@ type launchOverrides struct {
 	prompt  string
 	model   string
 	effort  string
+	group   groupFlags
 }
 
 // launchNotes carries what a caller has already created and is keeping, so a
@@ -177,7 +180,10 @@ type launchNotes struct {
 // A failed SaveSession tears the tmux session down: the pane is already live
 // but nothing would ever point at it — the TUI can't list it, adopt it, or
 // offer to delete it.
-func launchSession(s *session.Session, ag agent.Type, o launchOverrides, storage *session.StateDB, notes launchNotes) {
+//
+// It returns the line describing which sidebar group the session joined ("" =
+// ungrouped), for the caller to print after its own confirmation.
+func launchSession(s *session.Session, ag agent.Type, o launchOverrides, storage *session.StateDB, notes launchNotes) string {
 	// A CLI-created session needs the agent's hooks installed for status
 	// detection, which normally only happens on TUI launch. Only the chosen
 	// agent's hooks are touched — never create a config dir for an agent that
@@ -201,6 +207,11 @@ func launchSession(s *session.Session, ag agent.Type, o launchOverrides, storage
 		}
 		os.Exit(1)
 	}
+	// Resolved only once the session is running: inheriting a group can move
+	// the *parent* into a fresh one, and a launch that failed would leave the
+	// parent in a group with nothing it spawned.
+	groupID, groupNote := resolveLaunchGroup(storage, o.group, os.Getenv(session.InstanceIDEnvVar))
+	s.SetGroupID(groupID)
 	if err := storage.SaveSession(s.ToRow()); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to save session: %v\n", err)
 		if killErr := s.GetTmuxSession().Kill(); killErr != nil {
@@ -215,6 +226,96 @@ func launchSession(s *session.Session, ag agent.Type, o launchOverrides, storage
 	// session, mirroring what the TUI does on session create.
 	if err := storage.PinRepo(session.GetRepoRoot(s.ProjectPath)); err != nil {
 		debuglog.Logger.Error("failed to pin repo", "repo", s.ProjectPath, "err", err)
+	}
+	return groupNote
+}
+
+// groupFlags is the parsed --group / --no-group pair, shared by `fleet add` and
+// `fleet worktree`.
+type groupFlags struct {
+	// name is --group: join the group with exactly this name, or create it.
+	name string
+	// none is --no-group: launch ungrouped even when run from inside a session.
+	none bool
+}
+
+// registerGroupFlags binds --group and --no-group into g.
+func registerGroupFlags(fs *flag.FlagSet, g *groupFlags) {
+	fs.StringVar(&g.name, "group", "", "sidebar group to put the session in, joined by name or created (default: the group of the fleet session running this command)")
+	fs.BoolVar(&g.none, "no-group", false, "don't group the session with the fleet session running this command")
+}
+
+// validateGroupFlags rejects the combinations that can't mean anything. An
+// explicitly empty --group is refused rather than read as "no group": it is
+// almost always a substitution that expanded to nothing, and --no-group says
+// that on purpose.
+func validateGroupFlags(fs *flag.FlagSet, g *groupFlags) error {
+	var nameSet bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "group" {
+			nameSet = true
+		}
+	})
+	g.name = strings.TrimSpace(g.name)
+	if nameSet && g.name == "" {
+		return fmt.Errorf("-group was empty (use --no-group to launch ungrouped)")
+	}
+	if g.name != "" && g.none {
+		return fmt.Errorf("--group and --no-group conflict")
+	}
+	return nil
+}
+
+// resolveLaunchGroup decides which sidebar group a CLI-launched session joins,
+// returning the group id ("" = ungrouped) and a line to print, if any.
+//
+// The default is inheritance: every fleet pane exports its session id, so a
+// session that runs `fleet wt` through the skill is the parent of what it
+// creates. The child joins the parent's group — or, when the parent has none,
+// a new group led by the parent, which moves the parent into it too. That is
+// how "one ticket across five services" ends up as one sidebar section with no
+// flag at all. Groups are flat: a grandchild joins the same group.
+//
+// Never fatal. The session is already running by the time this is called, and
+// a grouping failure costs a sidebar section, never the session.
+func resolveLaunchGroup(storage *session.StateDB, g groupFlags, parentID string) (string, string) {
+	if g.none {
+		return "", ""
+	}
+	now := time.Now()
+	if g.name != "" {
+		existing, err := storage.FindGroupByName(g.name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Could not look up group %q, launching ungrouped: %v\n", g.name, err)
+			return "", ""
+		}
+		if existing != nil {
+			return existing.ID, fmt.Sprintf("Joined group '%s'", g.name)
+		}
+		grp := &session.Group{ID: session.NewGroupID(), Name: g.name, CreatedAt: now}
+		if err := storage.CreateGroup(grp); err != nil {
+			fmt.Fprintf(os.Stderr, "Could not create group %q, launching ungrouped: %v\n", g.name, err)
+			return "", ""
+		}
+		return grp.ID, fmt.Sprintf("Created group '%s'", g.name)
+	}
+	if parentID == "" {
+		return "", ""
+	}
+	id, created, ok, err := storage.EnsureLeadGroup(parentID, now)
+	switch {
+	case err != nil:
+		debuglog.Logger.Error("group inheritance failed; launching ungrouped", "parent", parentID, "err", err)
+		return "", ""
+	case !ok:
+		// A stale id (the parent was deleted) or one from another state.db
+		// (FLEET_DEMO_PREFIX, a second install). Nothing to group with.
+		debuglog.Logger.Info("parent session not found; launching ungrouped", "parent", parentID)
+		return "", ""
+	case created:
+		return id, "Grouped with the session that launched it (pass --no-group to opt out)"
+	default:
+		return id, "Joined the launching session's group (pass --no-group to opt out)"
 	}
 }
 
