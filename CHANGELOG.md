@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.47.1] - 2026-10-15
+
+### Fixed
+
+- **OpenCode 2.x plugin loads** instead of logging "Plugin must export a default definition" on every launch, and 1.x keeps working from the same file. For now, 2.x sessions report status only with OpenCode's background service off (`opencode service set disabled true`).
+
 ## [2.47.0] - 2026-10-04
 
 ### Added
@@ -746,7 +752,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.47.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.47.1...HEAD
+[2.47.1]: https://github.com/brizzai/fleet/releases/tag/v2.47.1
 [2.47.0]: https://github.com/brizzai/fleet/releases/tag/v2.47.0
 [2.46.0]: https://github.com/brizzai/fleet/releases/tag/v2.46.0
 [2.45.0]: https://github.com/brizzai/fleet/releases/tag/v2.45.0
