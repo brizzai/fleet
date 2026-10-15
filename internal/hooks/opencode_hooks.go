@@ -66,7 +66,8 @@ func GetOpenCodeConfigDir() string {
 //	session.execution.started             -> session.busy       (running)
 //	session.execution.succeeded /
 //	  session.execution.interrupted       -> session.idle       (finished)
-//	session.execution.failed              -> session.error      (error)
+//	session.execution.failed              -> session.error, then session.idle
+//	                                         (error, then finished — as 1.x)
 //	form.created / permission.asked       -> permission.asked   (waiting)
 //	form.replied / form.cancelled /
 //	  permission.replied                  -> permission.replied (running)
@@ -88,7 +89,8 @@ func GetOpenCodeConfigDir() string {
 // old exclude-set could miss and then falsely flip the root to Finished. 2.x
 // sub-agents are child sessions with their own ids too. A 2.x MCP elicitation
 // form is owned by the "global" sentinel rather than a session, so it never
-// takes the latch. 2.x re-imports a local plugin whenever the file changes
+// takes the latch; it is reported under the root, since a --stdio server
+// belongs to one pane. 2.x re-imports a local plugin whenever the file changes
 // (fleet rewrites it after an upgrade), so the latch lives on globalThis rather
 // than in the module: a fresh module-level latch would take whichever session
 // speaks next, a sub-agent if one is mid-turn.
@@ -172,7 +174,11 @@ function onEventV1(event) {
 function onEventV2(event) {
   const type = event && event.type
   const data = (event && event.data) || {}
-  const sessionID = data.sessionID || (data.form && data.form.sessionID)
+  let sessionID = data.sessionID || (data.form && data.form.sessionID)
+  // An MCP elicitation form is owned by "global", not a session. setup() runs
+  // only in this pane's private server, so it is this pane's prompt: report it
+  // under the root rather than drop it (it never takes the latch, see isRoot).
+  if (sessionID === "global") sessionID = globalThis[ROOT_ID]
   if (!isRoot(sessionID)) return
   if (type === "session.execution.started") {
     notify("session.busy", sessionID)
@@ -182,7 +188,10 @@ function onEventV2(event) {
   ) {
     notify("session.idle", sessionID)
   } else if (type === "session.execution.failed") {
+    // failed is the busy period's only terminal event in 2.x, so nothing else
+    // would clear the error; 1.x follows session.error with session.idle.
     notify("session.error", sessionID)
+    notify("session.idle", sessionID)
   } else if (type === "form.created" || type === "permission.asked") {
     notify("permission.asked", sessionID)
   } else if (

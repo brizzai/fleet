@@ -55,7 +55,8 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 		"session.idle",
 		"session.error",
 		"FLEET_INSTANCE_ID", // non-fleet sessions skip the spawn
-		"rootId",            // root-session latch (sub-agents filtered out)
+		// root-session latch (sub-agents filtered out); both handlers gate on it
+		"if (!isRoot(sessionID)) return",
 		// 2.x MCP elicitation forms are owned by "global", which is not a session
 		// and must not take the latch from the root.
 		`if (!sessionID || sessionID === "global") return false`,
@@ -119,10 +120,15 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 	// session at data.form.sessionID, so reading only data.sessionID would skip
 	// every question prompt (the stuck-at-running bug again).
 	for _, want := range []string{
-		`const sessionID = data.sessionID || (data.form && data.form.sessionID)`,
+		`let sessionID = data.sessionID || (data.form && data.form.sessionID)`,
 		`if (type === "session.execution.started") { notify("session.busy", sessionID)`,
 		`type === "session.execution.succeeded" || type === "session.execution.interrupted" ) { notify("session.idle", sessionID)`,
-		`if (type === "session.execution.failed") { notify("session.error", sessionID)`,
+		// failed is 2.x's only terminal event for a failed turn; without the
+		// trailing idle the row stays at error until the next prompt.
+		`if (type === "session.execution.failed") {`,
+		`notify("session.error", sessionID) notify("session.idle", sessionID) }`,
+		// MCP elicitation forms belong to "global", not the root session.
+		`if (sessionID === "global") sessionID = globalThis[ROOT_ID]`,
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("plugin missing event branch %q:\n%s", want, content)
