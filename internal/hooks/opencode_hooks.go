@@ -162,6 +162,37 @@ function reportAs(type, sessionID) {
   return globalThis[ROOT_ID] === undefined ? sessionID : globalThis[ROOT_ID]
 }
 
+// Prompts can overlap (two sub-agents each asking for permission), so the open
+// ones are counted, on globalThis like the latch so a re-import keeps them. A
+// reply reports running only once none is left open, and busy is held back
+// while one is (1.x re-announces busy straight after every reply). A reply
+// with nothing open is stale, e.g. a form cancelled by an interrupt that already
+// ended the turn, and would flip a finished turn back to running. The turn's
+// end (idle/error) clears the count, so a reply that never arrives can't hold
+// the next turn at waiting.
+const OPEN_PROMPTS = Symbol.for("fleet.status.openPrompts")
+
+function promptAsked(sessionID) {
+  globalThis[OPEN_PROMPTS] = (globalThis[OPEN_PROMPTS] || 0) + 1
+  notify("permission.asked", sessionID)
+}
+
+function promptReplied(sessionID) {
+  const open = globalThis[OPEN_PROMPTS] || 0
+  if (open === 0) return
+  globalThis[OPEN_PROMPTS] = open - 1
+  if (open === 1) notify("permission.replied", sessionID)
+}
+
+function busy(sessionID) {
+  if (!globalThis[OPEN_PROMPTS]) notify("session.busy", sessionID)
+}
+
+function turnEnded(event, sessionID) {
+  globalThis[OPEN_PROMPTS] = 0
+  notify(event, sessionID)
+}
+
 // OpenCode 1.x bus event: { type, properties }.
 function onEventV1(event) {
   const type = event && event.type
@@ -170,20 +201,20 @@ function onEventV1(event) {
   if (!isRoot(sessionID)) return
   if (type === "session.status") {
     const st = props.status && props.status.type
-    if (st === "busy") notify("session.busy", sessionID)
-    else if (st === "idle") notify("session.idle", sessionID)
+    if (st === "busy") busy(sessionID)
+    else if (st === "idle") turnEnded("session.idle", sessionID)
   } else if (type === "session.idle") {
-    notify("session.idle", sessionID)
+    turnEnded("session.idle", sessionID)
   } else if (type === "session.error") {
-    notify("session.error", sessionID)
+    turnEnded("session.error", sessionID)
   } else if (type === "question.asked" || type === "permission.asked") {
-    notify("permission.asked", sessionID)
+    promptAsked(sessionID)
   } else if (
     type === "question.replied" ||
     type === "question.rejected" ||
     type === "permission.replied"
   ) {
-    notify("permission.replied", sessionID)
+    promptReplied(sessionID)
   }
 }
 
@@ -194,25 +225,25 @@ function onEventV2(event) {
   const sessionID = reportAs(type, data.sessionID || (data.form && data.form.sessionID))
   if (!isRoot(sessionID)) return
   if (type === "session.execution.started") {
-    notify("session.busy", sessionID)
+    busy(sessionID)
   } else if (
     type === "session.execution.succeeded" ||
     type === "session.execution.interrupted"
   ) {
-    notify("session.idle", sessionID)
+    turnEnded("session.idle", sessionID)
   } else if (type === "session.execution.failed") {
     // failed is the busy period's only terminal event in 2.x, so nothing else
     // would clear the error; 1.x follows session.error with session.idle.
-    notify("session.error", sessionID)
-    notify("session.idle", sessionID)
+    turnEnded("session.error", sessionID)
+    turnEnded("session.idle", sessionID)
   } else if (type === "form.created" || type === "permission.asked") {
-    notify("permission.asked", sessionID)
+    promptAsked(sessionID)
   } else if (
     type === "form.replied" ||
     type === "form.cancelled" ||
     type === "permission.replied"
   ) {
-    notify("permission.replied", sessionID)
+    promptReplied(sessionID)
   }
 }
 

@@ -1,7 +1,10 @@
 package hooks
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,10 +90,10 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 	// forms, so its chain pairs form.* with permission.* the same way.
 	flat := strings.Join(strings.Fields(content), " ")
 	for _, want := range []string{
-		`if (type === "question.asked" || type === "permission.asked") { notify("permission.asked", sessionID)`,
-		`type === "question.replied" || type === "question.rejected" || type === "permission.replied" ) { notify("permission.replied", sessionID)`,
-		`if (type === "form.created" || type === "permission.asked") { notify("permission.asked", sessionID)`,
-		`type === "form.replied" || type === "form.cancelled" || type === "permission.replied" ) { notify("permission.replied", sessionID)`,
+		`if (type === "question.asked" || type === "permission.asked") { promptAsked(sessionID)`,
+		`type === "question.replied" || type === "question.rejected" || type === "permission.replied" ) { promptReplied(sessionID)`,
+		`if (type === "form.created" || type === "permission.asked") { promptAsked(sessionID)`,
+		`type === "form.replied" || type === "form.cancelled" || type === "permission.replied" ) { promptReplied(sessionID)`,
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("plugin missing event branch %q:\n%s", want, content)
@@ -102,8 +105,8 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 	// and each handler's wiring whole: swapping onEventV1/onEventV2, or reading
 	// the wrong envelope (properties vs data), must fail here.
 	for _, want := range []string{
-		`if (type === "session.status") { const st = props.status && props.status.type if (st === "busy") notify("session.busy", sessionID) else if (st === "idle") notify("session.idle", sessionID) }`,
-		`} else if (type === "session.error") { notify("session.error", sessionID) } else if (type === "question.asked"`,
+		`if (type === "session.status") { const st = props.status && props.status.type if (st === "busy") busy(sessionID) else if (st === "idle") turnEnded("session.idle", sessionID) }`,
+		`} else if (type === "session.error") { turnEnded("session.error", sessionID) } else if (type === "question.asked"`,
 		`const props = (event && event.properties) || {}`,
 		`const data = (event && event.data) || {}`,
 		`server: async (_input) => ({ event: async ({ event }) => onEventV1(event), })`,
@@ -121,12 +124,12 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 	// every question prompt (the stuck-at-running bug again).
 	for _, want := range []string{
 		`const sessionID = reportAs(type, data.sessionID || (data.form && data.form.sessionID))`,
-		`if (type === "session.execution.started") { notify("session.busy", sessionID)`,
-		`type === "session.execution.succeeded" || type === "session.execution.interrupted" ) { notify("session.idle", sessionID)`,
+		`if (type === "session.execution.started") { busy(sessionID)`,
+		`type === "session.execution.succeeded" || type === "session.execution.interrupted" ) { turnEnded("session.idle", sessionID)`,
 		// failed is 2.x's only terminal event for a failed turn; without the
 		// trailing idle the row stays at error until the next prompt.
 		`if (type === "session.execution.failed") {`,
-		`notify("session.error", sessionID) notify("session.idle", sessionID) }`,
+		`turnEnded("session.error", sessionID) turnEnded("session.idle", sessionID) }`,
 		// A sub-agent's prompt, or a 2.x MCP form owned by "global", blocks the
 		// root's turn: both handlers report prompts under the root, so the row
 		// reads waiting instead of running.
@@ -178,5 +181,90 @@ func TestInjectOpenCodePluginRewritesOnPathChange(t *testing.T) {
 	data, _ := os.ReadFile(pluginPath)
 	if strings.Contains(string(data), "/old/stale/fleet") {
 		t.Errorf("stale binary path not replaced:\n%s", data)
+	}
+}
+
+// TestOpenCodePluginOverlappingPrompts runs the generated plugin under node and
+// drives both handlers through two overlapping prompts. Rebinding sub-agent
+// prompts to the root merges their lifetimes, so answering the first of two must
+// not report running while the second is still open: hook-handler maps a reply
+// to running and OpenCode has no pane fallback to restore waiting. The pinned
+// strings above can't see an event sequence, and they can't see a syntax error
+// either, which would ship as a plugin-load failure on every launch.
+func TestOpenCodePluginOverlappingPrompts(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
+	stub := filepath.Join(dir, "fleet")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\ncat >> '"+logPath+"'\necho >> '"+logPath+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binLiteral, _ := json.Marshal(stub)
+	if err := os.WriteFile(filepath.Join(dir, "plugin.mjs"), []byte(fmt.Sprintf(openCodePluginTemplate, binLiteral)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Each handler gets a fresh node process, so the globalThis state starts clean.
+	cases := []struct {
+		name, harness string
+	}{
+		{"1.x", `
+const h = await p.server({})
+const ev = (type, sessionID, extra) => h.event({ event: { type, properties: { sessionID, ...extra } } })
+await ev("session.status", "root", { status: { type: "busy" } })
+await ev("permission.asked", "childA")
+await ev("question.asked", "childB")
+await ev("permission.replied", "childA")
+await ev("session.status", "root", { status: { type: "busy" } }) // 1.x re-announces busy after a reply
+await ev("question.replied", "childB")
+await ev("session.idle", "root")
+await ev("question.replied", "childB") // stale: nothing open
+`},
+		{"2.x", `
+process.argv.push("--stdio")
+const evs = [
+  ["session.execution.started", { sessionID: "root" }],
+  ["permission.asked", { sessionID: "childA" }],
+  ["form.created", { form: { sessionID: "global" } }],
+  ["permission.replied", { sessionID: "childA" }],
+  ["form.replied", { sessionID: "global" }],
+  ["session.execution.interrupted", { sessionID: "root" }],
+  ["form.cancelled", { sessionID: "global" }], // stale: the turn already ended
+]
+await new Promise((done) => p.setup({ event: { subscribe: async function* () {
+  for (const [type, data] of evs) yield { type, data }
+  done()
+} } }))
+`},
+	}
+	want := strings.Join([]string{
+		`{"hook_event_name":"session.busy","session_id":"root"}`,
+		`{"hook_event_name":"permission.asked","session_id":"root"}`,
+		`{"hook_event_name":"permission.asked","session_id":"root"}`,
+		`{"hook_event_name":"permission.replied","session_id":"root"}`,
+		`{"hook_event_name":"session.idle","session_id":"root"}`,
+	}, "\n")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(logPath)
+			script := filepath.Join(dir, "run.mjs")
+			src := "const p = (await import(\"./plugin.mjs\")).default\n" + tc.harness
+			if err := os.WriteFile(script, []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(node, script)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "FLEET_INSTANCE_ID=test")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("node: %v\n%s", err, out)
+			}
+			got, _ := os.ReadFile(logPath)
+			if g := strings.TrimSpace(string(got)); g != want {
+				t.Errorf("hook calls:\n%s\nwant:\n%s", g, want)
+			}
+		})
 	}
 }
