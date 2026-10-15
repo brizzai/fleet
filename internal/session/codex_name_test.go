@@ -111,6 +111,15 @@ func TestReadAgentSessionName(t *testing.T) {
 	// Point Claude's transcript lookup at a dir with no JSONL, so a Claude
 	// session reads as untitled rather than picking up a real transcript.
 	t.Setenv("HOME", t.TempDir())
+	// Seed OpenCode's store too, so its dispatch is proven the same way.
+	// HOME alone doesn't isolate it: XDG_DATA_HOME wins when exported, and a
+	// leaked $OPENCODE_DB would override even that.
+	opencodeXDG := t.TempDir()
+	writeOpenCodeDB(t, opencodeXDG, map[string]map[string]*string{
+		"session_v2": {"thread": titlePtr("opencode title")},
+	})
+	t.Setenv("XDG_DATA_HOME", opencodeXDG)
+	t.Setenv("OPENCODE_DB", "")
 
 	tests := []struct {
 		name  string
@@ -120,7 +129,7 @@ func TestReadAgentSessionName(t *testing.T) {
 		{"codex reads the state db", agent.Codex, "codex title"},
 		{"claude reads the transcript (none here)", agent.Claude, ""},
 		{"legacy session with no agent is treated as claude", agent.Type(""), ""},
-		{"opencode has no reader yet", agent.OpenCode, ""},
+		{"opencode reads its session db", agent.OpenCode, "opencode title"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

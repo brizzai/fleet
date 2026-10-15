@@ -27,6 +27,21 @@ func GetOpenCodeConfigDir() string {
 	return filepath.Join(home, ".config", "opencode")
 }
 
+// GetOpenCodeDataDir returns OpenCode's data directory. OpenCode roots it the
+// same way on every platform ($XDG_DATA_HOME/opencode, else
+// ~/.local/share/opencode — roots() in packages/util/src/global-roots.ts), so
+// there is no macOS Library special case the way Claude and Codex have.
+func GetOpenCodeDataDir() string {
+	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+		return filepath.Join(dir, "opencode")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "opencode")
+}
+
 // openCodePluginTemplate is the generated status plugin. OpenCode auto-loads
 // .ts files from <config>/plugin/ (1.x and 2.x alike). The single %s is the
 // JSON-quoted absolute fleet binary path.
