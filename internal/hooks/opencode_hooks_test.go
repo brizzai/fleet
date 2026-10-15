@@ -120,15 +120,21 @@ func TestInjectOpenCodePlugin(t *testing.T) {
 	// session at data.form.sessionID, so reading only data.sessionID would skip
 	// every question prompt (the stuck-at-running bug again).
 	for _, want := range []string{
-		`let sessionID = data.sessionID || (data.form && data.form.sessionID)`,
+		`const sessionID = reportAs(type, data.sessionID || (data.form && data.form.sessionID))`,
 		`if (type === "session.execution.started") { notify("session.busy", sessionID)`,
 		`type === "session.execution.succeeded" || type === "session.execution.interrupted" ) { notify("session.idle", sessionID)`,
 		// failed is 2.x's only terminal event for a failed turn; without the
 		// trailing idle the row stays at error until the next prompt.
 		`if (type === "session.execution.failed") {`,
 		`notify("session.error", sessionID) notify("session.idle", sessionID) }`,
-		// MCP elicitation forms belong to "global", not the root session.
-		`if (sessionID === "global") sessionID = globalThis[ROOT_ID]`,
+		// A sub-agent's prompt, or a 2.x MCP form owned by "global", blocks the
+		// root's turn: both handlers report prompts under the root, so the row
+		// reads waiting instead of running.
+		`const sessionID = reportAs(type, props.sessionID)`,
+		`return globalThis[ROOT_ID] === undefined ? sessionID : globalThis[ROOT_ID]`,
+		`"permission.asked", "permission.replied",`,
+		`"form.created", "form.replied", "form.cancelled",`,
+		`"question.asked", "question.replied", "question.rejected",`,
 	} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("plugin missing event branch %q:\n%s", want, content)

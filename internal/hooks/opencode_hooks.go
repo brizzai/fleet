@@ -89,8 +89,9 @@ func GetOpenCodeConfigDir() string {
 // old exclude-set could miss and then falsely flip the root to Finished. 2.x
 // sub-agents are child sessions with their own ids too. A 2.x MCP elicitation
 // form is owned by the "global" sentinel rather than a session, so it never
-// takes the latch; it is reported under the root, since a --stdio server
-// belongs to one pane. 2.x re-imports a local plugin whenever the file changes
+// takes the latch. Prompts are the exception to root-only: a sub-agent's or a
+// "global" prompt still blocks the root's turn, so it is reported under the
+// root (see reportAs). 2.x re-imports a local plugin whenever the file changes
 // (fleet rewrites it after an upgrade), so the latch lives on globalThis rather
 // than in the module: a fresh module-level latch would take whichever session
 // speaks next, a sub-agent if one is mid-turn.
@@ -145,11 +146,27 @@ function isRoot(sessionID) {
   return sessionID === globalThis[ROOT_ID]
 }
 
+// A permission or question prompt from any session this process drives (a
+// sub-agent's child session, or a 2.x "global" MCP form) blocks the root's turn
+// until the user answers, so it is reported under the root. Lifecycle events
+// (busy/idle/error) stay root-only. The root goes busy before any sub-agent
+// spawns, so it has latched by the time a child prompts.
+const PROMPT_EVENTS = new Set([
+  "question.asked", "question.replied", "question.rejected",
+  "form.created", "form.replied", "form.cancelled",
+  "permission.asked", "permission.replied",
+])
+
+function reportAs(type, sessionID) {
+  if (!sessionID || !PROMPT_EVENTS.has(type)) return sessionID
+  return globalThis[ROOT_ID] === undefined ? sessionID : globalThis[ROOT_ID]
+}
+
 // OpenCode 1.x bus event: { type, properties }.
 function onEventV1(event) {
   const type = event && event.type
   const props = (event && event.properties) || {}
-  const sessionID = props.sessionID
+  const sessionID = reportAs(type, props.sessionID)
   if (!isRoot(sessionID)) return
   if (type === "session.status") {
     const st = props.status && props.status.type
@@ -174,11 +191,7 @@ function onEventV1(event) {
 function onEventV2(event) {
   const type = event && event.type
   const data = (event && event.data) || {}
-  let sessionID = data.sessionID || (data.form && data.form.sessionID)
-  // An MCP elicitation form is owned by "global", not a session. setup() runs
-  // only in this pane's private server, so it is this pane's prompt: report it
-  // under the root rather than drop it (it never takes the latch, see isRoot).
-  if (sessionID === "global") sessionID = globalThis[ROOT_ID]
+  const sessionID = reportAs(type, data.sessionID || (data.form && data.form.sessionID))
   if (!isRoot(sessionID)) return
   if (type === "session.execution.started") {
     notify("session.busy", sessionID)
