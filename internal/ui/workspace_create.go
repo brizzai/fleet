@@ -19,7 +19,10 @@ type PendingWorkspace struct {
 	ID       string // unique ID for matching results back
 	Name     string // display name
 	RepoPath string // which repo group to show under
-	Frame    int    // spinner animation frame counter
+	// GroupID is the session group the session being created will join, so
+	// the phantom renders in that group's section rather than at the top.
+	GroupID string
+	Frame   int // spinner animation frame counter
 }
 
 func generatePendingID() string {

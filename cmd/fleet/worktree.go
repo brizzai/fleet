@@ -66,6 +66,8 @@ type worktreeOpts struct {
 	// time — see validateLaunchOverrides.
 	model  string
 	effort string
+	// group is --group / --no-group.
+	group groupFlags
 }
 
 // worktreeFlagSet builds the `fleet worktree` flag set, binding into o.
@@ -91,6 +93,7 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.BoolVar(&o.noTicketStart, "no-ticket-start", false, "don't move the issue to its first started state")
 	fs.StringVar(&o.model, "model", "", "model to launch on, e.g. opus or anthropic/claude-sonnet-5 (default: the agent's own)")
 	fs.StringVar(&o.effort, "effort", "", "reasoning effort to launch at, e.g. high or xhigh (default: the agent's own)")
+	registerGroupFlags(fs, &o.group)
 	return fs
 }
 
@@ -215,6 +218,13 @@ func parseWorktreeArgs(args []string) (worktreeOpts, error) {
 		if o.effort != "" {
 			return o, fmt.Errorf("--effort has no effect with --no-session (no session is started)")
 		}
+	}
+	if err := validateGroupFlags(fs, &o.group); err != nil {
+		return o, err
+	}
+	// A group holds sessions; with no session there is nothing to group.
+	if o.noSession && (o.group.name != "" || o.group.none) {
+		return o, fmt.Errorf("--group/--no-group have no effect with --no-session (no session is started)")
 	}
 	if err := validateLaunchOverrides(o.model, o.effort, o.agentName); err != nil {
 		return o, err
@@ -439,11 +449,12 @@ func runWorktree(args []string) {
 
 	s := session.NewSession(name, info.Path)
 	s.WorkspaceName = name
-	launchSession(s, ag, launchOverrides{
+	groupNote := launchSession(s, ag, launchOverrides{
 		account: account,
 		prompt:  prompt,
 		model:   opts.model,
 		effort:  opts.effort,
+		group:   opts.group,
 	}, storage, launchNotes{
 		startFailPrefix: fmt.Sprintf("Created worktree %s, but ", info.Path),
 		keptOnTeardown:  fmt.Sprintf(" The worktree %s was kept.", info.Path),
@@ -451,6 +462,9 @@ func runWorktree(args []string) {
 
 	fmt.Printf("Created worktree %s (%s)\n", info.Path, branchNote(opts.branch, reusedBranch))
 	fmt.Printf("Started %s session '%s' (%s)\n", ag.DisplayName(), name, s.ID)
+	if groupNote != "" {
+		fmt.Println(groupNote)
+	}
 	// Echo the prompt back: with `-p -` the text came from a pipe the user never
 	// saw, and this is the only confirmation that what arrived is what they meant.
 	if prompt != "" {

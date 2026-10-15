@@ -79,7 +79,7 @@ func TestSnoozeStatePrecedence(t *testing.T) {
 			s := session.NewSession("t", repo)
 			s.SetSnoozedUntil(tc.own)
 
-			got := snoozeState(s, origin, repo, tc.groups, now)
+			got := snoozeState(s, "", origin, repo, tc.groups, now)
 			if got.Muted != tc.wantMuted {
 				t.Errorf("Muted = %v, want %v", got.Muted, tc.wantMuted)
 			}
@@ -167,7 +167,7 @@ func TestSnoozedSessionsExcludedFromPills(t *testing.T) {
 	loud.SetStatus(session.StatusWaiting)
 
 	originOf := func(string) string { return origin }
-	items := BuildFlatItems([]*session.Session{quiet, loud}, nil, map[string]bool{}, "",
+	items := BuildFlatItems([]*session.Session{quiet, loud}, nil, nil, map[string]bool{}, "",
 		nil, nil, nil, now, originOf, nil)
 
 	for _, it := range items {
@@ -198,7 +198,7 @@ func TestGroupSnoozeMutesFutureSessions(t *testing.T) {
 
 	groups := map[string]time.Time{repo: now.Add(time.Hour)}
 	originOf := func(string) string { return origin }
-	items := BuildFlatItems([]*session.Session{newcomer}, nil, map[string]bool{}, "",
+	items := BuildFlatItems([]*session.Session{newcomer}, nil, nil, map[string]bool{}, "",
 		nil, nil, groups, now, originOf, nil)
 
 	var found bool

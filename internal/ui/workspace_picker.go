@@ -151,6 +151,10 @@ type WorktreeDialog struct {
 	// credentials fail independently and one being broken says nothing about
 	// the other.
 	ticketsOff map[string]bool
+	// groupLabel names the session group the new session will join ("" =
+	// none). Rides the title line rather than a row of its own: the dialog
+	// has no height budget to spare (see renderBranchBlock).
+	groupLabel string
 }
 
 // NewWorktreeDialog creates a new worktree dialog.
@@ -527,6 +531,9 @@ func (d *WorktreeDialog) routeToInput(msg tea.Msg) (*WorktreeDialog, tea.Cmd) {
 }
 
 // View renders the worktree dialog.
+// SetGroupLabel names the session group the next session joins ("" = none).
+func (d *WorktreeDialog) SetGroupLabel(label string) { d.groupLabel = label }
+
 func (d *WorktreeDialog) View() string {
 	var b strings.Builder
 
@@ -536,6 +543,10 @@ func (d *WorktreeDialog) View() string {
 		title += " — " + filepath.Base(d.repoPath)
 	}
 	b.WriteString(TitleStyle.Render(title))
+	if d.groupLabel != "" {
+		room := max(d.innerWidth()-ansi.StringWidth(title)-len("  · group: "), 8)
+		b.WriteString(DimStyle.Render("  · group: " + ansi.Truncate(d.groupLabel, room, "…")))
+	}
 	b.WriteString("\n\n")
 
 	if d.loading {

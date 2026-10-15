@@ -77,17 +77,24 @@ type snoozeResult struct {
 }
 
 // snoozeState resolves a session's mute. The group umbrella wins over the
-// session's own deadline: origin first (the widest scope), then checkout, then
-// the session itself. A session may hold its own snooze inside a snoozed group;
+// session's own deadline: the session group first (the widest scope, when the
+// session sits in one), then origin, then checkout, then the session itself.
+// groupID scopes the origin and checkout keys (see scopedKey), so muting a
+// checkout inside a group never mutes the same checkout at the top level. A session may hold its own snooze inside a snoozed group;
 // that deadline keeps ticking independently and takes effect once the group wakes.
 //
 // This is the single place the precedence rule lives. Callers consult the
 // result — they must not re-derive it.
-func snoozeState(s *session.Session, originKey, repoPath string, groups map[string]time.Time, now time.Time) snoozeResult {
-	if until, ok := activeGroupSnooze(groups, OriginExpandKey(originKey), now); ok {
+func snoozeState(s *session.Session, groupID, originKey, repoPath string, groups map[string]time.Time, now time.Time) snoozeResult {
+	if groupID != "" {
+		if until, ok := activeGroupSnooze(groups, GroupExpandKey(groupID), now); ok {
+			return snoozeResult{Muted: true, Until: until}
+		}
+	}
+	if until, ok := activeGroupSnooze(groups, scopedKey(groupID, OriginExpandKey(originKey)), now); ok {
 		return snoozeResult{Muted: true, Until: until}
 	}
-	if until, ok := activeGroupSnooze(groups, repoPath, now); ok {
+	if until, ok := activeGroupSnooze(groups, scopedKey(groupID, repoPath), now); ok {
 		return snoozeResult{Muted: true, Until: until}
 	}
 	if s != nil {
@@ -153,7 +160,7 @@ type snoozeScope struct {
 	groupKey string
 	// label names the target in toasts ("Fix the drawer bug", "main", "fleet").
 	label string
-	// kind is the analytics dimension: session | checkout | origin.
+	// kind is the analytics dimension: session | checkout | origin | group.
 	kind string
 }
 
@@ -165,10 +172,12 @@ func (h *Home) snoozeScopeAtCursor() (snoozeScope, bool) {
 	}
 	item := h.flatItems[h.cursor]
 	switch {
+	case item.IsGroupHeader:
+		return snoozeScope{groupKey: GroupExpandKey(item.GroupID), label: item.GroupLabel, kind: "group"}, true
 	case item.IsOriginHeader:
-		return snoozeScope{groupKey: OriginExpandKey(item.OriginKey), label: labelForOrigin(item.OriginKey), kind: "origin"}, true
+		return snoozeScope{groupKey: item.originFoldKey(), label: labelForOrigin(item.OriginKey), kind: "origin"}, true
 	case item.IsCheckoutHeader:
-		return snoozeScope{groupKey: item.RepoPath, label: filepath.Base(item.RepoPath), kind: "checkout"}, true
+		return snoozeScope{groupKey: item.checkoutFoldKey(), label: filepath.Base(item.RepoPath), kind: "checkout"}, true
 	case item.Session != nil:
 		return snoozeScope{session: item.Session, label: item.Session.Title, kind: "session"}, true
 	}

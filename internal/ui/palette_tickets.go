@@ -209,6 +209,7 @@ func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
 	}
 
 	h.logAction("ticket new worktree", identifier, true)
+	h.beginCreate()
 	repoPath := h.resolveWorktreeBaseRepo()
 	if repoPath == "" {
 		h.setInfo("Select a repo first, then pick the ticket")
@@ -227,7 +228,7 @@ func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
 func (h *Home) jumpToSessionID(id string) (tea.Model, tea.Cmd) {
 	for _, s := range h.sessions {
 		if s != nil && s.ID == id {
-			h.revealCheckout(s.ProjectPath)
+			h.revealSession(s)
 			break
 		}
 	}

@@ -29,6 +29,7 @@ func TestBuildFlatItems_OriginGrouping(t *testing.T) {
 	items := BuildFlatItems(
 		[]*session.Session{s1, s2, s3},
 		nil,
+		nil,
 		expanded,
 		"",
 		nil,

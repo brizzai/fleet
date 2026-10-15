@@ -29,6 +29,8 @@ type SessionCreateDialog struct {
 	accounts   []accountPickerRow
 	accountIdx int
 	focus      sessionCreateFocus
+	// groupLabel names the session group the new session will join ("" = none).
+	groupLabel string
 }
 
 // sessionCreateFocus names the row ←→ acts on. The dialog is a stack of
@@ -252,6 +254,9 @@ var sessionCreateRowChrome = sessionCreateLabelW +
 	lipgloss.Width(sessionCreateGap+sessionCreateLead+sessionCreateTrail)
 
 // View renders the dialog.
+// SetGroupLabel names the session group the next session joins ("" = none).
+func (d *SessionCreateDialog) SetGroupLabel(label string) { d.groupLabel = label }
+
 func (d *SessionCreateDialog) View() string {
 	boxW := sessionCreateWidth
 	if maxW := d.width - 4; boxW > maxW {
@@ -266,7 +271,11 @@ func (d *SessionCreateDialog) View() string {
 	b.WriteString(TitleStyle.Render("New Session"))
 	b.WriteString("\n\n")
 	repoW := max(inner-len("Repo: "), 1)
-	b.WriteString(DimStyle.Render("Repo: ") + ansi.Truncate(d.repoPath, repoW, "…") + "\n\n")
+	b.WriteString(DimStyle.Render("Repo: ") + ansi.Truncate(d.repoPath, repoW, "…") + "\n")
+	if d.groupLabel != "" {
+		b.WriteString(DimStyle.Render("Group: "+ansi.Truncate(d.groupLabel, max(inner-len("Group: "), 1), "…")) + "\n")
+	}
+	b.WriteString("\n")
 
 	b.WriteString(d.renderRow("Agent", d.agent.DisplayName(), inner,
 		d.focus == focusCreateAgent, true))
