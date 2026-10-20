@@ -30,7 +30,12 @@ const (
 	PaletteKindRepo
 	PaletteKindWorktree
 	PaletteKindTicket
+	PaletteKindReview
 )
+
+// paletteOpenInBrowserMsg asks to open a palette row's URL in the browser,
+// leaving fleet's own state untouched.
+type paletteOpenInBrowserMsg struct{ url string }
 
 // commandPaletteMsg is sent when the user selects an item from the palette.
 type commandPaletteMsg struct {
@@ -86,6 +91,7 @@ const (
 	PaletteTabActions
 	PaletteTabPlaces
 	PaletteTabTickets
+	PaletteTabReviews
 )
 
 var paletteTabOrder = []struct {
@@ -96,6 +102,7 @@ var paletteTabOrder = []struct {
 	{PaletteTabActions, "actions"},
 	{PaletteTabPlaces, "repos/worktrees"},
 	{PaletteTabTickets, "tickets"},
+	{PaletteTabReviews, "reviews"},
 }
 
 // CommandPaletteDialog shows a fuzzy-filterable list of palette items.
@@ -125,6 +132,10 @@ type CommandPaletteDialog struct {
 	// every tab, not only from the one that can toggle it — and it is not
 	// persisted to config, so a restart clears it.
 	ticketTodoOnly bool
+
+	// reviewsLoaded is ticketsLoaded's counterpart for the reviews tab: an
+	// empty list means "you owe nobody" only once the fetch has answered.
+	reviewsLoaded bool
 
 	clickRows overlayRowMap // filled by View; see ClickRowAt
 }
@@ -159,6 +170,7 @@ func (d *CommandPaletteDialog) Show(items []PaletteItem, recent []string) {
 	d.items = items
 	d.recent = recent
 	d.ticketsLoaded = false
+	d.reviewsLoaded = false
 	d.cursor = 0
 	d.scrollOff = 0
 	d.activeTab = PaletteTabAll
@@ -196,6 +208,27 @@ func (d *CommandPaletteDialog) SetTickets(tickets []PaletteItem) {
 	d.rebuildFiltered()
 }
 
+// SetReviews replaces the review rows, mirroring SetTickets: the fetch is
+// async, so rows arrive after the palette is already on screen.
+func (d *CommandPaletteDialog) SetReviews(reviews []PaletteItem) {
+	if !d.visible {
+		return
+	}
+	kept := d.items[:0:0]
+	for _, it := range d.items {
+		if it.Kind != PaletteKindReview {
+			kept = append(kept, it)
+		}
+	}
+	d.items = append(kept, reviews...)
+	d.reviewsLoaded = true
+	d.rebuildFiltered()
+}
+
+// ReviewsLoaded reports whether a review load has completed for this opening,
+// so the view can tell "still fetching" from "you have none".
+func (d *CommandPaletteDialog) ReviewsLoaded() bool { return d.reviewsLoaded }
+
 // TicketsLoaded reports whether a ticket load has completed for this opening,
 // so the view can tell "still fetching" from "you have none".
 func (d *CommandPaletteDialog) TicketsLoaded() bool { return d.ticketsLoaded }
@@ -209,6 +242,8 @@ func itemMatchesTab(it PaletteItem, tab PaletteTab) bool {
 		return it.Kind == PaletteKindRepo || it.Kind == PaletteKindWorktree
 	case PaletteTabTickets:
 		return it.Kind == PaletteKindTicket
+	case PaletteTabReviews:
+		return it.Kind == PaletteKindReview
 	default:
 		return true
 	}
@@ -441,6 +476,21 @@ func (d *CommandPaletteDialog) Update(msg tea.Msg) (*CommandPaletteDialog, tea.C
 		d.Hide()
 		return d, func() tea.Msg {
 			return commandPaletteMsg{kind: selected.Kind, id: selected.ID}
+		}
+	case "ctrl+p":
+		// Open a review in the browser without starting anything. A chord
+		// rather than plain `p` because the palette is a filter box, where a
+		// bare letter is text the user is typing, not a command.
+		if d.cursor < 0 || d.cursor >= len(d.filtered) {
+			return d, nil
+		}
+		selected := d.filtered[d.cursor]
+		if selected.Kind != PaletteKindReview {
+			return d, nil
+		}
+		d.Hide()
+		return d, func() tea.Msg {
+			return paletteOpenInBrowserMsg{url: selected.ID}
 		}
 	}
 

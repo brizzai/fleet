@@ -1,0 +1,8 @@
+@@ -12,7 +12,7 @@ func classifyGHError(stderr string) error {
+ 	switch {
+ 	case strings.Contains(stderr, "rate limit"):
+-		return fmt.Errorf("gh rate limit reached")
++		return fmt.Errorf("gh rate limit reached, retry after %s", reset)
+ 	}
+ 	return nil
+ }
