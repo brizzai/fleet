@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.48.0] - 2026-10-20
+
+### Highlights
+
+- **Let an agent run your fleet.** `fleet answer <session> 2`, `interrupt`, `submit`, `clear`, `restart`, `suspend` and `resume` act on a session without attaching and check the pane afterwards, and `fleet send -wait` hands off a task and returns the agent's reply when it's done (`fleet wait` for several at once). Run `fleet skill install` to teach your agents the new commands.
+
+### Added
+
+- **Let an agent run your fleet.** `fleet answer <session> 2`, `interrupt`, `submit`, `clear`, `restart`, `suspend` and `resume` act on a session without attaching and check the pane afterwards, and `fleet send -wait` hands off a task and returns the agent's reply when it's done (`fleet wait` for several at once). Run `fleet skill install` to teach your agents the new commands.
+- **See every session from the shell.** You can now run `fleet status` to see what every session is doing and which prompt it waits on, live in ~0.2s; `fleet read <session>` prints its last replies.
+
+### Improved
+
+- **TUI follows CLI restarts.** When you restart, resume or suspend a session from the shell (`fleet restart`, `fleet resume`, `fleet suspend`, a `fleet send` wake), an open TUI shows it correctly within ~5s instead of as an error you might restart a second time.
+
+### Fixed
+
+- **Declining a permission settles fast.** After you answer No to a permission prompt, the session reads finished within seconds instead of running for up to 2 minutes.
+- **Folder-trust prompt shows as waiting.** A new session stuck on Claude's "Quick safety check" dialog now reads as needing you instead of running.
+
 ## [2.47.1] - 2026-10-15
 
 ### Fixed
@@ -752,7 +772,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.47.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.48.0...HEAD
+[2.48.0]: https://github.com/brizzai/fleet/releases/tag/v2.48.0
 [2.47.1]: https://github.com/brizzai/fleet/releases/tag/v2.47.1
 [2.47.0]: https://github.com/brizzai/fleet/releases/tag/v2.47.0
 [2.46.0]: https://github.com/brizzai/fleet/releases/tag/v2.46.0
