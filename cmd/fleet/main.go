@@ -56,7 +56,7 @@ func main() {
 		runList()
 	case "remove", "rm":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: fleet remove <id>")
+			fmt.Fprintln(os.Stderr, "Usage: fleet remove <session>")
 			os.Exit(1)
 		}
 		runRemove(args[1])
@@ -64,6 +64,14 @@ func main() {
 		runWorktree(args[1:])
 	case "send":
 		runSend(args[1:])
+	case "status", "st":
+		runStatus(args[1:])
+	case "read":
+		runRead(args[1:])
+	case "wait":
+		runWait(args[1:])
+	case "answer", "interrupt", "submit", "clear", "restart", "suspend", "resume":
+		runVerb(args[0], args[1:])
 	case "skill":
 		runSkill(args[1:])
 	case "hook-handler":
@@ -266,7 +274,15 @@ func runList() {
 	w.Flush()
 }
 
-func runRemove(idPrefix string) {
+// runRemove deletes a session: kills its tmux session and drops its row. The
+// worktree, if any, is left alone, like d on a session row in the TUI. The
+// session is named as everywhere else, minus the title-substring match — a near
+// miss is a reason to refuse a delete, not to guess.
+func runRemove(selector string) {
+	// Without this the database's Info lines fall back to stderr.
+	debuglog.Init()
+	defer debuglog.Close()
+
 	storage, err := session.Open(session.DefaultDBPath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
@@ -279,21 +295,11 @@ func runRemove(idPrefix string) {
 		fmt.Fprintf(os.Stderr, "Failed to load sessions: %v\n", err)
 		os.Exit(1)
 	}
+	slots, _ := storage.LoadSlotBindings()
 
-	// Find session by ID prefix.
-	var match *session.SessionRow
-	for _, r := range rows {
-		if strings.HasPrefix(r.ID, idPrefix) {
-			if match != nil {
-				fmt.Fprintln(os.Stderr, "Ambiguous ID prefix, be more specific")
-				os.Exit(1)
-			}
-			match = r
-		}
-	}
-
-	if match == nil {
-		fmt.Fprintf(os.Stderr, "No session found with ID starting with '%s'\n", idPrefix)
+	match, err := resolveSessionExact(rows, slots, selector, branchOfHead)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
@@ -334,11 +340,28 @@ Usage:
   fleet add [path]   Add a new session in a directory (default: current)
                            (--agent, --account, --prompt, --model, --effort)
   fleet list         List all sessions
-  fleet remove <id>  Remove a session
+  fleet remove <session>  Remove a session
   fleet worktree <branch>  Create a git worktree and start a session in it
                            (--base, --path, --agent, --account, --no-session,
                             --prompt, --ticket, --model, --effort)
   fleet send <session> <message>  Send a message to a running session
+                           (--wait: then wait for the turn and print the reply)
+
+Watch and drive sessions (one-shot, never the TUI; --help on each):
+  fleet status [session...]  Live status of every session: what each is waiting
+                           on, unsent drafts, branch, PR (--json, --active,
+                           --waiting, --all)
+  fleet read <session>     Last turns from the agent's transcript, or the
+                           cleaned screen (--turns, --lines, --json)
+  fleet wait <session...>  Block until done / idle / waiting / running
+                           (--until, --timeout, --any; exit 0/2/3/4)
+  fleet answer <session> <n|yes|no>  Pick an option in the prompt it waits on
+  fleet interrupt <session>  Esc out of the current turn
+  fleet submit <session>   Send the unsent draft in its input box
+  fleet clear <session>    Erase the unsent draft in its input box
+  fleet restart <session>  Relaunch an exited agent (--fresh: new conversation)
+  fleet suspend <session>  Hibernate to free memory; fleet resume wakes it
+
   fleet skill <install|uninstall|status>  Install the fleet agent skill, which
                            teaches Claude Code, Codex, Cursor, OpenCode, and Copilot how
                            to use the commands above. If you are an agent

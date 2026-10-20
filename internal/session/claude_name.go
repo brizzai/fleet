@@ -635,14 +635,16 @@ func transcriptContainsUUID(path, uuid string) bool {
 // entry in the transcript at path, or the zero time if it's missing/unreadable or
 // has no timestamped entries.
 func firstTranscriptTimestamp(path string) time.Time {
-	return scanTranscriptTimestamp(path, false, false)
+	ts, _ := scanTranscriptTimestamp(path, false, false)
+	return ts
 }
 
 // lastTranscriptTimestamp returns the timestamp of the latest timestamped JSONL
 // entry in the transcript at path, or the zero time. It scans the whole file;
 // transcripts are small and this runs only on the rare session-id-change path.
 func lastTranscriptTimestamp(path string) time.Time {
-	return scanTranscriptTimestamp(path, true, false)
+	ts, _ := scanTranscriptTimestamp(path, true, false)
+	return ts
 }
 
 // lastLeadTranscriptTimestamp returns the timestamp of the last lead-conversation
@@ -652,8 +654,24 @@ func lastTranscriptTimestamp(path string) time.Time {
 // only the lead actually advancing counts (see leadConversationTypes). Used as the
 // out-of-pane tiebreaker for the between-bursts frame where the pane is
 // indistinguishable from finished (see conversationActivePastHook).
-func lastLeadTranscriptTimestamp(path string) time.Time {
+//
+// turnEnded reports that a turn-ending entry follows the lead's last entry in
+// file order — see turnEndSubtypes.
+func lastLeadTranscriptTimestamp(path string) (last time.Time, turnEnded bool) {
 	return scanTranscriptTimestamp(path, true, true)
+}
+
+// turnEndSubtypes are the "system" entries Claude writes as a turn ENDS. One
+// that follows the lead's last entry means the lead is parked: whatever the
+// turn wrote on its way out was not progress. Without that, denying a
+// permission — which appends a tool_result and an interrupt marker stamped after
+// the waiting hook — read as the lead advancing, and the session showed running
+// for the whole conversationActiveWindow (120s) while it sat at an idle prompt,
+// in the TUI and to a supervising agent's `fleet wait`. Kept apart from the
+// timestamp rather than folded into it: bookkeeping must still never move it.
+var turnEndSubtypes = map[string]bool{
+	"turn_duration":     true,
+	"stop_hook_summary": true,
 }
 
 // leadConversationTypes are the JSONL entry types that prove the LEAD turn advanced:
@@ -698,11 +716,12 @@ var leadConversationTypes = map[string]bool{
 // recent local transcripts. Overwriting on every match let one such entry understate how
 // far the conversation had got, which is the direction that demotes a live lead to
 // finished on exactly the between-bursts frame conversationActivePastHook exists to cover.
-func scanTranscriptTimestamp(path string, last bool, leadOnly bool) time.Time {
+func scanTranscriptTimestamp(path string, last bool, leadOnly bool) (time.Time, bool) {
 	if path == "" {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	var result time.Time
+	ended := false // lead-only: a turn ending is the last thing the lead did
 	_ = forEachTranscriptLine(path, func(line string) bool {
 		if !strings.Contains(line, `"timestamp"`) {
 			return true
@@ -711,13 +730,19 @@ func scanTranscriptTimestamp(path string, last bool, leadOnly bool) time.Time {
 			Timestamp   string `json:"timestamp"`
 			IsSidechain bool   `json:"isSidechain"`
 			Type        string `json:"type"`
+			Subtype     string `json:"subtype"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Timestamp == "" {
+			return true
+		}
+		if leadOnly && !entry.IsSidechain && entry.Type == "system" && turnEndSubtypes[entry.Subtype] {
+			ended = true
 			return true
 		}
 		if leadOnly && (entry.IsSidechain || !leadConversationTypes[entry.Type]) {
 			return true
 		}
+		ended = false
 		// RFC3339Nano: Claude transcripts stamp millisecond precision (e.g.
 		// "...:04.226Z"). The layout also parses entries with no fractional part.
 		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
@@ -733,5 +758,5 @@ func scanTranscriptTimestamp(path string, last bool, leadOnly bool) time.Time {
 		}
 		return true
 	})
-	return result
+	return result, ended
 }

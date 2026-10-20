@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -410,5 +411,120 @@ func TestUndoneUnpinIsHiddenAgain(t *testing.T) {
 
 	if h.pinnedRepos[repo] || !h.missingPins[repo] {
 		t.Fatalf("undone pin not hidden again: pinned=%v missing=%v", h.pinnedRepos[repo], h.missingPins[repo])
+	}
+}
+
+// The CLI (`fleet restart`, `fleet resume`, `fleet suspend`) changes a row
+// behind an open TUI. Direction is what matters: this TUI's own relaunch also
+// leaves memory and row disagreeing for a moment, and must not be "adopted"
+// back onto the dead tmux session.
+func TestRelaunchedElsewhere(t *testing.T) {
+	mk := func(tmux string, status session.Status) (*session.Session, *session.SessionRow) {
+		s := session.NewSession("t", "/tmp/t")
+		s.TmuxSessionName = tmux
+		s.SetStatus(status)
+		row := s.ToRow()
+		return s, row
+	}
+	live := map[string]bool{}
+	alive := func(name string) bool { return live[name] }
+
+	t.Run("another process relaunched it into a new tmux session", func(t *testing.T) {
+		s, row := mk("fleet_old", session.StatusError)
+		row.TmuxSession, row.ClaudeSessionID = "fleet_new", "c2"
+		live = map[string]bool{"fleet_new": true}
+		got := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s}, alive)
+		if len(got) != 1 || got[0].tmuxSession != "fleet_new" || got[0].claudeSessionID != "c2" || got[0].suspended {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("this TUI's own relaunch, not yet persisted, is left alone", func(t *testing.T) {
+		s, row := mk("fleet_new", session.StatusStarting)
+		row.TmuxSession = "fleet_old" // the row still names the session just killed
+		live = map[string]bool{"fleet_new": true}
+		if got := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s}, alive); len(got) != 0 {
+			t.Fatalf("got %+v, want nothing", got)
+		}
+	})
+
+	t.Run("another process suspended it", func(t *testing.T) {
+		s, row := mk("fleet_old", session.StatusRunning)
+		row.Status = string(session.StatusSuspended)
+		live = map[string]bool{}
+		got := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s}, alive)
+		if len(got) != 1 || !got[0].suspended {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
+	t.Run("a row saying suspended while tmux is up is not a suspend", func(t *testing.T) {
+		// This TUI resumed it; the row will catch up.
+		s, row := mk("fleet_live", session.StatusStarting)
+		row.Status = string(session.StatusSuspended)
+		live = map[string]bool{"fleet_live": true}
+		if got := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s}, alive); len(got) != 0 {
+			t.Fatalf("got %+v, want nothing", got)
+		}
+	})
+
+	t.Run("already suspended in both, or no row", func(t *testing.T) {
+		s, row := mk("fleet_old", session.StatusSuspended)
+		live = map[string]bool{}
+		other, _ := mk("fleet_x", session.StatusError)
+		if got := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s, other}, alive); len(got) != 0 {
+			t.Fatalf("got %+v, want nothing", got)
+		}
+	})
+
+	// Suspended here, woken elsewhere (`fleet resume`, a `fleet send` wake): a
+	// relaunch like any other. This TUI's own suspend never renames the tmux
+	// session, so it can't look like this.
+	t.Run("suspended here, woken by another process", func(t *testing.T) {
+		s, row := mk("fleet_old", session.StatusSuspended)
+		row.Status, row.TmuxSession = string(session.StatusStarting), "fleet_new"
+		live = map[string]bool{"fleet_new": true}
+		got := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s}, alive)
+		if len(got) != 1 || got[0].suspended || got[0].tmuxSession != "fleet_new" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+}
+
+// The worker writes "error" the moment a session's tmux disappears — within one
+// fast pass, long before the 5s sweep. For a CLI suspend that write is what
+// would erase the record of it, so the worker checks the row first.
+func TestUpdateAndPersistStatusAdoptsExternalSuspend(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // a regression writes a crash dump; keep it out of the real one
+	h := adoptTestHome(t)
+	row := storeSession(t, h, "suspended-from-cli", t.TempDir())
+	row.TmuxSession = "fleet_never_existed_" + row.ID
+	if err := h.storage.UpdateTmuxSession(row.ID, row.TmuxSession); err != nil {
+		t.Fatal(err)
+	}
+	s := session.FromRow(row)
+	s.SetStatus(session.StatusRunning)
+	// What `fleet suspend` leaves behind: the row says suspended, tmux is gone.
+	if err := h.storage.UpdateStatus(row.ID, string(session.StatusSuspended)); err != nil {
+		t.Fatal(err)
+	}
+
+	if !h.updateAndPersistStatus(s) {
+		t.Fatal("expected a status change")
+	}
+	if s.GetStatus() != session.StatusSuspended {
+		t.Errorf("in-memory status = %s, want suspended", s.GetStatus())
+	}
+	got, _, _ := h.storage.LoadSessionLaunch(row.ID)
+	if got.Status != string(session.StatusSuspended) {
+		t.Errorf("row status = %s — the worker overwrote the CLI's suspend", got.Status)
+	}
+	// The row is checked before UpdateStatus, which would otherwise have read
+	// the missing tmux session as a crash: a dump on disk, a session_errored
+	// event. The dump is written on a goroutine, so give it a moment to appear.
+	time.Sleep(200 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(home, ".config", "fleet", "crashes")); err == nil {
+		t.Error("a deliberate suspend was recorded as a crash")
 	}
 }

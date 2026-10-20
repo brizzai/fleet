@@ -1,6 +1,6 @@
 ---
 name: fleet
-description: Drives fleet, a CLI that runs parallel Claude Code, Codex, OpenCode, and Copilot sessions in git worktrees or existing directories. Use when handing independent work to a background agent session, creating a git worktree to work in, starting a session on a chosen agent/model/effort, sending a message to or checking on a running session, or when the user mentions fleet, `fleet wt`, `fleet add`, `fleet send`, worktree sessions, or running agents in parallel.
+description: Drives fleet, a CLI that runs parallel Claude Code, Codex, OpenCode, and Copilot sessions in git worktrees or existing directories. Use when handing independent work to a background agent session, creating a git worktree to work in, starting a session on a chosen agent/model/effort, checking what every session is doing or waiting on, reading a session's output, answering its prompt, sending it a message and waiting for the result, restarting or suspending it, or when the user mentions fleet, `fleet wt`, `fleet add`, `fleet send`, `fleet status`, worktree sessions, or running agents in parallel.
 ---
 
 <!-- Installed by `fleet skill install`. Local edits are overwritten on reinstall. -->
@@ -9,7 +9,8 @@ description: Drives fleet, a CLI that runs parallel Claude Code, Codex, OpenCode
 
 `fleet` runs coding-agent sessions in parallel, each in its own tmux session and — unless
 you point it at an existing directory — its own git worktree. From a shell you can create
-one, hand it a task, and message it later.
+one, hand it a task, see what it and every other session is doing, answer its prompts, and
+collect its result.
 
 Run `fleet <command> --help` for the exact flags. This file covers when and how to reach
 for them.
@@ -116,21 +117,96 @@ listing them — answer it with a more precise selector, not a retry of the same
   its Enter confirms whatever was highlighted. Pass `-force` only when the message really
   is the answer to that prompt.
 - The pane is **back at a shell prompt** (the agent exited or crashed): the message would
-  run as a shell command. Not forceable — restart the session instead.
+  run as a shell command. Not forceable — `fleet restart <session>` instead.
 - The session is **suspended**: fleet wakes it and delivers the message as its first
   prompt. Nothing for you to do.
 
 Delivery is verified against the pane, and there is no auto-retry. If it reports failure,
-check `fleet list` before sending again — a duplicate send submits the task twice.
+check `fleet status <session>` (its last prompt) before sending again — a duplicate send
+submits the task twice.
 
-## See what is running
+## See what every session is doing
 
 ```bash
-fleet list
+fleet status                 # one line per session, live
+fleet status --waiting       # only sessions blocked on a prompt (--active: working or blocked)
+fleet status <session>...    # detail: last prompt, last reply, the prompt, the input box
+fleet status --json          # the same, structured; --full stops truncating prompts and replies
 ```
 
-Columns: id, title, status, path. A status of `waiting` means that session needs a human,
-so tell the user rather than trying to answer it for them.
+Status is recomputed live with the pipeline fleet's TUI uses, so it is current whether or
+not the TUI is open, and costs two tmux calls for all sessions together — call it freely.
+Suspended sessions are counted, not listed, unless you pass `--all`.
+
+Under a session's line, an indented line appears only when there is something to act on:
+
+- `? <question> [<what it is about>]  1) …  2) …` — blocked on a prompt. The bracket is
+  the command or file the prompt is about.
+- `✎ unsent draft: "…"` — text typed into the input box and never sent. Claude's dim
+  **suggestion** in an empty box is not a draft and is never reported as one.
+- `! …` — the agent exited, and why if fleet can tell (`resume failed: no conversation
+  found` means `fleet restart <session> --fresh`).
+
+`exited` means the agent process is gone and the pane is at a shell prompt.
+
+## Read what a session said
+
+```bash
+fleet read <session>             # last 3 turns from its transcript: your prompt, its final reply
+fleet read <session> --turns 1   # just the latest exchange
+fleet read <session> --lines 80  # the screen instead, chrome stripped (scrollback included)
+```
+
+Turns come from the agent's own transcript (Claude), which holds the full reply rather than
+whatever happened to be on screen. For other agents, `fleet read` prints the cleaned screen.
+
+## Delegate and collect
+
+```bash
+fleet send -wait <session> "<task>"            # send, then block until the turn ends
+fleet wait <session> --until done --timeout 20m
+fleet wait a b c --any                          # first of several to finish
+```
+
+Both print the session's final reply when they return. Branch on the exit code rather than
+parsing text: **0** finished, **2** timed out, **3** blocked on a prompt (the prompt is
+printed — answer it or tell the user), **4** the agent exited or errored. `--until` also
+takes `idle` (finished its turn), `waiting` and `running`. `fleet send ...; fleet wait ...`
+is safe too: a state that already holds when the wait starts only counts once it has held
+for a few seconds, so the wait never returns before the agent has picked the message up.
+
+Don't poll `fleet status` in a loop to wait — `fleet wait` is built for it.
+
+## Answer prompts and steer a session
+
+```bash
+fleet answer <session> <n|yes|no> [--expect "<text from the question>"]
+fleet interrupt <session>      # Esc: stop the current turn
+fleet submit <session>         # send the unsent draft in its input box
+fleet clear <session>          # erase the unsent draft
+fleet restart <session>        # relaunch an exited agent, resuming its conversation
+fleet suspend <session>        # free its memory; fleet resume <session> brings it back
+fleet remove <session>         # delete the session (its worktree is kept)
+```
+
+`fleet answer` picks by the numbers `fleet status` shows, or `yes`/`no` for the option
+whose label opens with that word. It checks the cursor landed before pressing Enter and
+prints the next question if the prompt has several. Pass `--expect` with a few words of the
+question you read, so it refuses if a different prompt has appeared since.
+
+A permission prompt is the user's safety check. Answer one only when the user handed you
+that call or it is plainly inside the task they gave the session; anything destructive or
+outside that scope, show to the user instead. Questions the agent asks (`kind: question`)
+are usually yours to answer if you delegated the work.
+
+Every command here refuses rather than typing into the wrong place: a pane at a shell
+prompt, a prompt on screen when you meant the input box, an interrupt with nothing
+running. The error says what to do instead. `restart` refuses to resume a Claude
+conversation with no transcript (one that never got a prompt has none, and the launch
+would fail with "No conversation found"); `--fresh` starts a new conversation.
+
+`fleet list` still prints id, title, status and path from fleet's database alone, without
+reading any pane.
 
 ## Two things not to do
 

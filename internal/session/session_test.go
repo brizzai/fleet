@@ -26,6 +26,10 @@ func TestStripANSI(t *testing.T) {
 		{"OSC with ST", "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\", "link"},
 		// C1 CSI with ESC prefix so fast path doesn't skip (raw 0x9B byte isn't found by ContainsRune).
 		{"C1 CSI with ESC", "\x1b[0m\x9B31mred\x9B0m", "red"},
+		{"UTF-8 C1 CSI", "\x1b[0m\u009B31mred", "red"},
+		// 0x9B is also the last byte of "▛" (U+259B). Matched bytewise, it read as
+		// a CSI and ate the rune plus what followed — Claude's startup banner.
+		{"0x9B inside a rune", "\x1b[38;5;174m ▐▛███▜▌\x1b[0m", " ▐▛███▜▌"},
 		{"mixed", "\x1b[1mhello\x1b[0m \x1b]8;;url\x07world\x1b]8;;\x07", "hello world"},
 		{"empty", "", ""},
 		{"no escape fast path", "plain text 123", "plain text 123"},

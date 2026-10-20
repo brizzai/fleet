@@ -402,6 +402,51 @@ func TestDeslugify(t *testing.T) {
 	}
 }
 
+// A turn that ends and then picks up again — a background agent re-invoking the
+// lead, a queued message — is active once more: turnEnded follows file order.
+func TestLastLeadTranscriptTimestampTurnEnd(t *testing.T) {
+	write := func(t *testing.T, lines ...string) string {
+		path := filepath.Join(t.TempDir(), "t.jsonl")
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	t.Run("a denied permission ends the turn", func(t *testing.T) {
+		// What Claude writes when a permission prompt is answered No: the denial and
+		// the interrupt marker are lead entries stamped after the waiting hook, and
+		// turn_duration closes the turn.
+		path := write(t,
+			`{"type":"assistant","timestamp":"2026-10-20T12:06:38.766Z"}`,
+			`{"type":"user","timestamp":"2026-10-20T12:07:39.541Z"}`,
+			`{"type":"user","timestamp":"2026-10-20T12:07:39.544Z"}`,
+			`{"type":"system","subtype":"turn_duration","timestamp":"2026-10-20T12:07:39.552Z"}`,
+		)
+		if _, ended := lastLeadTranscriptTimestamp(path); !ended {
+			t.Error("turnEnded = false after turn_duration closed the turn")
+		}
+	})
+	t.Run("lead activity after a turn end reopens it", func(t *testing.T) {
+		path := write(t,
+			`{"type":"assistant","timestamp":"2026-10-20T12:06:38.766Z"}`,
+			`{"type":"system","subtype":"turn_duration","timestamp":"2026-10-20T12:06:40.000Z"}`,
+			`{"type":"assistant","timestamp":"2026-10-20T12:06:50.000Z"}`,
+		)
+		if _, ended := lastLeadTranscriptTimestamp(path); ended {
+			t.Error("turnEnded = true, but the lead wrote again after the turn ended")
+		}
+	})
+	t.Run("a sub-agent's turn end is not the lead's", func(t *testing.T) {
+		path := write(t,
+			`{"type":"assistant","timestamp":"2026-10-20T12:06:38.766Z"}`,
+			`{"type":"system","subtype":"turn_duration","isSidechain":true,"timestamp":"2026-10-20T12:06:40.000Z"}`,
+		)
+		if _, ended := lastLeadTranscriptTimestamp(path); ended {
+			t.Error("turnEnded = true from a sidechain entry")
+		}
+	})
+}
+
 func TestLastLeadTranscriptTimestamp(t *testing.T) {
 	t.Run("returns last lead entry, skipping sidechain", func(t *testing.T) {
 		dir := t.TempDir()
@@ -415,7 +460,7 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		got := lastLeadTranscriptTimestamp(path)
+		got, _ := lastLeadTranscriptTimestamp(path)
 		want, _ := time.Parse(time.RFC3339Nano, "2026-06-16T11:26:00.000Z")
 		if !got.Equal(want) {
 			t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (sidechain entry should be skipped)", got, want)
@@ -423,13 +468,13 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 	})
 
 	t.Run("missing file returns zero", func(t *testing.T) {
-		if got := lastLeadTranscriptTimestamp(filepath.Join(t.TempDir(), "nope.jsonl")); !got.IsZero() {
+		if got, _ := lastLeadTranscriptTimestamp(filepath.Join(t.TempDir(), "nope.jsonl")); !got.IsZero() {
 			t.Errorf("expected zero time for missing file, got %v", got)
 		}
 	})
 
 	t.Run("empty path returns zero", func(t *testing.T) {
-		if got := lastLeadTranscriptTimestamp(""); !got.IsZero() {
+		if got, _ := lastLeadTranscriptTimestamp(""); !got.IsZero() {
 			t.Errorf("expected zero time for empty path, got %v", got)
 		}
 	})
@@ -460,10 +505,15 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		got := lastLeadTranscriptTimestamp(path)
+		got, turnEnded := lastLeadTranscriptTimestamp(path)
 		want, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:17:55.651Z")
 		if !got.Equal(want) {
 			t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (bookkeeping entries should be skipped)", got, want)
+		}
+		// The turn-end entries never move the timestamp, but they do say the lead
+		// is parked — reported separately.
+		if !turnEnded {
+			t.Error("turnEnded = false, want true: stop_hook_summary/turn_duration follow the last lead entry")
 		}
 		// lastTranscriptTimestamp is the rotation-detection signal, where ANY write
 		// proves the file is live — it must keep seeing all of them.
@@ -493,7 +543,7 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 			t.Fatal(err)
 		}
 		want, _ := time.Parse(time.RFC3339Nano, "2026-08-23T14:30:26.239Z")
-		if got := lastLeadTranscriptTimestamp(path); !got.Equal(want) {
+		if got, _ := lastLeadTranscriptTimestamp(path); !got.Equal(want) {
 			t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (out-of-order entry must not pull it backwards)", got, want)
 		}
 		if got := lastTranscriptTimestamp(path); !got.Equal(want) {
@@ -513,7 +563,7 @@ func TestLastLeadTranscriptTimestamp(t *testing.T) {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if got := lastLeadTranscriptTimestamp(path); !got.IsZero() {
+		if got, _ := lastLeadTranscriptTimestamp(path); !got.IsZero() {
 			t.Errorf("expected zero time when all entries are sidechain, got %v", got)
 		}
 	})
@@ -556,7 +606,7 @@ func TestTranscriptScanSurvivesOversizedLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := lastLeadTranscriptTimestamp(path); !got.Equal(late) {
+	if got, _ := lastLeadTranscriptTimestamp(path); !got.Equal(late) {
 		t.Errorf("lastLeadTranscriptTimestamp = %v, want %v (scan stopped at the oversized line)", got, late)
 	}
 	if got := lastTranscriptTimestamp(path); !got.Equal(late) {
@@ -577,7 +627,7 @@ func TestTranscriptScanSurvivesOversizedLine(t *testing.T) {
 	if err := os.WriteFile(huge, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := lastLeadTranscriptTimestamp(huge); !got.Equal(late) {
+	if got, _ := lastLeadTranscriptTimestamp(huge); !got.Equal(late) {
 		t.Errorf("over-cap line aborted the walk: got %v, want %v", got, late)
 	}
 	if !transcriptContainsUUID(huge, lateUUID) {

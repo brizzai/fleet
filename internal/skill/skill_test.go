@@ -88,7 +88,10 @@ func TestFrontmatterIsPortable(t *testing.T) {
 // renamed without the skill following is a silent regression.
 func TestSkillCoversTheCLISurface(t *testing.T) {
 	text := string(Content)
-	for _, want := range []string{"fleet wt", "fleet send", "fleet list", "-p -", "-force"} {
+	for _, want := range []string{
+		"fleet wt", "fleet send", "fleet list", "-p -", "-force",
+		"fleet status", "fleet read", "fleet wait", "fleet answer", "fleet restart", "fleet suspend",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("SKILL.md never mentions %q", want)
 		}

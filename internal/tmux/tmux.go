@@ -970,6 +970,21 @@ func (s *Session) CapturePaneJoined() (string, error) {
 	return string(output), nil
 }
 
+// CaptureHistory captures the last lines of the pane's scrollback plus its
+// visible screen, ANSI preserved, wrapped lines rejoined (-J) so a long line
+// reads as one. For reading what a session said, which is usually more than one
+// screenful; status detection keeps using CapturePane. Uncached.
+func (s *Session) CaptureHistory(lines int) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", s.Name, "-p", "-e", "-J",
+		"-S", fmt.Sprintf("-%d", lines)).Output()
+	if err != nil {
+		return "", fmt.Errorf("capture-pane failed: %w", err)
+	}
+	return string(out), nil
+}
+
 func (s *Session) CapturePane() (string, error) {
 	// Check cache.
 	s.cacheMu.RLock()

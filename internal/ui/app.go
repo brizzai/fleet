@@ -172,6 +172,12 @@ type (
 		// sweep, and the handler leaves pins untouched.
 		pinned map[string]bool
 	}
+	// externalRelaunchMsg carries sessions another process relaunched into a
+	// new tmux session (`fleet restart`, `fleet resume`, a `fleet send` wake) or
+	// suspended (`fleet suspend`) since the last sync sweep.
+	externalRelaunchMsg struct {
+		changes []externalRelaunch
+	}
 	openEditorMsg struct{ err error }
 	openPRMsg     struct{ err error }
 	copyPRLinkMsg struct {
@@ -1296,6 +1302,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case externalRemovalsMsg:
 		return h.handleExternalRemovals(msg)
+
+	case externalRelaunchMsg:
+		return h.handleExternalRelaunches(msg)
 
 	case tccProbeResultMsg:
 		if !msg.determined {
@@ -5484,6 +5493,20 @@ func (h *Home) maybeSyncExternalSessions(known []*session.Session) {
 	}
 	h.adoptExternalSessions(rows, known)
 	h.sendExternalRemovals(rows, known)
+	h.sendExternalRelaunches(rows, known)
+}
+
+// sendExternalRelaunches reports sessions another process relaunched or
+// suspended. The tmux liveness checks run here, on the worker.
+func (h *Home) sendExternalRelaunches(rows []*session.SessionRow, known []*session.Session) {
+	changes := relaunchedElsewhere(rows, known, func(name string) bool {
+		return tmux.ReconnectSession(name, "", "").Exists()
+	})
+	// Same rendezvous hazard as the adopt send; the next sweep recomputes it.
+	if len(changes) == 0 || h.isAttaching.Load() {
+		return
+	}
+	h.send(externalRelaunchMsg{changes: changes})
 }
 
 // sendExternalRemovals reports what another process took away, every sweep: the
@@ -5586,6 +5609,118 @@ func goneSessions(rows []*session.SessionRow, known []*session.Session, alive fu
 		}
 	}
 	return out
+}
+
+// externalRelaunch is one session whose stored row moved on without this TUI:
+// a new tmux session, or a suspend.
+type externalRelaunch struct {
+	id              string
+	tmuxSession     string
+	claudeSessionID string
+	suspended       bool
+}
+
+// relaunchedElsewhere returns the known sessions another process relaunched
+// into a new tmux session or suspended.
+//
+// Direction is the whole difficulty: this TUI's own relaunch changes memory
+// first and the row later, so the two disagree for a moment then too. The test
+// that separates them is liveness — another process's relaunch leaves memory
+// pointing at a tmux session that is gone, while the row points at one that is
+// up. This TUI's own relaunch is the reverse: memory points at the live one. A
+// suspend is the same shape: memory's tmux is gone and the row says suspended,
+// whereas this TUI's own suspend marks memory first. A session suspended here
+// and woken elsewhere (`fleet resume`, a `fleet send` wake) is a relaunch like
+// any other — this TUI's own suspend never renames the tmux session, so it
+// can't be mistaken for one.
+func relaunchedElsewhere(rows []*session.SessionRow, known []*session.Session, alive func(tmuxName string) bool) []externalRelaunch {
+	byID := make(map[string]*session.SessionRow, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	var out []externalRelaunch
+	for _, s := range known {
+		row := byID[s.ID]
+		// Mid-relaunch here, memory already names a tmux session that isn't up
+		// yet — exactly what another process's work looks like.
+		if row == nil || s.Relaunching() {
+			continue
+		}
+		suspendedHere := s.GetStatus() == session.StatusSuspended
+		switch {
+		case session.Status(row.Status) == session.StatusSuspended:
+			if suspendedHere {
+				continue // already agrees
+			}
+			if !alive(s.TmuxSessionName) {
+				out = append(out, externalRelaunch{id: s.ID, suspended: true})
+			}
+		case row.TmuxSession != "" && row.TmuxSession != s.TmuxSessionName:
+			if alive(row.TmuxSession) && !alive(s.TmuxSessionName) {
+				out = append(out, externalRelaunch{
+					id: s.ID, tmuxSession: row.TmuxSession, claudeSessionID: row.ClaudeSessionID,
+				})
+			}
+		}
+	}
+	return out
+}
+
+// adoptExternalLaunch checks one session's row for a suspend or relaunch made
+// by another process, and adopts it. Worker goroutine only: it reads SQLite and
+// asks tmux. Returns whether anything was adopted.
+func (h *Home) adoptExternalLaunch(s *session.Session) bool {
+	row, ok, err := h.storage.LoadSessionLaunch(s.ID)
+	if err != nil || !ok {
+		return false
+	}
+	changes := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s}, func(name string) bool {
+		return tmux.ReconnectSession(name, "", "").Exists()
+	})
+	if len(changes) == 0 {
+		return false
+	}
+	applyExternalRelaunch(s, changes[0])
+	return true
+}
+
+// applyExternalRelaunch adopts one change found by relaunchedElsewhere.
+func applyExternalRelaunch(s *session.Session, c externalRelaunch) {
+	if c.suspended {
+		debuglog.Logger.Info("session suspended by another process", "id", s.ID)
+		s.AdoptExternalSuspend()
+		return
+	}
+	debuglog.Logger.Info("session relaunched by another process", "id", s.ID,
+		"old", s.TmuxSessionName, "new", c.tmuxSession)
+	s.AdoptExternalRelaunch(c.tmuxSession, c.claudeSessionID)
+}
+
+// handleExternalRelaunches points sessions at the tmux sessions another process
+// relaunched them into, and marks the ones it suspended.
+func (h *Home) handleExternalRelaunches(msg externalRelaunchMsg) (tea.Model, tea.Cmd) {
+	changed := false
+	for _, c := range msg.changes {
+		s := h.sessionByID[c.id]
+		// Re-checked against memory: the worker diffed a cycle-start snapshot,
+		// and this TUI may have relaunched or suspended the session since.
+		if s == nil || s.Relaunching() {
+			continue
+		}
+		if c.suspended && s.GetStatus() == session.StatusSuspended {
+			continue
+		}
+		if !c.suspended && s.TmuxSessionName == c.tmuxSession {
+			continue
+		}
+		applyExternalRelaunch(s, c)
+		changed = true
+	}
+	if !changed {
+		return h, nil
+	}
+	h.rebuildFlatItems()
+	return h, h.fetchPreviewForSelected()
 }
 
 // missingDirs returns the paths that no longer exist on disk. Only a definite
@@ -7115,9 +7250,25 @@ func (h *Home) syncHookStatuses(sessions []*session.Session, resolveRotation boo
 // that flipped).
 func (h *Home) updateAndPersistStatus(s *session.Session) bool {
 	oldStatus := s.GetStatus()
+	// A session whose tmux vanished may have been suspended or relaunched by
+	// another process (`fleet suspend`, `fleet restart`) rather than have died.
+	// Check its row BEFORE UpdateStatus: that reads a missing tmux session as a
+	// crash and acts on it at once — a crash dump, a session_errored event — and
+	// the persist below would then erase the other process's record of what it
+	// did, within one fast pass and well before the external sweep could see it.
+	// Only on the way into error: a session already there has had its dump.
+	if oldStatus != session.StatusError && oldStatus != session.StatusSuspended &&
+		!s.Relaunching() && !s.IsAlive() && h.adoptExternalLaunch(s) {
+		return true
+	}
 	s.UpdateStatus()
 	newStatus := s.GetStatus()
 	if oldStatus != newStatus {
+		// The same check for a death the liveness probe above didn't see yet: too
+		// late to spare the dump, still in time to spare the row.
+		if newStatus == session.StatusError && h.adoptExternalLaunch(s) {
+			return true
+		}
 		switch newStatus {
 		case session.StatusError:
 			// The same move session_errored reports: not a session already in

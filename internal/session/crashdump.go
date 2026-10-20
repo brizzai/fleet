@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -37,7 +38,19 @@ const crashdumpTmuxTimeout = 3 * time.Second
 //
 // reason is a fleet-side label ("tmux_gone", "pane_dead", "hook_dead") that
 // indicates which detection path fired.
+// crashDumpsOff is set by an observer that runs the status pipeline without
+// owning the session — `fleet status` and friends recompute status in a
+// one-shot process, where every invocation is a fresh "life" and a dead session
+// would get a new dump on every call. The TUI's worker owns the dumps.
+var crashDumpsOff atomic.Bool
+
+// DisableCrashDumps turns crash dumps off for this process. See crashDumpsOff.
+func DisableCrashDumps() { crashDumpsOff.Store(true) }
+
 func (s *Session) triggerCrashDump(reason string) {
+	if crashDumpsOff.Load() {
+		return
+	}
 	s.mu.Lock()
 	if s.deathRecorded {
 		s.mu.Unlock()

@@ -610,7 +610,11 @@ func (s *Session) conversationActivePastHook() bool {
 	if path == cachePath && fi.Size() == cacheSize && fi.ModTime().Equal(cacheMtime) {
 		last = cacheTS
 	} else {
-		last = lastLeadTranscriptTimestamp(path)
+		var turnEnded bool
+		last, turnEnded = lastLeadTranscriptTimestamp(path)
+		if turnEnded {
+			last = time.Time{} // the lead is parked: nothing it wrote is activity
+		}
 		s.mu.Lock()
 		s.convTranscriptPath = path
 		s.convTranscriptSize = fi.Size()
@@ -1112,6 +1116,16 @@ func (s *Session) Restart() error {
 	return nil
 }
 
+// Relaunching reports whether a Restart or RespawnClaude is in flight. Mid
+// relaunch the session already names its new tmux session, which does not
+// exist yet, so anything reading liveness must leave it alone — UpdateStatus
+// does, and so must code adopting another process's relaunch or suspend.
+func (s *Session) Relaunching() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.relaunching > 0
+}
+
 // beginRelaunch marks the session starting and keeps UpdateStatus off it until
 // endRelaunch. Between the kill and the new launch the old tmux is gone (or the
 // pane is at a shell) — for up to retiredExitTimeout while a Copilot exits — and
@@ -1304,6 +1318,16 @@ func (s *Session) ResolveLaunchID() (launchID, healedFrom string) {
 // during the gap between tmux respawn and the new Claude's first hook event.
 func (s *Session) clearHookState() {
 	s.mu.Lock()
+	s.resetHookStateLocked()
+	s.mu.Unlock()
+	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
+	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
+		debuglog.Logger.Warn("session: clear hook file failed", "id", s.ID, "path", hookFile, "err", err)
+	}
+}
+
+// resetHookStateLocked is clearHookState's in-memory half. Caller holds s.mu.
+func (s *Session) resetHookStateLocked() {
 	s.hookStatus = ""
 	s.hookReason = ""
 	s.hookUpdatedAt = time.Time{}
@@ -1324,11 +1348,67 @@ func (s *Session) clearHookState() {
 	// its next SessionStart and re-arm the unconditional fork-adoption branch — the
 	// next foreign hook (incl. a nested child) would then be force-adopted.
 	s.forkParentID = ""
-	s.mu.Unlock()
-	hookFile := filepath.Join(hooks.GetHooksDir(), s.ID+".json")
-	if err := os.Remove(hookFile); err != nil && !os.IsNotExist(err) {
-		debuglog.Logger.Warn("session: clear hook file failed", "id", s.ID, "path", hookFile, "err", err)
+}
+
+// SeedStableContent primes the stale-running-hook check for an observer that
+// sees the pane once — a one-shot CLI process — rather than across ticks.
+//
+// The TUI's worker concludes a "running" hook is stale once the pane has looked
+// the same for >10s with no tmux activity (applyHookRunning). It learns "looked
+// the same" by watching; a one-shot process never watches, so an interrupted
+// turn (Esc fires no Stop hook) would read running forever. since is tmux's own
+// window_activity — the last time the pane produced output — which is the same
+// fact recorded by tmux, and the rule already defers to it.
+//
+// Only for a "running" hook. In the waiting path the same clock means "content
+// changed recently", and seeding it there would flip a fresh prompt to running.
+func (s *Session) SeedStableContent(rawPane string, since time.Time) {
+	if rawPane == "" || since.IsZero() {
+		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hookStatus != "running" {
+		return
+	}
+	s.lastContentHash = hashContent(normalizeForHash(rawPane))
+	s.lastContentChangeAt = since
+}
+
+// AdoptExternalRelaunch points the session at a tmux session another fleet
+// process launched for it — `fleet restart` or `fleet resume` from the CLI —
+// so this process stops reading the dead one and calling it an error (and a
+// user pressing r here doesn't start a second agent on the same conversation).
+//
+// The old agent's hook state is dropped from memory, as a relaunch here would.
+// Unlike clearHookState the status file is left alone: the relaunching process
+// already removed the old one, and by now the file may be the new agent's.
+//
+// The status restarts at starting, as after a relaunch here; the next pass
+// reads the new pane. The row's own status is no guide — this process's worker
+// may already have written "error" into it.
+func (s *Session) AdoptExternalRelaunch(tmuxName, claudeSessionID string) {
+	ts := tmux.ReconnectSession(tmuxName, s.Title, s.ProjectPath)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tmuxSession = ts
+	s.TmuxSessionName = tmuxName
+	s.Status = StatusStarting
+	s.deathRecorded = false
+	if claudeSessionID != "" {
+		s.ClaudeSessionID = claudeSessionID
+	}
+	s.resetHookStateLocked()
+}
+
+// AdoptExternalSuspend records that another fleet process suspended the
+// session (`fleet suspend`): its tmux is gone on purpose, so the status
+// pipeline must leave it alone rather than report a crash.
+func (s *Session) AdoptExternalSuspend() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Status = StatusSuspended
+	s.resetHookStateLocked()
 }
 
 // UpdateStatus detects the session status from pane content.
@@ -2194,6 +2274,7 @@ var (
 		"Yes, allow once",
 		"No, and tell Claude",
 		"Do you trust the files",
+		"Yes, I trust this folder", // the folder-trust dialog's wording since it became "Quick safety check"
 		"Allow this MCP server",
 	}
 	// Patterns in recent lines that indicate Claude is idle at the prompt.
@@ -2988,14 +3069,25 @@ func StripANSI(content string) string {
 
 	i := 0
 	for i < len(content) {
-		switch content[i] {
-		case '\x1b':
+		c := content[i]
+		switch {
+		case c == '\x1b':
 			i = skipESCSequence(content, i+1)
-		case '\x9B':
-			i = skipCSIParams(content, i+1)
-		default:
-			b.WriteByte(content[i])
+		case c < utf8.RuneSelf:
+			b.WriteByte(c)
 			i++
+		default:
+			// Decode before matching the 8-bit CSI: 0x9B is also a UTF-8
+			// continuation byte, the last byte of "▛" (U+259B) among others, and
+			// matching it bytewise ate the rune and the text after it. Only the
+			// C1 control itself (U+009B) or a lone invalid 0x9B byte is a CSI.
+			r, size := utf8.DecodeRuneInString(content[i:])
+			if r == '\x9B' || (r == utf8.RuneError && size == 1 && c == '\x9B') {
+				i = skipCSIParams(content, i+size)
+				continue
+			}
+			b.WriteString(content[i : i+size])
+			i += size
 		}
 	}
 

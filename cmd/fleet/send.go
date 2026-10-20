@@ -35,6 +35,8 @@ type sendOpts struct {
 	selector string
 	message  string
 	force    bool
+	wait     bool
+	timeout  time.Duration
 }
 
 // sendFlagSet builds the `fleet send` flag set, binding into o. Silent for the
@@ -45,6 +47,8 @@ func sendFlagSet(o *sendOpts) *flag.FlagSet {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 	fs.BoolVar(&o.force, "force", false, "send even though the agent is waiting on a prompt")
+	fs.BoolVar(&o.wait, "wait", false, "after sending, wait for the turn to end and print the reply (exit codes as fleet wait)")
+	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "with -wait, give up after this long")
 	return fs
 }
 
@@ -160,10 +164,40 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
+	sentAt := time.Now()
 	if err := deliver(storage, row, message, opts.force); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if opts.wait {
+		os.Exit(waitAfterSend(storage, row.ID, slots, sentAt, opts.timeout))
+	}
+}
+
+// waitAfterSend waits for the turn the message started to end. The row is
+// reloaded because waking a suspended session gave it a new tmux session.
+func waitAfterSend(storage *session.StateDB, id string, slots map[int]string, sentAt time.Time, timeout time.Duration) int {
+	rows, err := storage.LoadSessions()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to reload sessions: %v\n", err)
+		return 1
+	}
+	var row *session.SessionRow
+	for _, r := range rows {
+		if r.ID == id {
+			row = r
+		}
+	}
+	if row == nil {
+		fmt.Fprintln(os.Stderr, "the session disappeared while sending")
+		return 1
+	}
+	prs, _ := storage.LoadPRCache()
+	st := &cliState{storage: storage, rows: rows, slots: slots, prs: prs}
+	fmt.Println()
+	return waitFor(st, []*session.SessionRow{row}, waitSpec{
+		until: "done", timeout: timeout, since: sentAt, settle: sendWaitSettle,
+	})
 }
 
 // deliver hands message to the session behind row, waking it first if it was
@@ -181,46 +215,25 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 		if err := s.Restart(); err != nil {
 			return fmt.Errorf("failed to wake suspended session %q: %w", row.Title, err)
 		}
-		// Restart built a new tmux session; without persisting the new name the
-		// row points at a session that no longer exists and the next reader
-		// (TUI or CLI) reads the session as dead.
-		if err := storage.UpdateTmuxSession(row.ID, s.TmuxSessionName); err != nil {
-			debuglog.Logger.Error("failed to persist tmux session after wake", "id", row.ID, "err", err)
-		}
-		if err := storage.UpdateStatus(row.ID, string(s.GetStatus())); err != nil {
-			debuglog.Logger.Error("failed to persist status after wake", "id", row.ID, "err", err)
-		}
-		// Restart may have *healed* the conversation id on the way in
-		// (adoptResolvedLaunchID promotes a resolved id over a stale one — the
-		// issue #226 path). The TUI gets away with not persisting that here
-		// because its hook worker re-persists moments later; this process exits
-		// as soon as deliver returns, so an unsaved heal is recomputed and thrown
-		// away on every wake and the session stays pinned to a dead conversation.
-		if id := s.ClaudeSessionID; id != "" && id != row.ClaudeSessionID {
-			if err := storage.UpdateClaudeSessionID(row.ID, id); err != nil {
-				debuglog.Logger.Error("failed to persist healed conversation id after wake", "id", row.ID, "err", err)
-			}
-		}
+		persistRelaunch(storage, row, s)
 		fmt.Printf("Woke suspended session '%s' (%s) with your message\n", row.Title, ag.DisplayName())
 		fmt.Printf("Sent: %s\n", summarizeText(message, 60))
-		// The TUI reads sessions from SQLite once, at startup, and only ever
-		// adopts rows it has never seen — so an already-open fleet keeps showing
-		// this one as suspended against a session that is now running. Say so
-		// rather than let the sidebar look broken.
-		fmt.Println("Note: a fleet TUI opened before now still shows it suspended until restarted.")
+		// An open TUI adopts the new tmux session on its next sync sweep
+		// (relaunchedElsewhere), so for a few seconds it still shows suspended.
+		fmt.Println("Note: an open fleet TUI picks this up within a few seconds.")
 		return nil
 	}
 
 	ts := s.GetTmuxSession()
 	if !ts.Exists() {
-		return fmt.Errorf("session %q has no live tmux session (status %s) — restart it with r in the TUI",
-			row.Title, row.Status)
+		return fmt.Errorf("session %q has no live tmux session (status %s) — restart it with fleet restart %s "+
+			"(or r in the TUI)", row.Title, row.Status, hexID(row.ID))
 	}
 	// remain-on-exit keeps a dead pane on screen, so an exited agent looks
 	// identical to a live one from the outside. Typing into it does nothing.
 	if ts.IsPaneDead() {
-		return fmt.Errorf("the %s process in session %q has exited — restart it with r in the TUI",
-			ag.DisplayName(), row.Title)
+		return fmt.Errorf("the %s process in session %q has exited — restart it with fleet restart %s (or r in the TUI)",
+			ag.DisplayName(), row.Title, hexID(row.ID))
 	}
 	// A live tmux session is not proof an agent is listening: the pane runs a
 	// shell and the agent is a process inside it, so `/exit` (or a crash) drops
@@ -230,8 +243,8 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 	// -force: there is no version of this the user wanted.
 	if paneCmd, atShell := waitForAgentInPane(row.TmuxSession); atShell {
 		return fmt.Errorf("the %s process in session %q has exited — its pane is back at a %s prompt, "+
-			"where the message would run as a shell command.\nRestart it with r in the TUI",
-			ag.DisplayName(), row.Title, paneCmd)
+			"where the message would run as a shell command.\nRestart it with fleet restart %s (or r in the TUI)",
+			ag.DisplayName(), row.Title, paneCmd, hexID(row.ID))
 	}
 
 	if !force {
@@ -278,6 +291,33 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 	return nil
 }
 
+// persistRelaunch records what a relaunch (Restart or RespawnClaude) changed
+// on the session, from a CLI process that exits right after.
+func persistRelaunch(storage *session.StateDB, row *session.SessionRow, s *session.Session) {
+	// Restart built a new tmux session; without persisting the new name the
+	// row points at a session that no longer exists and the next reader
+	// (TUI or CLI) reads the session as dead.
+	if s.TmuxSessionName != row.TmuxSession {
+		if err := storage.UpdateTmuxSession(row.ID, s.TmuxSessionName); err != nil {
+			debuglog.Logger.Error("failed to persist tmux session after relaunch", "id", row.ID, "err", err)
+		}
+	}
+	if err := storage.UpdateStatus(row.ID, string(s.GetStatus())); err != nil {
+		debuglog.Logger.Error("failed to persist status after relaunch", "id", row.ID, "err", err)
+	}
+	// A relaunch may have *healed* the conversation id on the way in
+	// (adoptResolvedLaunchID promotes a resolved id over a stale one — the
+	// issue #226 path). The TUI gets away with not persisting that because its
+	// hook worker re-persists moments later; a CLI process exits as soon as it
+	// is done, so an unsaved heal is recomputed and thrown away on every
+	// relaunch and the session stays pinned to a dead conversation.
+	if id := s.ClaudeSessionID; id != "" && id != row.ClaudeSessionID {
+		if err := storage.UpdateClaudeSessionID(row.ID, id); err != nil {
+			debuglog.Logger.Error("failed to persist healed conversation id after relaunch", "id", row.ID, "err", err)
+		}
+	}
+}
+
 // agentStartupGrace bounds how long waitForAgentInPane waits for a pane to stop
 // looking like a bare shell. Generous because the cost is paid only on the
 // genuinely-exited path, which is already an error, while under-waiting
@@ -314,11 +354,7 @@ const (
 func waitForAgentInPane(tmuxSession string) (paneCmd string, atShell bool) {
 	deadline := time.Now().Add(agentStartupGrace)
 	for {
-		// Re-refresh every pass: the cache is a snapshot, and the TUI's tick that
-		// normally repopulates it isn't running in a one-shot CLI process.
-		tmux.RefreshSessionCache()
-		paneCmd = tmux.PaneCurrentCommand(tmuxSession)
-		if !shell.IsShellCommand(paneCmd) {
+		if paneCmd, atShell = paneAtShell(tmuxSession); !atShell {
 			return paneCmd, false
 		}
 		if time.Now().After(deadline) {
@@ -326,6 +362,15 @@ func waitForAgentInPane(tmuxSession string) (paneCmd string, atShell bool) {
 		}
 		time.Sleep(agentStartupPoll)
 	}
+}
+
+// paneAtShell reads the pane's foreground command once. The cache is refreshed
+// first: it is a snapshot, and the TUI's tick that normally repopulates it
+// isn't running in a one-shot CLI process.
+func paneAtShell(tmuxSession string) (paneCmd string, atShell bool) {
+	tmux.RefreshSessionCache()
+	paneCmd = tmux.PaneCurrentCommand(tmuxSession)
+	return paneCmd, shell.IsShellCommand(paneCmd)
 }
 
 // confirmDelivered reports whether message visibly reached the pane.
@@ -407,6 +452,28 @@ func resolveSession(
 	selector string,
 	branchOf func(repoPath string) string,
 ) (*session.SessionRow, error) {
+	return resolveSessionTiers(rows, slots, selector, branchOf, true)
+}
+
+// resolveSessionExact is resolveSession without the title-substring tier, for
+// commands where a near miss is worth refusing: `fleet remove frontend` must
+// not delete the one session whose title happens to contain the word.
+func resolveSessionExact(
+	rows []*session.SessionRow,
+	slots map[int]string,
+	selector string,
+	branchOf func(repoPath string) string,
+) (*session.SessionRow, error) {
+	return resolveSessionTiers(rows, slots, selector, branchOf, false)
+}
+
+func resolveSessionTiers(
+	rows []*session.SessionRow,
+	slots map[int]string,
+	selector string,
+	branchOf func(repoPath string) string,
+	fuzzy bool,
+) (*session.SessionRow, error) {
 	if selector == "" {
 		return nil, errMissingSendArgs
 	}
@@ -430,9 +497,14 @@ func resolveSession(
 			return branchOf != nil && r.ProjectPath != "" && branchOf(r.ProjectPath) == selector
 		}},
 		{"id prefix", func(r *session.SessionRow) bool { return strings.HasPrefix(r.ID, selector) }},
-		{"title", func(r *session.SessionRow) bool {
+	}
+	if fuzzy {
+		tiers = append(tiers, struct {
+			what  string
+			match func(*session.SessionRow) bool
+		}{"title", func(r *session.SessionRow) bool {
 			return strings.Contains(strings.ToLower(r.Title), strings.ToLower(selector))
-		}},
+		}})
 	}
 
 	for _, tier := range tiers {

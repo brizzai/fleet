@@ -3,6 +3,7 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -376,6 +377,23 @@ func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 	}
 	debuglog.Logger.Debug("loaded sessions from database", "count", len(sessions))
 	return sessions, nil
+}
+
+// LoadSessionLaunch reads the three columns a relaunch from another process
+// changes — status, tmux session, conversation id — for one session. ok is
+// false when the row is gone. One indexed lookup, for the TUI's worker to check
+// a row before it overwrites it.
+func (s *StateDB) LoadSessionLaunch(id string) (row *SessionRow, ok bool, err error) {
+	r := &SessionRow{ID: id}
+	err = s.db.QueryRow(`SELECT status, tmux_session, claude_session_id FROM sessions WHERE id = ?`, id).
+		Scan(&r.Status, &r.TmuxSession, &r.ClaudeSessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return r, true, nil
 }
 
 // DeleteSession removes a session by ID.
