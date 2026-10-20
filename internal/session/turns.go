@@ -72,10 +72,9 @@ func ReadClaudeTurns(path string, n int) ([]Turn, error) {
 			}
 		}
 		turns := parseClaudeTurns(buf)
-		// One more prompt than asked for guarantees the oldest returned turn
-		// started inside the window, rather than being a reply whose prompt sits
-		// just before it.
-		if len(turns) > n || start == 0 || window >= turnTailMax {
+		// A Turn exists only once its prompt line is parsed, so every turn
+		// returned started inside the window; n of them is enough.
+		if len(turns) >= n || start == 0 || window >= turnTailMax {
 			if len(turns) > n {
 				turns = turns[len(turns)-n:]
 			}

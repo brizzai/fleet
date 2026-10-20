@@ -158,6 +158,51 @@ func waitExited(until string, ob *control.Observation) bool {
 		ob.Pane == control.PaneSuspended || ob.Status == session.StatusError
 }
 
+// waitCounts reports whether an observation that matches counts yet. A state
+// that already held when the wait began says nothing about the turn being
+// waited on, so it counts only once something shows the session moved on: it
+// was seen not matching, a hook landed after since, or settle has passed.
+//
+// Hook stamps are whole seconds, so only a strictly later second is after
+// since — a Stop from earlier in the send's own second would otherwise pass for
+// the end of the turn the send started. UserPromptSubmit opens a turn rather
+// than ending one. SessionStart (mapped to finished) is an agent starting up: a
+// launch or a wake with a first prompt fires it just before that prompt's
+// UserPromptSubmit, after a relaunch has already shown running, so it is
+// neither fresh nor proof of movement.
+func waitCounts(ob *control.Observation, moved bool, sinceSec time.Time, settled bool) bool {
+	if settled {
+		return true
+	}
+	if ob.HookEvent == "SessionStart" {
+		return false
+	}
+	return moved || (ob.HookAt.After(sinceSec) && ob.HookEvent != "UserPromptSubmit")
+}
+
+// reloadRows re-reads the watched rows, so a session another process
+// relaunched into a new tmux session is followed (the observer rebuilds it)
+// rather than read as gone. A vanished row or a failed read keeps the last copy.
+func reloadRows(st *cliState, rows []*session.SessionRow) []*session.SessionRow {
+	fresh, err := st.storage.LoadSessions()
+	if err != nil {
+		return rows
+	}
+	byID := make(map[string]*session.SessionRow, len(fresh))
+	for _, r := range fresh {
+		byID[r.ID] = r
+	}
+	out := make([]*session.SessionRow, len(rows))
+	for i, r := range rows {
+		if f := byID[r.ID]; f != nil {
+			out[i] = f
+		} else {
+			out[i] = r
+		}
+	}
+	return out
+}
+
 // waitPoll is the gap between observations. Each costs two tmux calls for all
 // the sessions together, so a second is cheap and well under any turn.
 const waitPoll = time.Second
@@ -170,15 +215,16 @@ func waitFor(st *cliState, rows []*session.SessionRow, spec waitSpec) int {
 	sinceSec := spec.since.Truncate(time.Second)
 	moved := map[string]bool{} // seen not matching since the wait began
 	for {
+		rows = reloadRows(st, rows)
 		obs := o.Observe(rows)
+		settled := time.Since(start) >= spec.settle
 		var counted, blocked, exited []*control.Observation
 		for _, ob := range obs {
 			m := waitMatches(spec.until, ob)
 			if !m {
 				moved[ob.Row.ID] = true
 			}
-			fresh := !ob.HookAt.IsZero() && !ob.HookAt.Before(sinceSec) && ob.HookEvent != "UserPromptSubmit"
-			if m && (moved[ob.Row.ID] || fresh || time.Since(start) >= spec.settle) {
+			if m && waitCounts(ob, moved[ob.Row.ID], sinceSec, settled) {
 				counted = append(counted, ob)
 			}
 			switch {

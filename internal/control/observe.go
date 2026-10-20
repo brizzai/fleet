@@ -246,7 +246,7 @@ func (o *Observer) fill(ob *Observation) {
 
 	if ob.Agent == agent.Claude {
 		n := max(1, o.opts.Turns)
-		turns, _ := session.ReadClaudeTurns(TranscriptPath(s, ob.Row), n)
+		turns, _ := session.ReadClaudeTurns(transcriptPath(s, ob.Row), n)
 		ob.Turns = turns
 		if len(turns) > 0 {
 			last := turns[len(turns)-1]
@@ -259,10 +259,10 @@ func (o *Observer) fill(ob *Observation) {
 	ob.Since = sinceFor(ob, s.GetHookStatus())
 }
 
-// TranscriptPath is the Claude transcript for a session: the conversation the
+// transcriptPath is the Claude transcript for a session: the conversation the
 // hooks say is current, falling back to the persisted id when that one has no
 // transcript (yet).
-func TranscriptPath(s *session.Session, row *session.SessionRow) string {
+func transcriptPath(s *session.Session, row *session.SessionRow) string {
 	if p := session.ClaudeTranscriptPath(s.GetClaudeSessionID(), s.ProjectPath); p != "" && fileExists(p) {
 		return p
 	}

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/control"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
@@ -212,6 +215,41 @@ func TestWaitPredicates(t *testing.T) {
 	}
 }
 
+// A matching state counts only on evidence it belongs to the turn being waited
+// on — otherwise `fleet send -wait` returns the previous turn's reply.
+func TestWaitCounts(t *testing.T) {
+	since := time.Unix(1_000_005, 700_000_000) // a send at :05.7
+	sinceSec := since.Truncate(time.Second)
+	hook := func(event string, at int64) *control.Observation {
+		return &control.Observation{Pane: control.PaneAlive, Status: session.StatusFinished, HookEvent: event, HookAt: time.Unix(at, 0)}
+	}
+
+	for _, c := range []struct {
+		name    string
+		ob      *control.Observation
+		moved   bool
+		settled bool
+		want    bool
+	}{
+		{"a Stop in a later second ends the turn", hook("Stop", 1_000_009), false, false, true},
+		// Stamped :05 — it may be from :05.1, before the send.
+		{"a Stop in the send's own second is not evidence", hook("Stop", 1_000_005), false, false, false},
+		{"an older Stop is not evidence", hook("Stop", 1_000_001), false, false, false},
+		{"the turn's own prompt is not its end", hook("UserPromptSubmit", 1_000_007), false, false, false},
+		{"seen moving, then done", hook("Stop", 1_000_001), true, false, true},
+		// A wake or a launch with a prompt: Restart shows running, then the
+		// agent fires SessionStart before it reads the prompt.
+		{"SessionStart after a wake is not the turn ending", hook("SessionStart", 1_000_007), false, false, false},
+		{"SessionStart after the relaunch showed running", hook("SessionStart", 1_000_007), true, false, false},
+		{"settle counts anything", hook("SessionStart", 1_000_007), true, true, true},
+		{"no hook at all waits for settle", &control.Observation{Pane: control.PaneAlive, Status: session.StatusIdle}, false, false, false},
+	} {
+		if got := waitCounts(c.ob, c.moved, sinceSec, c.settled); got != c.want {
+			t.Errorf("%s: waitCounts = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestParseWaitArgs(t *testing.T) {
 	o, err := parseWaitArgs([]string{"a", "b", "--until", "idle", "--timeout", "90s", "--any"})
 	if err != nil || len(o.selectors) != 2 || o.until != "idle" || o.timeout != 90*time.Second || !o.any {
@@ -285,5 +323,39 @@ func TestStatusWord(t *testing.T) {
 	}
 	if got := statusWord(&control.Observation{Pane: control.PaneAlive, Status: session.StatusWaiting}); got != "waiting" {
 		t.Errorf("statusWord = %q, want waiting", got)
+	}
+}
+
+// The transcript guard must check the conversation the relaunch will resume,
+// not the one status reads: those differ when the hooks moved to a conversation
+// with no transcript yet while the row still names an older one that has one.
+func TestPrepareLaunchChecksTheResumedConversation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	project := t.TempDir()
+	old := session.ClaudeTranscriptPath("old-conv", project)
+	if err := os.MkdirAll(filepath.Dir(old), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(old, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mk := func(resume string) *control.Observation {
+		row := &session.SessionRow{ID: "s1", Title: "t", Agent: "claude", ProjectPath: project, ClaudeSessionID: "old-conv"}
+		s := session.FromRow(row)
+		s.ClaudeSessionID = resume
+		return &control.Observation{Row: row, Session: s, Agent: agent.Claude}
+	}
+
+	if err := prepareLaunch(mk("old-conv"), false); err != nil {
+		t.Errorf("resuming a conversation with a transcript: %v", err)
+	}
+	if err := prepareLaunch(mk("new-conv"), false); err == nil || !strings.Contains(err.Error(), "new-conv") {
+		t.Errorf("resuming one without: err = %v, want a refusal naming new-conv", err)
+	}
+	// -fresh drops the id in memory only; the row keeps it until a launch works.
+	ob := mk("new-conv")
+	if err := prepareLaunch(ob, true); err != nil || ob.Session.ClaudeSessionID != "" || ob.Row.ClaudeSessionID != "old-conv" {
+		t.Errorf("fresh: err = %v, memory = %q, row = %q", err, ob.Session.ClaudeSessionID, ob.Row.ClaudeSessionID)
 	}
 }

@@ -211,6 +211,9 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 	// message as the launch prompt: the agent resumes already working on it,
 	// which is the same one-shot path `fleet worktree -p` uses.
 	if session.Status(row.Status) == session.StatusSuspended {
+		if err := accountGoneErr(row); err != nil {
+			return err
+		}
 		s.InitialPrompt = message
 		if err := s.Restart(); err != nil {
 			return fmt.Errorf("failed to wake suspended session %q: %w", row.Title, err)
@@ -291,6 +294,25 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 	return nil
 }
 
+// accountGoneErr refuses to relaunch a Claude session pinned to an account
+// that is no longer configured: the launch would fall back to the ambient login
+// and silently bill a different subscription. The TUI heals such a pin on r; the
+// CLI can't, since which account to move to depends on quota and login state
+// that live only in a running TUI. With no accounts configured at all there is
+// nothing to heal to, so the TUI launches on the ambient login and so does this.
+func accountGoneErr(row *session.SessionRow) error {
+	if agent.Parse(row.Agent) != agent.Claude || row.Account == "" {
+		return nil
+	}
+	accounts := claudeaccount.Load()
+	if accounts.Len() == 0 || accounts.ConfigDirFor(row.Account) != "" {
+		return nil
+	}
+	return fmt.Errorf("session %q is pinned to Claude account %s, which is no longer configured — relaunching it "+
+		"would run on your default login instead. In the fleet TUI, press r on it (fleet moves it to a usable "+
+		"account) or use . → Move to Account…", row.Title, row.Account)
+}
+
 // persistRelaunch records what a relaunch (Restart or RespawnClaude) changed
 // on the session, from a CLI process that exits right after.
 func persistRelaunch(storage *session.StateDB, row *session.SessionRow, s *session.Session) {
@@ -310,8 +332,9 @@ func persistRelaunch(storage *session.StateDB, row *session.SessionRow, s *sessi
 	// issue #226 path). The TUI gets away with not persisting that because its
 	// hook worker re-persists moments later; a CLI process exits as soon as it
 	// is done, so an unsaved heal is recomputed and thrown away on every
-	// relaunch and the session stays pinned to a dead conversation.
-	if id := s.ClaudeSessionID; id != "" && id != row.ClaudeSessionID {
+	// relaunch and the session stays pinned to a dead conversation. An empty id
+	// is `restart -fresh` dropping one, written only now that the launch worked.
+	if id := s.ClaudeSessionID; id != row.ClaudeSessionID {
 		if err := storage.UpdateClaudeSessionID(row.ID, id); err != nil {
 			debuglog.Logger.Error("failed to persist healed conversation id after relaunch", "id", row.ID, "err", err)
 		}

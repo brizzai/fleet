@@ -500,7 +500,7 @@ func runRestartVerb(st *cliState, opts actOpts) error {
 			ob.Row.Title, statusWord(ob))
 	}
 	s := ob.Session
-	if err := prepareLaunch(st, ob, opts.fresh); err != nil {
+	if err := prepareLaunch(ob, opts.fresh); err != nil {
 		return err
 	}
 
@@ -535,7 +535,7 @@ func runResumeVerb(st *cliState, opts actOpts) error {
 
 func resumeSession(st *cliState, ob *control.Observation, fresh bool) error {
 	s := ob.Session
-	if err := prepareLaunch(st, ob, fresh); err != nil {
+	if err := prepareLaunch(ob, fresh); err != nil {
 		return err
 	}
 	if err := s.Restart(); err != nil {
@@ -545,26 +545,34 @@ func resumeSession(st *cliState, ob *control.Observation, fresh bool) error {
 	return confirmLaunched(ob, s, "Resumed", true)
 }
 
-// prepareLaunch refuses to resume a Claude conversation with no transcript —
-// `claude --resume` would print "No conversation found" and drop the pane to a
-// shell, the state this command exists to get out of — and, with fresh, drops
-// the conversation id so the launch starts a new one.
-func prepareLaunch(st *cliState, ob *control.Observation, fresh bool) error {
+// prepareLaunch refuses a relaunch that would land somewhere wrong: on a
+// removed Claude account (see accountGoneErr), or resuming a Claude
+// conversation with no transcript — `claude --resume` would print "No
+// conversation found" and drop the pane to a shell, the state this command
+// exists to get out of. With fresh, it drops the conversation id so the launch
+// starts a new one.
+func prepareLaunch(ob *control.Observation, fresh bool) error {
+	if err := accountGoneErr(ob.Row); err != nil {
+		return err
+	}
 	s := ob.Session
 	if fresh {
-		if s.ClaudeSessionID != "" {
-			s.ClaudeSessionID = ""
-			if err := st.storage.UpdateClaudeSessionID(ob.Row.ID, ""); err != nil {
-				debuglog.Logger.Error("failed to clear conversation id", "id", ob.Row.ID, "err", err)
-			}
-		}
+		// Memory only: persistRelaunch writes the empty id once the launch has
+		// worked, so a failed one still points at the old conversation.
+		s.ClaudeSessionID = ""
 		return nil
 	}
-	if ob.Agent == agent.Claude && s.ClaudeSessionID != "" {
-		if p := control.TranscriptPath(s, ob.Row); p == "" || !fileExists(p) {
+	if ob.Agent != agent.Claude {
+		return nil
+	}
+	// The id the relaunch will resume, after the heal it runs on the way in
+	// (adoptResolvedLaunchID) — not the transcript status reads, which falls
+	// back to the row's id when the current one has none.
+	if id, _ := s.ResolveLaunchID(); id != "" {
+		if p := session.ClaudeTranscriptPath(id, s.ProjectPath); p == "" || !fileExists(p) {
 			return fmt.Errorf("session %q would resume conversation %s, which has no transcript (Claude writes "+
 				"none until the first prompt) — `claude --resume` would fail with \"No conversation found\".\n"+
-				"Pass -fresh to start a new conversation instead", ob.Row.Title, s.ClaudeSessionID)
+				"Pass -fresh to start a new conversation instead", ob.Row.Title, id)
 		}
 	}
 	return nil
@@ -633,11 +641,18 @@ func runSuspendVerb(st *cliState, opts actOpts) error {
 			return fmt.Errorf("not suspending %q: failed to save its conversation id: %w", ob.Row.Title, err)
 		}
 	}
-	if err := ob.Session.Suspend(); err != nil {
-		return fmt.Errorf("failed to suspend %q: %w", ob.Row.Title, err)
-	}
+	// Recorded before the kill, as Suspend marks memory before it: an open TUI
+	// that sees the tmux session vanish reads the row first, and one still
+	// naming a live state would have it log a crash and persist error over
+	// this suspend. While tmux is up the TUI ignores a row saying suspended.
 	if err := st.storage.UpdateStatus(ob.Row.ID, string(session.StatusSuspended)); err != nil {
-		return fmt.Errorf("suspended %q, but failed to record it: %w", ob.Row.Title, err)
+		return fmt.Errorf("not suspending %q: failed to record it: %w", ob.Row.Title, err)
+	}
+	if err := ob.Session.Suspend(); err != nil {
+		if rerr := st.storage.UpdateStatus(ob.Row.ID, ob.Row.Status); rerr != nil {
+			debuglog.Logger.Error("failed to restore status after a failed suspend", "id", ob.Row.ID, "err", rerr)
+		}
+		return fmt.Errorf("failed to suspend %q: %w", ob.Row.Title, err)
 	}
 	fmt.Printf("Suspended %q — fleet resume %s brings it back\n", ob.Row.Title, hexID(ob.Row.ID))
 	return nil

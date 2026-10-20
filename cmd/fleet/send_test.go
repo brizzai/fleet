@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -297,4 +298,36 @@ func TestDeliveryNeedle(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A relaunch on a removed account falls back to the ambient login, billing a
+// different subscription with nothing on screen saying so.
+func TestAccountGoneErr(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	row := func(ag, account string) *session.SessionRow {
+		return &session.SessionRow{ID: "s1", Title: "t", Agent: ag, Account: account}
+	}
+
+	// No accounts file: nothing to heal to, so nothing to refuse.
+	if err := accountGoneErr(row("claude", "gone@example.com")); err != nil {
+		t.Errorf("no accounts configured: %v", err)
+	}
+
+	store := claudeaccount.Load()
+	store.Upsert(claudeaccount.Account{Email: "work@example.com", ConfigDir: t.TempDir()})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := accountGoneErr(row("claude", "gone@example.com")); err == nil || !strings.Contains(err.Error(), "Move to Account") {
+		t.Errorf("removed account: err = %v, want a refusal naming the fix", err)
+	}
+	for _, r := range []*session.SessionRow{
+		row("claude", "work@example.com"), // still configured
+		row("claude", ""),                 // never pinned: the strategy or ambient login, by design
+		row("codex", "gone@example.com"),  // accounts are Claude-only
+	} {
+		if err := accountGoneErr(r); err != nil {
+			t.Errorf("%s/%q: %v", r.Agent, r.Account, err)
+		}
+	}
 }

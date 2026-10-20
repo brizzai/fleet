@@ -5614,7 +5614,10 @@ func goneSessions(rows []*session.SessionRow, known []*session.Session, alive fu
 // externalRelaunch is one session whose stored row moved on without this TUI:
 // a new tmux session, or a suspend.
 type externalRelaunch struct {
-	id              string
+	id string
+	// fromTmux is the tmux session memory named when the worker diffed. The
+	// change is stale once memory names another: this TUI relaunched it since.
+	fromTmux        string
 	tmuxSession     string
 	claudeSessionID string
 	suspended       bool
@@ -5653,12 +5656,12 @@ func relaunchedElsewhere(rows []*session.SessionRow, known []*session.Session, a
 				continue // already agrees
 			}
 			if !alive(s.TmuxSessionName) {
-				out = append(out, externalRelaunch{id: s.ID, suspended: true})
+				out = append(out, externalRelaunch{id: s.ID, fromTmux: s.TmuxSessionName, suspended: true})
 			}
 		case row.TmuxSession != "" && row.TmuxSession != s.TmuxSessionName:
 			if alive(row.TmuxSession) && !alive(s.TmuxSessionName) {
 				out = append(out, externalRelaunch{
-					id: s.ID, tmuxSession: row.TmuxSession, claudeSessionID: row.ClaudeSessionID,
+					id: s.ID, fromTmux: s.TmuxSessionName, tmuxSession: row.TmuxSession, claudeSessionID: row.ClaudeSessionID,
 				})
 			}
 		}
@@ -5703,8 +5706,11 @@ func (h *Home) handleExternalRelaunches(msg externalRelaunchMsg) (tea.Model, tea
 	for _, c := range msg.changes {
 		s := h.sessionByID[c.id]
 		// Re-checked against memory: the worker diffed a cycle-start snapshot,
-		// and this TUI may have relaunched or suspended the session since.
-		if s == nil || s.Relaunching() {
+		// and this TUI may have relaunched or suspended the session since. A
+		// relaunch finished here in between leaves memory on a new tmux session;
+		// adopting the stale change would orphan it, and with both tmux sessions
+		// up no later sweep would notice.
+		if s == nil || s.Relaunching() || s.TmuxSessionName != c.fromTmux {
 			continue
 		}
 		if c.suspended && s.GetStatus() == session.StatusSuspended {

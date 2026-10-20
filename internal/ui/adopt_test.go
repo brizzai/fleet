@@ -434,7 +434,8 @@ func TestRelaunchedElsewhere(t *testing.T) {
 		row.TmuxSession, row.ClaudeSessionID = "fleet_new", "c2"
 		live = map[string]bool{"fleet_new": true}
 		got := relaunchedElsewhere([]*session.SessionRow{row}, []*session.Session{s}, alive)
-		if len(got) != 1 || got[0].tmuxSession != "fleet_new" || got[0].claudeSessionID != "c2" || got[0].suspended {
+		if len(got) != 1 || got[0].tmuxSession != "fleet_new" || got[0].claudeSessionID != "c2" || got[0].suspended ||
+			got[0].fromTmux != "fleet_old" {
 			t.Fatalf("got %+v", got)
 		}
 	})
@@ -489,6 +490,39 @@ func TestRelaunchedElsewhere(t *testing.T) {
 			t.Fatalf("got %+v", got)
 		}
 	})
+}
+
+// The worker diffs a snapshot; by the time its message is handled this TUI may
+// have relaunched the session itself. Adopting the stale change then would point
+// memory at the CLI's tmux session and orphan this TUI's own agent.
+func TestHandleExternalRelaunchesSkipsStaleChange(t *testing.T) {
+	h := adoptTestHome(t)
+	s := session.NewSession("t", t.TempDir())
+	s.TmuxSessionName = "fleet_old"
+	s.SetStatus(session.StatusError)
+	h.sessions = []*session.Session{s}
+	h.rebuildSessionMap()
+
+	change := externalRelaunch{id: s.ID, fromTmux: "fleet_old", tmuxSession: "fleet_cli", claudeSessionID: "c2"}
+
+	// This TUI restarted it after the snapshot: memory now names fleet_tui.
+	s.TmuxSessionName = "fleet_tui"
+	h.handleExternalRelaunches(externalRelaunchMsg{changes: []externalRelaunch{change}})
+	if s.TmuxSessionName != "fleet_tui" {
+		t.Fatalf("tmux = %q, want fleet_tui — a stale change was adopted", s.TmuxSessionName)
+	}
+	suspend := externalRelaunch{id: s.ID, fromTmux: "fleet_old", suspended: true}
+	h.handleExternalRelaunches(externalRelaunchMsg{changes: []externalRelaunch{suspend}})
+	if s.GetStatus() == session.StatusSuspended {
+		t.Fatal("a stale suspend marked a session this TUI relaunched as suspended")
+	}
+
+	// Memory unchanged since the snapshot: adopted.
+	s.TmuxSessionName = "fleet_old"
+	h.handleExternalRelaunches(externalRelaunchMsg{changes: []externalRelaunch{change}})
+	if s.TmuxSessionName != "fleet_cli" {
+		t.Fatalf("tmux = %q, want fleet_cli", s.TmuxSessionName)
+	}
 }
 
 // The worker writes "error" the moment a session's tmux disappears — within one
