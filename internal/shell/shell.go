@@ -104,8 +104,14 @@ func (s *Shell) ToRow() *session.ShellRow {
 // Start launches the shell in tmux. No env is passed (no FLEET_INSTANCE_ID), so
 // no agent hooks ever fire for a shell.
 func (s *Shell) Start() error {
-	return s.Tmux().Start(s.Command)
+	return s.Tmux().Start(s.Command, promptEnv)
 }
+
+// promptEnv shortens a drawer bash prompt to the folder name, because the
+// drawer's border already shows the full path. bash runs PROMPT_COMMAND before
+// each prompt, after ~/.bashrc has set PS1, so no rc file is touched. zsh
+// ignores it and keeps its own prompt.
+const promptEnv = `PROMPT_COMMAND=PS1='\[\e[1;34m\]\W\[\e[0m\]\$ '`
 
 // Restart kills the (possibly dead) tmux session and relaunches the shell in a
 // fresh one, reusing the same name/command. Updates the tmux name; the caller
@@ -116,7 +122,7 @@ func (s *Shell) Restart() error {
 		_ = old.Kill()
 	}
 	ts := tmux.NewSessionWithPrefix(ShellPrefix, s.Name, s.RepoPath)
-	if err := ts.Start(s.Command); err != nil {
+	if err := ts.Start(s.Command, promptEnv); err != nil {
 		return err
 	}
 	s.mu.Lock()

@@ -27,6 +27,7 @@ var (
 	tickPresets   = []int{1, 2, 3, 5, 10}
 	// Bounded by config.DrawerHeightMax (the UI's hard body cap) — taller can't render.
 	drawerHeightPresets  = []int{6, 8, 10, 12, 14}
+	sidebarWidthPresets  = []int{40, 50, 65, 80, 100}
 	statusStyleSet       = []string{"icon", "bar"}
 	chevronStyleSet      = []string{"triangle", "plusminus"}
 	densitySet           = []string{"normal", "compact"}
@@ -620,6 +621,18 @@ func buildSettingsCategories() []settingsCategory {
 				cycle: func(d *SettingsDialog, dir int) {
 					d.cfg.SidebarDensity = cycleString(d.cfg.GetSidebarDensity(), densitySet, dir)
 					ApplyDisplayConfig(d.cfg)
+				},
+			},
+			{
+				label:  "Sidebar width (cols)",
+				value:  func(c *config.Config) string { return fmt.Sprintf("%d", c.GetSidebarWidth()) },
+				valueW: func() int { return maxIntStrW(sidebarWidthPresets) },
+				cycle: func(d *SettingsDialog, dir int) {
+					idx := indexOfInt(sidebarWidthPresets, d.cfg.GetSidebarWidth())
+					if idx < 0 {
+						idx = indexOfInt(sidebarWidthPresets, config.SidebarWidthDefault)
+					}
+					d.cfg.SidebarWidth = sidebarWidthPresets[(idx+dir+len(sidebarWidthPresets))%len(sidebarWidthPresets)]
 				},
 			},
 		},
