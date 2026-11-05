@@ -82,7 +82,7 @@ func worktreeFlagSet(o *worktreeOpts) *flag.FlagSet {
 	fs.StringVar(&o.base, "base", "", "base branch to branch from (default: the repo's default branch)")
 	fs.StringVar(&o.repoPath, "path", "", "repo to create the worktree in (default: current directory)")
 	fs.StringVar(&o.agentName, "agent", "", "agent to run: "+agent.NameList()+" (default: default_agent config)")
-	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config)")
+	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config, ranked on live quota)")
 	fs.BoolVar(&o.noSession, "no-session", false, "create the worktree only, print its path, and start no session")
 	fs.StringVar(&o.prompt, "prompt", "", "first message for the agent, which it starts working on (use - to read stdin)")
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")

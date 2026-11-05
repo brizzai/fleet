@@ -50,7 +50,8 @@ Worth knowing:
   worktree, so running it from inside one worktree doesn't nest names.
 - `--agent claude|codex|opencode|copilot` overrides the user's configured default agent.
 - `--account <email>` picks which Claude subscription the session bills to. Claude only —
-  passing it with another agent is an error, not a silent no-op.
+  passing it with another agent is an error, not a silent no-op. Without it, the user's
+  `account_strategy` picks, ranked on live quota just as the TUI does.
 - `--ticket BRZ-3182` materializes a Linear issue (description, comments, screenshots)
   into the worktree and names the branch from it. Conflicts with `-p`.
 - `--no-session` makes only the worktree and prints its path, so it composes:
