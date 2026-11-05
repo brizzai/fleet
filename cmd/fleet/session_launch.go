@@ -89,16 +89,14 @@ func resolveLaunchAccount(cfg *config.Config, accounts *claudeaccount.Store, rep
 			os.Exit(1)
 		}
 		account = explicit
-	} else if acct, ok, notes := selectLaunchAccount(cfg, accounts.List(), allowed, readLaunchUsage); ok {
+	} else if acct, ok, note := selectLaunchAccount(cfg, accounts.List(), allowed); ok {
 		account = acct.Email
-		// On stderr, not only in debug.log: whoever runs a scripted
-		// `fleet worktree` never opens that, and a strategy that couldn't rank
-		// can land on a nearly spent account.
-		for _, n := range notes {
-			fmt.Fprintln(os.Stderr, n)
+		// On stderr: whoever runs a scripted `fleet worktree` never opens debug.log.
+		if note != "" {
+			fmt.Fprintln(os.Stderr, note)
 		}
 		debuglog.Logger.Info("account select", "chosen", account,
-			"strategy", cfg.GetAccountStrategy(), "notes", notes)
+			"strategy", cfg.GetAccountStrategy(), "note", note)
 	} else if accounts.Len() > 0 {
 		// Select declined, and the two reasons it can decline want opposite
 		// answers — see claudeaccount.AllowedConfigured.
@@ -147,17 +145,9 @@ func guardEffortSupported(ag agent.Type, effort string) {
 	}
 }
 
-// usageReader produces the quota readings Select ranks on, plus the accounts
-// it couldn't read.
-type usageReader func(accounts []claudeaccount.Account) (map[string]claudeaccount.Usage, []claudeaccount.Unread)
-
-// readLaunchUsage is cliUsageReader; tests replace it.
-var readLaunchUsage usageReader = cliUsageReader
-
-// cliUsageReader reads quota the way the TUI's poll does, through the shared
-// cache: a reading a TUI or an earlier CLI run took within the poll floor is
-// reused, otherwise it is fetched under claudeaccount.CLIFetchTimeout.
-func cliUsageReader(accounts []claudeaccount.Account) (map[string]claudeaccount.Usage, []claudeaccount.Unread) {
+// readLaunchUsage reads quota through the cache the TUI's poll writes; tests
+// replace it.
+var readLaunchUsage = func(accounts []claudeaccount.Account) (map[string]claudeaccount.Usage, []claudeaccount.Unread) {
 	claudeaccount.SetUserAgent(version)
 	return claudeaccount.UsageForLaunch(context.Background(), claudeaccount.LaunchUsageOpts{
 		Accounts:  accounts,
@@ -165,26 +155,21 @@ func cliUsageReader(accounts []claudeaccount.Account) (map[string]claudeaccount.
 	})
 }
 
-// selectLaunchAccount runs account_strategy for a session with no --account:
-// the same claudeaccount.Select the TUI calls, fed the same quota readings.
-//
-// Quota is read only when the strategy ranks by it and there is a choice to
-// make; waterfall and manual pick as they always have. Unreadable quota never
-// blocks a launch — Select scores those accounts as unknown, which with
-// nothing readable is configured order — and each note says why.
-func selectLaunchAccount(cfg *config.Config, all []claudeaccount.Account, allowed []string, read usageReader) (claudeaccount.Account, bool, []string) {
+// selectLaunchAccount runs account_strategy with the TUI's own Select, reading
+// quota only when the strategy ranks by it and there is a choice. Unreadable
+// quota never blocks a launch; the note says why.
+func selectLaunchAccount(cfg *config.Config, all []claudeaccount.Account, allowed []string) (claudeaccount.Account, bool, string) {
 	strategy := cfg.GetAccountStrategy()
-	var usage map[string]claudeaccount.Usage
-	var unread []claudeaccount.Unread
-	candidates := 0
+	var cands []claudeaccount.Account
 	for _, a := range all {
 		if accountAllowed(a.Email, allowed) {
-			candidates++
+			cands = append(cands, a)
 		}
 	}
-	ranks := claudeaccount.RanksByUsage(strategy) && candidates > 1
-	if ranks {
-		usage, unread = read(all)
+	var usage map[string]claudeaccount.Usage
+	var unread []claudeaccount.Unread
+	if claudeaccount.RanksByUsage(strategy) && len(cands) > 1 {
+		usage, unread = readLaunchUsage(cands)
 	}
 	acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
 		Accounts: all,
@@ -193,42 +178,18 @@ func selectLaunchAccount(cfg *config.Config, all []claudeaccount.Account, allowe
 		Manual:   cfg.DefaultAccount,
 		Allowed:  allowed,
 	})
-	if !ok || !ranks {
-		return acct, ok, nil
+	if !ok || len(unread) == 0 {
+		return acct, ok, ""
 	}
-
-	var unknown, skipped []string
-	for _, u := range unread {
-		switch {
-		case !accountAllowed(u.Email, allowed):
-		case u.LoggedOut:
-			skipped = append(skipped, u.Email)
-		default:
-			unknown = append(unknown, u.Email+": "+u.Reason)
-		}
+	reasons := make([]string, len(unread))
+	for i, u := range unread {
+		reasons[i] = u.Email + ": " + u.Reason
 	}
-	var notes []string
-	if len(unknown)+len(skipped) >= candidates {
-		notes = append(notes, fmt.Sprintf("Note: couldn't read quota (%s), so configured order chose %s.",
-			strings.Join(append(unknown, notLoggedIn(skipped)...), "; "), acct.Email))
-		return acct, true, notes
+	if len(unread) == len(cands) {
+		return acct, true, fmt.Sprintf("Note: couldn't read quota (%s), so configured order chose %s.",
+			strings.Join(reasons, "; "), acct.Email)
 	}
-	notes = append(notes, fmt.Sprintf("Account: %s (%s).", acct.Email, claudeaccount.StrategyLabel(strategy)))
-	if len(unknown) > 0 {
-		notes = append(notes, fmt.Sprintf("Note: couldn't read quota for %s; ranked as half used.", strings.Join(unknown, "; ")))
-	}
-	if len(skipped) > 0 {
-		notes = append(notes, fmt.Sprintf("Note: skipped %s.", strings.Join(notLoggedIn(skipped), "; ")))
-	}
-	return acct, true, notes
-}
-
-func notLoggedIn(emails []string) []string {
-	out := make([]string, len(emails))
-	for i, e := range emails {
-		out[i] = e + ": not logged in"
-	}
-	return out
+	return acct, true, fmt.Sprintf("Note: couldn't read quota for %s.", strings.Join(reasons, "; "))
 }
 
 // launchOverrides carries the per-launch choices a command hands to the agent.

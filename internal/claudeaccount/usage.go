@@ -92,6 +92,7 @@ func accessToken(ctx context.Context, dir string) (string, error) {
 	// Absolute path: a launchd job or `env -i` may run with no PATH at all.
 	cmd := exec.CommandContext(ctx, securityBin, "find-generic-password",
 		"-w", "-s", keychainService(dir))
+	cmd.WaitDelay = time.Second // a child holding the pipe would outlive ctx
 	out, err := cmd.Output()
 	if err != nil {
 		var exit *exec.ExitError

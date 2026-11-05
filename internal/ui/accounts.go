@@ -830,6 +830,10 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 	h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
 		m[key] = msg.account.InitialUsage()
 	})
+	// Or the CLI would keep reading a cached logged-out verdict.
+	if err := claudeaccount.ForgetCachedUsage(claudeaccount.UsageCachePath(), key); err != nil {
+		debuglog.Logger.Warn("could not clear cached account usage", "err", err)
+	}
 
 	stored, ok := h.accounts.Get(key)
 	if !ok {
@@ -930,7 +934,7 @@ func (h *Home) maybePollAccountUsage() {
 	h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
 		maps.Copy(m, updates)
 	})
-	// Shared with `fleet worktree`/`fleet add`, which rank from this file.
+	// `fleet worktree`/`fleet add` rank from this file.
 	if err := claudeaccount.SaveUsageCache(claudeaccount.UsageCachePath(), updates); err != nil {
 		debuglog.Logger.Warn("could not write account usage cache", "err", err)
 	}
