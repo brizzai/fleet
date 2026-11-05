@@ -719,15 +719,8 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		"count", h.accounts.Len(), "strategy", cfg.GetAccountStrategy(),
 		"manual_default", cfg.DefaultAccount, "origins_restricted", len(cfg.AllowedAccounts),
 		"conflicting_auth", claudeaccount.GuardConflictingAuth().Name)
-	// Seeded with readings a CLI took within the poll floor, so the first poll
-	// doesn't re-ask the endpoint for them.
-	seedUsage := make(map[string]claudeaccount.Usage)
-	for email, u := range claudeaccount.LoadUsageCache(claudeaccount.UsageCachePath()) {
-		if !u.PollDue(time.Now()) {
-			seedUsage[email] = u
-		}
-	}
-	h.accountUsage.Store(&seedUsage)
+	emptyUsage := make(map[string]claudeaccount.Usage)
+	h.accountUsage.Store(&emptyUsage)
 	// Sessions resolve their token at launch through this, so re-adding an
 	// account with a fresh token takes effect on the next relaunch without
 	// touching any live Session.

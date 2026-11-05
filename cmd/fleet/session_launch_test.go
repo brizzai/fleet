@@ -11,89 +11,90 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 )
 
-func twoAccounts() []claudeaccount.Account {
+func threeAccounts() []claudeaccount.Account {
 	return []claudeaccount.Account{
 		{Email: "first@x", ConfigDir: "/dirs/first", Order: 0},
 		{Email: "second@x", ConfigDir: "/dirs/second", Order: 1},
+		{Email: "third@x", ConfigDir: "/dirs/third", Order: 2},
 	}
 }
 
-func readerOf(usage map[string]claudeaccount.Usage, unread []claudeaccount.Unread, called *bool) usageReader {
-	return func([]claudeaccount.Account) (map[string]claudeaccount.Usage, []claudeaccount.Unread) {
-		*called = true
+// stubUsage replaces readLaunchUsage and records which accounts it was asked for.
+func stubUsage(t *testing.T, usage map[string]claudeaccount.Usage, unread []claudeaccount.Unread) *[]string {
+	t.Helper()
+	var asked []string
+	prev := readLaunchUsage
+	t.Cleanup(func() { readLaunchUsage = prev })
+	readLaunchUsage = func(accts []claudeaccount.Account) (map[string]claudeaccount.Usage, []claudeaccount.Unread) {
+		for _, a := range accts {
+			asked = append(asked, a.Email)
+		}
 		return usage, unread
 	}
+	return &asked
 }
 
 func TestSelectLaunchAccountPicksLeastUsedNotFirst(t *testing.T) {
 	now := time.Now()
-	var called bool
-	read := readerOf(map[string]claudeaccount.Usage{
+	stubUsage(t, map[string]claudeaccount.Usage{
 		"first@x":  {SevenDayPct: 80, FetchedAt: now},
 		"second@x": {SevenDayPct: 20, FetchedAt: now},
-	}, nil, &called)
+		"third@x":  {SevenDayPct: 60, FetchedAt: now},
+	}, nil)
 
-	acct, ok, notes := selectLaunchAccount(&config.Config{AccountStrategy: "least_used_weekly"}, twoAccounts(), nil, read)
-	if !ok || acct.Email != "second@x" {
-		t.Fatalf("picked %s, want second@x", acct.Email)
-	}
-	if len(notes) != 1 || strings.Contains(notes[0], "configured order") {
-		t.Fatalf("notes = %q", notes)
+	acct, ok, note := selectLaunchAccount(&config.Config{AccountStrategy: "least_used_weekly"}, threeAccounts(), nil)
+	if !ok || acct.Email != "second@x" || note != "" {
+		t.Fatalf("picked %s note %q, want second@x and no note", acct.Email, note)
 	}
 }
 
 func TestSelectLaunchAccountFallsBackWithReason(t *testing.T) {
-	var called bool
-	read := readerOf(map[string]claudeaccount.Usage{}, []claudeaccount.Unread{
+	stubUsage(t, map[string]claudeaccount.Usage{}, []claudeaccount.Unread{
 		{Email: "first@x", Reason: "timed out"},
 		{Email: "second@x", Reason: "timed out"},
-	}, &called)
+	})
 
-	acct, ok, notes := selectLaunchAccount(&config.Config{AccountStrategy: "least_used_weekly"}, twoAccounts(), nil, read)
-	if !ok || acct.Email != "first@x" {
-		t.Fatalf("picked %s, want configured order first@x", acct.Email)
-	}
+	acct, ok, note := selectLaunchAccount(&config.Config{}, threeAccounts(), []string{"first@x", "second@x"})
 	want := "Note: couldn't read quota (first@x: timed out; second@x: timed out), so configured order chose first@x."
-	if len(notes) != 1 || notes[0] != want {
-		t.Fatalf("notes = %q, want %q", notes, want)
+	if !ok || acct.Email != "first@x" || note != want {
+		t.Fatalf("picked %s note %q, want first@x %q", acct.Email, note, want)
 	}
 }
 
 func TestSelectLaunchAccountPartialRead(t *testing.T) {
 	now := time.Now()
-	var called bool
-	read := readerOf(map[string]claudeaccount.Usage{
+	stubUsage(t, map[string]claudeaccount.Usage{
 		"second@x": {SevenDayPct: 70, FetchedAt: now},
-	}, []claudeaccount.Unread{{Email: "first@x", Reason: "usage endpoint returned 503"}}, &called)
+	}, []claudeaccount.Unread{{Email: "first@x", Reason: "usage endpoint returned 503"}})
 
-	acct, _, notes := selectLaunchAccount(&config.Config{AccountStrategy: "least_used_weekly"}, twoAccounts(), nil, read)
-	// first@x ranks at the unknown midpoint (50), below second@x's 70.
-	if acct.Email != "first@x" || len(notes) != 2 || !strings.Contains(notes[1], "first@x: usage endpoint returned 503") {
-		t.Fatalf("picked %s, notes = %q", acct.Email, notes)
+	acct, _, note := selectLaunchAccount(&config.Config{}, threeAccounts(), []string{"first@x", "second@x"})
+	// first@x ranks as unknown (midpoint), below second@x's 70.
+	if acct.Email != "first@x" || note != "Note: couldn't read quota for first@x: usage endpoint returned 503." {
+		t.Fatalf("picked %s note %q", acct.Email, note)
+	}
+}
+
+// Quota is read only for accounts the origin allows.
+func TestSelectLaunchAccountReadsOnlyAllowed(t *testing.T) {
+	asked := stubUsage(t, nil, nil)
+	selectLaunchAccount(&config.Config{}, threeAccounts(), []string{"second@x", "third@x"})
+	if strings.Join(*asked, ",") != "second@x,third@x" {
+		t.Fatalf("read quota for %v, want only the allowed accounts", *asked)
 	}
 }
 
 func TestSelectLaunchAccountOtherStrategiesReadNoQuota(t *testing.T) {
-	for _, strategy := range []string{"waterfall", "manual"} {
-		var called bool
-		acct, ok, notes := selectLaunchAccount(&config.Config{AccountStrategy: strategy, DefaultAccount: "second@x"},
-			twoAccounts(), nil, readerOf(nil, nil, &called))
-		if called || !ok || len(notes) != 0 {
-			t.Fatalf("%s: called=%v ok=%v notes=%q", strategy, called, ok, notes)
-		}
-		want := map[string]string{"waterfall": "first@x", "manual": "second@x"}[strategy]
-		if acct.Email != want {
-			t.Fatalf("%s: picked %s, want %s", strategy, acct.Email, want)
+	asked := stubUsage(t, nil, nil)
+	for strategy, want := range map[string]string{"waterfall": "first@x", "manual": "second@x"} {
+		acct, ok, note := selectLaunchAccount(&config.Config{AccountStrategy: strategy, DefaultAccount: "second@x"}, threeAccounts(), nil)
+		if !ok || acct.Email != want || note != "" {
+			t.Fatalf("%s: picked %s note %q, want %s", strategy, acct.Email, note, want)
 		}
 	}
-}
-
-// One allowed account is no choice, so quota isn't read.
-func TestSelectLaunchAccountSingleCandidateReadsNoQuota(t *testing.T) {
-	var called bool
-	acct, _, notes := selectLaunchAccount(&config.Config{}, twoAccounts(), []string{"second@x"}, readerOf(nil, nil, &called))
-	if called || acct.Email != "second@x" || len(notes) != 0 {
-		t.Fatalf("called=%v picked=%s notes=%q", called, acct.Email, notes)
+	// One allowed account is no choice.
+	selectLaunchAccount(&config.Config{}, threeAccounts(), []string{"second@x"})
+	if len(*asked) != 0 {
+		t.Fatalf("quota read for %v", *asked)
 	}
 }
 
@@ -102,20 +103,15 @@ func TestExplicitAccountOverridesStrategy(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
 	store := claudeaccount.Load()
-	for _, a := range twoAccounts() {
+	for _, a := range threeAccounts() {
 		a.OrgUUID = a.Email
 		store.Upsert(a)
 	}
-	prev := readLaunchUsage
-	t.Cleanup(func() { readLaunchUsage = prev })
-	readLaunchUsage = func([]claudeaccount.Account) (map[string]claudeaccount.Usage, []claudeaccount.Unread) {
-		t.Fatal("quota read despite an explicit --account")
-		return nil, nil
-	}
+	asked := stubUsage(t, nil, nil)
 
 	got := resolveLaunchAccount(&config.Config{AccountStrategy: "least_used_weekly"}, store, t.TempDir(), agent.Claude, "second@x")
-	if got != "second@x" {
-		t.Fatalf("account = %q, want second@x", got)
+	if got != "second@x" || len(*asked) != 0 {
+		t.Fatalf("account = %q, quota read for %v; want second@x and no read", got, *asked)
 	}
 }
 
@@ -126,11 +122,8 @@ func TestAddAndWorktreeShareAccountResolution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(src), "resolveLaunchAccount(") {
-			t.Fatalf("%s no longer calls resolveLaunchAccount", f)
-		}
-		if strings.Contains(string(src), "claudeaccount.Select(") {
-			t.Fatalf("%s calls claudeaccount.Select directly; go through resolveLaunchAccount", f)
+		if !strings.Contains(string(src), "resolveLaunchAccount(") || strings.Contains(string(src), "claudeaccount.Select(") {
+			t.Fatalf("%s must pick accounts through resolveLaunchAccount", f)
 		}
 	}
 }

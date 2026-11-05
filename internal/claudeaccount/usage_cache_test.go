@@ -3,6 +3,7 @@ package claudeaccount
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,42 +103,90 @@ func TestUsageForLaunchDropsReadingsPastMaxAge(t *testing.T) {
 	}
 }
 
-func TestUsageForLaunchMissingCacheIsNeverRead(t *testing.T) {
-	now := time.Now()
+func TestUsageForLaunchTimesOut(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.json")
-	// Within the poll floor, nothing is fetched, and an empty reading has no age.
-	if err := SaveUsageCache(path, map[string]Usage{
-		"a@x": {AttemptedAt: now}, "b@x": {AttemptedAt: now},
-	}); err != nil {
-		t.Fatal(err)
+	var accts []Account
+	for _, e := range []string{"a", "b", "c", "d", "e"} {
+		accts = append(accts, Account{Email: e, ConfigDir: "/" + e})
 	}
+	// Like `security` killed by the deadline: the error doesn't say timeout.
+	hang := func(ctx context.Context, _ string) (Usage, error) {
+		<-ctx.Done()
+		return Usage{}, ErrNoCredential
+	}
+	timeout := 200 * time.Millisecond
+	start := time.Now()
 	_, unread := UsageForLaunch(context.Background(), LaunchUsageOpts{
-		Accounts: launchAccounts(), CachePath: path, Now: now,
-		Fetch: func(context.Context, string) (Usage, error) {
-			t.Fatal("fetched inside the poll floor")
-			return Usage{}, nil
-		},
+		Accounts: accts, CachePath: path, Timeout: timeout, Fetch: hang,
 	})
-	if len(unread) != 2 || unread[0].Reason != "never read" {
+	if el := time.Since(start); el > 3*timeout {
+		t.Fatalf("took %s; accounts must be fetched in parallel under one timeout", el)
+	}
+	if len(unread) != 5 || unread[0].Reason != "timed out" {
 		t.Fatalf("unread = %+v", unread)
 	}
 }
 
-func TestUsageForLaunchTimesOut(t *testing.T) {
+// One account cached, the others fetched: the map must not be written from
+// two goroutines at once (run under -race).
+func TestUsageForLaunchMixedCachedAndFetched(t *testing.T) {
+	now := time.Now()
 	path := filepath.Join(t.TempDir(), "cache.json")
-	hang := func(ctx context.Context, _ string) (Usage, error) {
-		<-ctx.Done()
-		return Usage{}, ctx.Err()
+	accts := []Account{{Email: "due", ConfigDir: "/due"}}
+	seed := map[string]Usage{}
+	for i := range 50 {
+		e := fmt.Sprintf("cached%d", i)
+		accts = append(accts, Account{Email: e, ConfigDir: "/" + e})
+		seed[e] = Usage{SevenDayPct: 10, FetchedAt: now, AttemptedAt: now}
 	}
-	start := time.Now()
-	_, unread := UsageForLaunch(context.Background(), LaunchUsageOpts{
-		Accounts: launchAccounts(), CachePath: path, Timeout: 50 * time.Millisecond, Fetch: hang,
+	if err := SaveUsageCache(path, seed); err != nil {
+		t.Fatal(err)
+	}
+	usage, unread := UsageForLaunch(context.Background(), LaunchUsageOpts{
+		Accounts: accts, CachePath: path, Now: now,
+		Fetch: func(context.Context, string) (Usage, error) { return Usage{}, ErrNoCredential },
 	})
-	if el := time.Since(start); el > time.Second {
-		t.Fatalf("took %s; accounts must be fetched in parallel under one timeout", el)
+	if len(usage) != 51 || len(unread) != 1 || unread[0].Email != "due" {
+		t.Fatalf("usage=%d unread=%+v", len(usage), unread)
 	}
-	if len(unread) != 2 || unread[0].Reason != "timed out" {
-		t.Fatalf("unread = %+v", unread)
+}
+
+// An old reading that shows an account spent still keeps Select off it.
+func TestUsageForLaunchKeepsOldSpentReading(t *testing.T) {
+	now := time.Now()
+	path := filepath.Join(t.TempDir(), "cache.json")
+	old := now.Add(-UsageCacheMaxAge - time.Minute)
+	if err := SaveUsageCache(path, map[string]Usage{
+		"a@x": {SevenDayPct: 100, SevenDayReset: now.Add(96 * time.Hour), FetchedAt: old, AttemptedAt: old},
+		"b@x": {SevenDayPct: 40, FetchedAt: old, AttemptedAt: old},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fail := func(context.Context, string) (Usage, error) { return Usage{}, statusError(503) }
+	usage, _ := UsageForLaunch(context.Background(), LaunchUsageOpts{
+		Accounts: launchAccounts(), CachePath: path, Now: now, Fetch: fail,
+	})
+	acct, _ := Select(SelectOpts{Accounts: launchAccounts(), Usage: usage, Strategy: StrategyLeastUsedWeekly, Now: now})
+	if acct.Email != "b@x" {
+		t.Fatalf("picked %s, want b@x (a@x is spent for days)", acct.Email)
+	}
+}
+
+func TestForgetCachedUsageClearsLoggedOut(t *testing.T) {
+	now := time.Now()
+	path := filepath.Join(t.TempDir(), "cache.json")
+	if err := SaveUsageCache(path, map[string]Usage{
+		"a@x": {AttemptedAt: now, LoggedOut: true, Err: ErrNotLoggedIn},
+		"b@x": {SevenDayPct: 5, FetchedAt: now, AttemptedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ForgetCachedUsage(path, "a@x"); err != nil {
+		t.Fatal(err)
+	}
+	m := LoadUsageCache(path)
+	if _, ok := m["a@x"]; ok || m["b@x"].SevenDayPct != 5 {
+		t.Fatalf("cache = %+v", m)
 	}
 }
 
@@ -153,7 +202,7 @@ func TestUsageForLaunchLoggedOutIsFlagged(t *testing.T) {
 	usage, unread := UsageForLaunch(context.Background(), LaunchUsageOpts{
 		Accounts: launchAccounts(), CachePath: path, Now: now, Fetch: fetch,
 	})
-	if len(unread) != 1 || !unread[0].LoggedOut {
+	if len(unread) != 1 || unread[0].Reason != "not logged in" {
 		t.Fatalf("unread = %+v", unread)
 	}
 	acct, _ := Select(SelectOpts{Accounts: launchAccounts(), Usage: usage, Strategy: StrategyLeastUsedWeekly, Now: now})
