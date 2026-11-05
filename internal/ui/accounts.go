@@ -830,6 +830,10 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 	h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
 		m[key] = msg.account.InitialUsage()
 	})
+	// Or the CLI would keep reading a cached logged-out verdict.
+	if err := claudeaccount.ForgetCachedUsage(claudeaccount.UsageCachePath(), key); err != nil {
+		debuglog.Logger.Warn("could not clear cached account usage", "err", err)
+	}
 
 	stored, ok := h.accounts.Get(key)
 	if !ok {
@@ -878,8 +882,7 @@ func (h *Home) maybePollAccountUsage() {
 		// so the readout keeps showing a spent account for up to three minutes
 		// after it came back — with the countdown at zero, which is the moment
 		// its owner is actually looking at it.
-		if had && now.Sub(prev.AttemptedAt) < claudeaccount.MinPollInterval &&
-			!prev.StaleAfterReset(now) {
+		if had && !prev.PollDue(now) {
 			continue
 		}
 
@@ -912,11 +915,7 @@ func (h *Home) maybePollAccountUsage() {
 			// Keep whatever numbers we already had — a reading from three
 			// minutes ago beats none, and dropping it would pull the account out
 			// of the readout and rank it at the neutral midpoint for selection.
-			// Only the attempt clock moves.
-			prev.Err = err
-			prev.AttemptedAt = now
-			prev.LoggedOut = loggedOut
-			updates[a.Email] = prev
+			updates[a.Email] = prev.WithFailure(err, now)
 			continue
 		}
 
@@ -935,6 +934,10 @@ func (h *Home) maybePollAccountUsage() {
 	h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
 		maps.Copy(m, updates)
 	})
+	// `fleet worktree`/`fleet add` rank from this file.
+	if err := claudeaccount.SaveUsageCache(claudeaccount.UsageCachePath(), updates); err != nil {
+		debuglog.Logger.Warn("could not write account usage cache", "err", err)
+	}
 }
 
 // persistAccounts saves the store, re-points the token resolver and refreshes

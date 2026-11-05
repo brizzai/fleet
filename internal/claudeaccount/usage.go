@@ -51,6 +51,9 @@ var ErrNoCredential = errors.New("no stored credential for this config dir")
 // could not run.
 const errSecItemNotFound = 44
 
+// securityBin is macOS's Keychain CLI. A var so tests can stub it.
+var securityBin = "/usr/bin/security"
+
 // keychainService returns the macOS Keychain service name Claude Code stores a
 // config dir's credential under.
 //
@@ -86,8 +89,10 @@ func keychainService(dir string) string {
 // the previous mechanism, which kept year-long credentials in a file of its own
 // and needed redaction at every logging site to keep them out of bug reports.
 func accessToken(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "security", "find-generic-password",
+	// Absolute path: a launchd job or `env -i` may run with no PATH at all.
+	cmd := exec.CommandContext(ctx, securityBin, "find-generic-password",
 		"-w", "-s", keychainService(dir))
+	cmd.WaitDelay = time.Second // a child holding the pipe would outlive ctx
 	out, err := cmd.Output()
 	if err != nil {
 		var exit *exec.ExitError
@@ -151,7 +156,7 @@ func FetchUsage(ctx context.Context, dir string) (Usage, error) {
 		return Usage{}, fmt.Errorf("%w (%d)", ErrNotLoggedIn, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return Usage{}, fmt.Errorf("usage endpoint returned %d", resp.StatusCode)
+		return Usage{}, statusError(resp.StatusCode)
 	}
 
 	var raw struct {
