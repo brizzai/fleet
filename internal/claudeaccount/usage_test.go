@@ -65,7 +65,7 @@ func TestUnparseableKeychainItemIsNotEvidence(t *testing.T) {
 	}
 }
 
-// withFakeSecurity puts a stub `security` on PATH for the duration of the test.
+// withFakeSecurity points securityBin at a stub for the duration of the test.
 func withFakeSecurity(t *testing.T, body string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -73,5 +73,7 @@ func withFakeSecurity(t *testing.T, body string) {
 	if err := os.WriteFile(filepath.Join(dir, "security"), []byte(script), 0700); err != nil {
 		t.Fatalf("write stub: %v", err)
 	}
-	t.Setenv("PATH", dir)
+	prev := securityBin
+	securityBin = filepath.Join(dir, "security")
+	t.Cleanup(func() { securityBin = prev })
 }
