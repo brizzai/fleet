@@ -84,40 +84,62 @@ func openTestState(t *testing.T) *session.StateDB {
 
 func TestResolveLaunchGroup(t *testing.T) {
 	db := openTestState(t)
-	if err := db.SaveSession(&session.SessionRow{ID: "parent", Title: "p", ProjectPath: "/p", Status: "idle", CreatedAt: time.Now()}); err != nil {
-		t.Fatal(err)
+	save := func(id string) {
+		t.Helper()
+		if err := db.SaveSession(&session.SessionRow{ID: id, Title: id, ProjectPath: "/" + id, Status: "idle", CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groupOf := func(id string) string {
+		t.Helper()
+		rows, err := db.LoadSessions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rows {
+			if r.ID == id {
+				return r.GroupID
+			}
+		}
+		t.Fatalf("no session %s", id)
+		return ""
+	}
+	for _, id := range []string{"parent", "a", "b", "c", "d", "e", "f"} {
+		save(id)
 	}
 
 	// Not launched from a fleet session: ungrouped, nothing printed.
-	if id, note := resolveLaunchGroup(db, groupFlags{}, ""); id != "" || note != "" {
-		t.Fatalf("no parent: id=%q note=%q", id, note)
+	if note := resolveLaunchGroup(db, groupFlags{}, "", "a"); note != "" || groupOf("a") != "" {
+		t.Fatalf("no parent: note=%q group=%q", note, groupOf("a"))
 	}
-	// --no-group wins over a parent.
-	if id, _ := resolveLaunchGroup(db, groupFlags{none: true}, "parent"); id != "" {
-		t.Fatalf("--no-group: id=%q", id)
+	// --no-group wins over a parent, and leaves the parent alone too.
+	resolveLaunchGroup(db, groupFlags{none: true}, "parent", "b")
+	if groupOf("b") != "" || groupOf("parent") != "" {
+		t.Fatal("--no-group grouped something")
 	}
-	// A stale parent id launches ungrouped rather than failing.
-	if id, _ := resolveLaunchGroup(db, groupFlags{}, "deleted"); id != "" {
-		t.Fatalf("stale parent: id=%q", id)
-	}
-
-	// Inheritance: the first child creates the group, the second joins it.
-	first, note := resolveLaunchGroup(db, groupFlags{}, "parent")
-	if first == "" || !strings.Contains(note, "Grouped") {
-		t.Fatalf("first child: id=%q note=%q", first, note)
-	}
-	second, note := resolveLaunchGroup(db, groupFlags{}, "parent")
-	if second != first || !strings.Contains(note, "Joined") {
-		t.Fatalf("second child: id=%q note=%q, want %q", second, note, first)
+	// A stale parent id leaves the child ungrouped rather than failing.
+	if resolveLaunchGroup(db, groupFlags{}, "deleted", "c"); groupOf("c") != "" {
+		t.Fatal("stale parent grouped the child")
 	}
 
-	// --group creates by name once, then joins it — and overrides the parent.
-	named, note := resolveLaunchGroup(db, groupFlags{name: "BRZ-12"}, "parent")
-	if named == "" || named == first || !strings.Contains(note, "Created group") {
-		t.Fatalf("--group create: id=%q note=%q", named, note)
+	// Inheritance: the first child creates the group (moving the parent in
+	// with it), the second joins it.
+	if note := resolveLaunchGroup(db, groupFlags{}, "parent", "d"); !strings.Contains(note, "Grouped") {
+		t.Fatalf("first child note = %q", note)
 	}
-	again, note := resolveLaunchGroup(db, groupFlags{name: "BRZ-12"}, "")
-	if again != named || !strings.Contains(note, "Joined group") {
-		t.Fatalf("--group join: id=%q note=%q, want %q", again, note, named)
+	first := groupOf("d")
+	if first == "" || groupOf("parent") != first {
+		t.Fatalf("first child %q, parent %q — want both in one new group", first, groupOf("parent"))
+	}
+	if note := resolveLaunchGroup(db, groupFlags{}, "parent", "e"); !strings.Contains(note, "Joined") || groupOf("e") != first {
+		t.Fatalf("second child: note=%q group=%q, want %q", note, groupOf("e"), first)
+	}
+
+	// --group creates by name, overriding the parent.
+	if note := resolveLaunchGroup(db, groupFlags{name: "BRZ-12"}, "parent", "f"); !strings.Contains(note, "Created group") {
+		t.Fatalf("--group note = %q", note)
+	}
+	if named := groupOf("f"); named == "" || named == first {
+		t.Fatalf("--group put the child in %q", named)
 	}
 }

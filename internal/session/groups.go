@@ -3,6 +3,7 @@ package session
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -61,28 +62,6 @@ func (s *StateDB) CreateGroup(g *Group) error {
 		debuglog.Logger.Error("failed to create session group", "id", g.ID, "error", err)
 	}
 	return err
-}
-
-// FindGroupByName returns the oldest group whose explicit name is exactly
-// name, or nil. Only explicit names match: an unnamed group's label is derived
-// at render time and is not something `--group` can be expected to spell.
-func (s *StateDB) FindGroupByName(name string) (*Group, error) {
-	if name == "" {
-		return nil, nil
-	}
-	var g Group
-	var created int64
-	err := s.db.QueryRow(`SELECT id, name, lead_session_id, created_at FROM session_groups WHERE name = ? ORDER BY created_at, id LIMIT 1`, name).
-		Scan(&g.ID, &g.Name, &g.LeadSessionID, &created)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		debuglog.Logger.Error("failed to find session group by name", "name", name, "error", err)
-		return nil, err
-	}
-	g.CreatedAt = time.Unix(created, 0)
-	return &g, nil
 }
 
 // GroupExists reports whether a group row with this id exists.
@@ -152,13 +131,22 @@ func (s *StateDB) DeleteGroup(id string) error {
 
 // DeleteEmptyGroups removes groups no session row points at. Two exemptions,
 // both about timing rather than policy:
-//   - groups created at or after createdBefore: a CLI launch creates the group
-//     before it has saved the session that joins it, and a sweep landing in
-//     between must not collect it;
+//   - groups created at or after createdBefore: a group created by the TUI
+//     a moment ago may not have its first member yet;
 //   - ids in keep: a deleted member's row is gone during its 5s undo window,
 //     and `u` must restore it into a group that still exists.
+//
+// One transaction, and the DELETE re-checks emptiness itself: a join commits
+// between this sweep's SELECT and its DELETE otherwise, and a session saved
+// into the group in that gap would be left pointing at nothing.
 func (s *StateDB) DeleteEmptyGroups(createdBefore time.Time, keep map[string]bool) ([]string, error) {
-	rows, err := s.db.Query(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`
 		SELECT id FROM session_groups
 		WHERE created_at < ?
 		  AND id NOT IN (SELECT group_id FROM sessions WHERE group_id != '')`, createdBefore.Unix())
@@ -166,7 +154,7 @@ func (s *StateDB) DeleteEmptyGroups(createdBefore time.Time, keep map[string]boo
 		debuglog.Logger.Error("failed to find empty session groups", "error", err)
 		return nil, err
 	}
-	var doomed []string
+	var candidates []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -174,30 +162,47 @@ func (s *StateDB) DeleteEmptyGroups(createdBefore time.Time, keep map[string]boo
 			return nil, err
 		}
 		if !keep[id] {
-			doomed = append(doomed, id)
+			candidates = append(candidates, id)
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for _, id := range doomed {
-		if _, err := s.db.Exec(`DELETE FROM session_groups WHERE id = ?`, id); err != nil {
+	var gone []string
+	for _, id := range candidates {
+		res, err := tx.Exec(`
+			DELETE FROM session_groups
+			WHERE id = ? AND NOT EXISTS (SELECT 1 FROM sessions WHERE group_id = ?)`, id, id)
+		if err != nil {
 			debuglog.Logger.Error("failed to delete empty session group", "group", id, "error", err)
 			return nil, err
 		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			gone = append(gone, id)
+		}
 	}
-	return doomed, nil
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return gone, nil
 }
 
-// EnsureLeadGroup returns the group a session spawned from lead should join:
-// lead's own group when it has one, otherwise a fresh group led by lead, with
-// lead moved into it. Atomic, so two children spawned at once by the same
-// parent can't each mint a group.
+// JoinLeadGroup puts child in the group a session spawned from lead belongs
+// to: lead's own group when it has one, otherwise a fresh group led by lead,
+// with lead moved into it too. child "" only resolves (and creates) the group.
+//
+// One write-locked transaction (state.db opens with _txlock=immediate), so:
+//   - two children spawned at once by the same parent serialize instead of
+//     racing — the second sees the group the first created;
+//   - the parent is moved only together with a child that is already saved,
+//     so a launch that failed can never leave it regrouped alone;
+//   - an empty-group sweep can't delete the group between the read and the
+//     child's write.
 //
 // ok is false when lead is not a session in this database (a stale or foreign
-// FLEET_INSTANCE_ID) — the caller then launches ungrouped.
-func (s *StateDB) EnsureLeadGroup(leadID string, now time.Time) (groupID string, created, ok bool, err error) {
+// FLEET_INSTANCE_ID) — nothing is written and the child stays ungrouped.
+func (s *StateDB) JoinLeadGroup(leadID, childID string, now time.Time) (groupID string, created, ok bool, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", false, false, err
@@ -212,30 +217,105 @@ func (s *StateDB) EnsureLeadGroup(leadID string, now time.Time) (groupID string,
 	if err != nil {
 		return "", false, false, err
 	}
+	groupID = current
 	if current != "" {
 		var n int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM session_groups WHERE id = ?`, current).Scan(&n); err != nil {
 			return "", false, false, err
 		}
-		if n > 0 {
-			return current, false, true, tx.Commit()
+		if n == 0 {
+			// A dangling id (its group was dissolved) is treated as
+			// ungrouped — the sidebar renders it that way too.
+			groupID = ""
 		}
-		// A dangling id (its group was collected or dissolved) is treated as
-		// ungrouped — the sidebar renders it that way too.
 	}
-
-	id := NewGroupID()
-	if _, err := tx.Exec(`INSERT INTO session_groups (id, name, lead_session_id, created_at) VALUES (?, '', ?, ?)`,
-		id, leadID, now.Unix()); err != nil {
-		return "", false, false, err
+	if groupID == "" {
+		groupID, created = NewGroupID(), true
+		if _, err := tx.Exec(`INSERT INTO session_groups (id, name, lead_session_id, created_at) VALUES (?, '', ?, ?)`,
+			groupID, leadID, now.Unix()); err != nil {
+			return "", false, false, err
+		}
+		if _, err := tx.Exec(`UPDATE sessions SET group_id = ? WHERE id = ?`, groupID, leadID); err != nil {
+			return "", false, false, err
+		}
 	}
-	if _, err := tx.Exec(`UPDATE sessions SET group_id = ? WHERE id = ?`, id, leadID); err != nil {
-		return "", false, false, err
+	if childID != "" {
+		if _, err := tx.Exec(`UPDATE sessions SET group_id = ? WHERE id = ?`, groupID, childID); err != nil {
+			return "", false, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", false, false, err
 	}
-	return id, true, true, nil
+	return groupID, created, true, nil
+}
+
+// JoinNamedGroup puts child in the group whose explicit name is exactly name,
+// creating it when there is none. One transaction, for the same reasons as
+// JoinLeadGroup: two launches naming the same new group can't each create
+// one, and an empty-group sweep can't collect the group between the lookup and
+// the child's write.
+func (s *StateDB) JoinNamedGroup(name, childID string, now time.Time) (groupID string, created bool, err error) {
+	if name == "" {
+		return "", false, errors.New("group name is empty")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	err = tx.QueryRow(`SELECT id FROM session_groups WHERE name = ? ORDER BY created_at, id LIMIT 1`, name).Scan(&groupID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		groupID, created = NewGroupID(), true
+		if _, err := tx.Exec(`INSERT INTO session_groups (id, name, lead_session_id, created_at) VALUES (?, ?, '', ?)`,
+			groupID, name, now.Unix()); err != nil {
+			return "", false, err
+		}
+	case err != nil:
+		return "", false, err
+	}
+	if childID != "" {
+		if _, err := tx.Exec(`UPDATE sessions SET group_id = ? WHERE id = ?`, groupID, childID); err != nil {
+			return "", false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return groupID, created, nil
+}
+
+// CreateGroupFor creates g and moves sessionID into it, in one transaction, so
+// a failure can't leave an empty group for the sync sweep to show in the
+// "Move to Group…" picker until the collector catches up.
+func (s *StateDB) CreateGroupFor(g *Group, sessionID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO session_groups (id, name, lead_session_id, created_at) VALUES (?, ?, ?, ?)`,
+		g.ID, g.Name, g.LeadSessionID, g.CreatedAt.Unix()); err != nil {
+		debuglog.Logger.Error("failed to create session group", "id", g.ID, "error", err)
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE sessions SET group_id = ? WHERE id = ?`, g.ID, sessionID); err != nil {
+		debuglog.Logger.Error("failed to move session into new group", "id", sessionID, "group", g.ID, "error", err)
+		return err
+	}
+	return tx.Commit()
+}
+
+// GroupLabelFromLead is the label an unnamed group shows: its lead's title,
+// led by the ticket the lead's branch carries when there is one ("BRZ-12 ·
+// Fix login"). One spelling for the TUI and `fleet remove`, which freezes it.
+func GroupLabelFromLead(title, ticketID string) string {
+	if ticketID != "" && !strings.HasPrefix(strings.ToUpper(title), ticketID) {
+		return ticketID + " · " + title
+	}
+	return title
 }
 
 // SessionGroupIDs returns every session's group id, keyed by session id. The

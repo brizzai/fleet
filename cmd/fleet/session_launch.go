@@ -207,11 +207,6 @@ func launchSession(s *session.Session, ag agent.Type, o launchOverrides, storage
 		}
 		os.Exit(1)
 	}
-	// Resolved only once the session is running: inheriting a group can move
-	// the *parent* into a fresh one, and a launch that failed would leave the
-	// parent in a group with nothing it spawned.
-	groupID, groupNote := resolveLaunchGroup(storage, o.group, os.Getenv(session.InstanceIDEnvVar))
-	s.SetGroupID(groupID)
 	if err := storage.SaveSession(s.ToRow()); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to save session: %v\n", err)
 		if killErr := s.GetTmuxSession().Kill(); killErr != nil {
@@ -227,7 +222,11 @@ func launchSession(s *session.Session, ag agent.Type, o launchOverrides, storage
 	if err := storage.PinRepo(session.GetRepoRoot(s.ProjectPath)); err != nil {
 		debuglog.Logger.Error("failed to pin repo", "repo", s.ProjectPath, "err", err)
 	}
-	return groupNote
+	// Grouped only once the session is running AND saved, and in one
+	// transaction with the child's own row: inheriting a group can move the
+	// *parent* into a fresh one, so any earlier — or any separate write —
+	// could leave the parent in a group with nothing it spawned.
+	return resolveLaunchGroup(storage, o.group, os.Getenv(session.InstanceIDEnvVar), s.ID)
 }
 
 // groupFlags is the parsed --group / --no-group pair, shared by `fleet add` and
@@ -266,8 +265,8 @@ func validateGroupFlags(fs *flag.FlagSet, g *groupFlags) error {
 	return nil
 }
 
-// resolveLaunchGroup decides which sidebar group a CLI-launched session joins,
-// returning the group id ("" = ungrouped) and a line to print, if any.
+// resolveLaunchGroup puts a CLI-launched session (childID, already saved) in
+// its sidebar group and returns the line to print about it, if any.
 //
 // The default is inheritance: every fleet pane exports its session id, so a
 // session that runs `fleet wt` through the skill is the parent of what it
@@ -276,46 +275,42 @@ func validateGroupFlags(fs *flag.FlagSet, g *groupFlags) error {
 // how "one ticket across five services" ends up as one sidebar section with no
 // flag at all. Groups are flat: a grandchild joins the same group.
 //
-// Never fatal. The session is already running by the time this is called, and
-// a grouping failure costs a sidebar section, never the session.
-func resolveLaunchGroup(storage *session.StateDB, g groupFlags, parentID string) (string, string) {
+// Never fatal. The session is already running and saved by the time this is
+// called, and a grouping failure costs a sidebar section, never the session.
+func resolveLaunchGroup(storage *session.StateDB, g groupFlags, parentID, childID string) string {
 	if g.none {
-		return "", ""
+		return ""
 	}
 	now := time.Now()
 	if g.name != "" {
-		existing, err := storage.FindGroupByName(g.name)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Could not look up group %q, launching ungrouped: %v\n", g.name, err)
-			return "", ""
+		_, created, err := storage.JoinNamedGroup(g.name, childID, now)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "Could not join group %q, left the session ungrouped: %v\n", g.name, err)
+			return ""
+		case created:
+			return fmt.Sprintf("Created group '%s'", g.name)
+		default:
+			return fmt.Sprintf("Joined group '%s'", g.name)
 		}
-		if existing != nil {
-			return existing.ID, fmt.Sprintf("Joined group '%s'", g.name)
-		}
-		grp := &session.Group{ID: session.NewGroupID(), Name: g.name, CreatedAt: now}
-		if err := storage.CreateGroup(grp); err != nil {
-			fmt.Fprintf(os.Stderr, "Could not create group %q, launching ungrouped: %v\n", g.name, err)
-			return "", ""
-		}
-		return grp.ID, fmt.Sprintf("Created group '%s'", g.name)
 	}
 	if parentID == "" {
-		return "", ""
+		return ""
 	}
-	id, created, ok, err := storage.EnsureLeadGroup(parentID, now)
+	_, created, ok, err := storage.JoinLeadGroup(parentID, childID, now)
 	switch {
 	case err != nil:
-		debuglog.Logger.Error("group inheritance failed; launching ungrouped", "parent", parentID, "err", err)
-		return "", ""
+		debuglog.Logger.Error("group inheritance failed; left ungrouped", "parent", parentID, "err", err)
+		return ""
 	case !ok:
 		// A stale id (the parent was deleted) or one from another state.db
 		// (FLEET_DEMO_PREFIX, a second install). Nothing to group with.
-		debuglog.Logger.Info("parent session not found; launching ungrouped", "parent", parentID)
-		return "", ""
+		debuglog.Logger.Info("parent session not found; left ungrouped", "parent", parentID)
+		return ""
 	case created:
-		return id, "Grouped with the session that launched it (pass --no-group to opt out)"
+		return "Grouped with the session that launched it (pass --no-group to opt out)"
 	default:
-		return id, "Joined the launching session's group (pass --no-group to opt out)"
+		return "Joined the launching session's group (pass --no-group to opt out)"
 	}
 }
 

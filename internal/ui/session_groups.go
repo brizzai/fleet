@@ -116,11 +116,7 @@ func (h *Home) groupLabel(g *session.Group) string {
 		return g.Name
 	}
 	if lead := h.sessionByID[g.LeadSessionID]; lead != nil {
-		title := lead.Title
-		if id := h.leadTicketID(lead); id != "" && !strings.HasPrefix(strings.ToUpper(title), id) {
-			return id + " · " + title
-		}
-		return title
+		return session.GroupLabelFromLead(lead.Title, h.leadTicketID(lead))
 	}
 	n := len(h.groupMembers(g.ID))
 	if n == 1 {
@@ -295,12 +291,10 @@ func (h *Home) createGroupForSession(sessionID, name string) {
 		return
 	}
 	g := &session.Group{ID: session.NewGroupID(), Name: name, LeadSessionID: s.ID, CreatedAt: time.Now()}
-	if err := h.storage.CreateGroup(g); err != nil {
+	// One transaction: a group created without its member would sit empty in
+	// the picker until the collector's grace period ran out.
+	if err := h.storage.CreateGroupFor(g, s.ID); err != nil {
 		h.setError("group_create_failed", fmt.Errorf("create group failed: %w", err))
-		return
-	}
-	if err := h.storage.SetSessionGroup(s.ID, g.ID); err != nil {
-		h.setError("group_move_failed", fmt.Errorf("move to group failed: %w", err))
 		return
 	}
 	old := h.effectiveGroup(s)

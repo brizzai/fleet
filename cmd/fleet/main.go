@@ -15,10 +15,13 @@ import (
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/termkeys"
+	"github.com/brizzai/fleet/internal/ticket"
+	"github.com/brizzai/fleet/internal/ticketing"
 	"github.com/brizzai/fleet/internal/tmux"
 	"github.com/brizzai/fleet/internal/ui"
 	"github.com/brizzai/fleet/internal/update"
@@ -299,6 +302,19 @@ func cliGroupLabels(groups []*session.Group, rows []*session.SessionRow) map[str
 	return out
 }
 
+// leadLabel is the label the TUI shows for a group this session leads: its
+// title, led by the ticket its branch carries. Same rule as Home.groupLabel —
+// the TUI reads the branch from its git cache, a one-shot command asks git —
+// so freezing it on removal keeps the "BRZ-12 · " the user was looking at.
+func leadLabel(r *session.SessionRow) string {
+	root := session.GetRepoRoot(r.ProjectPath)
+	id := ""
+	if keys := ticketing.Keys(root); len(keys) > 0 {
+		id = ticket.IdentifierFromBranch(git.GetBranchName(root), keys)
+	}
+	return session.GroupLabelFromLead(r.Title, id)
+}
+
 func runRemove(idPrefix string) {
 	storage, err := session.Open(session.DefaultDBPath())
 	if err != nil {
@@ -341,7 +357,7 @@ func runRemove(idPrefix string) {
 	if groups, err := storage.LoadGroups(); err == nil {
 		for _, g := range groups {
 			if g.LeadSessionID == match.ID {
-				_ = storage.RetireGroupLead(g.ID, match.Title)
+				_ = storage.RetireGroupLead(g.ID, leadLabel(match))
 			}
 		}
 	}

@@ -7038,30 +7038,25 @@ func (h *Home) bootstrapRepoSet() []string {
 	return repos
 }
 
-// allExpandKeys returns every origin + checkout key the sidebar could render
-// right now, derived from sessions + pinned repos + pending workspaces (the
-// same sources BuildFlatItems consumes). Used by Expand All / Collapse All
-// so they can force-write every entry to a known value — IsExpanded defaults
-// missing keys to true, which means iterating only the existing map entries
-// would leave un-toggled groups in the wrong state.
+// allExpandKeys returns every fold key the sidebar could render right now —
+// session groups, origins and checkouts — derived from sessions + pinned repos
+// + pending workspaces (the same sources BuildFlatItems consumes). Used by
+// Expand All / Collapse All so they can force-write every entry to a known
+// value — IsExpanded defaults missing keys to true, which means iterating only
+// the existing map entries would leave un-toggled groups in the wrong state.
+//
+// Keys are scoped by the session group each row renders in (scopedKey), so a
+// grouped session contributes its group's key and the group-scoped origin and
+// checkout keys rather than the top-level ones.
 func (h *Home) allExpandKeys() []string {
-	checkoutSeen := make(map[string]bool)
-	originSeen := make(map[string]bool)
+	seen := make(map[string]bool)
 	var keys []string
-
-	addCheckout := func(repo string) {
-		if repo == "" || checkoutSeen[repo] {
+	add := func(key string) {
+		if key == "" || seen[key] {
 			return
 		}
-		checkoutSeen[repo] = true
-		keys = append(keys, repo)
-	}
-	addOrigin := func(origin string) {
-		if origin == "" || originSeen[origin] {
-			return
-		}
-		originSeen[origin] = true
-		keys = append(keys, OriginExpandKey(origin))
+		seen[key] = true
+		keys = append(keys, key)
 	}
 
 	originFor := func(repo string) string {
@@ -7071,22 +7066,32 @@ func (h *Home) allExpandKeys() []string {
 		}
 		return "local:" + filepath.Base(repo)
 	}
+	addTree := func(group, repo string) {
+		if repo == "" {
+			return
+		}
+		if group != "" {
+			add(GroupExpandKey(group))
+		}
+		add(scopedKey(group, repo))
+		add(scopedKey(group, OriginExpandKey(originFor(repo))))
+	}
 
 	for _, s := range h.sessions {
-		repo := session.GetRepoRoot(s.ProjectPath)
-		addCheckout(repo)
-		addOrigin(originFor(repo))
+		addTree(h.effectiveGroup(s), session.GetRepoRoot(s.ProjectPath))
 	}
 	for repo := range h.pinnedRepos {
-		addCheckout(repo)
-		addOrigin(originFor(repo))
+		addTree("", repo)
 	}
 	for _, pw := range h.pendingWorkspaces {
 		if pw == nil {
 			continue
 		}
-		addCheckout(pw.RepoPath)
-		addOrigin(originFor(pw.RepoPath))
+		group := pw.GroupID
+		if h.groupByID(group) == nil {
+			group = ""
+		}
+		addTree(group, pw.RepoPath)
 	}
 	return keys
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/session"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func localOrigin(repo string) string { return "local:" + filepath.Base(repo) }
@@ -177,9 +178,9 @@ func TestGroupSyncMovesAKnownParentIntoItsNewGroup(t *testing.T) {
 	}
 
 	// What `fleet wt` does from inside the parent's pane.
-	gid, created, ok, err := h.storage.EnsureLeadGroup(row.ID, time.Now())
+	gid, created, ok, err := h.storage.JoinLeadGroup(row.ID, "", time.Now())
 	if err != nil || !ok || !created {
-		t.Fatalf("EnsureLeadGroup: %v ok=%v created=%v", err, ok, created)
+		t.Fatalf("JoinLeadGroup: %v ok=%v created=%v", err, ok, created)
 	}
 
 	sync := func() groupSyncMsg {
@@ -343,6 +344,70 @@ func TestGroupMenusAreDispatchable(t *testing.T) {
 		}
 		if !known[it.ID] {
 			t.Errorf("move picker entry %q emits unhandled id %q", it.Label, it.ID)
+		}
+	}
+}
+
+// Expand All / Collapse All force-write every key the sidebar could render.
+// Inside a group those are the group's own key and the group-scoped origin and
+// checkout keys — the top-level ones fold nothing there.
+func TestAllExpandKeysReachIntoGroups(t *testing.T) {
+	h := adoptTestHome(t)
+	h.sessionGroups = []*session.Group{{ID: "g1"}}
+	grouped := groupedSession(t, "grouped", "/tmp/grp-expand-a", "g1")
+	loose := session.NewSession("loose", "/tmp/grp-expand-b")
+	h.sessions = []*session.Session{grouped, loose}
+	h.rebuildSessionMap()
+
+	keys := map[string]bool{}
+	for _, k := range h.allExpandKeys() {
+		keys[k] = true
+	}
+	groupedRepo := session.GetRepoRoot(grouped.ProjectPath)
+	looseRepo := session.GetRepoRoot(loose.ProjectPath)
+	for _, want := range []string{
+		GroupExpandKey("g1"),
+		scopedKey("g1", groupedRepo),
+		scopedKey("g1", OriginExpandKey(h.originOf(groupedRepo))),
+		looseRepo,
+		OriginExpandKey(h.originOf(looseRepo)),
+	} {
+		if !keys[want] {
+			t.Errorf("allExpandKeys is missing %q (got %v)", want, keys)
+		}
+	}
+	if keys[groupedRepo] {
+		t.Errorf("a checkout that only renders inside a group got a top-level key")
+	}
+}
+
+// At the narrowest supported layout the `n` dialog's title line, group label
+// included, must stay inside the box rather than wrap past its edge.
+func TestNewSessionDialogGroupLabelFitsNarrowTerminals(t *testing.T) {
+	for _, w := range []int{49, 60, 80, 120} {
+		d := NewNewSessionDialog()
+		d.SetSize(w, 30)
+		d.SetGroupLabel("BRZ-12 · Investigate the flaky login redirect across services")
+		d.Show()
+		for i, line := range strings.Split(d.View(), "\n") {
+			if got := ansi.StringWidth(line); got > w {
+				t.Fatalf("width %d: line %d is %d cells wide: %q", w, i, got, ansi.Strip(line))
+			}
+		}
+		// The box wraps rather than overflows, so "fits" means the label is
+		// truncated on the very line that names it: wrapped, its "…" lands on
+		// the line below and this line stops mid-word.
+		var labelLine string
+		for _, line := range strings.Split(ansi.Strip(d.View()), "\n") {
+			if strings.Contains(line, "group: ") {
+				labelLine = strings.TrimRight(strings.TrimRight(line, " "), "│")
+			}
+		}
+		if labelLine == "" {
+			t.Fatalf("width %d: group label not shown", w)
+		}
+		if !strings.HasSuffix(strings.TrimSpace(labelLine), "…") {
+			t.Fatalf("width %d: the long group label wrapped instead of truncating: %q", w, labelLine)
 		}
 	}
 }

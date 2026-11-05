@@ -305,12 +305,28 @@ func (d *NewSessionDialog) shortenSuggestions() {
 // SetGroupLabel names the session group the next session joins ("" = none).
 func (d *NewSessionDialog) SetGroupLabel(label string) { d.groupLabel = label }
 
+// boxWidth is the dialog's outer width for the current terminal.
+func (d *NewSessionDialog) boxWidth() int {
+	return min(max(d.width-4, 30), 64)
+}
+
 func (d *NewSessionDialog) View() string {
 	var b strings.Builder
 
-	b.WriteString(TitleStyle.Render("New Session"))
+	dialogWidth := d.boxWidth()
+	title := TitleStyle.Render("New Session")
+	b.WriteString(title)
 	if d.groupLabel != "" {
-		b.WriteString(DimStyle.Render("  · group: " + ansi.Truncate(d.groupLabel, 30, "…")))
+		// Budgeted against the box, not a fixed cap: at 49 columns the box is
+		// 45 wide and a 30-cell label pushed the title line over the edge.
+		// DialogStyle spends 6 cells (border-inclusive width, padding 2 a side).
+		inner := dialogWidth - 6
+		const prefix = "  · group: "
+		if room := inner - lipgloss.Width(title) - ansi.StringWidth(prefix); room >= 8 {
+			b.WriteString(DimStyle.Render(prefix + ansi.Truncate(d.groupLabel, room, "…")))
+		} else {
+			b.WriteString("\n" + DimStyle.Render(ansi.Truncate("group: "+d.groupLabel, max(inner, 1), "…")))
+		}
 	}
 	b.WriteString("\n\n")
 	b.WriteString(DimStyle.Render("Project directory:"))
@@ -340,14 +356,6 @@ func (d *NewSessionDialog) View() string {
 	b.WriteString(DimStyle.Render("tab: complete  enter: create  esc: cancel"))
 
 	// Center the dialog.
-	dialogWidth := d.width - 4
-	if dialogWidth > 64 {
-		dialogWidth = 64
-	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
-
 	box := DialogStyle.Width(dialogWidth).Render(b.String())
 
 	// Center vertically and horizontally.

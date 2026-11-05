@@ -87,7 +87,19 @@ func Open(dbPath string) (*StateDB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Two connection-level settings ride the DSN rather than the PRAGMA loop
+	// below, because database/sql pools connections and a db.Exec reaches only
+	// whichever one it happened to take:
+	//   - _txlock=immediate: every transaction on state.db reads and then
+	//     writes. A deferred BEGIN takes the write lock only at the first
+	//     write, and in WAL mode a reader whose snapshot went stale meanwhile
+	//     gets SQLITE_BUSY_SNAPSHOT there — which busy_timeout does not retry.
+	//     Two `fleet wt` children spawned at once by the same parent hit
+	//     exactly that, and the loser launched ungrouped.
+	//   - busy_timeout on every connection, so an IMMEDIATE begin that finds
+	//     the lock held waits for it instead of failing.
+	// The driver strips the query off a plain path before opening the file.
+	db, err := sql.Open("sqlite", dbPath+"?_txlock=immediate&_pragma=busy_timeout(5000)")
 	if err != nil {
 		debuglog.Logger.Error("failed to open database", "path", dbPath, "error", err)
 		return nil, fmt.Errorf("open database: %w", err)
