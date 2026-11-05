@@ -47,7 +47,7 @@ func addFlagSet(o *addOpts) *flag.FlagSet {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 	fs.StringVar(&o.agentName, "agent", "", "agent to run: "+agent.NameList()+" (default: default_agent config)")
-	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config, ranked on live quota)")
+	fs.StringVar(&o.account, "account", "", "Claude account email to run as (default: chosen by account_strategy config; least-used strategies rank on quota)")
 	fs.StringVar(&o.prompt, "prompt", "", "first message for the agent, which it starts working on (use - to read stdin)")
 	fs.StringVar(&o.prompt, "p", "", "shorthand for -prompt")
 	fs.StringVar(&o.model, "model", "", "model to launch on, e.g. opus or anthropic/claude-sonnet-5 (default: the agent's own)")
