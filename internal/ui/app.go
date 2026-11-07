@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -438,7 +439,10 @@ type Home struct {
 	// pair, which deadlocked when callers double-locked via rebuildFlatItems.
 	gitInfoCache  atomic.Pointer[map[string]*git.RepoInfo]
 	repoLastHotAt map[string]time.Time // repo root -> last time a session in it was Running (worker-only access)
-	ghAvailable   bool                 // cached gh CLI availability
+	// gitForceNext makes the next gitWorkerCycle refresh every repo regardless
+	// of its cadence. Set by triggerGitRefresh, consumed by the cycle.
+	gitForceNext atomic.Bool
+	ghAvailable  bool // cached gh CLI availability
 
 	hookWatcher *hooks.HookWatcher
 
@@ -501,6 +505,9 @@ type Home struct {
 	// mid-session therefore isn't noticed until the next launch — acceptable,
 	// since the tip is tipOnce and retires on its own either way.
 	agentSkillInstalled bool
+	// underZellij drives the zellij Shift+Enter tip. Read from the environment
+	// once in NewHome, like agentSkillInstalled.
+	underZellij bool
 
 	// macOS TCC: tmux can't read ~/Documents/~/Desktop/~/Downloads once its server
 	// daemonizes. Probed lazily (once per protected root per launch) when a session
@@ -642,6 +649,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		tipEpisodeDismissed:    make(map[string]bool),
 		tipVisibleFor:          make(map[string]time.Duration),
 		agentSkillInstalled:    skill.AnyInstalled(),
+		underZellij:            os.Getenv("ZELLIJ") != "",
 		tccProbed:              make(map[string]bool),
 		tccBlockedRoots:        make(map[string]bool),
 		pinnedRepos:            make(map[string]bool),
@@ -2011,7 +2019,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(names) > 0 {
 			line = fmt.Sprintf("Will terminate %d process(es): %s", len(msg.holders), strings.Join(names, ", "))
 		}
-		h.confirmDialog.SetScan(msg.gen, line)
+		h.confirmDialog.SetScan(msg.gen, msg.dirtyPrefix+line)
 		return h, nil
 
 	case previewTickMsg:
@@ -4727,6 +4735,35 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 type worktreeHoldersScannedMsg struct {
 	gen     int
 	holders []proc.Holder
+	// dirtyPrefix carries an uncommitted-changes warning the scan found live
+	// that the dialog's cached reading missed (dirtyScanPrefix). The git cache
+	// can be minutes old for a repo whose sessions are idle or suspended
+	// (git_cadence.go), and the removal is `git worktree remove --force` — so
+	// the live answer must be able to add the warning the cache left out.
+	dirtyPrefix string
+}
+
+// countDirty runs a live `git status` in each dir. Worker goroutine only.
+func countDirty(dirs []string) int {
+	n := 0
+	for _, d := range dirs {
+		if git.HasUncommittedChanges(d) {
+			n++
+		}
+	}
+	return n
+}
+
+// dirtyScanPrefix is the warning the live dirty check adds to the scan line
+// when it found more than the cached reading already warned about.
+func dirtyScanPrefix(dirty, cachedDirty, scanned int) string {
+	if dirty <= cachedDirty {
+		return ""
+	}
+	if scanned == 1 {
+		return "Uncommitted changes will be discarded · "
+	}
+	return fmt.Sprintf("%d worktree(s) have uncommitted changes · ", dirty)
 }
 
 // confirmDeleteHeader handles `d` pressed on a repo/worktree header. Scope is the
@@ -4776,9 +4813,15 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 		gen := h.nextHolderScanGen()
 		h.confirmDialog.StartScan(gen, "Checking for running processes…")
 		editor := h.cfg.GetEditor()
+		cachedDirty := 0
+		if info := h.gitInfo()[repoPath]; info != nil && info.IsDirty {
+			cachedDirty = 1
+		}
 		return func() tea.Msg {
 			holders, _ := proc.FindHolders(repoPath, []string{editor})
-			return worktreeHoldersScannedMsg{gen: gen, holders: holders}
+			dirty := countDirty([]string{repoPath})
+			return worktreeHoldersScannedMsg{gen: gen, holders: holders,
+				dirtyPrefix: dirtyScanPrefix(dirty, cachedDirty, 1)}
 		}
 	}
 	return nil
@@ -4937,6 +4980,7 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 		h.confirmDialog.StartScan(gen, "Checking for running processes…")
 		editor := h.cfg.GetEditor()
 		dirs := destroyDirs
+		cachedDirty := dirtyWorktrees
 		return func() tea.Msg {
 			seen := make(map[int]bool)
 			var holders []proc.Holder
@@ -4950,7 +4994,9 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 					holders = append(holders, hd)
 				}
 			}
-			return worktreeHoldersScannedMsg{gen: gen, holders: holders}
+			dirty := countDirty(dirs)
+			return worktreeHoldersScannedMsg{gen: gen, holders: holders,
+				dirtyPrefix: dirtyScanPrefix(dirty, cachedDirty, len(dirs))}
 		}
 	}
 	return nil
@@ -7603,7 +7649,17 @@ drainPriority:
 	// warm caches instead of each shelling out to capture-pane. Sessions the
 	// batch misses (a dead pane aborts the chain) keep a cold cache and fall
 	// back to a live capture inside UpdateStatus.
-	active := fastPassSessions(sessions, processed)
+	//
+	// While attached the fast pass rides the heavy cadence instead (2s, not
+	// 500ms). The sidebar isn't on screen — tea.Exec owns the terminal — and
+	// each pass is a capture-pane of every active pane against the same tmux
+	// server that is relaying the attached session's output. Hook-driven
+	// changes still take the priority path above every cycle, and detach
+	// triggers an immediate full cycle, so nothing on screen is staler.
+	var active []*session.Session
+	if heavy || !h.isAttaching.Load() {
+		active = fastPassSessions(sessions, processed)
+	}
 	h.seedActiveCaptures(active)
 	for _, s := range active {
 		if h.updateAndPersistStatus(s) {
@@ -7746,6 +7802,9 @@ func (h *Home) gitWorker() {
 // triggerGitRefresh asks gitWorker for an out-of-band cycle. Non-blocking: the
 // channel is buffered(1), so a pending request coalesces with this one.
 func (h *Home) triggerGitRefresh() {
+	// Set before the send: the cycle the trigger wakes must see it. A trigger
+	// that coalesces with a pending one still leaves the flag set.
+	h.gitForceNext.Store(true)
 	select {
 	case h.gitTrigger <- struct{}{}:
 	default:
@@ -7796,10 +7855,20 @@ func (h *Home) gitWorkerCycle() {
 		}
 	}
 
+	// Only the repos whose cadence is due (see git_cadence.go): every 2s while
+	// a session is active, 30s at rest, 5 min with no live process. An explicit
+	// trigger (detach, checkout, create) forces a full pass.
+	force := h.gitForceNext.Swap(false)
+	samples := make([]repoSample, 0, len(sessions))
+	for _, s := range sessions {
+		samples = append(samples, repoSample{repo: session.GetRepoRoot(s.ProjectPath), status: s.GetStatus()})
+	}
+	repos := gitRefreshTargets(samples, h.gitInfo(), h.repoLastHotAt, now, force)
+
 	// Fan out bounded to 4 concurrent goroutines so subprocess load stays flat.
-	// Branch/dirty lands within the 2s tick; PR refresh respects the per-repo
-	// TTL gate (60s hot / 2 min cold) inside the goroutine.
-	h.refreshAllGitAndPR(h.uniqueRepoPathsFromSessions(sessions), 4, 0, nil)
+	// PR refresh respects the per-repo TTL gate (60s hot / 2 min cold) inside
+	// the goroutine, and can only run for a repo whose git refresh is due.
+	h.refreshAllGitAndPR(repos, 4, 0, nil)
 }
 
 // workerStallThreshold is how long the status worker may go without completing a
@@ -7919,8 +7988,41 @@ func (h *Home) workerHeartbeat() workerHeartbeat {
 	return hb
 }
 
-// refreshTmuxStatusBars re-applies the theme + state pill on every session's
-// tmux chrome whose (status, theme) key has changed since the last refresh.
+// statusBarApplicable reports whether a session has a tmux session to paint.
+// A suspended session's tmux was killed on purpose, and an errored one whose
+// tmux is gone has nothing to paint either; applying to them failed with
+// "exit status 1" for every such session on every launch (20 at once with 16
+// suspended + 4 errored). An unknown cache (worker not caught up) still
+// applies — a failed attempt costs one log line, a skipped one a stale bar.
+func statusBarApplicable(st session.Status, exists, known bool) bool {
+	if st == session.StatusSuspended {
+		return false
+	}
+	return exists || !known
+}
+
+// statusBarKey covers every input to ApplyStatusBar, and nothing else. A
+// branch switch / PR refresh / auto-rename changes DisplayName/Origin/Branch/
+// PRSummary/Path, so those are in it. The session's status is deliberately
+// NOT: no status-bar option renders it, and keying on it re-ran 13 tmux
+// set-options — redrawing the attached client's status line and pane border —
+// on every running/finished flip, mid-stream, for nothing.
+//
+// Two inputs stand in for "this is a new tmux session", the job status used to
+// do by accident. Session.Start paints a plain bar, and the themed one must land
+// after it: panePID changes with every new pane process, and `starting` flips
+// once per launch, so a themed apply that lost the race to Start's plain one is
+// repainted when the session leaves starting — without re-keying on every
+// running/waiting/finished flip after that.
+func statusBarKey(themeKey string, panePID int, starting bool, opts tmux.StatusBarOpts) string {
+	return strings.Join([]string{
+		themeKey, strconv.Itoa(panePID), strconv.FormatBool(starting),
+		opts.DisplayName, opts.Origin, opts.Branch, opts.PRSummary, opts.PRColor, opts.Path,
+	}, "\x00")
+}
+
+// refreshTmuxStatusBars re-applies the theme + session info on every session's
+// tmux chrome whose inputs have changed since the last refresh.
 // Called from the status worker, so map access is single-threaded — no lock.
 func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
 	if len(sessions) == 0 {
@@ -7937,17 +8039,15 @@ func (h *Home) refreshTmuxStatusBars(sessions []*session.Session) {
 		if tmuxS == nil {
 			continue
 		}
-		status := s.GetStatus()
+		exists, known := tmuxS.ExistsCached()
+		if !statusBarApplicable(s.GetStatus(), exists, known) {
+			// Forget the key, so the bar is painted afresh once the session is
+			// back (resume / restart create a new tmux session with none).
+			delete(h.lastTmuxStatusBar, s.ID)
+			continue
+		}
 		opts := h.buildTmuxStatusBarOpts(s, gitSnap[session.GetRepoRoot(s.ProjectPath)])
-		// Cache key must cover every input to ApplyStatusBar, not just status
-		// and theme. A branch switch / PR refresh / auto-rename changes
-		// opts.DisplayName/Origin/Branch/PRSummary/Path but leaves status
-		// alone — without those in the key we'd skip the re-apply and the
-		// pane chrome would go stale.
-		key := strings.Join([]string{
-			string(status), themeKey,
-			opts.DisplayName, opts.Origin, opts.Branch, opts.PRSummary, opts.Path,
-		}, "\x00")
+		key := statusBarKey(themeKey, tmux.PanePID(tmuxS.Name), s.GetStatus() == session.StatusStarting, opts)
 		if last, ok := h.lastTmuxStatusBar[s.ID]; ok && last == key {
 			continue
 		}
@@ -8076,6 +8176,7 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 						debuglog.Logger.Error("bootstrap: panic in repo goroutine", "repo", r, "panic", fmt.Sprintf("%v", pErr), "stack", string(debug.Stack()))
 					}
 				}()
+				prev := h.gitInfo()[r]
 				info := git.RefreshGitInfo(r)
 
 				// Carry PR + last-refresh stamp forward from the cache, but
@@ -8091,10 +8192,10 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 				// limit the moment we fan out across all repos in parallel.
 				// Carry-forward PR data is now a lock-free atomic load —
 				// h.gitInfo() returns an immutable map snapshot.
-				if old, ok := h.gitInfo()[r]; ok && old != nil && old.Branch == info.Branch {
-					info.PR = old.PR
-					info.LastPRRefresh = old.LastPRRefresh
-					info.PRRateLimitedAt = old.PRRateLimitedAt
+				if prev != nil && prev.Branch == info.Branch {
+					info.PR = prev.PR
+					info.LastPRRefresh = prev.LastPRRefresh
+					info.PRRateLimitedAt = prev.PRRateLimitedAt
 				}
 
 				ttl := repoTTL[r]
@@ -8137,14 +8238,19 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 				// on a suspended loop (see below), and a fleet killed during a
 				// long attach would otherwise lose these rows and re-fire gh for
 				// every repo on the next launch.
-				_ = h.storage.SavePRCacheRow(&session.PRCacheRow{
-					RepoPath:        r,
-					Branch:          info.Branch,
-					OriginKey:       info.OriginKey,
-					PR:              info.PR,
-					LastPRRefresh:   info.LastPRRefresh,
-					PRRateLimitedAt: info.PRRateLimitedAt,
-				})
+				//
+				// Only when the row actually changed (prCacheRowChanged): writing
+				// every repo every cycle kept SQLite's one write lock busy.
+				if prCacheRowChanged(prev, info) {
+					_ = h.storage.SavePRCacheRow(&session.PRCacheRow{
+						RepoPath:        r,
+						Branch:          info.Branch,
+						OriginKey:       info.OriginKey,
+						PR:              info.PR,
+						LastPRRefresh:   info.LastPRRefresh,
+						PRRateLimitedAt: info.PRRateLimitedAt,
+					})
+				}
 
 				// Update still owns the sidebar rebuild. The message carries no
 				// data — the cache write above already published it — so if this
@@ -8223,20 +8329,6 @@ func (h *Home) maybeWarnRateLimited() {
 	}
 	h.lastRateLimitWarn = now
 	debuglog.Logger.Warn("gh rate-limited — PR badges paused; resets hourly. Run: gh api rate_limit --jq .resources.graphql")
-}
-
-// uniqueRepoPathsFromSessions returns distinct repo root paths from the given sessions.
-func (h *Home) uniqueRepoPathsFromSessions(sessions []*session.Session) []string {
-	seen := make(map[string]bool)
-	var repos []string
-	for _, s := range sessions {
-		root := session.GetRepoRoot(s.ProjectPath)
-		if !seen[root] {
-			seen[root] = true
-			repos = append(repos, root)
-		}
-	}
-	return repos
 }
 
 func (h *Home) resolveCurrentRepo() string {
@@ -9021,6 +9113,9 @@ func (h *Home) loadSessions() tea.Msg {
 	// covers fresh installs once a server exists. Sessions already running when
 	// this flips may need a restart before it takes.
 	tmux.EnsureExtendedKeys()
+	// Let agents' OSC 8 links through to the outer terminal (Cmd+click).
+	// Same split as above: here for existing servers, Start for fresh ones.
+	tmux.EnsureHyperlinks()
 	chrome.InstallNativeMessagingHost()
 	ghAvailable := github.IsGHAvailable()
 

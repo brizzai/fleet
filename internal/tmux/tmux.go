@@ -345,6 +345,54 @@ func EnsureExtendedKeys() {
 	}
 }
 
+// EnsureHyperlinks lets OSC 8 hyperlinks from an agent reach the outer
+// terminal, so Cmd+click (iTerm2, Ghostty, kitty, WezTerm) opens them.
+//
+// tmux understands OSC 8 from 3.4, but only forwards it to a client whose
+// terminal it believes supports hyperlinks — the `hyperlinks` terminal
+// feature. tmux auto-detects that only for a few terminals it can identify by
+// name, so any client it can't name keeps none and every link is reduced to
+// its plain text. That includes everything nested: under zellij the client's
+// TERM is xterm-256color and tmux sees zellij, not iTerm2 — measured, an
+// attached client there reported `bpaste,ccolour,clipboard,cstyle,extkeys,
+// focus,RGB,title` and no hyperlinks.
+//
+// Appends `xterm*:hyperlinks` once, in the same shape and with the same
+// shared-server etiquette as the extkeys entry in EnsureExtendedKeys: exact
+// entry match, never duplicated. A terminal that can't render OSC 8 ignores the
+// sequence and shows the text, which is why advertising it broadly is safe.
+// Takes effect for clients that attach afterwards. FLEET_NO_HYPERLINKS opts out.
+func EnsureHyperlinks() {
+	if envIsTruthy("FLEET_NO_HYPERLINKS") {
+		return
+	}
+	if !hyperlinksSupported(serverVersionPartsNoSuffix()) {
+		return
+	}
+	feat, err := exec.Command("tmux", "show-options", "-sv", "terminal-features").Output()
+	if err != nil {
+		return // No server yet — retry on a later call.
+	}
+	if !strings.Contains(string(feat), "xterm*:hyperlinks") {
+		_ = exec.Command("tmux", "set-option", "-sa", "terminal-features", "xterm*:hyperlinks").Run()
+	}
+}
+
+// hyperlinksSupported reports whether tmux knows the `hyperlinks` terminal
+// feature (added in 3.4). Older tmux rejects the unknown feature name; an
+// unparseable version (dev build) is treated as new, like the other gates.
+func hyperlinksSupported(major, minor int, ok bool) bool {
+	if !ok {
+		return true
+	}
+	return major > 3 || (major == 3 && minor >= 4)
+}
+
+func serverVersionPartsNoSuffix() (major, minor int, ok bool) {
+	major, minor, _, ok = serverVersionParts()
+	return major, minor, ok
+}
+
 // extendedKeysSafe reports whether this tmux can be asked for extended keys
 // without shipping a known upstream key-parsing bug along with the feature.
 // Two releases can't:
@@ -491,6 +539,7 @@ func (s *Session) Start(command string, env ...string) error {
 	// Forward extended keys (Shift+Enter et al.) into the pane instead of
 	// collapsing them to plain Enter.
 	EnsureExtendedKeys()
+	EnsureHyperlinks()
 
 	// Batch set options.
 	// remain-on-exit keeps the dead pane around so the crash dump can read

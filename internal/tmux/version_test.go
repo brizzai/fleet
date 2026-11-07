@@ -124,3 +124,22 @@ func TestExtendedKeysSafe(t *testing.T) {
 		})
 	}
 }
+
+func TestHyperlinksSupported(t *testing.T) {
+	tests := []struct {
+		major, minor int
+		ok, want     bool
+	}{
+		{3, 3, true, false},
+		{3, 4, true, true},
+		{3, 7, true, true},
+		{4, 0, true, true},
+		{2, 9, true, false},
+		{0, 0, false, true}, // dev build: assume modern
+	}
+	for _, tt := range tests {
+		if got := hyperlinksSupported(tt.major, tt.minor, tt.ok); got != tt.want {
+			t.Errorf("hyperlinksSupported(%d, %d, %v) = %v, want %v", tt.major, tt.minor, tt.ok, got, tt.want)
+		}
+	}
+}

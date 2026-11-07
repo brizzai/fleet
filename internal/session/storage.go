@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
@@ -76,6 +78,41 @@ func DefaultDBPath() string {
 	return filepath.Join(home, ".config", "fleet", "state.db")
 }
 
+// stateDBMaxConns caps the connection pool. Matches stats.db.
+const stateDBMaxConns = 4
+
+// stateDBDSN builds the driver DSN for state.db.
+//
+// The pragmas MUST ride the DSN, never a `db.Exec("PRAGMA ...")` after Open.
+// busy_timeout and foreign_keys are per-connection settings, and database/sql
+// hands Exec one pooled connection: every other connection the pool opens
+// later starts with busy_timeout=0 and foreign keys off. That is what produced
+// "database is locked (SQLITE_BUSY)" from a single fleet instance — a second
+// connection with no busy handler fails the instant another one holds the
+// write lock (measured: 1359 of 1600 concurrent upserts failed that way, 0
+// with the DSN form) — and it left the slot_bindings ON DELETE CASCADE
+// unenforced on most connections. modernc.org/sqlite applies each _pragma on
+// every new connection.
+//
+// _txlock=immediate makes Begin take the write lock up front. A deferred
+// transaction that reads and then tries to write can hit SQLITE_BUSY without
+// the busy handler ever being consulted (the lock-upgrade deadlock rule);
+// starting immediate turns that into an ordinary wait under busy_timeout.
+func stateDBDSN(path string) string {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Set("_txlock", "immediate")
+	return "file:" + uriPathEscaper.Replace(path) + "?" + q.Encode()
+}
+
+// uriPathEscaper percent-encodes the characters SQLite's URI parser treats
+// specially in a `file:` path — `%` (escape), `?` (query) and `#` (fragment) —
+// so a home directory containing one opens the right file. SQLite decodes %HH
+// in the path; everything else passes through as-is.
+var uriPathEscaper = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
+
 // Open opens or creates the SQLite database with WAL mode.
 func Open(dbPath string) (*StateDB, error) {
 	debuglog.Logger.Info("opening database", "path", dbPath)
@@ -85,24 +122,22 @@ func Open(dbPath string) (*StateDB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", stateDBDSN(dbPath))
 	if err != nil {
 		debuglog.Logger.Error("failed to open database", "path", dbPath, "error", err)
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+	// Bounded like stats.db. The TUI writes from several goroutines at once
+	// (the git worker fans out 4-wide), and each extra connection is one more
+	// writer contending for WAL's single write lock.
+	db.SetMaxOpenConns(stateDBMaxConns)
 
-	// Configure for concurrent access.
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			debuglog.Logger.Error("failed to set pragma", "pragma", p, "error", err)
-			db.Close()
-			return nil, fmt.Errorf("set pragma %q: %w", p, err)
-		}
+	// Ping forces the first connection open, so a bad path or a pragma the
+	// driver rejects fails here rather than on the first query.
+	if err := db.Ping(); err != nil {
+		debuglog.Logger.Error("failed to open database", "path", dbPath, "error", err)
+		db.Close()
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	s := &StateDB{db: db}

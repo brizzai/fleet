@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -169,6 +170,58 @@ func writeCrashDump(sessionID, title, tmuxName, reason, cachedPane string) {
 		return
 	}
 	debuglog.Logger.Warn("crashdump: written", "path", path, "id", sessionID, "reason", reason)
+	pruneCrashDumps(dir, maxCrashDumps)
+}
+
+// maxCrashDumps caps ~/.config/fleet/crashes. Dumps carry raw pane content, so
+// an unbounded directory is both clutter and a growing pile of old screens.
+const maxCrashDumps = 100
+
+// pruneCrashDumps keeps the newest `keep` dumps in dir and removes the rest.
+// Names end in a sortable timestamp, but ids differ per session, so order by
+// mtime rather than name. Best effort: a failure costs disk, not correctness.
+func pruneCrashDumps(dir string, keep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type dump struct {
+		path string
+		mod  time.Time
+	}
+	dumps := make([]dump, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".txt" {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		dumps = append(dumps, dump{filepath.Join(dir, e.Name()), info.ModTime()})
+	}
+	if len(dumps) <= keep {
+		return
+	}
+	sort.Slice(dumps, func(i, j int) bool { return dumps[i].mod.After(dumps[j].mod) })
+	for _, d := range dumps[keep:] {
+		if err := os.Remove(d.path); err != nil && !os.IsNotExist(err) {
+			debuglog.Logger.Warn("crashdump: prune failed", "path", d.path, "err", err)
+		}
+	}
+}
+
+// deathIsNew reports whether a death detected now is a fresh one worth a crash
+// dump. A session already in StatusError is one fleet has already recorded —
+// most often one that was persisted as errored and is being re-detected on the
+// next launch, where the in-memory deathRecorded latch starts out false. That
+// re-detection wrote a new dump for every dead session on every launch (one
+// session reached 29), each saying only "tmux_gone, capture failed".
+// StatusStarting is NOT excluded, unlike newFailure: a launch that dies is the
+// crash a dump is most useful for, and a dump has no analytics double count to
+// avoid.
+func deathIsNew(old Status) bool {
+	return old != StatusError
 }
 
 // tmuxPaneDeadInfo queries tmux for pane death info. Returns an error rather

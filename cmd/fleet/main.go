@@ -102,6 +102,7 @@ func runTUI() {
 	defer debuglog.Close()
 	perfwatch.Init()
 	debuglog.Logger.Info("fleet TUI starting", "version", version)
+	startPprofFromEnv()
 
 	// Bubble Tea prints loop/cmd panics to the terminal only, and a panic in
 	// this goroutine outside p.Run() would never reach debug.log at all. Record
@@ -121,6 +122,12 @@ func runTUI() {
 		reportStartupFailure(cfg, "tmux_missing")
 		os.Exit(1)
 	}
+
+	// One TUI per config dir. Taken before the auto-update, whose re-exec
+	// closes the lock fd (Go opens files close-on-exec) so the updated binary
+	// takes it afresh.
+	lock := acquireInstanceLock()
+	defer lock.Release()
 
 	// Analytics is initialized inside the TUI, after the first-launch
 	// consent prompt is answered. We still defer Shutdown unconditionally
