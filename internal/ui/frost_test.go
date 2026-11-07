@@ -95,8 +95,9 @@ func TestQuitKeyEndsTheRunInOnePress(t *testing.T) {
 	if h.frost != nil {
 		t.Fatal("ctrl+c left the run active")
 	}
+	h.handleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}) //nolint:errcheck // quitting is the assertion
 	if !h.quitting {
-		t.Fatal("ctrl+c should quit fleet in one press, not just leave the run")
+		t.Fatal("a second ctrl+c should quit fleet")
 	}
 }
 

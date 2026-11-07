@@ -49,7 +49,7 @@ const (
 )
 
 const (
-	drawerMaxBodyRows    = 14                     // body cap when open (also clamped so panels keep ≥3 rows)
+	drawerMaxBodyRows    = 60                     // body cap when open (also clamped so panels keep ≥3 rows)
 	drawerMinBodyRows    = 3                      // never smaller than this when open
 	drawerMinPreviewRows = 5                      // in the dual split, leave the preview at least this many rows
 	drawerMinTermRows    = 12                     // refuse to open the drawer below this total terminal height
@@ -561,6 +561,7 @@ func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// has to arrive as typed. Cost: that one letter reaches the shell only via
 	// Ctrl+G full attach, which intercepts nothing — the same trade already made
 	// for Ctrl+T and Ctrl+W.
+	h.resetScroll(&h.drawerScroll) // any key returns the drawer to live
 	switch normalizeKey(msg).String() {
 	case "`":
 		return h, h.closeDrawer()
@@ -614,45 +615,78 @@ func (h *Home) handleTypingKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // own line-editing keeps working; the drawer's reserved chords are intercepted
 // before this is ever reached.
 func forwardKeyToPane(cc *tmux.ControlClient, target string, msg tea.KeyPressMsg) {
+	if name := paneKeyName(msg); name != "" {
+		cc.SendKeys(target, name)
+		return
+	}
+	// Plain Ctrl chords → tmux "C-x"; printable text passes through literally.
+	if c, ok := ctrlChord(msg.String()); ok {
+		cc.SendKeys(target, c)
+		return
+	}
+	if msg.Text != "" {
+		cc.SendLiteralKeys(target, msg.Text)
+	}
+}
+
+// paneKeyName is the tmux key name for a non-text key, or "" for anything
+// forwarded as a chord or literal text. Modifiers ride along as tmux prefixes
+// (C-Left, M-Right, S-Home), so Ctrl+arrow word jumps reach the pane instead
+// of arriving as a bare arrow.
+func paneKeyName(msg tea.KeyPressMsg) string {
+	name := paneKeyBase(msg)
+	if name == "" || name == "BTab" {
+		return name
+	}
+	prefix := ""
+	if msg.Mod.Contains(tea.ModCtrl) {
+		prefix += "C-"
+	}
+	if msg.Mod.Contains(tea.ModAlt) {
+		prefix += "M-"
+	}
+	if msg.Mod.Contains(tea.ModShift) {
+		prefix += "S-"
+	}
+	return prefix + name
+}
+
+func paneKeyBase(msg tea.KeyPressMsg) string {
 	switch msg.Code {
 	case tea.KeyEnter:
-		cc.SendKeys(target, "Enter")
+		return "Enter"
 	case tea.KeyBackspace:
-		cc.SendKeys(target, "BSpace")
+		return "BSpace"
 	case tea.KeyTab:
-		cc.SendKeys(target, "Tab")
+		// Shift+Tab is how Claude cycles its mode (accept edits, plan, …).
+		if msg.Mod.Contains(tea.ModShift) {
+			return "BTab"
+		}
+		return "Tab"
 	case tea.KeySpace:
-		cc.SendKeys(target, "Space")
+		return "Space"
 	case tea.KeyEsc:
-		cc.SendKeys(target, "Escape")
+		return "Escape"
 	case tea.KeyUp:
-		cc.SendKeys(target, "Up")
+		return "Up"
 	case tea.KeyDown:
-		cc.SendKeys(target, "Down")
+		return "Down"
 	case tea.KeyLeft:
-		cc.SendKeys(target, "Left")
+		return "Left"
 	case tea.KeyRight:
-		cc.SendKeys(target, "Right")
+		return "Right"
 	case tea.KeyHome:
-		cc.SendKeys(target, "Home")
+		return "Home"
 	case tea.KeyEnd:
-		cc.SendKeys(target, "End")
+		return "End"
 	case tea.KeyDelete:
-		cc.SendKeys(target, "DC")
+		return "DC"
 	case tea.KeyPgUp:
-		cc.SendKeys(target, "PageUp")
+		return "PageUp"
 	case tea.KeyPgDown:
-		cc.SendKeys(target, "PageDown")
-	default:
-		// Plain Ctrl chords → tmux "C-x"; printable text passes through literally.
-		if c, ok := ctrlChord(msg.String()); ok {
-			cc.SendKeys(target, c)
-			return
-		}
-		if msg.Text != "" {
-			cc.SendLiteralKeys(target, msg.Text)
-		}
+		return "PageDown"
 	}
+	return ""
 }
 
 // ctrlChord maps a single-letter Ctrl combo ("ctrl+k") to its tmux key name
@@ -680,6 +714,7 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 	// the available rows (clamped), not content-fit. Recorded for syncShellStream,
 	// which sizes the reader + emulator to match so wrap points line up.
 	dispRows := maxOuterH - 2
+	h.layout.drawerMaxRows = min(dispRows, drawerMaxBodyRows)
 	if dispRows > drawerMaxBodyRows {
 		dispRows = drawerMaxBodyRows
 	}
@@ -699,6 +734,8 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 	switch {
 	case len(shells) == 0:
 		raw = []string{drawerEmptyCTA()}
+	case h.drawerScroll.content != "" && h.drawerScroll.sessionID == shells[h.clampTab(len(shells))].TmuxName():
+		raw = strings.Split(stripOSC8(h.drawerScroll.content), "\n")
 	case h.shellTerm != nil && h.shellStreamTarget == shells[h.clampTab(len(shells))].TmuxName():
 		raw = strings.Split(strings.TrimRight(stripOSC8(h.shellTerm.Render()), "\n"), "\n")
 		cursorX, cursorY = h.shellTerm.Cursor()
@@ -772,8 +809,12 @@ func (h *Home) renderDrawer(width, maxOuterH int) string {
 		}
 	}
 
+	bodyStr := strings.Join(body, "\n")
+	if h.drawerScroll.content != "" {
+		bodyStr = paintScrollbar(h.drawerScroll, ensureExactWidth(bodyStr, innerWidth), innerWidth)
+	}
 	return RenderBorderedPanelFull(
-		strings.Join(body, "\n"),
+		bodyStr,
 		h.drawerTitle(shells),
 		h.drawerModeLabel(shells),
 		h.drawerCwdLabel(),
