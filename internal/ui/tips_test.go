@@ -246,7 +246,7 @@ func TestZellijTipOnlyUnderZellij(t *testing.T) {
 	if tip.active(h) {
 		t.Error("zellij tip active outside zellij")
 	}
-	h.underZellij = true
+	h.zellijShiftEnterTip = true
 	if !tip.active(h) {
 		t.Error("zellij tip inactive under zellij with a session")
 	}

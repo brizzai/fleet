@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/envflag"
 	"github.com/brizzai/fleet/internal/instancelock"
 )
 
@@ -19,7 +19,7 @@ const allowMultipleEnvVar = "FLEET_ALLOW_MULTIPLE"
 // is logged and ignored: refusing to start over the guard itself would be
 // worse than the duplicate it guards against.
 func acquireInstanceLock() *instancelock.Lock {
-	if envTruthy(os.Getenv(allowMultipleEnvVar)) {
+	if envflag.Set(allowMultipleEnvVar) {
 		return nil
 	}
 	home, err := os.UserHomeDir()
@@ -49,13 +49,4 @@ func instanceHeldMessage(pid int) string {
 		"Two TUIs poll the same sessions and write the same database, which doubles CPU and causes\n"+
 		"\"database is locked\" errors. Switch to the running one, or set %s=1 to start anyway.\n"+
 		"CLI commands (fleet send, status, add, …) work alongside it as usual.", who, allowMultipleEnvVar)
-}
-
-// envTruthy matches the FLEET_NO_* switches' rule (tmux.envIsTruthy).
-func envTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	}
-	return false
 }

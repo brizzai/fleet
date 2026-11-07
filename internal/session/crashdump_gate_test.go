@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 )
 
@@ -39,32 +40,62 @@ func countDumps(ch chan string) int {
 // A session persisted as errored is re-detected as dead on every launch, and
 // the in-memory deathRecorded latch starts out false each time. That wrote a
 // fresh dump per dead session per launch (580 files in one user's crashes dir,
-// 29 for one session). A death is recorded once: when it happens.
+// 29 for one session). A death is recorded once: when it happens. A session
+// that reached StatusError while still alive (an agent-reported error) and
+// THEN dies is a new death, and still gets its dump.
 func TestCrashDumpOnlyOnANewDeath(t *testing.T) {
 	debuglog.Init()
 	for _, tc := range []struct {
-		name string
-		old  Status
-		pane *mockPane
-		want int
+		name    string
+		session *Session
+		want    int
 	}{
-		{"running session's tmux vanished", StatusRunning, &mockPane{dead: true, tmuxGone: true}, 1},
-		{"already-errored session re-detected (next launch)", StatusError, &mockPane{dead: true, tmuxGone: true}, 0},
-		{"running session's pane died", StatusRunning, &mockPane{dead: true}, 1},
-		{"already-errored dead pane re-detected", StatusError, &mockPane{dead: true}, 0},
-		{"a launch that dies is still dumped", StatusStarting, &mockPane{dead: true, tmuxGone: true}, 1},
+		{"running session's tmux vanished",
+			&Session{ID: "d", Status: StatusRunning, paneCapturer: &mockPane{dead: true, tmuxGone: true}}, 1},
+		{"loaded from state.db already dead (next launch)",
+			&Session{ID: "d", Status: StatusError, loadedDead: true, paneCapturer: &mockPane{dead: true, tmuxGone: true}}, 0},
+		{"running session's pane died",
+			&Session{ID: "d", Status: StatusRunning, paneCapturer: &mockPane{dead: true}}, 1},
+		{"loaded dead pane re-detected",
+			&Session{ID: "d", Status: StatusError, loadedDead: true, paneCapturer: &mockPane{dead: true}}, 0},
+		{"a launch that dies is still dumped",
+			&Session{ID: "d", Status: StatusStarting, paneCapturer: &mockPane{dead: true, tmuxGone: true}}, 1},
+		{"agent error while alive, then the pane dies",
+			&Session{ID: "d", Status: StatusError, paneCapturer: &mockPane{dead: true}}, 1},
+		{"hook-reported death (applyHookStatus)",
+			&Session{ID: "d", Agent: agent.OpenCode, Status: StatusRunning, paneCapturer: &mockPane{},
+				hookStatus: "dead", hookUpdatedAt: time.Now()}, 1},
+		{"hook-reported death on a loaded-dead session (applyHookStatus)",
+			&Session{ID: "d", Agent: agent.OpenCode, Status: StatusError, loadedDead: true, paneCapturer: &mockPane{},
+				hookStatus: "dead", hookUpdatedAt: time.Now()}, 0},
+		{"hook-reported death (Claude hook path)",
+			&Session{ID: "d", Agent: agent.Claude, Status: StatusRunning, paneCapturer: &mockPane{},
+				hookStatus: "dead", hookUpdatedAt: time.Now()}, 1},
+		{"hook-reported death on a loaded-dead session (Claude hook path)",
+			&Session{ID: "d", Agent: agent.Claude, Status: StatusError, loadedDead: true, paneCapturer: &mockPane{},
+				hookStatus: "dead", hookUpdatedAt: time.Now()}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dumps := recordDumps(t)
-			s := &Session{ID: "d", Status: tc.old, paneCapturer: tc.pane}
-			s.UpdateStatus()
-			if s.GetStatus() != StatusError {
-				t.Fatalf("status = %s, want error — the case is not reaching a death branch", s.GetStatus())
+			tc.session.UpdateStatus()
+			if tc.session.GetStatus() != StatusError {
+				t.Fatalf("status = %s, want error — the case is not reaching a death branch", tc.session.GetStatus())
 			}
 			if got := countDumps(dumps); got != tc.want {
 				t.Errorf("wrote %d crash dumps, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// FromRow is where the latch is seeded: a row persisted as error is a death an
+// earlier process already recorded.
+func TestFromRowMarksPersistedErrorAsLoadedDead(t *testing.T) {
+	if !FromRow(&SessionRow{ID: "a", Status: string(StatusError)}).loadedDead {
+		t.Error("a row persisted as error must load as already dead")
+	}
+	if FromRow(&SessionRow{ID: "b", Status: string(StatusFinished)}).loadedDead {
+		t.Error("a finished row must not load as dead")
 	}
 }
 

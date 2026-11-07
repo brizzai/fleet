@@ -169,6 +169,15 @@ type Session struct {
 	paneFinishedFirstAt time.Time
 
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
+	// loadedDead marks a session read from state.db already in StatusError: its
+	// death belongs to an earlier fleet process, which wrote that dump (or had
+	// its chance to). deathRecorded is in-memory and starts false on every
+	// launch, so without this each launch re-detected the same dead tmux and
+	// wrote another dump — 29 for one session, 615 in all. Cleared by the
+	// relaunch paths together with deathRecorded. Deliberately separate from
+	// deathRecorded rather than seeding it: a stale non-dead hook file read at
+	// startup re-arms deathRecorded, which would bring the repeat dump back.
+	loadedDead bool
 
 	// launchResumed records whether the latest launch continued an existing
 	// conversation (a resume or fork id) rather than starting fresh, for
@@ -1094,6 +1103,7 @@ func (s *Session) Restart() error {
 	s.TmuxSessionName = newTmux.Name
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
@@ -1184,6 +1194,7 @@ func (s *Session) RespawnClaude() error {
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
@@ -1395,6 +1406,7 @@ func (s *Session) AdoptExternalRelaunch(tmuxName, claudeSessionID string) {
 	s.TmuxSessionName = tmuxName
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	if claudeSessionID != "" {
 		s.ClaudeSessionID = claudeSessionID
 	}
@@ -1433,9 +1445,7 @@ func (s *Session) UpdateStatus() {
 	if !s.IsAlive() {
 		s.SetStatus(StatusError)
 		log.Debug("status: not alive", "old", oldStatus, "new", StatusError)
-		if deathIsNew(oldStatus) {
-			s.triggerCrashDump("tmux_gone")
-		}
+		s.triggerCrashDump("tmux_gone")
 		if newFailure(oldStatus) {
 			// No exitProps here. We are on this branch because the tmux session is
 			// gone, so PaneDeadInfo would shell out to a server that cannot answer
@@ -1455,9 +1465,7 @@ func (s *Session) UpdateStatus() {
 	if s.getCapturer().IsPaneDead() {
 		s.SetStatus(StatusError)
 		log.Debug("status: pane dead", "old", oldStatus, "new", StatusError)
-		if deathIsNew(oldStatus) {
-			s.triggerCrashDump("pane_dead")
-		}
+		s.triggerCrashDump("pane_dead")
 		if newFailure(oldStatus) {
 			s.reportErrored("pane_dead", s.exitProps())
 		}
@@ -1565,9 +1573,7 @@ func (s *Session) applyHookStatus(oldStatus Status, hookStatus, hookReason strin
 	}()
 
 	if hookSaysDead {
-		if deathIsNew(oldStatus) {
-			s.triggerCrashDump("hook_dead")
-		}
+		s.triggerCrashDump("hook_dead")
 	}
 	if errReason != "" && newFailure(oldStatus) {
 		// hookReason, not s.hookReason: it was read with the hookStatus that chose
@@ -1640,9 +1646,7 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus, hookReason 
 	}()
 
 	if hookSaysDead {
-		if deathIsNew(oldStatus) {
-			s.triggerCrashDump("hook_dead")
-		}
+		s.triggerCrashDump("hook_dead")
 		if newFailure(oldStatus) {
 			// The snapshot taken with hookStatus, as in applyHookStatus above.
 			s.reportErrored("hook_dead", map[string]string{"exit_reason": hookReason})
@@ -2261,6 +2265,7 @@ func FromRow(row *SessionRow) *Session {
 		// not snoozed, so nothing renders stale in the meantime.
 		snoozedUntil: row.SnoozedUntil,
 		tmuxSession:  ts,
+		loadedDead:   status == StatusError,
 	}
 }
 

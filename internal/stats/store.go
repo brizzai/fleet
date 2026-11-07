@@ -3,7 +3,6 @@ package stats
 import (
 	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/sqliteutil"
 
 	_ "modernc.org/sqlite"
 )
@@ -94,11 +94,8 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create stats dir: %w", err)
 	}
-	q := url.Values{}
-	q.Add("_pragma", "busy_timeout(5000)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "synchronous(NORMAL)")
-	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	db, err := sql.Open("sqlite", sqliteutil.DSN(path,
+		[]string{"busy_timeout(5000)", "journal_mode(WAL)", "synchronous(NORMAL)"}, ""))
 	if err != nil {
 		return nil, fmt.Errorf("open stats db: %w", err)
 	}

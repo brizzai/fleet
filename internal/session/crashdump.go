@@ -53,7 +53,7 @@ func (s *Session) triggerCrashDump(reason string) {
 		return
 	}
 	s.mu.Lock()
-	if s.deathRecorded {
+	if s.deathRecorded || s.loadedDead {
 		s.mu.Unlock()
 		return
 	}
@@ -209,19 +209,6 @@ func pruneCrashDumps(dir string, keep int) {
 			debuglog.Logger.Warn("crashdump: prune failed", "path", d.path, "err", err)
 		}
 	}
-}
-
-// deathIsNew reports whether a death detected now is a fresh one worth a crash
-// dump. A session already in StatusError is one fleet has already recorded —
-// most often one that was persisted as errored and is being re-detected on the
-// next launch, where the in-memory deathRecorded latch starts out false. That
-// re-detection wrote a new dump for every dead session on every launch (one
-// session reached 29), each saying only "tmux_gone, capture failed".
-// StatusStarting is NOT excluded, unlike newFailure: a launch that dies is the
-// crash a dump is most useful for, and a dump has no analytics double count to
-// avoid.
-func deathIsNew(old Status) bool {
-	return old != StatusError
 }
 
 // tmuxPaneDeadInfo queries tmux for pane death info. Returns an error rather

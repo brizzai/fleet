@@ -135,7 +135,7 @@ var tipRegistry = []Tip{
 		ID:       tipZellijShiftEnter,
 		Policy:   tipOnce,
 		Priority: 12,
-		active:   func(h *Home) bool { return h.underZellij && len(h.sessions) >= 1 },
+		active:   func(h *Home) bool { return h.zellijShiftEnterTip && len(h.sessions) >= 1 },
 		text: func(h *Home) string {
 			return "Running inside zellij: Shift+Enter reaches agents as a plain Enter (zellij doesn't pass " +
 				"modifyOtherKeys through). Bind Shift+Enter in your zellij config to send `ESC [13;2u` for newlines."

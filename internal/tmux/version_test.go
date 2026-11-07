@@ -143,3 +143,25 @@ func TestHyperlinksSupported(t *testing.T) {
 		}
 	}
 }
+
+func TestHasTerminalFeatureMatchesWholeEntries(t *testing.T) {
+	out := "xterm*:clipboard:ccolour:cstyle:focus:title\nscreen*:extkeys\n*:RGB\nxterm*:hyperlinks\n"
+	tests := []struct {
+		entry string
+		want  bool
+	}{
+		{"xterm*:hyperlinks", true},
+		{"*:RGB", true},
+		{"xterm*:extkeys", false}, // only screen*:extkeys is present
+		{"focus", false},          // a substring of an entry is not the entry
+	}
+	for _, tt := range tests {
+		if got := hasTerminalFeature(out, tt.entry); got != tt.want {
+			t.Errorf("hasTerminalFeature(%q) = %v, want %v", tt.entry, got, tt.want)
+		}
+	}
+	// Comma-joined values, as `set -as terminal-features ',x'` leaves them.
+	if !hasTerminalFeature(",xterm-256color:RGB,xterm*:extkeys", "xterm*:extkeys") {
+		t.Error("comma-joined entry not found")
+	}
+}
