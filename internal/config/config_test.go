@@ -560,3 +560,18 @@ func TestTicketStartStateHonoursTheLegacyKey(t *testing.T) {
 		})
 	}
 }
+
+func TestGetSidebarWidthClamps(t *testing.T) {
+	cases := []struct{ set, want int }{
+		{0, SidebarWidthDefault},
+		{-5, SidebarWidthDefault},
+		{10, SidebarWidthMin},
+		{80, 80},
+		{999, SidebarWidthMax},
+	}
+	for _, c := range cases {
+		if got := (&Config{SidebarWidth: c.set}).GetSidebarWidth(); got != c.want {
+			t.Errorf("GetSidebarWidth(%d) = %d, want %d", c.set, got, c.want)
+		}
+	}
+}
