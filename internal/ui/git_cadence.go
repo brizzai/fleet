@@ -72,10 +72,8 @@ func gitRefreshInterval(a repoActivity, lastHot, now time.Time) time.Duration {
 // pass. The half-tick of slack absorbs ticker jitter: without it an active
 // repo refreshed at t=0 reads 1.99s old at the next 2s wake and skips a beat.
 func gitRefreshDue(last time.Time, interval time.Duration, now time.Time, force bool) bool {
-	if force || last.IsZero() {
-		return true
-	}
-	return now.Sub(last) >= interval-tickInterval/2
+	// A never-refreshed repo (zero last) is due through the subtraction itself.
+	return force || now.Sub(last) >= interval-tickInterval/2
 }
 
 // repoSample is one session's contribution to its repo's cadence.
@@ -122,11 +120,31 @@ func gitRefreshTargets(samples []repoSample, infos map[string]*git.RepoInfo, las
 // stamps LastPRRefresh / PRRateLimitedAt); the PR payload never changes
 // without one of those, because it is carried forward otherwise.
 func prCacheRowChanged(old, next *git.RepoInfo) bool {
-	if old == nil || next == nil {
+	if old == nil {
 		return true
 	}
 	return old.Branch != next.Branch ||
 		old.OriginKey != next.OriginKey ||
 		!old.LastPRRefresh.Equal(next.LastPRRefresh) ||
 		!old.PRRateLimitedAt.Equal(next.PRRateLimitedAt)
+}
+
+// PR-refresh TTL constants. Hot repos refresh fast so an actively-used
+// branch's badge stays responsive; cold repos refresh slowly so a 24-repo
+// fleet doesn't burn through the gh rate limit.
+const (
+	prTTLHot         = 60 * time.Second
+	prTTLCold        = 2 * time.Minute
+	prHotnessWindow  = 15 * time.Minute
+	prRateLimitedFor = 5 * time.Minute
+)
+
+// repoTTLFor returns the per-repo PR refresh TTL. A repo is hot if any of
+// its sessions was Running within `prHotnessWindow`; cold otherwise.
+// repoLastHotAt is worker-only state — no synchronization required.
+func (h *Home) repoTTLFor(repo string, now time.Time) time.Duration {
+	if t, ok := h.repoLastHotAt[repo]; ok && now.Sub(t) < prHotnessWindow {
+		return prTTLHot
+	}
+	return prTTLCold
 }

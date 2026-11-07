@@ -32,6 +32,12 @@ func startPprof(addr string) error {
 	if err != nil {
 		return fmt.Errorf("%s: listen %s: %w", pprofEnvVar, addr, err)
 	}
+	// `localhost` is resolved by the system, and /etc/hosts can point it
+	// anywhere; check what was actually bound, not what was asked for.
+	if tcp, ok := ln.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+		_ = ln.Close()
+		return fmt.Errorf("%s=%q bound %s, which is not a loopback address", pprofEnvVar, addr, ln.Addr())
+	}
 	// Its own mux and listener, so nothing about this depends on what else in
 	// the binary uses http.DefaultServeMux. (The package's init registers on
 	// DefaultServeMux too, but fleet never serves that mux.)
@@ -42,12 +48,38 @@ func startPprof(addr string) error {
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	go func() {
-		if err := http.Serve(ln, mux); err != nil {
+		if err := http.Serve(ln, loopbackHostOnly(mux)); err != nil {
 			debuglog.Logger.Warn("pprof server stopped", "addr", addr, "err", err)
 		}
 	}()
 	debuglog.Logger.Info("pprof serving", "addr", ln.Addr().String())
 	return nil
+}
+
+// loopbackHostOnly refuses requests whose Host header doesn't name a loopback
+// host. A loopback listener is reachable from any web page the browser opens,
+// and DNS rebinding lets such a page address it under its own hostname; the
+// Host header is what still carries that name.
+func loopbackHostOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func checkLoopback(addr string) error {

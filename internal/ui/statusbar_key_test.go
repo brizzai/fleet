@@ -56,21 +56,3 @@ func TestStatusBarKey(t *testing.T) {
 		t.Error("a rendered option change must change the key")
 	}
 }
-
-func TestDirtyScanPrefix(t *testing.T) {
-	tests := []struct {
-		dirty, cached, scanned int
-		want                   string
-	}{
-		{0, 0, 1, ""},
-		{1, 1, 1, ""}, // the cached warning already says it
-		{1, 0, 1, "Uncommitted changes will be discarded · "},
-		{2, 1, 3, "2 worktree(s) have uncommitted changes · "},
-		{0, 1, 1, ""}, // cache was dirty, now clean: never retract a warning
-	}
-	for _, tt := range tests {
-		if got := dirtyScanPrefix(tt.dirty, tt.cached, tt.scanned); got != tt.want {
-			t.Errorf("dirtyScanPrefix(%d, %d, %d) = %q, want %q", tt.dirty, tt.cached, tt.scanned, got, tt.want)
-		}
-	}
-}

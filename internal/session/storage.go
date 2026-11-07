@@ -5,15 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/github"
+	"github.com/brizzai/fleet/internal/sqliteutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -81,37 +80,19 @@ func DefaultDBPath() string {
 // stateDBMaxConns caps the connection pool. Matches stats.db.
 const stateDBMaxConns = 4
 
-// stateDBDSN builds the driver DSN for state.db.
-//
-// The pragmas MUST ride the DSN, never a `db.Exec("PRAGMA ...")` after Open.
-// busy_timeout and foreign_keys are per-connection settings, and database/sql
-// hands Exec one pooled connection: every other connection the pool opens
-// later starts with busy_timeout=0 and foreign keys off. That is what produced
-// "database is locked (SQLITE_BUSY)" from a single fleet instance — a second
-// connection with no busy handler fails the instant another one holds the
-// write lock (measured: 1359 of 1600 concurrent upserts failed that way, 0
-// with the DSN form) — and it left the slot_bindings ON DELETE CASCADE
-// unenforced on most connections. modernc.org/sqlite applies each _pragma on
-// every new connection.
+// stateDBDSN builds the driver DSN for state.db. The pragmas ride the DSN so
+// every pooled connection gets them (see sqliteutil.DSN for why that matters:
+// measured, 1359 of 1600 concurrent upserts failed with SQLITE_BUSY when they
+// were set by Exec, and the slot_bindings ON DELETE CASCADE went unenforced on
+// most connections).
 //
 // _txlock=immediate makes Begin take the write lock up front. A deferred
 // transaction that reads and then tries to write can hit SQLITE_BUSY without
 // the busy handler ever being consulted (the lock-upgrade deadlock rule);
 // starting immediate turns that into an ordinary wait under busy_timeout.
 func stateDBDSN(path string) string {
-	q := url.Values{}
-	q.Add("_pragma", "busy_timeout(5000)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "foreign_keys(1)")
-	q.Set("_txlock", "immediate")
-	return "file:" + uriPathEscaper.Replace(path) + "?" + q.Encode()
+	return sqliteutil.DSN(path, []string{"busy_timeout(5000)", "journal_mode(WAL)", "foreign_keys(1)"}, "immediate")
 }
-
-// uriPathEscaper percent-encodes the characters SQLite's URI parser treats
-// specially in a `file:` path — `%` (escape), `?` (query) and `#` (fragment) —
-// so a home directory containing one opens the right file. SQLite decodes %HH
-// in the path; everything else passes through as-is.
-var uriPathEscaper = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
 
 // Open opens or creates the SQLite database with WAL mode.
 func Open(dbPath string) (*StateDB, error) {

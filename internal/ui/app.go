@@ -107,7 +107,7 @@ type (
 	}
 	// originDeleteMsg forgets a whole origin group: every checkout under it
 	// (the main repo plus any worktrees) and all their sessions. Each target
-	// carries its own destroy decision, snapshotted at show-time so the ~2s
+	// carries its own destroy decision, snapshotted at show-time so the periodic
 	// gitInfo refresh can't flip a worktree classification between the user
 	// ticking the checkbox and execution.
 	originDeleteMsg struct {
@@ -442,7 +442,10 @@ type Home struct {
 	// gitForceNext makes the next gitWorkerCycle refresh every repo regardless
 	// of its cadence. Set by triggerGitRefresh, consumed by the cycle.
 	gitForceNext atomic.Bool
-	ghAvailable  bool // cached gh CLI availability
+	// prCacheUnsaved holds repo roots whose PR cache row failed to persist, so
+	// the next refresh retries the write. Written from the fan-out goroutines.
+	prCacheUnsaved sync.Map
+	ghAvailable    bool // cached gh CLI availability
 
 	hookWatcher *hooks.HookWatcher
 
@@ -505,9 +508,12 @@ type Home struct {
 	// mid-session therefore isn't noticed until the next launch — acceptable,
 	// since the tip is tipOnce and retires on its own either way.
 	agentSkillInstalled bool
-	// underZellij drives the zellij Shift+Enter tip. Read from the environment
-	// once in NewHome, like agentSkillInstalled.
-	underZellij bool
+	// zellijShiftEnterTip drives the zellij Shift+Enter tip: running inside
+	// zellij, on a tmux where fleet enables extended keys (on 3.5 / 3.6.x it
+	// doesn't, and the binding the tip suggests couldn't work). Sampled once
+	// in NewHome, like agentSkillInstalled; the tmux half is only asked under
+	// zellij, so nobody else pays for it.
+	zellijShiftEnterTip bool
 
 	// macOS TCC: tmux can't read ~/Documents/~/Desktop/~/Downloads once its server
 	// daemonizes. Probed lazily (once per protected root per launch) when a session
@@ -649,7 +655,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		tipEpisodeDismissed:    make(map[string]bool),
 		tipVisibleFor:          make(map[string]time.Duration),
 		agentSkillInstalled:    skill.AnyInstalled(),
-		underZellij:            os.Getenv("ZELLIJ") != "",
+		zellijShiftEnterTip:    os.Getenv("ZELLIJ") != "" && tmux.ExtendedKeysUsable(),
 		tccProbed:              make(map[string]bool),
 		tccBlockedRoots:        make(map[string]bool),
 		pinnedRepos:            make(map[string]bool),
@@ -4743,7 +4749,8 @@ type worktreeHoldersScannedMsg struct {
 	dirtyPrefix string
 }
 
-// countDirty runs a live `git status` in each dir. Worker goroutine only.
+// countDirty runs a live `git status` in each dir. Never on the Update
+// goroutine: it runs inside the delete dialog's scan tea.Cmd.
 func countDirty(dirs []string) int {
 	n := 0
 	for _, d := range dirs {
@@ -4763,7 +4770,9 @@ func dirtyScanPrefix(dirty, cachedDirty, scanned int) string {
 	if scanned == 1 {
 		return "Uncommitted changes will be discarded · "
 	}
-	return fmt.Sprintf("%d worktree(s) have uncommitted changes · ", dirty)
+	// The cached count may already be on screen as its own bullet, so this one
+	// names itself as the newer, live reading instead of contradicting it.
+	return fmt.Sprintf("Live check: %d worktree(s) have uncommitted changes · ", dirty)
 }
 
 // confirmDeleteHeader handles `d` pressed on a repo/worktree header. Scope is the
@@ -4811,7 +4820,7 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	// asynchronously; SetScan ignores the result if the prompt has moved on.
 	if isWorktree {
 		gen := h.nextHolderScanGen()
-		h.confirmDialog.StartScan(gen, "Checking for running processes…")
+		h.confirmDialog.StartScan(gen, "Checking for running processes and uncommitted changes…")
 		editor := h.cfg.GetEditor()
 		cachedDirty := 0
 		if info := h.gitInfo()[repoPath]; info != nil && info.IsDirty {
@@ -4892,7 +4901,7 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 		inScope[repo] = true
 	}
 
-	// Snapshot each checkout's destroy decision now, at show-time, so the ~2s
+	// Snapshot each checkout's destroy decision now, at show-time, so the periodic
 	// gitInfo refresh can't flip a worktree classification between the user
 	// ticking the box and execution. destroyDirs (the dirs actually removed) and
 	// the dirty count are derived from the same snapshot the user approves.
@@ -4977,7 +4986,7 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 	// isn't double-counted (reuses the worktreeHoldersScannedMsg handler).
 	if len(destroyDirs) > 0 {
 		gen := h.nextHolderScanGen()
-		h.confirmDialog.StartScan(gen, "Checking for running processes…")
+		h.confirmDialog.StartScan(gen, "Checking for running processes and uncommitted changes…")
 		editor := h.cfg.GetEditor()
 		dirs := destroyDirs
 		cachedDirty := dirtyWorktrees
@@ -8098,26 +8107,6 @@ func (h *Home) buildTmuxStatusBarOpts(s *session.Session, info *git.RepoInfo) tm
 	}
 }
 
-// PR-refresh TTL constants. Hot repos refresh fast so an actively-used
-// branch's badge stays responsive; cold repos refresh slowly so a 24-repo
-// fleet doesn't burn through the gh rate limit.
-const (
-	prTTLHot         = 60 * time.Second
-	prTTLCold        = 2 * time.Minute
-	prHotnessWindow  = 15 * time.Minute
-	prRateLimitedFor = 5 * time.Minute
-)
-
-// repoTTLFor returns the per-repo PR refresh TTL. A repo is hot if any of
-// its sessions was Running within `prHotnessWindow`; cold otherwise.
-// repoLastHotAt is worker-only state — no synchronization required.
-func (h *Home) repoTTLFor(repo string, now time.Time) time.Duration {
-	if t, ok := h.repoLastHotAt[repo]; ok && now.Sub(t) < prHotnessWindow {
-		return prTTLHot
-	}
-	return prTTLCold
-}
-
 // refreshAllGitAndPR runs the per-repo git+PR refresh across `repos` with
 // bounded parallelism, optionally capped by a wall-clock deadline.
 //
@@ -8241,8 +8230,12 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 				//
 				// Only when the row actually changed (prCacheRowChanged): writing
 				// every repo every cycle kept SQLite's one write lock busy.
-				if prCacheRowChanged(prev, info) {
-					_ = h.storage.SavePRCacheRow(&session.PRCacheRow{
+				// A failed write is remembered in prCacheUnsaved and retried on
+				// the repo's next refresh: the in-memory cache already holds the
+				// new value, so prCacheRowChanged alone would never see it again.
+				_, unsaved := h.prCacheUnsaved.Load(r)
+				if unsaved || prCacheRowChanged(prev, info) {
+					err := h.storage.SavePRCacheRow(&session.PRCacheRow{
 						RepoPath:        r,
 						Branch:          info.Branch,
 						OriginKey:       info.OriginKey,
@@ -8250,6 +8243,11 @@ func (h *Home) refreshAllGitAndPR(repos []string, maxParallel int, deadline time
 						LastPRRefresh:   info.LastPRRefresh,
 						PRRateLimitedAt: info.PRRateLimitedAt,
 					})
+					if err != nil {
+						h.prCacheUnsaved.Store(r, struct{}{})
+					} else {
+						h.prCacheUnsaved.Delete(r)
+					}
 				}
 
 				// Update still owns the sidebar rebuild. The message carries no
