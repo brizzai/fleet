@@ -56,6 +56,7 @@ const (
 	// Only the Go identifier changed.
 	tipConnectTicketsID = "connect_linear"
 	tipHooksRepairedID  = "hooks_repaired"
+	tipZellijShiftEnter = "zellij_shift_enter"
 
 	reloadFailedThreshold = 4
 	cmdPaletteMinSessions = 3
@@ -122,6 +123,22 @@ var tipRegistry = []Tip{
 			return fmt.Sprintf("Fleet suspended %d idle session(s) to free memory — nothing is lost. "+
 				"Press enter on one to resume. Tune this in Settings → Behavior → \"Idle-session suspend\".",
 				h.countSessionsByStatus(session.StatusSuspended))
+		},
+	},
+	{
+		// Under zellij, Shift+Enter reaches an agent as a plain Enter and sends
+		// the message. tmux asks the outer terminal for xterm's modifyOtherKeys
+		// to tell the two apart, and inside zellij the outer terminal is zellij,
+		// which doesn't provide it — so nothing fleet sets on the tmux side can
+		// fix it. The fix is one binding in zellij's own config, and without
+		// this tip the symptom points at fleet or Claude rather than at it.
+		ID:       tipZellijShiftEnter,
+		Policy:   tipOnce,
+		Priority: 12,
+		active:   func(h *Home) bool { return h.underZellij && len(h.sessions) >= 1 },
+		text: func(h *Home) string {
+			return "Running inside zellij: Shift+Enter reaches agents as a plain Enter (zellij doesn't pass " +
+				"modifyOtherKeys through). Bind Shift+Enter in your zellij config to send `ESC [13;2u` for newlines."
 		},
 	},
 	{

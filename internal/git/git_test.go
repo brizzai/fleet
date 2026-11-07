@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -424,5 +425,18 @@ func TestGetDefaultBranchPrefersOriginInFallback(t *testing.T) {
 	run(local, "commit", "-q", "--allow-empty", "-m", "one")
 	if got := GetDefaultBranch(local); got != "master" {
 		t.Errorf("GetDefaultBranch(no remote) = %q, want master", got)
+	}
+}
+
+func TestGitCommandDisablesOptionalLocks(t *testing.T) {
+	cmd := gitCommand(context.Background(), "status")
+	found := false
+	for _, kv := range cmd.Env {
+		if kv == "GIT_OPTIONAL_LOCKS=0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("git commands must run with GIT_OPTIONAL_LOCKS=0, or fleet's periodic status takes index.lock in agents' worktrees")
 	}
 }

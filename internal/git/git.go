@@ -25,14 +25,29 @@ const gitTimeout = 8 * time.Second
 func gitOutput(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).Output()
+	return gitCommand(ctx, args...).Output()
 }
 
 // gitRun runs `git <args>` under gitTimeout, discarding output.
 func gitRun(args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "git", args...).Run()
+	return gitCommand(ctx, args...).Run()
+}
+
+// gitCommand builds the exec.Cmd for gitOutput/gitRun.
+//
+// GIT_OPTIONAL_LOCKS=0 stops `git status` from taking .git/index.lock to write
+// back refreshed stat data. fleet runs status in every checkout on a timer,
+// in worktrees where an agent is committing at the same moment; an optional
+// lock fleet holds is a "Unable to create index.lock: File exists" the agent
+// gets. The status answer is identical either way — the lock only saves the
+// next status some stat calls. Only the optional locks are affected; a command
+// that has to write (worktree add, branch) still locks as it must.
+func gitCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
+	return cmd
 }
 
 // GetBranchName returns the current branch name for the given repo path.

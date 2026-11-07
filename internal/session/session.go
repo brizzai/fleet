@@ -1433,7 +1433,9 @@ func (s *Session) UpdateStatus() {
 	if !s.IsAlive() {
 		s.SetStatus(StatusError)
 		log.Debug("status: not alive", "old", oldStatus, "new", StatusError)
-		s.triggerCrashDump("tmux_gone")
+		if deathIsNew(oldStatus) {
+			s.triggerCrashDump("tmux_gone")
+		}
 		if newFailure(oldStatus) {
 			// No exitProps here. We are on this branch because the tmux session is
 			// gone, so PaneDeadInfo would shell out to a server that cannot answer
@@ -1453,7 +1455,9 @@ func (s *Session) UpdateStatus() {
 	if s.getCapturer().IsPaneDead() {
 		s.SetStatus(StatusError)
 		log.Debug("status: pane dead", "old", oldStatus, "new", StatusError)
-		s.triggerCrashDump("pane_dead")
+		if deathIsNew(oldStatus) {
+			s.triggerCrashDump("pane_dead")
+		}
 		if newFailure(oldStatus) {
 			s.reportErrored("pane_dead", s.exitProps())
 		}
@@ -1561,7 +1565,9 @@ func (s *Session) applyHookStatus(oldStatus Status, hookStatus, hookReason strin
 	}()
 
 	if hookSaysDead {
-		s.triggerCrashDump("hook_dead")
+		if deathIsNew(oldStatus) {
+			s.triggerCrashDump("hook_dead")
+		}
 	}
 	if errReason != "" && newFailure(oldStatus) {
 		// hookReason, not s.hookReason: it was read with the hookStatus that chose
@@ -1634,7 +1640,9 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus, hookReason 
 	}()
 
 	if hookSaysDead {
-		s.triggerCrashDump("hook_dead")
+		if deathIsNew(oldStatus) {
+			s.triggerCrashDump("hook_dead")
+		}
 		if newFailure(oldStatus) {
 			// The snapshot taken with hookStatus, as in applyHookStatus above.
 			s.reportErrored("hook_dead", map[string]string{"exit_reason": hookReason})
