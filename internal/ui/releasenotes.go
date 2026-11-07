@@ -413,6 +413,7 @@ func renderInlineMarkdown(s string) string {
 	base := HelpDescStyle
 	codeStyle := lipgloss.NewStyle().Foreground(ColorOrange)
 	boldStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorText)
+	italicStyle := lipgloss.NewStyle().Italic(true).Foreground(ColorText)
 
 	var out, buf strings.Builder
 	flush := func() {
@@ -446,8 +447,32 @@ func renderInlineMarkdown(s string) string {
 				continue
 			}
 			flush()
-			out.WriteString(boldStyle.Render(rest[:j]))
+			// Same rule as emphasis: bold around a phrase often contains a code
+			// span, and rendering the inner text verbatim leaves its backticks
+			// on screen.
+			if inner := rest[:j]; strings.ContainsAny(inner, "`_") {
+				out.WriteString(renderInlineMarkdown(inner))
+			} else {
+				out.WriteString(boldStyle.Render(inner))
+			}
 			i = i + 2 + j + 2
+		case (s[i] == '_' || s[i] == '*') && emphasisOpensAt(s, i):
+			if end := emphasisCloses(s, i); end > 0 {
+				flush()
+				// Emphasis around a whole sentence routinely contains bold or
+				// code, and emitting its inner text verbatim left THOSE markers
+				// on screen. Nested markup wins the styling; what matters is
+				// that no marker survives either way.
+				if inner := s[i+1 : end]; strings.ContainsAny(inner, "*`_") {
+					out.WriteString(renderInlineMarkdown(inner))
+				} else {
+					out.WriteString(italicStyle.Render(inner))
+				}
+				i = end + 1
+				continue
+			}
+			buf.WriteByte(s[i])
+			i++
 		default:
 			buf.WriteByte(s[i])
 			i++
@@ -455,6 +480,49 @@ func renderInlineMarkdown(s string) string {
 	}
 	flush()
 	return out.String()
+}
+
+// emphasisOpensAt reports whether the marker at i can START emphasis.
+//
+// The whole difficulty is that `_` is a word character in code: `skip_migrations`
+// and `is_admin` are everywhere in a pull request description, and a naive rule
+// renders the middle of every identifier in italics. So a marker only opens when
+// it follows a boundary and is followed by something that is not a space —
+// exactly the pairing that makes _this_ emphasis and skip_migrations a word.
+func emphasisOpensAt(s string, i int) bool {
+	if i+1 >= len(s) || s[i+1] == ' ' || s[i+1] == s[i] {
+		return false
+	}
+	return i == 0 || isBoundaryByte(s[i-1])
+}
+
+// emphasisCloses finds the matching marker, or -1.
+func emphasisCloses(s string, i int) int {
+	marker := s[i]
+	for j := i + 1; j < len(s); j++ {
+		if s[j] != marker {
+			continue
+		}
+		// A closing marker sits tight against the text it ends and is followed
+		// by a boundary — which is what keeps `a_b_c` a single word.
+		if s[j-1] != ' ' && (j+1 == len(s) || isBoundaryByte(s[j+1])) {
+			return j
+		}
+	}
+	return -1
+}
+
+// isBoundaryByte reports whether a byte can sit beside emphasis. Multibyte
+// runes are deliberately treated as boundaries: the markers are ASCII, so the
+// only thing that matters is that a letter or digit is not one.
+func isBoundaryByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return false
+	case b == '_':
+		return false
+	}
+	return true
 }
 
 // backtickRun returns the number of consecutive backticks starting at i.
