@@ -66,8 +66,19 @@ type User struct {
 // TODO: add authentication middleware
 EOF
 git add -A && git commit -q -m "init: basic Go web API"
-git checkout -q -b feat/auth
-echo "// wip" >> internal/handlers/users.go
+
+# Fake remote so the main clone and its worktree share ONE origin in fleet's
+# sidebar. Origin identity comes from remote.origin.url (git.GetOriginKey);
+# without a remote each folder falls back to a distinct local:<basename> and
+# the two checkouts split into separate groups instead of grouping together.
+git remote add origin https://github.com/example/api-server.git
+
+# Feature work lives in a linked worktree (the real fleet flow), not the main
+# checkout — this is what yields the "origin → main repo + worktree" grouping.
+# Main stays on `main` (clean); the worktree holds feat/auth (dirty + PR #42).
+WT1="$DEMO_DIR/api-server-feat-auth"
+git worktree add -q "$WT1" -b feat/auth
+echo "// wip" >> "$WT1/internal/handlers/users.go"
 
 # Repo 2: React dashboard
 REPO2="$DEMO_DIR/dashboard-ui"
@@ -233,10 +244,10 @@ PROMPTS=(
     "What does this project do? Summarize in one sentence."
     "Implement the full training pipeline: data preprocessing with missing value handling, model training with scikit-learn, cross-validation, and evaluation metrics"
 )
-REPOS=("$REPO1" "$REPO1" "$REPO2" "$REPO2" "$REPO3")
+REPOS=("$REPO1" "$WT1" "$REPO2" "$REPO2" "$REPO3")
 LABELS=(
     "api-server: architecture review"
-    "api-server: add auth middleware"
+    "api-server (feat/auth worktree): add auth middleware"
     "dashboard-ui: analytics component"
     "dashboard-ui: quick question"
     "ml-pipeline: implement training"
