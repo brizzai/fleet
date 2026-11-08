@@ -51,7 +51,7 @@ type Usage struct {
 	// that cannot work.
 	//
 	// Live state: persisted only to the usage cache, which a re-login clears
-	// (ForgetCachedUsage) and the next poll overwrites.
+	// (ResetCachedUsage) and the next poll overwrites.
 	LoggedOut bool
 }
 

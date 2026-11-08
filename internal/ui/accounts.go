@@ -831,8 +831,8 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 		m[key] = msg.account.InitialUsage()
 	})
 	// Or the CLI would keep reading a cached logged-out verdict.
-	if err := claudeaccount.ForgetCachedUsage(claudeaccount.UsageCachePath(), key); err != nil {
-		debuglog.Logger.Warn("could not clear cached account usage", "err", err)
+	if err := claudeaccount.ResetCachedUsage(claudeaccount.UsageCachePath(), key, msg.account.InitialUsage()); err != nil {
+		debuglog.Logger.Warn("could not reset cached account usage", "err", err)
 	}
 
 	stored, ok := h.accounts.Get(key)

@@ -186,6 +186,13 @@ func selectLaunchAccount(cfg *config.Config, all []claudeaccount.Account, allowe
 		reasons[i] = u.Email + ": " + u.Reason
 	}
 	if len(unread) == len(cands) {
+		// An old reading kept because it shows an account spent still steered the pick.
+		for _, a := range cands {
+			if usage[a.Email].Known() {
+				return acct, true, fmt.Sprintf("Note: couldn't read fresh quota (%s); chose %s from the last known readings.",
+					strings.Join(reasons, "; "), acct.Email)
+			}
+		}
 		return acct, true, fmt.Sprintf("Note: couldn't read quota (%s), so configured order chose %s.",
 			strings.Join(reasons, "; "), acct.Email)
 	}

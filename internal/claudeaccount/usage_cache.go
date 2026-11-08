@@ -86,14 +86,18 @@ func SaveUsageCache(path string, readings map[string]Usage) error {
 	return writeUsageCache(path, merged)
 }
 
-// ForgetCachedUsage drops one account's entry, so a re-login isn't overruled by
-// a cached logged-out verdict.
-func ForgetCachedUsage(path, email string) error {
+// ResetCachedUsage replaces one account's entry after a re-login: with the
+// login's own reading when it has one, else by dropping it, so a cached
+// logged-out verdict can't outlive the fix.
+func ResetCachedUsage(path, email string, u Usage) error {
 	m := LoadUsageCache(path)
-	if _, ok := m[email]; !ok {
+	if u.Known() {
+		m[email] = u
+	} else if _, ok := m[email]; ok {
+		delete(m, email)
+	} else {
 		return nil
 	}
-	delete(m, email)
 	return writeUsageCache(path, m)
 }
 

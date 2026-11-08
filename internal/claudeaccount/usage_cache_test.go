@@ -172,21 +172,36 @@ func TestUsageForLaunchKeepsOldSpentReading(t *testing.T) {
 	}
 }
 
-func TestForgetCachedUsageClearsLoggedOut(t *testing.T) {
+func TestResetCachedUsageAfterLogin(t *testing.T) {
 	now := time.Now()
 	path := filepath.Join(t.TempDir(), "cache.json")
-	if err := SaveUsageCache(path, map[string]Usage{
-		"a@x": {AttemptedAt: now, LoggedOut: true, Err: ErrNotLoggedIn},
+	seed := map[string]Usage{
+		"a@x": {AttemptedAt: now.Add(-time.Minute), LoggedOut: true, Err: ErrNotLoggedIn},
 		"b@x": {SevenDayPct: 5, FetchedAt: now, AttemptedAt: now},
-	}); err != nil {
+	}
+	if err := SaveUsageCache(path, seed); err != nil {
 		t.Fatal(err)
 	}
-	if err := ForgetCachedUsage(path, "a@x"); err != nil {
+
+	// A login whose own fetch failed: the stale verdict is dropped.
+	if err := ResetCachedUsage(path, "a@x", Usage{}); err != nil {
 		t.Fatal(err)
 	}
 	m := LoadUsageCache(path)
 	if _, ok := m["a@x"]; ok || m["b@x"].SevenDayPct != 5 {
 		t.Fatalf("cache = %+v", m)
+	}
+
+	// A login with a reading: it is kept, so the CLI reuses it inside the poll floor.
+	if err := SaveUsageCache(path, seed); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetCachedUsage(path, "a@x", Usage{SevenDayPct: 30, FetchedAt: now, AttemptedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadUsageCache(path)["a@x"]
+	if got.LoggedOut || got.SevenDayPct != 30 || got.PollDue(now) {
+		t.Fatalf("a@x = %+v, want the login reading", got)
 	}
 }
 

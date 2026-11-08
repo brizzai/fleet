@@ -61,6 +61,24 @@ func TestSelectLaunchAccountFallsBackWithReason(t *testing.T) {
 	}
 }
 
+// An old reading kept because it shows an account spent decided the pick, so
+// the note must not credit configured order.
+func TestSelectLaunchAccountNoteNamesOldReadings(t *testing.T) {
+	now := time.Now()
+	stubUsage(t, map[string]claudeaccount.Usage{
+		"first@x": {SevenDayPct: 100, SevenDayReset: now.Add(96 * time.Hour), FetchedAt: now.Add(-time.Hour)},
+	}, []claudeaccount.Unread{
+		{Email: "first@x", Reason: "usage endpoint returned 503"},
+		{Email: "second@x", Reason: "usage endpoint returned 503"},
+	})
+
+	acct, _, note := selectLaunchAccount(&config.Config{}, threeAccounts(), []string{"first@x", "second@x"})
+	want := "Note: couldn't read fresh quota (first@x: usage endpoint returned 503; second@x: usage endpoint returned 503); chose second@x from the last known readings."
+	if acct.Email != "second@x" || note != want {
+		t.Fatalf("picked %s note %q, want second@x %q", acct.Email, note, want)
+	}
+}
+
 func TestSelectLaunchAccountPartialRead(t *testing.T) {
 	now := time.Now()
 	stubUsage(t, map[string]claudeaccount.Usage{
