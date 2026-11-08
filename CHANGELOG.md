@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.48.1] - 2026-11-08
+
+### Fixed
+
+- **Scripts rank by quota.** Under a least-used `account_strategy`, `fleet worktree` and `fleet add` without `--account` now rank your Claude accounts on live quota like the TUI does, even from a launchd job, instead of always taking the first one with "quota isn't available outside the TUI".
+
 ## [2.48.0] - 2026-10-20
 
 ### Highlights
@@ -772,7 +778,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.48.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.48.1...HEAD
+[2.48.1]: https://github.com/brizzai/fleet/releases/tag/v2.48.1
 [2.48.0]: https://github.com/brizzai/fleet/releases/tag/v2.48.0
 [2.47.1]: https://github.com/brizzai/fleet/releases/tag/v2.47.1
 [2.47.0]: https://github.com/brizzai/fleet/releases/tag/v2.47.0
