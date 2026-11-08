@@ -440,3 +440,24 @@ func TestGitCommandDisablesOptionalLocks(t *testing.T) {
 		t.Error("git commands must run with GIT_OPTIONAL_LOCKS=0, or fleet's periodic status takes index.lock in agents' worktrees")
 	}
 }
+
+// UncommittedChanges reports git's failure instead of reading it as clean:
+// the delete dialog's live check relies on telling the two apart.
+func TestUncommittedChangesReportsFailure(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if _, err := UncommittedChanges(t.TempDir()); err == nil {
+		t.Error("UncommittedChanges on a non-repo returned no error")
+	}
+	main, _ := initRepoWithWorktree(t)
+	if dirty, err := UncommittedChanges(main); err != nil || dirty {
+		t.Errorf("clean repo: dirty=%v err=%v, want false, nil", dirty, err)
+	}
+	if err := os.WriteFile(filepath.Join(main, "x.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := UncommittedChanges(main); err != nil || !dirty {
+		t.Errorf("dirty repo: dirty=%v err=%v, want true, nil", dirty, err)
+	}
+}
