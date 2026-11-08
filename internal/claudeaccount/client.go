@@ -50,8 +50,8 @@ type Usage struct {
 	// active use — which is how every new session ends up on the one account
 	// that cannot work.
 	//
-	// Live state, never persisted: an account heals the moment it is logged in
-	// again, and a verdict on disk would outlive the fix.
+	// Live state: persisted only to the usage cache, which a re-login clears
+	// (ResetCachedUsage) and the next poll overwrites.
 	LoggedOut bool
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -88,24 +89,14 @@ func resolveLaunchAccount(cfg *config.Config, accounts *claudeaccount.Store, rep
 			os.Exit(1)
 		}
 		account = explicit
-	} else if acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
-		Accounts: accounts.List(),
-		Strategy: cfg.GetAccountStrategy(),
-		Manual:   cfg.DefaultAccount,
-		Allowed:  allowed,
-	}); ok {
+	} else if acct, ok, note := selectLaunchAccount(cfg, accounts.List(), allowed); ok {
 		account = acct.Email
-		// Quota lives only in a running TUI's memory, so SelectOpts.Usage is
-		// empty here and least_used degrades to configured order. Said out
-		// loud — on stderr, not only in debug.log, since the person running a
-		// scripted `fleet worktree` never opens that: it can otherwise land on
-		// a nearly spent account with nothing to indicate the strategy didn't
-		// apply.
-		if claudeaccount.RanksByUsage(cfg.GetAccountStrategy()) && accounts.Len() > 1 {
-			fmt.Fprintf(os.Stderr, "Note: quota isn't available outside the TUI, so configured order chose %s.\n", account)
-			debuglog.Logger.Info("account select: no quota available from the CLI, configured order decided",
-				"chosen", account, "strategy", cfg.GetAccountStrategy())
+		// On stderr: whoever runs a scripted `fleet worktree` never opens debug.log.
+		if note != "" {
+			fmt.Fprintln(os.Stderr, note)
 		}
+		debuglog.Logger.Info("account select", "chosen", account,
+			"strategy", cfg.GetAccountStrategy(), "note", note)
 	} else if accounts.Len() > 0 {
 		// Select declined, and the two reasons it can decline want opposite
 		// answers — see claudeaccount.AllowedConfigured.
@@ -152,6 +143,60 @@ func guardEffortSupported(ag agent.Type, effort string) {
 		fmt.Fprintf(os.Stderr, "--effort %q isn't accepted by %s — expected one of: %s\n", effort, ag.DisplayName(), ag.EffortChoices())
 		os.Exit(1)
 	}
+}
+
+// readLaunchUsage reads quota through the cache the TUI's poll writes; tests
+// replace it.
+var readLaunchUsage = func(accounts []claudeaccount.Account) (map[string]claudeaccount.Usage, []claudeaccount.Unread) {
+	claudeaccount.SetUserAgent(version)
+	return claudeaccount.UsageForLaunch(context.Background(), claudeaccount.LaunchUsageOpts{
+		Accounts:  accounts,
+		CachePath: claudeaccount.UsageCachePath(),
+	})
+}
+
+// selectLaunchAccount runs account_strategy with the TUI's own Select, reading
+// quota only when the strategy ranks by it and there is a choice. Unreadable
+// quota never blocks a launch; the note says why.
+func selectLaunchAccount(cfg *config.Config, all []claudeaccount.Account, allowed []string) (claudeaccount.Account, bool, string) {
+	strategy := cfg.GetAccountStrategy()
+	var cands []claudeaccount.Account
+	for _, a := range all {
+		if accountAllowed(a.Email, allowed) {
+			cands = append(cands, a)
+		}
+	}
+	var usage map[string]claudeaccount.Usage
+	var unread []claudeaccount.Unread
+	if claudeaccount.RanksByUsage(strategy) && len(cands) > 1 {
+		usage, unread = readLaunchUsage(cands)
+	}
+	acct, ok := claudeaccount.Select(claudeaccount.SelectOpts{
+		Accounts: all,
+		Usage:    usage,
+		Strategy: strategy,
+		Manual:   cfg.DefaultAccount,
+		Allowed:  allowed,
+	})
+	if !ok || len(unread) == 0 {
+		return acct, ok, ""
+	}
+	reasons := make([]string, len(unread))
+	for i, u := range unread {
+		reasons[i] = u.Email + ": " + u.Reason
+	}
+	if len(unread) == len(cands) {
+		// An old reading kept because it shows an account spent still steered the pick.
+		for _, a := range cands {
+			if usage[a.Email].Known() {
+				return acct, true, fmt.Sprintf("Note: couldn't read fresh quota (%s); chose %s from the last known readings.",
+					strings.Join(reasons, "; "), acct.Email)
+			}
+		}
+		return acct, true, fmt.Sprintf("Note: couldn't read quota (%s), so configured order chose %s.",
+			strings.Join(reasons, "; "), acct.Email)
+	}
+	return acct, true, fmt.Sprintf("Note: couldn't read quota for %s.", strings.Join(reasons, "; "))
 }
 
 // launchOverrides carries the per-launch choices a command hands to the agent.
