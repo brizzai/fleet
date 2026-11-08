@@ -9,19 +9,32 @@ import (
 
 func TestDirtyScanPrefix(t *testing.T) {
 	tests := []struct {
-		dirty, cached, scanned int
-		want                   string
+		dirty, failed, cached, scanned int
+		want                           string
 	}{
-		{0, 0, 1, ""},
-		{1, 1, 1, ""}, // the cached warning already says it
-		{1, 0, 1, "Uncommitted changes will be discarded · "},
-		{2, 1, 3, "Live check: 2 worktree(s) have uncommitted changes · "},
-		{0, 1, 1, ""}, // cache was dirty, now clean: never retract a warning
+		{0, 0, 0, 1, ""},
+		{1, 0, 1, 1, ""}, // the cached warning already says it
+		{1, 0, 0, 1, "Uncommitted changes will be discarded · "},
+		{2, 0, 1, 3, "Live check: 2 worktree(s) have uncommitted changes · "},
+		{0, 0, 1, 1, ""}, // cache was dirty, now clean: never retract a warning
+		// A git status that failed or timed out is unknown, never clean:
+		// the removal is --force.
+		{0, 1, 0, 1, "Couldn't check for uncommitted changes · "},
+		{1, 1, 0, 3, "Live check: 1 worktree(s) have uncommitted changes · Couldn't check 1 worktree(s) for uncommitted changes · "},
 	}
 	for _, tt := range tests {
-		if got := dirtyScanPrefix(tt.dirty, tt.cached, tt.scanned); got != tt.want {
-			t.Errorf("dirtyScanPrefix(%d, %d, %d) = %q, want %q", tt.dirty, tt.cached, tt.scanned, got, tt.want)
+		if got := dirtyScanPrefix(tt.dirty, tt.failed, tt.cached, tt.scanned); got != tt.want {
+			t.Errorf("dirtyScanPrefix(%d, %d, %d, %d) = %q, want %q", tt.dirty, tt.failed, tt.cached, tt.scanned, got, tt.want)
 		}
+	}
+}
+
+// A dir git can't read (here: not a repo at all) must count as failed, not
+// as clean — the failure the live check exists to surface.
+func TestCountDirtyCountsFailures(t *testing.T) {
+	dirty, failed := countDirty([]string{t.TempDir()})
+	if dirty != 0 || failed != 1 {
+		t.Errorf("countDirty(non-repo) = (%d, %d), want (0, 1)", dirty, failed)
 	}
 }
 
@@ -89,7 +102,7 @@ func TestScanResultCarriesDirtyWarning(t *testing.T) {
 	h.confirmDialog.ShowDanger("Remove Worktree?", "wt", nil, func() tea.Msg { return nil })
 	h.confirmDialog.StartScan(3, "Checking…")
 
-	h.Update(worktreeHoldersScannedMsg{gen: 3, dirtyPrefix: dirtyScanPrefix(1, 0, 1)})
+	h.Update(worktreeHoldersScannedMsg{gen: 3, dirtyPrefix: dirtyScanPrefix(1, 0, 0, 1)})
 
 	view := h.confirmDialog.View()
 	if !strings.Contains(view, "Uncommitted changes will be discarded") {

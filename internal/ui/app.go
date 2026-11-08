@@ -4749,30 +4749,46 @@ type worktreeHoldersScannedMsg struct {
 	dirtyPrefix string
 }
 
-// countDirty runs a live `git status` in each dir. Never on the Update
-// goroutine: it runs inside the delete dialog's scan tea.Cmd.
-func countDirty(dirs []string) int {
-	n := 0
+// countDirty runs a live `git status` in each dir and counts the dirty ones
+// and the ones git could not answer for. Never on the Update goroutine: it
+// runs inside the delete dialog's scan tea.Cmd.
+func countDirty(dirs []string) (dirty, failed int) {
 	for _, d := range dirs {
-		if git.HasUncommittedChanges(d) {
-			n++
+		isDirty, err := git.UncommittedChanges(d)
+		switch {
+		case err != nil:
+			failed++
+		case isDirty:
+			dirty++
 		}
 	}
-	return n
+	return dirty, failed
 }
 
-// dirtyScanPrefix is the warning the live dirty check adds to the scan line
-// when it found more than the cached reading already warned about.
-func dirtyScanPrefix(dirty, cachedDirty, scanned int) string {
-	if dirty <= cachedDirty {
-		return ""
+// dirtyScanPrefix is the warning the live dirty check adds to the scan line:
+// changes it found beyond what the cached reading already warned about, and
+// any worktree it could not inspect. The removal is --force, so a check that
+// failed must never read as clean.
+func dirtyScanPrefix(dirty, failed, cachedDirty, scanned int) string {
+	var b strings.Builder
+	if dirty > cachedDirty {
+		if scanned == 1 {
+			b.WriteString("Uncommitted changes will be discarded · ")
+		} else {
+			// The cached count may already be on screen as its own bullet, so
+			// this one names itself as the newer, live reading instead of
+			// contradicting it.
+			fmt.Fprintf(&b, "Live check: %d worktree(s) have uncommitted changes · ", dirty)
+		}
 	}
-	if scanned == 1 {
-		return "Uncommitted changes will be discarded · "
+	if failed > 0 {
+		if scanned == 1 {
+			b.WriteString("Couldn't check for uncommitted changes · ")
+		} else {
+			fmt.Fprintf(&b, "Couldn't check %d worktree(s) for uncommitted changes · ", failed)
+		}
 	}
-	// The cached count may already be on screen as its own bullet, so this one
-	// names itself as the newer, live reading instead of contradicting it.
-	return fmt.Sprintf("Live check: %d worktree(s) have uncommitted changes · ", dirty)
+	return b.String()
 }
 
 // confirmDeleteHeader handles `d` pressed on a repo/worktree header. Scope is the
@@ -4792,16 +4808,24 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 	}
 
 	base := filepath.Base(repoPath)
+	// Read the cached dirty flag once: the warning shown and the baseline the
+	// live scan compares against must be the same reading, or a background
+	// refresh landing in between would let the scan suppress a warning that
+	// was never on screen.
+	cachedDirty := false
+	if info := h.gitInfo()[repoPath]; info != nil && info.IsDirty {
+		cachedDirty = true
+	}
 	var title string
 	var details []string
 	switch {
 	case isWorktree && count > 0:
 		title = "Remove Worktree?"
-		details = append([]string{fmt.Sprintf("Deletes %d session(s) + the worktree directory", count)}, h.worktreeDeleteWarnings(repoPath)...)
+		details = append([]string{fmt.Sprintf("Deletes %d session(s) + the worktree directory", count)}, h.worktreeDeleteWarnings(repoPath, cachedDirty)...)
 		details = append(details, "Press u to undo within 5s")
 	case isWorktree: // empty worktree
 		title = "Remove Worktree?"
-		details = append([]string{"Removes the worktree directory"}, h.worktreeDeleteWarnings(repoPath)...)
+		details = append([]string{"Removes the worktree directory"}, h.worktreeDeleteWarnings(repoPath, cachedDirty)...)
 	default: // real repo with sessions
 		title = "Remove repo from fleet?"
 		details = []string{
@@ -4822,15 +4846,15 @@ func (h *Home) confirmDeleteHeader(item SidebarItem) tea.Cmd {
 		gen := h.nextHolderScanGen()
 		h.confirmDialog.StartScan(gen, "Checking for running processes and uncommitted changes…")
 		editor := h.cfg.GetEditor()
-		cachedDirty := 0
-		if info := h.gitInfo()[repoPath]; info != nil && info.IsDirty {
-			cachedDirty = 1
+		cachedCount := 0
+		if cachedDirty {
+			cachedCount = 1
 		}
 		return func() tea.Msg {
 			holders, _ := proc.FindHolders(repoPath, []string{editor})
-			dirty := countDirty([]string{repoPath})
+			dirty, failed := countDirty([]string{repoPath})
 			return worktreeHoldersScannedMsg{gen: gen, holders: holders,
-				dirtyPrefix: dirtyScanPrefix(dirty, cachedDirty, 1)}
+				dirtyPrefix: dirtyScanPrefix(dirty, failed, cachedCount, 1)}
 		}
 	}
 	return nil
@@ -5003,9 +5027,9 @@ func (h *Home) confirmDeleteOrigin(item SidebarItem) tea.Cmd {
 					holders = append(holders, hd)
 				}
 			}
-			dirty := countDirty(dirs)
+			dirty, failed := countDirty(dirs)
 			return worktreeHoldersScannedMsg{gen: gen, holders: holders,
-				dirtyPrefix: dirtyScanPrefix(dirty, cachedDirty, len(dirs))}
+				dirtyPrefix: dirtyScanPrefix(dirty, failed, cachedDirty, len(dirs))}
 		}
 	}
 	return nil
@@ -5051,9 +5075,11 @@ func (h *Home) nextHolderScanGen() int {
 // worktreeDeleteWarnings returns the instant (cache-backed) pre-flight warnings
 // for removing a worktree: uncommitted changes and still-running sessions. The
 // process-kill warning is filled in asynchronously (see confirmDeleteHeader).
-func (h *Home) worktreeDeleteWarnings(repoPath string) []string {
+// cachedDirty is passed in rather than read here so the caller's live scan
+// compares against exactly the reading this warning showed.
+func (h *Home) worktreeDeleteWarnings(repoPath string, cachedDirty bool) []string {
 	var w []string
-	if info := h.gitInfo()[repoPath]; info != nil && info.IsDirty {
+	if cachedDirty {
 		w = append(w, "Uncommitted changes will be discarded")
 	}
 	active := 0

@@ -61,12 +61,21 @@ func GetBranchName(repoPath string) string {
 }
 
 // HasUncommittedChanges returns true if the working tree has uncommitted changes.
+// A failed or timed-out `git status` reads as clean; a caller about to discard
+// the working tree must use UncommittedChanges and treat the error as unknown.
 func HasUncommittedChanges(repoPath string) bool {
+	dirty, _ := UncommittedChanges(repoPath)
+	return dirty
+}
+
+// UncommittedChanges reports whether the working tree has uncommitted changes,
+// with the error when git could not answer.
+func UncommittedChanges(repoPath string) (bool, error) {
 	output, err := gitOutput("-C", repoPath, "status", "--porcelain")
 	if err != nil {
-		return false
+		return false, err
 	}
-	return strings.TrimSpace(string(output)) != ""
+	return strings.TrimSpace(string(output)) != "", nil
 }
 
 // BranchInfo holds metadata about a git branch.

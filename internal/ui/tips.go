@@ -138,7 +138,8 @@ var tipRegistry = []Tip{
 		active:   func(h *Home) bool { return h.zellijShiftEnterTip && len(h.sessions) >= 1 },
 		text: func(h *Home) string {
 			return "Running inside zellij: Shift+Enter reaches agents as a plain Enter (zellij doesn't pass " +
-				"modifyOtherKeys through). Bind Shift+Enter in your zellij config to send `ESC [13;2u` for newlines."
+				"modifyOtherKeys through). Bind Shift+Enter in your zellij config to send `ESC [13;2u` for newlines " +
+				"(your terminal must send Shift+Enter distinctly)."
 		},
 	},
 	{
