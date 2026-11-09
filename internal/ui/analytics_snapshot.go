@@ -20,12 +20,26 @@ func (h *Home) collectSnapshot() analytics.SnapshotStats {
 
 	groups := session.GroupByRepo(h.sessions)
 
-	worktreeCount := 0
 	perRepo := make([]int, 0, len(groups))
-	for repo, sessions := range groups {
+	for _, sessions := range groups {
 		perRepo = append(perRepo, len(sessions))
-		if info := h.gitInfo()[repo]; info != nil && info.IsWorktreeRepo {
+	}
+
+	// Pinned checkouts count too, so the figure matches the sidebar's
+	// worktree headers rather than only the ones holding a session.
+	gitInfo := h.gitInfo()
+	worktreeCount := 0
+	countWorktree := func(repo string) {
+		if info := gitInfo[repo]; info != nil && info.IsWorktreeRepo {
 			worktreeCount++
+		}
+	}
+	for repo := range groups {
+		countWorktree(repo)
+	}
+	for repo := range h.pinnedRepos {
+		if _, counted := groups[repo]; !counted {
+			countWorktree(repo)
 		}
 	}
 
@@ -49,6 +63,16 @@ func (h *Home) collectSnapshot() analytics.SnapshotStats {
 		SessionsPerRepo:    perRepo,
 		SlotBindingsTotal:  len(h.slotBindings),
 	}
+}
+
+// emitPendingStartupSnapshot sends the app_started snapshot once boot has
+// filled gitInfoCache. Before that, every worktree read as 0.
+func (h *Home) emitPendingStartupSnapshot() {
+	if !h.startupSnapshotPending {
+		return
+	}
+	h.startupSnapshotPending = false
+	analytics.EmitSnapshot(h.collectSnapshot())
 }
 
 // fireStartupAnalytics initializes the analytics client and emits the
@@ -84,7 +108,10 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 		h.cfg.IsCopyClaudeSettingsEnabled(),
 	)
 	if mode != config.TelemetryOff {
-		analytics.EmitSnapshot(h.collectSnapshot())
+		h.startupSnapshotPending = true
+		if h.booted {
+			h.emitPendingStartupSnapshot()
+		}
 		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
 			analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
 		}
