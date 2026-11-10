@@ -79,15 +79,17 @@ The screen an empty fleet opens on, offering to resume your recent Claude Code r
 
 PostHog has no native gauge or distribution type, so these are emitted as events with a numeric `value` property. Chart them by aggregating that property (sum / average / percentiles) per event.
 
-Gauges (snapshots at `app_started` + `app_quit`):
+Gauges (snapshots at `app_started` + `app_quit`). Every snapshot event, including the `sessions_per_repo` distribution below, carries `boundary`: `start` or `quit`. Filter on it rather than pairing by timestamp.
 
 | Event | `value` | Extra properties |
 |---|---|---|
-| `repos_total` | count | — |
-| `worktree_repos_total` | count | — |
-| `sessions_total` | count | — |
-| `sessions_by_status` | count | `status` |
-| `slot_bindings_total` | count | — |
+| `repos_total` | checkouts in the sidebar: those holding a session plus empty pinned ones | `boundary` |
+| `worktree_repos_total` | how many of those checkouts are `git worktree add` worktrees | `boundary` |
+| `sessions_total` | count | `boundary` |
+| `sessions_by_status` | count | `boundary`, `status` |
+| `slot_bindings_total` | count | `boundary` |
+
+Before the release that added `boundary`, `worktree_repos_total` read 0 on every `app_started` (it was read from a git cache still empty at launch) and skipped pinned worktrees with no session, and `repos_total` was the larger of pinned repos and repos with sessions rather than their union. Compare across that release with a `version` filter.
 
 Distributions (sampled at the relevant moment):
 

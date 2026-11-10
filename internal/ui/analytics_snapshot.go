@@ -3,6 +3,7 @@ package ui
 import (
 	"github.com/brizzai/fleet/internal/analytics"
 	"github.com/brizzai/fleet/internal/config"
+	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -11,20 +12,32 @@ import (
 // to emit gauges of the user's "shape": how many repos, worktrees,
 // sessions, slot bindings they're juggling.
 //
-// workerMu protects sessions/gitInfoCache from the status worker; we hold
-// it for the whole function because GroupByRepo and the iterations below
-// all touch h.sessions, and the snapshot fires while the worker is live.
+// workerMu protects sessions from the status worker; we hold it for the
+// whole function because GroupByRepo and the iterations below all touch
+// h.sessions, and the snapshot fires while the worker is live.
 func (h *Home) collectSnapshot() analytics.SnapshotStats {
 	h.workerMu.Lock()
 	defer h.workerMu.Unlock()
 
 	groups := session.GroupByRepo(h.sessions)
 
-	worktreeCount := 0
+	// Every checkout the sidebar shows: those holding a session plus empty
+	// pinned ones.
+	checkouts := make(map[string]bool, len(groups)+len(h.pinnedRepos))
 	perRepo := make([]int, 0, len(groups))
 	for repo, sessions := range groups {
+		checkouts[repo] = true
 		perRepo = append(perRepo, len(sessions))
-		if info := h.gitInfo()[repo]; info != nil && info.IsWorktreeRepo {
+	}
+	for repo := range h.pinnedRepos {
+		checkouts[repo] = true
+	}
+
+	// Read from disk, not gitInfoCache: at app_started the cache is still
+	// empty, which made every startup report 0.
+	worktreeCount := 0
+	for repo := range checkouts {
+		if git.IsLinkedWorktree(repo) {
 			worktreeCount++
 		}
 	}
@@ -34,15 +47,8 @@ func (h *Home) collectSnapshot() analytics.SnapshotStats {
 		byStatus[string(s.GetStatus())]++
 	}
 
-	// Use pinned repos as the "total repos" count so empty pinned repos count
-	// too — that's a structural signal even without sessions.
-	reposTotal := len(h.pinnedRepos)
-	if reposTotal < len(groups) {
-		reposTotal = len(groups)
-	}
-
 	return analytics.SnapshotStats{
-		ReposTotal:         reposTotal,
+		ReposTotal:         len(checkouts),
 		WorktreeReposTotal: worktreeCount,
 		SessionsTotal:      len(h.sessions),
 		SessionsByStatus:   byStatus,
@@ -84,7 +90,7 @@ func (h *Home) fireStartupAnalytics(repoCount int) {
 		h.cfg.IsCopyClaudeSettingsEnabled(),
 	)
 	if mode != config.TelemetryOff {
-		analytics.EmitSnapshot(h.collectSnapshot())
+		analytics.EmitSnapshot(h.collectSnapshot(), analytics.SnapshotStart)
 		if analytics.MarkOnboardingMilestone(analytics.MilestoneFirstLaunch) {
 			analytics.Track(analytics.EventOnboardingFirstLaunch, nil)
 		}

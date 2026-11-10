@@ -3660,7 +3660,7 @@ func (h *Home) performShutdown() tea.Cmd {
 			"session_count":  sessionCount,
 		})
 		analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
-		analytics.EmitSnapshot(h.collectSnapshot())
+		analytics.EmitSnapshot(h.collectSnapshot(), analytics.SnapshotQuit)
 
 		if runningCount > 0 || waitingCount > 0 {
 			analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{
