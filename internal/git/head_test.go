@@ -70,16 +70,22 @@ func TestIsLinkedWorktree(t *testing.T) {
 		t.Errorf("linked worktree: IsLinkedWorktree=%v IsWorktree=%v, want both true", IsLinkedWorktree(linked), IsWorktree(linked))
 	}
 
-	// A submodule's .git file points into .git/modules/, not .git/worktrees/.
-	sub := filepath.Join(main, "vendor", "lib")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: ../../.git/modules/lib\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if IsLinkedWorktree(sub) {
-		t.Error("submodule read as a linked worktree")
+	// Submodules also have a .git file. The one at worktrees/lib has a gitdir
+	// whose parent is named "worktrees", so only commondir tells them apart.
+	for _, path := range []string{"vendor/lib", "worktrees/lib"} {
+		sub := filepath.Join(main, path)
+		gitDir := filepath.Join(main, ".git", "modules", path)
+		for _, dir := range []string{sub, gitDir} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if IsLinkedWorktree(sub) {
+			t.Errorf("submodule at %s read as a linked worktree", path)
+		}
 	}
 
 	if IsLinkedWorktree(t.TempDir()) {
