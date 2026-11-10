@@ -12,6 +12,7 @@ import (
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/envflag"
 )
 
 // Telemetry modes. Full sends usage events tagged with the user's git
@@ -340,23 +341,13 @@ func (c *Config) IsAutoNameEnabled() bool {
 // (1/true/yes/y/on) — useful for running a local dev build without the
 // auto-updater overwriting it with the latest release.
 func (c *Config) IsAutoUpdateEnabled() bool {
-	if isTruthyEnv(os.Getenv("FLEET_AUTO_UPDATE_DISABLED")) {
+	if envflag.Set("FLEET_AUTO_UPDATE_DISABLED") {
 		return false
 	}
 	if c.AutoUpdate == nil {
 		return true
 	}
 	return *c.AutoUpdate
-}
-
-// isTruthyEnv returns true for common truthy values (1, true, yes, y, on).
-func isTruthyEnv(v string) bool {
-	switch strings.TrimSpace(strings.ToLower(v)) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
 }
 
 // DefaultConfigPath returns the default config file path.

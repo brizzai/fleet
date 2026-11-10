@@ -169,6 +169,15 @@ type Session struct {
 	paneFinishedFirstAt time.Time
 
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
+	// loadedDead marks a session read from state.db already in StatusError: its
+	// death belongs to an earlier fleet process, which wrote that dump (or had
+	// its chance to). deathRecorded is in-memory and starts false on every
+	// launch, so without this each launch re-detected the same dead tmux and
+	// wrote another dump — 29 for one session, 615 in all. Cleared by the
+	// relaunch paths together with deathRecorded. Deliberately separate from
+	// deathRecorded rather than seeding it: a stale non-dead hook file read at
+	// startup re-arms deathRecorded, which would bring the repeat dump back.
+	loadedDead bool
 
 	// launchResumed records whether the latest launch continued an existing
 	// conversation (a resume or fork id) rather than starting fresh, for
@@ -1094,6 +1103,7 @@ func (s *Session) Restart() error {
 	s.TmuxSessionName = newTmux.Name
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
@@ -1184,6 +1194,7 @@ func (s *Session) RespawnClaude() error {
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
@@ -1395,6 +1406,7 @@ func (s *Session) AdoptExternalRelaunch(tmuxName, claudeSessionID string) {
 	s.TmuxSessionName = tmuxName
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	if claudeSessionID != "" {
 		s.ClaudeSessionID = claudeSessionID
 	}
@@ -2253,6 +2265,7 @@ func FromRow(row *SessionRow) *Session {
 		// not snoozed, so nothing renders stale in the meantime.
 		snoozedUntil: row.SnoozedUntil,
 		tmuxSession:  ts,
+		loadedDead:   status == StatusError,
 	}
 }
 

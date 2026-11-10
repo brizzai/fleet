@@ -28,6 +28,7 @@ import (
 
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/diagnostics"
+	"github.com/brizzai/fleet/internal/envflag"
 	"github.com/posthog/posthog-go"
 )
 
@@ -590,18 +591,10 @@ func IsOptedOutByEnv() bool {
 
 // isOptedOut checks env vars for telemetry opt-out.
 func isOptedOut() bool {
-	if isTruthyEnv(os.Getenv("FLEET_TELEMETRY_DISABLED")) {
+	if envflag.Set("FLEET_TELEMETRY_DISABLED") {
 		return true
 	}
-	if isTruthyEnv(os.Getenv("DO_NOT_TRACK")) {
-		return true
-	}
-	return false
-}
-
-func isTruthyEnv(v string) bool {
-	switch strings.TrimSpace(strings.ToLower(v)) {
-	case "1", "true", "yes", "y", "on":
+	if envflag.Set("DO_NOT_TRACK") {
 		return true
 	}
 	return false
