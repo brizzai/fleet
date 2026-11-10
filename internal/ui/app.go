@@ -594,13 +594,10 @@ type Home struct {
 	// every visible repo's OriginKey (or the 4s deadline expires); while
 	// false, View() returns the splash and the steady-state worker has
 	// not started.
-	booted bool
-	// Startup snapshot held until boot: before it, gitInfoCache has no
-	// IsWorktreeRepo yet and every worktree would count as a plain repo.
-	startupSnapshotPending bool
-	splashFrame            int
-	bootstrapRepos         int          // total repos the bootstrap is waiting on (for progress UI)
-	bootstrapResolved      atomic.Int32 // goroutines that have finished within the current bootstrap fan-out
+	booted            bool
+	splashFrame       int
+	bootstrapRepos    int          // total repos the bootstrap is waiting on (for progress UI)
+	bootstrapResolved atomic.Int32 // goroutines that have finished within the current bootstrap fan-out
 
 	// Shutdown overlay. Once `quitting` is set, View() renders `frozenFrame`
 	// (the last body, captured at quit time) dimmed with a "Shutting down…"
@@ -2141,7 +2138,6 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bootstrapDoneMsg:
 		h.booted = true
-		h.emitPendingStartupSnapshot()
 		h.rebuildFlatItems()
 		// Land the cursor on the first actionable row (a session) instead
 		// of the first origin header — first keystroke does something
@@ -2170,7 +2166,6 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// transition (launchpad if we found anything, bare empty state if not).
 		if !h.booted {
 			h.booted = true
-			h.emitPendingStartupSnapshot()
 			go h.statusWorker()
 			// Empty fleet still needs git/PR refresh: this path never emits
 			// bootstrapDoneMsg, so without this gitWorker would never start and
@@ -3665,7 +3660,7 @@ func (h *Home) performShutdown() tea.Cmd {
 			"session_count":  sessionCount,
 		})
 		analytics.Distribution(analytics.MetricAppUptimeSeconds, uptime, nil)
-		analytics.EmitSnapshot(h.collectSnapshot())
+		analytics.EmitSnapshot(h.collectSnapshot(), analytics.SnapshotQuit)
 
 		if runningCount > 0 || waitingCount > 0 {
 			analytics.Track(analytics.EventQuitWithRunningSessions, map[string]interface{}{

@@ -57,3 +57,32 @@ func TestReadHead(t *testing.T) {
 		}
 	})
 }
+
+// IsLinkedWorktree must agree with IsWorktree, which forks git, so the
+// analytics snapshot can count worktrees on the Update loop.
+func TestIsLinkedWorktree(t *testing.T) {
+	main, linked := initRepoWithWorktree(t)
+
+	if IsLinkedWorktree(main) || IsWorktree(main) {
+		t.Errorf("main checkout: IsLinkedWorktree=%v IsWorktree=%v, want both false", IsLinkedWorktree(main), IsWorktree(main))
+	}
+	if !IsLinkedWorktree(linked) || !IsWorktree(linked) {
+		t.Errorf("linked worktree: IsLinkedWorktree=%v IsWorktree=%v, want both true", IsLinkedWorktree(linked), IsWorktree(linked))
+	}
+
+	// A submodule's .git file points into .git/modules/, not .git/worktrees/.
+	sub := filepath.Join(main, "vendor", "lib")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: ../../.git/modules/lib\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if IsLinkedWorktree(sub) {
+		t.Error("submodule read as a linked worktree")
+	}
+
+	if IsLinkedWorktree(t.TempDir()) {
+		t.Error("plain directory read as a linked worktree")
+	}
+}

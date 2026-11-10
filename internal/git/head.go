@@ -38,6 +38,20 @@ func ReadHead(path string) (root, branch string) {
 	}
 }
 
+// IsLinkedWorktree reports whether root is a checkout made by `git worktree
+// add`, from its .git file alone — no git fork, so it is cheap enough for the
+// Update loop. A submodule also has a .git file, but its gitdir lives under
+// .git/modules/, not .git/worktrees/.
+func IsLinkedWorktree(root string) bool {
+	dotGit := filepath.Join(root, ".git")
+	st, err := os.Stat(dotGit)
+	if err != nil || st.IsDir() {
+		return false
+	}
+	gitDir := linkedGitDir(dotGit)
+	return gitDir != "" && filepath.Base(filepath.Dir(filepath.Clean(gitDir))) == "worktrees"
+}
+
 // linkedGitDir reads a "gitdir: <path>" pointer file, resolving a relative path
 // against the file's own directory.
 func linkedGitDir(file string) string {
