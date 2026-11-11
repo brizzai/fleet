@@ -194,3 +194,27 @@ func TestEmptyAreaMessage(t *testing.T) {
 		t.Errorf("empty state = %q", got)
 	}
 }
+
+func TestHiddenNewSessionToast(t *testing.T) {
+	tests := []struct {
+		name    string
+		areas   []config.Area
+		current string
+		path    string
+		want    string // "" = no toast
+	}{
+		{"other area visible", testAreas, "personal", "/tmp/ar/work/x", "Created in area work — press v to switch"},
+		{"same area", testAreas, "work", "/tmp/ar/work/x", ""},
+		{"all view", testAreas, "", "/tmp/ar/work/x", ""},
+		{"no areas", nil, "", "/tmp/ar/work/x", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := areaTestHome(t, tc.areas, tc.current)
+			h.noteHiddenNewSession(session.NewSession("n", tc.path))
+			if h.infoMsg != tc.want {
+				t.Errorf("toast = %q, want %q", h.infoMsg, tc.want)
+			}
+		})
+	}
+}
