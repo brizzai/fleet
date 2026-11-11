@@ -49,6 +49,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "P", Desc: "Jump to next red (else green) PR", Section: "session"},
 	{Key: "Y", BarKey: "Y", BarDesc: "Approve", Desc: "Quick approve permission", Section: "session"},
 	{Key: "b", BarKey: "b", BarDesc: "Branch", Desc: "Switch git branch", Section: "session"},
+	{Key: "v", Desc: "Switch area (needs \"areas\" in config)", Section: "session"},
 	{Key: "/", BarKey: "/", BarDesc: "Filter", Desc: "Filter sessions", Section: "session"},
 
 	// Session slots. Split out of "session" because they are a distinct concept
