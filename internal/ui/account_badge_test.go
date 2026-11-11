@@ -136,3 +136,30 @@ func TestAtKeyRefusesWithAToastWhenThereIsNothingToMove(t *testing.T) {
 		t.Fatal("picker did not open for a Claude session with two accounts")
 	}
 }
+
+func TestAccountsDialogShowsLoginMismatch(t *testing.T) {
+	d := NewAccountsDialog()
+	d.SetSize(120, 40)
+	d.Show(accountsFixture(), map[string]claudeaccount.Usage{
+		"first@x.com": {Mismatch: "someone@else.com"},
+	}, "", claudeaccount.StrategyLeastUsedWeekly)
+	view := ansi.Strip(d.View())
+	for _, want := range []string{"login mismatch", "someone@else.com"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("dialog missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestMismatchedAccountIsNotOfferedInThePicker(t *testing.T) {
+	h, _ := moveHome(t, map[string]claudeaccount.Usage{"second@x.com": {Mismatch: "x@y.com"}})
+	h.openAccountPicker()
+	if !h.accountPicker.IsVisible() {
+		t.Fatal("picker not shown")
+	}
+	for _, r := range h.accountPicker.rows {
+		if r.email == "second@x.com" && (r.enabled || r.note != "login mismatch") {
+			t.Errorf("mismatched row = %+v, want disabled with a note", r)
+		}
+	}
+}
