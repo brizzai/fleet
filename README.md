@@ -146,7 +146,7 @@ Group your directories into **areas** and give each terminal window its own: `fl
 ]
 ```
 
-A session belongs to the area whose longest `paths` prefix contains its directory (or its repository's main checkout); anything unmatched goes to the `default` area. The optional `account` is used for new sessions there unless `--account` or the repo's `allowed_accounts` say otherwise. The panel title shows the current area plus a count of waiting sessions in the others. The area is only a per-window view and is never saved; without `areas` fleet behaves as before.
+A session belongs to the area whose longest `paths` prefix contains its directory (or its repository's main checkout); anything unmatched goes to the `default` area. The optional `account` is used for new sessions there unless `--account` or the repo's `allowed_accounts` say otherwise. The panel title shows the current area plus a count of waiting sessions in the others. Inside an area, repos that sit two or more folders below the area path are grouped under a collapsible header named after the first folder (`~/Projects/Personal/Youtube/lastro` → "Youtube"); repos directly in the area folder stay loose. Collapse a group like any other header; snoozing and deleting still apply to the repos inside it. The area is only a per-window view and is never saved; without `areas` fleet behaves as before.
 
 ### And more
 

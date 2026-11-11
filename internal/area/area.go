@@ -177,14 +177,49 @@ func PickAccount(email string, accounts []claudeaccount.Account, usage map[strin
 
 // longest returns the area index of the longest prefix containing path, or -1.
 func (m *Matcher) longest(path string) int {
+	i, _ := m.longestPrefix(path)
+	return i
+}
+
+// longestPrefix is longest plus the prefix that matched.
+func (m *Matcher) longestPrefix(path string) (int, string) {
 	path = filepath.Clean(path)
-	best, bestLen := -1, -1
+	best, bestLen, bestPre := -1, -1, ""
 	for _, p := range m.prefixes {
 		if contains(p.path, path) && len(p.path) > bestLen {
-			best, bestLen = p.area, len(p.path)
+			best, bestLen, bestPre = p.area, len(p.path), p.path
 		}
 	}
-	return best
+	return best, bestPre
+}
+
+// Folder returns the area and the folder group of a checkout at path: the first
+// directory below the matching area prefix, when the path sits at least two
+// levels below it (prefix/Youtube/lastro → "Youtube"). Paths directly in the
+// area folder, matching no area prefix, or with no areas configured have no
+// group (""). Like Of, it consults mainRepo only when path itself matches no
+// prefix, and the default area never groups: it owns paths by absence.
+func (m *Matcher) Folder(path string, mainRepo func() string) (areaName, folder string) {
+	if !m.Enabled() {
+		return "", ""
+	}
+	path = filepath.Clean(path)
+	i, pre := m.longestPrefix(path)
+	if i < 0 && mainRepo != nil {
+		if mp := mainRepo(); mp != "" {
+			path = filepath.Clean(mp)
+			i, pre = m.longestPrefix(path)
+		}
+	}
+	if i < 0 {
+		return "", ""
+	}
+	rel := strings.TrimPrefix(strings.TrimPrefix(path, pre), string(filepath.Separator))
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 {
+		return m.areas[i].Name, ""
+	}
+	return m.areas[i].Name, parts[0]
 }
 
 // contains reports whether path is dir or lies under it, on a directory

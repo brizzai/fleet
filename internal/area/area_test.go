@@ -155,3 +155,43 @@ func TestPickAccount(t *testing.T) {
 		})
 	}
 }
+
+func TestFolder(t *testing.T) {
+	areas := []config.Area{
+		{Name: "personal", Paths: []string{"~/P"}, Default: true},
+		{Name: "work", Paths: []string{"~/W", "~/P/Work"}},
+		{Name: "other", Paths: []string{"~/O"}},
+	}
+	tests := []struct {
+		name       string
+		areas      []config.Area
+		path, main string
+		wantArea   string
+		wantFolder string
+	}{
+		{"two levels below the area", areas, "/home/u/P/Youtube/lastro", "", "personal", "Youtube"},
+		{"deeper still: one grouping level only", areas, "/home/u/P/Youtube/a/b/c", "", "personal", "Youtube"},
+		{"directly in the area folder", areas, "/home/u/P/ideias", "", "personal", ""},
+		{"the area folder itself", areas, "/home/u/P", "", "personal", ""},
+		{"no area matches", areas, "/tmp/x/y/z", "", "", ""},
+		{"default area does not group unmatched paths", areas, "/srv/a/b", "", "", ""},
+		{"no areas configured", nil, "/home/u/P/Youtube/lastro", "", "", ""},
+		{"longest prefix is the base", areas, "/home/u/P/Work/api/svc", "", "work", "api"},
+		{"longest prefix, directly inside", areas, "/home/u/P/Work/api", "", "work", ""},
+		{"worktree outside the folders follows its main repo", areas, "/tmp/wt", "/home/u/W/clients/app", "work", "clients"},
+		{"boundary: P2 is not P", areas, "/home/u/P2/a/b", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(tc.areas, home)
+			var main func() string
+			if tc.main != "" {
+				main = func() string { return tc.main }
+			}
+			a, f := m.Folder(tc.path, main)
+			if a != tc.wantArea || f != tc.wantFolder {
+				t.Errorf("Folder(%q) = (%q, %q), want (%q, %q)", tc.path, a, f, tc.wantArea, tc.wantFolder)
+			}
+		})
+	}
+}
