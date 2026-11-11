@@ -2,6 +2,7 @@ package claudeaccount
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,5 +89,24 @@ func TestMismatchSurvivesTheUsageCache(t *testing.T) {
 	}
 	if got := LoadUsageCache(path)["a@x.com"].Mismatch; got != "b@x.com" {
 		t.Errorf("cached mismatch = %q, want b@x.com", got)
+	}
+}
+
+// The ambient login is "no CLAUDE_CONFIG_DIR at all", not an empty one, and the
+// credential overrides still have to be scrubbed.
+func TestConfigDirEnvAmbientSetsNoConfigDir(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/leaked")
+	t.Setenv("ANTHROPIC_API_KEY", "leaked")
+	for _, kv := range configDirEnv("") {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") || strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			t.Errorf("ambient env carries %q", kv)
+		}
+	}
+	found := false
+	for _, kv := range configDirEnv("/d/1") {
+		found = found || kv == "CLAUDE_CONFIG_DIR=/d/1"
+	}
+	if !found {
+		t.Error("pinned env lost its config dir")
 	}
 }

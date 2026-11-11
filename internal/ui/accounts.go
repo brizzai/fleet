@@ -877,6 +877,7 @@ func (h *Home) maybePollAccountUsage() {
 	}
 
 	now := time.Now()
+	h.resolveAmbientIdentity(now)
 	current := h.accountUsageSnapshot()
 	// Collected as a delta and merged under CompareAndSwap at the end: a whole
 	// replacement map would clobber an account added on the Update goroutine
@@ -964,6 +965,50 @@ func (h *Home) maybePollAccountUsage() {
 	if err := claudeaccount.SaveUsageCache(claudeaccount.UsageCachePath(), updates); err != nil {
 		debuglog.Logger.Warn("could not write account usage cache", "err", err)
 	}
+}
+
+// resolveAmbientIdentity learns who the default login is, so a session with no
+// pinned account can be labelled with a real email instead of "your logged-in
+// account". Worker goroutine only: it spawns `claude auth status`.
+//
+// Re-asked on the identity interval rather than once, since the default login
+// can change under a running fleet; a failed ask keeps the old answer.
+func (h *Home) resolveAmbientIdentity(now time.Time) {
+	h.ambientMu.RLock()
+	last := h.ambientCheckedAt
+	h.ambientMu.RUnlock()
+	if !claudeaccount.IdentityCheckDue(last, now) {
+		return
+	}
+	id, err := claudeaccount.IdentifyAmbient(context.Background())
+	h.ambientMu.Lock()
+	defer h.ambientMu.Unlock()
+	h.ambientCheckedAt = now
+	switch {
+	case err == nil:
+		h.ambientEmail = id.Email
+	case errors.Is(err, claudeaccount.ErrNotLoggedIn):
+		h.ambientEmail = ""
+	default:
+		debuglog.Logger.Warn("could not identify the ambient login", "err", claudeaccount.Redact(err.Error()))
+	}
+}
+
+// ambientIdentity returns the default login's email ("" = not resolved yet) and
+// the registered account that is the same mailbox, if any.
+func (h *Home) ambientIdentity() (string, claudeaccount.Account, int, bool) {
+	h.ambientMu.RLock()
+	email := h.ambientEmail
+	h.ambientMu.RUnlock()
+	if email == "" || h.accounts == nil {
+		return email, claudeaccount.Account{}, -1, false
+	}
+	for i, a := range h.accounts.List() {
+		if strings.EqualFold(a.Email, email) {
+			return email, a, i, true
+		}
+	}
+	return email, claudeaccount.Account{}, -1, false
 }
 
 // checkAccountIdentity asks the account's config dir who it is logged in as,
@@ -1078,12 +1123,26 @@ func (h *Home) stopAccountLoginWatch() {
 // it: the key survives on the session row, the subscription behind it does not.
 func (h *Home) accountLabel(email string) string {
 	if email == "" {
-		return "your logged-in account"
+		return h.ambientLabel("your logged-in account")
 	}
 	if a, ok := h.accounts.Get(email); ok {
 		return a.Name()
 	}
-	return "your logged-in account (its account was removed)"
+	return h.ambientLabel("your logged-in account") + " (its account was removed)"
+}
+
+// ambientLabel names the default login: the registered account's own name when
+// that mailbox is registered, "ambient · <email>" when it is only the default
+// login, and fallback while it has not been resolved yet.
+func (h *Home) ambientLabel(fallback string) string {
+	email, a, _, matched := h.ambientIdentity()
+	switch {
+	case matched:
+		return a.Name()
+	case email != "":
+		return "ambient · " + email
+	}
+	return fallback
 }
 
 // agentOf resolves a session's agent, treating the legacy empty value as Claude
@@ -1119,6 +1178,13 @@ func (h *Home) accountBadge(s *session.Session) (string, int) {
 				return accountShortLabel(a), i
 			}
 		}
+	}
+	email, a, idx, matched := h.ambientIdentity()
+	switch {
+	case matched:
+		return accountShortLabel(a), idx
+	case email != "":
+		return accountShortLabel(claudeaccount.Account{Email: email}), -1
 	}
 	return "ambient", -1
 }
