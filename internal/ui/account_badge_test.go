@@ -33,7 +33,7 @@ func TestAccountBadge(t *testing.T) {
 		{"nil session", nil, ""},
 	}
 	for _, tc := range tests {
-		if got := h.accountBadge(tc.s); got != tc.want {
+		if got, _ := h.accountBadge(tc.s); got != tc.want {
 			t.Errorf("%s: badge = %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -41,7 +41,7 @@ func TestAccountBadge(t *testing.T) {
 	// One account (or none): every session shares a credential, so silence.
 	h.accounts = &claudeaccount.Store{}
 	h.accounts.Upsert(claudeaccount.Account{Email: "only@x.com", ConfigDir: "/d/1"})
-	if got := h.accountBadge(mk(agent.Claude, "only@x.com")); got != "" {
+	if got, _ := h.accountBadge(mk(agent.Claude, "only@x.com")); got != "" {
 		t.Errorf("single account badge = %q, want none", got)
 	}
 }
@@ -57,11 +57,15 @@ func TestRenderSessionItem_AccountBadge(t *testing.T) {
 			}
 		}
 		out := renderSessionItem(SidebarItem{Session: s, AccountBadge: "breno"}, 40, selected, -1)
-		if !strings.Contains(ansi.Strip(out), "@breno") {
+		if !strings.Contains(ansi.Strip(out), "breno") {
 			t.Errorf("selected=%v: badge missing: %q", selected, out)
 		}
+		// Right-aligned: the badge ends the row.
+		if plain := strings.TrimRight(ansi.Strip(out), " "); !strings.HasSuffix(plain, "breno") {
+			t.Errorf("selected=%v: badge not at the right edge: %q", selected, plain)
+		}
 		out = renderSessionItem(SidebarItem{Session: s}, 40, selected, -1)
-		if strings.Contains(ansi.Strip(out), "@") {
+		if strings.Contains(ansi.Strip(out), "breno") {
 			t.Errorf("selected=%v: badge shown with none set: %q", selected, out)
 		}
 	}
