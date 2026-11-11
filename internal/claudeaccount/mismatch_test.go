@@ -19,6 +19,7 @@ func TestLoginMismatch(t *testing.T) {
 		{"different email", "a@x.com", Identity{LoggedIn: true, Email: "b@x.com"}, "b@x.com"},
 		{"logged out has no email to compare", "a@x.com", Identity{LoggedIn: false, Email: "b@x.com"}, ""},
 		{"empty reported email is a missing answer", "a@x.com", Identity{LoggedIn: true}, ""},
+		{"placeholder key names nobody to compare", "acct-1f3a", Identity{LoggedIn: true, Email: "b@x.com"}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

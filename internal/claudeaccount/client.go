@@ -86,6 +86,11 @@ type Usage struct {
 // empty reported email is a missing answer, not a different account. Case is
 // ignored, since email providers treat the two spellings as one mailbox.
 func LoginMismatch(registered string, id Identity) string {
+	// A key without an "@" is a placeholder from the setup-token era: it names
+	// no one, so there is nothing to disagree with.
+	if !strings.Contains(registered, "@") {
+		return ""
+	}
 	if !id.LoggedIn || id.Email == "" || strings.EqualFold(registered, id.Email) {
 		return ""
 	}
