@@ -42,6 +42,11 @@ type SidebarItem struct {
 	// Snooze is the resolved attention-mute for a session row, stamped here by
 	// BuildFlatItems so no downstream caller re-derives the precedence rule.
 	Snooze snoozeResult
+	// AccountBadge is the short Claude account name shown after a session's
+	// title ("" = none). Stamped by Home at render time, not by BuildFlatItems:
+	// it depends on the account store and the ambient login, which BuildFlatItems
+	// does not see and which change without the session list changing.
+	AccountBadge string
 	// GroupSnooze is a header row's OWN snooze deadline (zero = not snoozed).
 	// Only the group that holds the snooze renders a countdown — a checkout
 	// under a snoozed origin stays silent for the same reason its sessions do.
@@ -693,6 +698,13 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 		slotRaw = fmt.Sprintf(" [%d]", slot)
 	}
 
+	// Account badge: "@name" after the title. Cheap to drop and costly to
+	// overflow, so it only renders while the title keeps its minimum width.
+	badgeRaw := ""
+	if item.AccountBadge != "" {
+		badgeRaw = " @" + item.AccountBadge
+	}
+
 	// Reserve: leading indent + status symbol + selection padding + slot, plus
 	// the agent glyph and its trailing space when it's shown (2 cells).
 	reserve := 13
@@ -712,7 +724,12 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if !selected {
 		snoozeCost = ansi.StringWidth(snoozeRaw)
 	}
-	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost
+	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost - ansi.StringWidth(badgeRaw)
+	if badgeRaw != "" && maxTitleLen < 10 {
+		// No room for the badge without crushing the title: drop the badge.
+		badgeRaw = ""
+		maxTitleLen = width - reserve - len(slotRaw) - snoozeCost
+	}
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -732,7 +749,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	// glyph used for collapsed headers). Bg fill spans symbol + agent glyph +
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
-		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
+		row := " " + symbolRaw + " " + glyphSel + title + badgeRaw + slotRaw + " "
 		rendered := fmt.Sprintf("   %s", selTitle().Render(row))
 		// On the focused row, spell out the affordance. Exactly one note fits
 		// before the row overflows, so these are mutually exclusive: suspended
@@ -763,6 +780,9 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	styledSlot := ""
 	if slotRaw != "" {
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
+	}
+	if badgeRaw != "" {
+		styledSlot = DimStyle.Render(badgeRaw) + styledSlot
 	}
 	styledSnooze := ""
 	if snoozeRaw != "" {

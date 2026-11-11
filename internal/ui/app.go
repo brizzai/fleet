@@ -2769,6 +2769,8 @@ func (h *Home) renderBody() string {
 		}
 	}
 
+	h.stampAccountBadges(h.flatItems)
+
 	// Status counts ride the Sessions panel's top-right border (inset into
 	// the title border, after the "Sessions" label). The top app bar no
 	// longer renders them.
