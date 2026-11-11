@@ -70,3 +70,69 @@ func TestRenderSessionItem_AccountBadge(t *testing.T) {
 		}
 	}
 }
+
+// Moving restarts the process, so a busy session must be asked about first and
+// an idle one must not be.
+func TestMoveToAccountConfirmsOnlyWhenBusy(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      session.Status
+		wantConfirm bool
+	}{
+		{"running", session.StatusRunning, true},
+		{"waiting on the user", session.StatusWaiting, true},
+		{"starting", session.StatusStarting, true},
+		{"idle", session.StatusIdle, false},
+		{"finished", session.StatusFinished, false},
+		{"error", session.StatusError, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h, s := moveHome(t, nil)
+			s.SetStatus(tc.status)
+
+			cmd := h.requestMoveToAccount("second@x.com")
+			if tc.wantConfirm {
+				if cmd != nil || s.Account != "first@x.com" {
+					t.Fatalf("busy session moved without asking (account=%q)", s.Account)
+				}
+				if !h.confirmDialog.IsVisible() {
+					t.Fatal("no confirmation shown for a busy session")
+				}
+				// Confirming performs the move.
+				if _, cmd := h.Update(accountMoveConfirmedMsg{id: s.ID, email: "second@x.com"}); cmd == nil || s.Account != "second@x.com" {
+					t.Fatalf("confirmed move did not happen (account=%q)", s.Account)
+				}
+				return
+			}
+			if cmd == nil || s.Account != "second@x.com" {
+				t.Fatalf("idle session was not moved (account=%q)", s.Account)
+			}
+			if h.confirmDialog.IsVisible() {
+				t.Fatal("idle session asked for confirmation")
+			}
+		})
+	}
+}
+
+func TestMoveConfirmedForAnotherSessionIsRefused(t *testing.T) {
+	h, s := moveHome(t, nil)
+	h.Update(accountMoveConfirmedMsg{id: "someone-else", email: "second@x.com"})
+	if s.Account != "first@x.com" {
+		t.Fatalf("a confirm for a different session moved this one to %q", s.Account)
+	}
+}
+
+func TestAtKeyRefusesWithAToastWhenThereIsNothingToMove(t *testing.T) {
+	h, s := moveHome(t, nil)
+	s.Agent = agent.Codex
+	h.openAccountPickerForKey()
+	if h.accountPicker.IsVisible() {
+		t.Fatal("picker opened for a non-Claude session")
+	}
+	s.Agent = agent.Claude
+	h.openAccountPickerForKey()
+	if !h.accountPicker.IsVisible() {
+		t.Fatal("picker did not open for a Claude session with two accounts")
+	}
+}
