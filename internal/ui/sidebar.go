@@ -26,6 +26,18 @@ type SidebarItem struct {
 	IsOriginHeader   bool
 	IsCheckoutHeader bool
 	IsSpacer         bool // visual gap row between origin groups; not selectable
+	// IsFolderHeader marks a folder-group header (see folders.go): a row above
+	// several origins that share a directory under an area. IsRepoHeader stays
+	// true on it so "not a session" guards keep working.
+	IsFolderHeader bool
+	FolderKey      string // folder header: FolderExpandKey — also its collapse/persist key
+	FolderLabel    string // folder header: the directory name
+	// FolderPath (origin header) is the origin's main checkout — what the folder
+	// grouping reads. SessionTotal is every session under the origin, muted or not.
+	FolderPath   string
+	SessionTotal int
+	// Depth indents the row one level per unit (members of a folder group).
+	Depth int
 
 	OriginKey   string // origin grouping key (github org/repo or local:basename)
 	OriginLabel string // human-readable origin label
@@ -242,12 +254,18 @@ func BuildFlatItems(
 			items = append(items, SidebarItem{IsSpacer: true})
 		}
 
+		sessionTotal := 0
+		for _, blk := range blocks {
+			sessionTotal += len(blk.sessions)
+		}
 		originExpanded := IsExpanded(expanded, OriginExpandKey(origin))
 		items = append(items, SidebarItem{
 			IsRepoHeader:   true,
 			IsOriginHeader: true,
 			OriginKey:      origin,
 			OriginLabel:    labelForOrigin(origin),
+			FolderPath:     blocks[0].repo,
+			SessionTotal:   sessionTotal,
 			Expanded:       originExpanded,
 			SessionCount:   len(blocks),
 			StatusCounts:   originStatusCounts,
@@ -393,10 +411,13 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 
 	for i := viewOffset; i < visibleEnd; i++ {
 		item := items[i]
+		// Members of a folder group sit one indent level in.
+		b.WriteString(strings.Repeat("  ", item.Depth))
+		width := width - 2*item.Depth
 		switch {
 		case item.IsSpacer:
 			// Blank line between origin groups.
-		case item.IsOriginHeader:
+		case item.IsOriginHeader || item.IsFolderHeader:
 			b.WriteString(renderOriginHeader(item, width, i == cursor))
 		case item.IsCheckoutHeader:
 			b.WriteString(renderCheckoutHeader(item, gitInfo[item.RepoPath], width, i == cursor))
@@ -1002,7 +1023,7 @@ func NextHeaderItem(items []SidebarItem, current, direction int) int {
 // silently did nothing would be worse than one that lands somewhere useful.
 func NextOriginItem(items []SidebarItem, current, direction int) int {
 	return nextRowMatching(items, current, direction, func(it SidebarItem) bool {
-		return it.IsOriginHeader
+		return it.IsOriginHeader || it.IsFolderHeader
 	})
 }
 

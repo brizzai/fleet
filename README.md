@@ -135,6 +135,19 @@ Sessions live under their repo. Branch name, dirty state, and full PR status on 
 
 **`fleet skill install`** writes an [Agent Skill](https://agentskills.io) that teaches Claude Code, Codex, Cursor, OpenCode, and Copilot how to use fleet's CLI — so an agent can hand independent work to a fresh worktree session (`fleet wt fix-242 -p "…"`), message one that's already running (`fleet send`), and see what's in flight, instead of asking you to run the commands. Opt-in, never prompts, and `fleet skill uninstall` takes it back out.
 
+### Areas — one window per desktop
+
+Group your directories into **areas** and give each terminal window its own: `fleet --area work` shows only the work projects, **`v`** cycles through areas (then "all"). Add them to `~/.config/fleet/config.json`:
+
+```json
+"areas": [
+  {"name": "personal", "paths": ["~/Projects/Personal"], "account": "me@gmail.com", "default": true},
+  {"name": "work", "paths": ["~/Projects/Work"], "account": "me@company.com"}
+]
+```
+
+A session belongs to the area whose longest `paths` prefix contains its directory (or its repository's main checkout); anything unmatched goes to the `default` area. The optional `account` is used for new sessions there unless `--account` or the repo's `allowed_accounts` say otherwise. The panel title shows the current area plus a count of waiting sessions in the others. Inside an area, repos that sit two or more folders below the area path are grouped under a collapsible header named after the first folder (`~/Projects/Personal/Youtube/lastro` → "Youtube"); repos directly in the area folder stay loose. Collapse a group like any other header; snoozing and deleting still apply to the repos inside it. The area is only a per-window view and is never saved; without `areas` fleet behaves as before.
+
 ### And more
 
 - **Session resume** — restart with **`r`**, the agent picks up exactly where it left off (`claude --resume` / `codex resume` / `opencode --session` / `copilot --session-id`)
@@ -193,6 +206,7 @@ If you drive Claude Code, Codex, OpenCode, or Copilot and want the tightest inte
 | `b` | Switch git branch |
 | `e` | Open in editor |
 | `p` | Open PR in browser |
+| `v` | Switch area (when `areas` is configured) |
 | `/` | Filter sessions |
 | `` ` `` | Toggle terminal drawer |
 | `Ctrl+K` | Command palette |
