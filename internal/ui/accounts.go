@@ -369,6 +369,16 @@ func (d *AccountsDialog) View() string {
 		for i, a := range d.accounts {
 			b.WriteString(d.renderRow(i, a, inner) + "\n")
 		}
+		// Spelled out under the list: the row only has room for the verdict, and
+		// the real email is what the user needs to decide what to do.
+		if a, ok := d.selected(); ok {
+			if mm := d.usage[a.Email].Mismatch; mm != "" {
+				b.WriteString("\n")
+				for _, l := range wrapTo(inner, "✕ login mismatch: "+a.Name()+" is now logged in as "+mm+". Excluded from new sessions until it is fixed.") {
+					b.WriteString(errStyle.Render(l) + "\n")
+				}
+			}
+		}
 		if d.mode == accountsConfirmRm {
 			b.WriteString("\n" + errStyle.Render(ansi.Truncate("Remove "+d.selectedName()+"?  y / n", inner, "…")) + "\n")
 			// Named because it survives: fleet deletes the account's config
@@ -562,6 +572,8 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 		switch {
 		case u.LoggedOut:
 			right = lipgloss.NewStyle().Foreground(ColorRed).Render("✕ logged out")
+		case u.Mismatch != "":
+			right = lipgloss.NewStyle().Foreground(ColorRed).Render("✕ login mismatch")
 		case u.Known():
 			right = renderQuotaCell(u)
 		case u.Err != nil:
@@ -873,6 +885,15 @@ func (h *Home) maybePollAccountUsage() {
 
 	for _, a := range accounts {
 		prev, had := current[a.Email]
+		// Identity first, ahead of the quota throttle: it has its own, slower
+		// clock. A changed verdict is recorded even on a cycle where the quota
+		// poll is not due, and the quota poll below keeps whatever it decided.
+		if mm, checked := h.checkAccountIdentity(a, prev.Mismatch, now); checked {
+			if mm != prev.Mismatch {
+				prev.Mismatch = mm
+				updates[a.Email] = prev
+			}
+		}
 		// Paced on AttemptedAt, not FetchedAt: a failing account must back off
 		// at the same slow cadence as a healthy one rather than retrying every
 		// cycle, and FetchedAt no longer advances on failure.
@@ -884,6 +905,10 @@ func (h *Home) maybePollAccountUsage() {
 		// its owner is actually looking at it.
 		if had && !prev.PollDue(now) {
 			continue
+		}
+		// prev may have just taken a new verdict above; updates is the freshest.
+		if up, ok := updates[a.Email]; ok {
+			prev = up
 		}
 
 		// /api/oauth/usage is the whole mechanism, and it costs nothing.
@@ -920,6 +945,7 @@ func (h *Home) maybePollAccountUsage() {
 		}
 
 		u.AttemptedAt = now
+		u.Mismatch = prev.Mismatch
 		debuglog.Logger.Info("account usage polled",
 			"account", a.Email,
 			"five_hour_pct", u.FiveHourPct, "five_hour_reset", u.FiveHourReset.Format(time.RFC3339),
@@ -938,6 +964,40 @@ func (h *Home) maybePollAccountUsage() {
 	if err := claudeaccount.SaveUsageCache(claudeaccount.UsageCachePath(), updates); err != nil {
 		debuglog.Logger.Warn("could not write account usage cache", "err", err)
 	}
+}
+
+// checkAccountIdentity asks the account's config dir who it is logged in as,
+// when that is due, and returns the resulting mismatch verdict (the real email
+// when it differs from the registered one, else "").
+//
+// checked is false when nothing was asked — not due, or `claude` could not
+// answer — and then the previous verdict stands: fleet failing to run the CLI
+// says nothing about the login. Worker goroutine only (the throttle map is
+// unsynchronised), and never the UI thread: it spawns a process.
+func (h *Home) checkAccountIdentity(a claudeaccount.Account, prev string, now time.Time) (mismatch string, checked bool) {
+	if h.identityCheckedAt == nil {
+		h.identityCheckedAt = map[string]time.Time{}
+	}
+	if !claudeaccount.IdentityCheckDue(h.identityCheckedAt[a.Email], now) {
+		return prev, false
+	}
+	h.identityCheckedAt[a.Email] = now
+	id, err := claudeaccount.Identify(context.Background(), a.ConfigDir)
+	switch {
+	case errors.Is(err, claudeaccount.ErrNotLoggedIn):
+		// LoggedOut owns this state (set by the quota poll); no email to compare.
+		return "", true
+	case err != nil:
+		debuglog.Logger.Warn("account identity check failed",
+			"account", a.Email, "err", claudeaccount.Redact(err.Error()))
+		return prev, false
+	}
+	mm := claudeaccount.LoginMismatch(a.Email, id)
+	if mm != "" && mm != prev {
+		debuglog.Logger.Error("account config dir is logged in as a different email; excluding it from new sessions",
+			"account", a.Email, "logged_in_as", mm)
+	}
+	return mm, true
 }
 
 // persistAccounts saves the store, re-points the token resolver and refreshes

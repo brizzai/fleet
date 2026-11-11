@@ -534,6 +534,9 @@ type Home struct {
 	pendingTicketID string
 	// accountWorkerOnce guards the quota poller — see startAccountWorker.
 	accountWorkerOnce sync.Once
+	// identityCheckedAt paces the per-account login check. Touched only by the
+	// account worker goroutine, so it needs no lock.
+	identityCheckedAt map[string]time.Time
 	// accountLoginCancel stops the in-flight login watcher, if any. Written from
 	// Update and from the tea.Exec completion callback, hence the mutex.
 	accountLoginMu     sync.Mutex
@@ -4079,6 +4082,8 @@ func (h *Home) sessionCreateAccountRows(repoPath string) []accountPickerRow {
 			// Starting a session on an account nobody is logged into would open
 			// a pane that cannot answer.
 			r.enabled, r.note = false, "logged out"
+		case usage[a.Email].Mismatch != "":
+			r.enabled, r.note = false, "login mismatch"
 		case !accountAllowedFor(a.Email, allowed):
 			// Dimmed rather than dropped from the cycle: an option that vanishes
 			// reads as a missing account, where a disabled one with its reason
@@ -4104,6 +4109,9 @@ func (h *Home) accountUnusableReason(email string) string {
 	u := h.accountUsageSnapshot()[email]
 	if u.LoggedOut {
 		return "it is logged out"
+	}
+	if u.Mismatch != "" {
+		return "its login is now " + u.Mismatch
 	}
 	// Named from the window that is actually blocking it, not assumed to be the
 	// 5-hour one. Exhausted covers both buckets, and they differ by days — an
@@ -4210,6 +4218,8 @@ func (h *Home) openAccountPicker() {
 			// Offering an account nobody is logged into would trade a busy
 			// account for one that cannot run at all.
 			r.enabled, r.note = false, "logged out"
+		case usage[a.Email].Mismatch != "":
+			r.enabled, r.note = false, "login mismatch"
 		case !accountAllowedFor(a.Email, allowed):
 			// Dimmed rather than hidden: a row that vanishes reads as a missing
 			// account, where a disabled one with a reason teaches the policy.
