@@ -138,6 +138,45 @@ func TestDifferentOrgIsADifferentAccount(t *testing.T) {
 	}
 }
 
+// A Team or Enterprise org seats many people. Two members logging in are two
+// accounts, each with its own login and quota: folding the second onto the
+// first kept the first's name while pointing it at the second's login, so every
+// session labelled with the first person silently ran as the second.
+func TestTeammatesInOneOrgAreDifferentAccounts(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: "ana@team.com", ConfigDir: "/d1", OrgUUID: "org-1"})
+	key := s.Upsert(Account{Email: "bob@team.com", ConfigDir: "/d2", OrgUUID: "org-1"})
+
+	if n := s.Len(); n != 2 {
+		t.Fatalf("%d accounts, want 2 — a teammate replaced the first login", n)
+	}
+	if key != "bob@team.com" {
+		t.Errorf("stored under %q, want bob@team.com", key)
+	}
+	if a, _ := s.Get("ana@team.com"); a.ConfigDir != "/d1" {
+		t.Errorf("ana's config dir = %q, want /d1 — her name now runs someone else's login", a.ConfigDir)
+	}
+}
+
+// The same person logging in again inside their org still lands on their
+// account, even when the stored key predates real emails.
+func TestSameMemberReLoginInSharedOrg(t *testing.T) {
+	s := &Store{}
+	s.Upsert(Account{Email: "ana@team.com", ConfigDir: "/d1", OrgUUID: "org-1"})
+	s.Upsert(Account{Email: "bob@team.com", ConfigDir: "/d2", OrgUUID: "org-1"})
+	s.Upsert(Account{Email: "ana@team.com", ConfigDir: "/d3", OrgUUID: "org-1"})
+
+	if n := s.Len(); n != 2 {
+		t.Fatalf("%d accounts after ana logged in again, want 2", n)
+	}
+	if a, _ := s.Get("ana@team.com"); a.ConfigDir != "/d3" {
+		t.Errorf("ana's config dir = %q, want /d3", a.ConfigDir)
+	}
+	if b, _ := s.Get("bob@team.com"); b.ConfigDir != "/d2" {
+		t.Errorf("bob's config dir = %q, want /d2", b.ConfigDir)
+	}
+}
+
 // Accounts stored before fleet recorded orgs have none, and so does an account
 // whose add-time probe failed. Matching on a blank org would fold every one of
 // them onto the first.
