@@ -47,6 +47,16 @@ const identifyTimeout = 20 * time.Second
 // Local and free — no API call, no quota. Called at add time to name the
 // account, and on the quota poll to notice a login that has since expired.
 func Identify(ctx context.Context, dir string) (Identity, error) {
+	return identify(ctx, configDirEnv(dir))
+}
+
+// IdentifyAmbient asks who the default login (no CLAUDE_CONFIG_DIR, so
+// ~/.claude) is — the one sessions with no pinned account run on.
+func IdentifyAmbient(ctx context.Context) (Identity, error) {
+	return identify(ctx, configDirEnv(""))
+}
+
+func identify(ctx context.Context, env []string) (Identity, error) {
 	ctx, cancel := context.WithTimeout(ctx, identifyTimeout)
 	defer cancel()
 
@@ -54,7 +64,7 @@ func Identify(ctx context.Context, dir string) (Identity, error) {
 	// query, and going through the agent package would import the launch
 	// machinery into the account store for one string.
 	cmd := exec.CommandContext(ctx, claudeBinary, "auth", "status")
-	cmd.Env = configDirEnv(dir)
+	cmd.Env = env
 
 	// Output, then parse regardless of the exit code. `claude auth status` exits
 	// 1 when logged out while still printing perfectly good JSON, so treating a
@@ -123,6 +133,10 @@ func configDirEnv(dir string) []string {
 			continue
 		}
 		out = append(out, kv)
+	}
+	if dir == "" {
+		// The ambient login: no variable at all, so Claude Code uses its default.
+		return out
 	}
 	return append(out, ConfigDirEnvVar+"="+dir)
 }

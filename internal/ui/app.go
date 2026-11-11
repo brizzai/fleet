@@ -537,6 +537,11 @@ type Home struct {
 	// identityCheckedAt paces the per-account login check. Touched only by the
 	// account worker goroutine, so it needs no lock.
 	identityCheckedAt map[string]time.Time
+	// ambientEmail is who the default (no pinned account) login is, resolved
+	// off-thread by the account worker; "" until known. See ambientIdentity.
+	ambientMu        sync.RWMutex
+	ambientEmail     string
+	ambientCheckedAt time.Time
 	// accountLoginCancel stops the in-flight login watcher, if any. Written from
 	// Update and from the tea.Exec completion callback, hence the mutex.
 	accountLoginMu     sync.Mutex

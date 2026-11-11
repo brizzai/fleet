@@ -163,3 +163,34 @@ func TestMismatchedAccountIsNotOfferedInThePicker(t *testing.T) {
 		}
 	}
 }
+
+func TestAmbientIdentityLabelsAndBadges(t *testing.T) {
+	h, _ := moveHome(t, nil)
+	h.accounts.Upsert(claudeaccount.Account{Email: "me@x.com", ConfigDir: "/d/3", Label: "work"})
+	amb := session.NewSession("t", "/tmp/r")
+	amb.Agent = agent.Claude
+
+	tests := []struct {
+		name      string
+		ambient   string
+		wantLabel string
+		wantBadge string
+	}{
+		{"unresolved", "", "your logged-in account", "ambient"},
+		{"unregistered mailbox", "stranger@y.com", "ambient · stranger@y.com", "stranger"},
+		{"registered mailbox uses that account's name", "ME@x.com", "work", "work"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h.ambientMu.Lock()
+			h.ambientEmail = tc.ambient
+			h.ambientMu.Unlock()
+			if got := h.accountLabel(""); got != tc.wantLabel {
+				t.Errorf("label = %q, want %q", got, tc.wantLabel)
+			}
+			if got, _ := h.accountBadge(amb); got != tc.wantBadge {
+				t.Errorf("badge = %q, want %q", got, tc.wantBadge)
+			}
+		})
+	}
+}
