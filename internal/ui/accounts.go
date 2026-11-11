@@ -1042,3 +1042,29 @@ func (h *Home) previewAccountLabel(s *session.Session) string {
 	}
 	return h.accountLabel(s.Account)
 }
+
+// accountBadge is the short account name for a session's sidebar row, or "" when
+// there is nothing worth saying (same silence rule as previewAccountLabel).
+//
+// A session with no pin, or one pinned to an account since removed, really runs
+// on the ambient login (see accountLabel), so both read "ambient".
+func (h *Home) accountBadge(s *session.Session) string {
+	if s == nil || h.accounts == nil || h.accounts.Len() < 2 || agentOf(s) != agent.Claude {
+		return ""
+	}
+	if s.Account != "" {
+		if a, ok := h.accounts.Get(s.Account); ok {
+			return accountShortLabel(a)
+		}
+	}
+	return "ambient"
+}
+
+// stampAccountBadges fills each session row's account badge. Render-time, so a
+// rename, add, remove or move shows on the next frame without rebuilding the
+// tree.
+func (h *Home) stampAccountBadges(items []SidebarItem) {
+	for i := range items {
+		items[i].AccountBadge = h.accountBadge(items[i].Session)
+	}
+}
