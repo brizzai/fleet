@@ -94,6 +94,32 @@ func TestProvisionIsIdempotent(t *testing.T) {
 	}
 }
 
+// The user's global instructions live in ~/.claude/CLAUDE.md. Claude Code reads
+// them from its config dir, so an account dir without the link runs every
+// session on that account without them — silently, since nothing errors.
+func TestProvisionSharesUserInstructions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	src := filepath.Join(home, ".claude", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(src), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("always answer in Portuguese"), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	dir := filepath.Join(home, "acct")
+	if err := Provision(dir); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("account dir has no CLAUDE.md: %v", err)
+	}
+	if string(got) != "always answer in Portuguese" {
+		t.Errorf("CLAUDE.md = %q, want the user's instructions", got)
+	}
+}
+
 // Concurrent provisions of the same dir must not leave a window where a shared
 // link is missing.
 //
