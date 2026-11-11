@@ -85,7 +85,8 @@ func (d *AccountsDialog) beginInput(mode accountsMode, value, placeholder string
 }
 
 // manual reports whether the pinned-account strategy is in force, which is the
-// only mode where the ★ marker and the ⏎ binding mean anything.
+// only mode that reads the default: the ★ shows regardless, but the ⏎ binding
+// only means anything here.
 func (d *AccountsDialog) manual() bool {
 	return claudeaccount.ParseStrategy(d.strategy) == claudeaccount.StrategyManual
 }
@@ -377,6 +378,11 @@ func (d *AccountsDialog) View() string {
 		for i, a := range d.accounts {
 			b.WriteString(d.renderRow(i, a, inner) + "\n")
 		}
+		// The ★ shows whenever a default is set, but only the manual strategy
+		// reads it — said once here, so the marker is never mistaken for live.
+		if !d.manual() && d.hasDefault() {
+			b.WriteString("\n" + dimStyle.Render(ansi.Truncate("★ default account (used only in manual)", inner, "…")) + "\n")
+		}
 		// Spelled out under the list: the row only has room for the verdict, and
 		// the real email is what the user needs to decide what to do.
 		if a, ok := d.selected(); ok {
@@ -488,6 +494,16 @@ func (d *AccountsDialog) strategyRow(width int) string {
 		lipgloss.NewStyle().Foreground(ColorTextDim).Render(hint)
 }
 
+// hasDefault reports whether the pinned default names a configured account.
+func (d *AccountsDialog) hasDefault() bool {
+	for _, a := range d.accounts {
+		if a.Email == d.defaultAccount {
+			return true
+		}
+	}
+	return false
+}
+
 // manualNeedsDefault reports whether the manual strategy is on with nothing
 // pinned — the one state where the dialog has to ask for a second keystroke.
 //
@@ -594,7 +610,7 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 		cursorCol = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("▸")
 	}
 	starCol := "  "
-	if d.manual() && a.Email == d.defaultAccount {
+	if a.Email == d.defaultAccount {
 		starCol = lipgloss.NewStyle().Foreground(ColorAccent).Render("★") + " "
 	}
 	const leadCells = 3

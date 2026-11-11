@@ -12,6 +12,9 @@ import (
 // accountPickedMsg carries the account a session should move to.
 type accountPickedMsg struct{ email string }
 
+// accountDefaultPickedMsg carries the account chosen as the manual default.
+type accountDefaultPickedMsg struct{ email string }
+
 // accountPickerRow is one account as offered to the user, with the quota reading
 // that is the whole reason they opened this dialog.
 type accountPickerRow struct {
@@ -40,6 +43,9 @@ type AccountPickerDialog struct {
 	title  string
 	rows   []accountPickerRow
 	cursor int
+	// pick builds the message Enter sends. nil = accountPickedMsg, the session
+	// move this dialog was written for; the default-account picker swaps it.
+	pick func(email string) tea.Msg
 
 	// anchor mirrors ContextMenuDialog's.
 	anchorX     int
@@ -55,6 +61,13 @@ func NewAccountPickerDialog() *AccountPickerDialog { return &AccountPickerDialog
 // dimmed one — the current account and any rejected token are both shown but
 // inert, so the list explains itself without offering a no-op.
 func (d *AccountPickerDialog) Show(title string, rows []accountPickerRow) {
+	d.ShowPicking(title, rows, nil)
+}
+
+// ShowPicking is Show with its own result message, for reuse of the dialog to
+// choose an account for something other than moving a session.
+func (d *AccountPickerDialog) ShowPicking(title string, rows []accountPickerRow, pick func(email string) tea.Msg) {
+	d.pick = pick
 	d.visible = true
 	d.title = title
 	d.rows = rows
@@ -115,6 +128,10 @@ func (d *AccountPickerDialog) Update(msg tea.Msg) (*AccountPickerDialog, tea.Cmd
 		}
 		email := d.rows[d.cursor].email
 		d.Hide()
+		if d.pick != nil {
+			pick := d.pick
+			return d, func() tea.Msg { return pick(email) }
+		}
 		return d, func() tea.Msg { return accountPickedMsg{email: email} }
 	}
 	return d, nil

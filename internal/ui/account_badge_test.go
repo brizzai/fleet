@@ -266,3 +266,67 @@ func TestReloginOfAnUnknownAccountFailsWithoutALoginPane(t *testing.T) {
 		t.Fatalf("msg = %#v, want an error carrying the relogin key", msg)
 	}
 }
+
+func TestAccountsDialogStarShowsOutsideManualWithANote(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy string
+		def      string
+		wantStar bool
+		wantNote bool
+	}{
+		{"manual", claudeaccount.StrategyManual, "first@x.com", true, false},
+		{"automatic with a default", claudeaccount.StrategyLeastUsedWeekly, "first@x.com", true, true},
+		{"automatic, no default", claudeaccount.StrategyLeastUsedWeekly, "", false, false},
+		{"default names a removed account", claudeaccount.StrategyLeastUsedWeekly, "gone@x.com", false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewAccountsDialog()
+			d.SetSize(120, 40)
+			d.Show(accountsFixture(), nil, tc.def, tc.strategy)
+			view := ansi.Strip(d.View())
+			if got := strings.Contains(view, "★ first"); got != tc.wantStar {
+				t.Errorf("star on the row = %v, want %v:\n%s", got, tc.wantStar, view)
+			}
+			if got := strings.Contains(view, "used only in manual"); got != tc.wantNote {
+				t.Errorf("manual-only note = %v, want %v:\n%s", got, tc.wantNote, view)
+			}
+		})
+	}
+}
+
+func TestSetDefaultAccountSwitchesToManualAndSaysSo(t *testing.T) {
+	h, _ := moveHome(t, nil)
+	h.cfg.AccountStrategy = claudeaccount.StrategyLeastUsedWeekly
+	t.Setenv("HOME", t.TempDir())
+
+	h.Update(accountDefaultPickedMsg{email: "second@x.com"})
+	if h.cfg.DefaultAccount != "second@x.com" {
+		t.Errorf("default = %q, want second@x.com", h.cfg.DefaultAccount)
+	}
+	if got := h.cfg.GetAccountStrategy(); got != claudeaccount.StrategyManual {
+		t.Errorf("strategy = %q, want manual", got)
+	}
+
+	// Unknown account: nothing changes.
+	h.cfg.DefaultAccount = "first@x.com"
+	h.Update(accountDefaultPickedMsg{email: "gone@x.com"})
+	if h.cfg.DefaultAccount != "first@x.com" {
+		t.Errorf("default moved to an account that does not exist: %q", h.cfg.DefaultAccount)
+	}
+}
+
+func TestDefaultPickerGreysOutCurrentAndBrokenAccounts(t *testing.T) {
+	h, _ := moveHome(t, map[string]claudeaccount.Usage{"second@x.com": {Mismatch: "x@y.com"}})
+	h.cfg.DefaultAccount = "first@x.com"
+	h.openDefaultAccountPicker()
+	if !h.accountPicker.IsVisible() {
+		t.Fatal("picker not shown")
+	}
+	for _, r := range h.accountPicker.rows {
+		if r.enabled {
+			t.Errorf("row %q should be inert (default / mismatch), got enabled", r.email)
+		}
+	}
+}

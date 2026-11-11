@@ -1219,6 +1219,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case accountDefaultPickedMsg:
+		return h, h.setDefaultAccount(msg.email)
+
 	case accountSetDefaultMsg:
 		// Only the manual strategy consults this, so setting it under an
 		// automatic strategy would be a control that visibly does nothing.
@@ -4239,6 +4242,56 @@ func (h *Home) openAccountPicker() {
 	h.contextMenuTarget = h.targetForCursor()
 	h.accountPicker.SetAnchor(h.contextMenuAnchor())
 	h.accountPicker.Show("Move "+s.Title+" to", rows)
+}
+
+// openDefaultAccountPicker offers the accounts as the default for new sessions.
+func (h *Home) openDefaultAccountPicker() {
+	if h.accounts.Len() == 0 {
+		h.setInfo("No Claude accounts yet — add one with Ctrl+K → Manage Claude Accounts")
+		return
+	}
+	usage := h.accountUsageSnapshot()
+	rows := make([]accountPickerRow, 0, h.accounts.Len())
+	for _, a := range h.accounts.List() {
+		r := accountPickerRow{email: a.Email, label: a.Name(), usage: usage[a.Email], enabled: true}
+		switch {
+		case a.Email == h.cfg.DefaultAccount:
+			r.enabled, r.note = false, "default"
+		case usage[a.Email].LoggedOut:
+			r.enabled, r.note = false, "logged out"
+		case usage[a.Email].Mismatch != "":
+			r.enabled, r.note = false, "login mismatch"
+		}
+		rows = append(rows, r)
+	}
+	h.accountPicker.SetAnchor(h.contextMenuAnchor())
+	h.accountPicker.ShowPicking("Default account", rows, func(email string) tea.Msg {
+		return accountDefaultPickedMsg{email: email}
+	})
+}
+
+// setDefaultAccount pins email as the default for new sessions. The default is
+// only read by the Manual strategy, so under any other strategy it also switches
+// to Manual — and says so, rather than leaving a pin that visibly does nothing.
+func (h *Home) setDefaultAccount(email string) tea.Cmd {
+	a, ok := h.accounts.Get(email)
+	if !ok {
+		h.setInfo("That account no longer exists")
+		return nil
+	}
+	prevStrategy := h.cfg.GetAccountStrategy()
+	h.cfg.DefaultAccount = email
+	h.cfg.AccountStrategy = claudeaccount.StrategyManual
+	if err := h.cfg.Save(); err != nil {
+		h.setError("default_account_save_failed", fmt.Errorf("could not save default account: %w", err))
+		return nil
+	}
+	h.logAction("default account", a.Name(), true)
+	notice := "Default account: " + a.Name()
+	if prevStrategy != claudeaccount.StrategyManual {
+		notice += " — strategy switched to Manual (was " + claudeaccount.StrategyLabel(prevStrategy) + ")"
+	}
+	return h.persistAccounts(notice)
 }
 
 // openAccountPickerForKey is the `@` / palette entry to the account picker. The
@@ -9586,6 +9639,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
 		{Kind: PaletteKindCommand, ID: "move_account", Name: "Move Session to Account…", Shortcut: "@"},
+		{Kind: PaletteKindCommand, ID: "set_default_account", Name: "Set Default Account…"},
 		{Kind: PaletteKindCommand, ID: "connect_linear", Name: "Connect Linear"},
 		{Kind: PaletteKindCommand, ID: "connect_jira", Name: "Connect Jira"},
 		{Kind: PaletteKindCommand, ID: "my_tickets", Name: "My Tickets", Shortcut: "t"},
@@ -9864,6 +9918,9 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.confirmRestartSelected()
 	case "move_account":
 		return h, h.openAccountPickerForKey()
+	case "set_default_account":
+		h.openDefaultAccountPicker()
+		return h, nil
 	case "allowed_accounts":
 		h.openAllowedAccounts()
 		return h, nil
