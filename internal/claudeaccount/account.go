@@ -313,11 +313,16 @@ func (s *Store) Upsert(a Account) string {
 // reads in the UI as "your logged-in account (its account was removed)" and
 // silently bills the ambient login on the next restart.
 //
+// An org is not a person, though: a Team or Enterprise org seats many members,
+// each with their own login. So the org only decides when one side has no real
+// email to tell them apart — two different emails are two people, however
+// many orgs they share.
+//
 // Callers must hold s.mu.
 func (s *Store) indexOfLocked(a Account) int {
 	if a.OrgUUID != "" {
 		for i := range s.accounts {
-			if s.accounts[i].OrgUUID == a.OrgUUID {
+			if s.accounts[i].OrgUUID == a.OrgUUID && !distinctMembers(s.accounts[i].Email, a.Email) {
 				return i
 			}
 		}
@@ -328,6 +333,13 @@ func (s *Store) indexOfLocked(a Account) int {
 		}
 	}
 	return -1
+}
+
+// distinctMembers reports whether two account keys are both real emails naming
+// different people. A key without an "@" is a placeholder (an account keyed by
+// a token hash from the setup-token era) and says nothing about who logged in.
+func distinctMembers(a, b string) bool {
+	return strings.Contains(a, "@") && strings.Contains(b, "@") && !strings.EqualFold(a, b)
 }
 
 // Remove drops the account with the given email, reporting whether it existed.
