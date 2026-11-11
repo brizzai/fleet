@@ -22,8 +22,9 @@ type areaState struct {
 	matcher *area.Matcher
 	current string // area.All ("") = no filter
 
-	mu    sync.Mutex
-	cache map[string]string // session/checkout path → owning area
+	mu      sync.Mutex
+	cache   map[string]string    // session/checkout path → owning area
+	folders map[string][2]string // origin main checkout → (area, folder group)
 }
 
 // SetArea selects the area this window opens on. name must be one the config

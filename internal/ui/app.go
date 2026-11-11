@@ -3398,6 +3398,10 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Scope follows the cursor, like `d`. On an already-snoozed row this
 		// wakes immediately rather than re-opening the picker — the common
 		// follow-up to "I snoozed this" is "actually, bring it back".
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsFolderHeader {
+			h.setInfo("Snooze applies to a repo or session — pick a repo header inside the folder")
+			return h, nil
+		}
 		sc, ok := h.snoozeScopeAtCursor()
 		if !ok {
 			return h, nil
@@ -4702,6 +4706,10 @@ func (h *Home) canAutoExpand(repo string) bool {
 func (h *Home) deleteAtCursor() tea.Cmd {
 	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
 		item := h.flatItems[h.cursor]
+		if item.IsFolderHeader {
+			h.setInfo("A folder group can't be deleted — delete its repos one by one")
+			return nil
+		}
 		if item.IsOriginHeader {
 			return h.confirmDeleteOrigin(item)
 		}
@@ -6019,6 +6027,8 @@ func (h *Home) forkToWorktreeSelected() tea.Cmd {
 // Empty when the cursor isn't on a header.
 func (h *Home) expandKeyFor(item SidebarItem) string {
 	switch {
+	case item.IsFolderHeader:
+		return item.FolderKey
 	case item.IsOriginHeader:
 		return OriginExpandKey(item.OriginKey)
 	case item.IsCheckoutHeader:
@@ -6128,7 +6138,7 @@ func (h *Home) toggleRepoGroup() {
 		return
 	}
 	item := h.flatItems[h.cursor]
-	if !item.IsOriginHeader && !item.IsCheckoutHeader {
+	if !item.IsOriginHeader && !item.IsCheckoutHeader && !item.IsFolderHeader {
 		return
 	}
 	key := h.expandKeyFor(item)
@@ -6139,7 +6149,8 @@ func (h *Home) toggleRepoGroup() {
 	h.rebuildFlatItems()
 	// Keep cursor on the same header.
 	for i, it := range h.flatItems {
-		if (it.IsOriginHeader && it.OriginKey == item.OriginKey && item.IsOriginHeader) ||
+		if (it.IsFolderHeader && item.IsFolderHeader && it.FolderKey == item.FolderKey) ||
+			(it.IsOriginHeader && it.OriginKey == item.OriginKey && item.IsOriginHeader) ||
 			(it.IsCheckoutHeader && it.RepoPath == item.RepoPath && item.IsCheckoutHeader) {
 			h.cursor = i
 			break
@@ -6174,11 +6185,15 @@ func (h *Home) collapseRepoAtCursor() {
 	h.rebuildFlatItems()
 	// Move cursor to the matching header row.
 	for i, fi := range h.flatItems {
+		if item.IsFolderHeader && fi.IsFolderHeader && fi.FolderKey == item.FolderKey {
+			h.cursor = i
+			break
+		}
 		if item.IsOriginHeader && fi.IsOriginHeader && fi.OriginKey == item.OriginKey {
 			h.cursor = i
 			break
 		}
-		if !item.IsOriginHeader && fi.IsCheckoutHeader && fi.RepoPath == h.expandKeyFor(item) {
+		if !item.IsOriginHeader && !item.IsFolderHeader && fi.IsCheckoutHeader && fi.RepoPath == h.expandKeyFor(item) {
 			h.cursor = i
 			break
 		}
@@ -6245,6 +6260,8 @@ func (h *Home) jumpToNextAttentionSession() {
 			switch {
 			case cur.Session != nil && it.Session != nil && it.Session.ID == cur.Session.ID:
 				start = i
+			case cur.IsFolderHeader && it.IsFolderHeader && it.FolderKey == cur.FolderKey:
+				start = i
 			case cur.IsOriginHeader && it.IsOriginHeader && it.OriginKey == cur.OriginKey:
 				start = i
 			case cur.IsCheckoutHeader && it.IsCheckoutHeader && it.RepoPath == cur.RepoPath:
@@ -6303,13 +6320,14 @@ func (h *Home) jumpToNextAttentionSession() {
 func (h *Home) buildJumpTree() []SidebarItem {
 	exp := make(map[string]bool, len(h.repoExpanded))
 	for k, v := range h.repoExpanded {
-		if strings.HasPrefix(k, originExpandPrefix) {
-			exp[k] = v // keep origin collapse; drop checkout keys → default expanded
+		if strings.HasPrefix(k, originExpandPrefix) || strings.HasPrefix(k, folderExpandPrefix) {
+			exp[k] = v // keep origin/folder collapse; drop checkout keys → default expanded
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
 	sessions, pending, pinned := h.areaScoped()
-	return BuildFlatItems(sessions, pending, exp, h.filterText, pinned, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
+	items := BuildFlatItems(sessions, pending, exp, h.filterText, pinned, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
+	return GroupFolders(items, h.areaFolderOf(), exp)
 }
 
 // jumpToNextAttentionPR moves the cursor to the first session of the next
@@ -8792,7 +8810,7 @@ func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
 	now := time.Now()
 	sessions, pending, pinned := h.areaScoped()
-	h.flatItems = BuildFlatItems(sessions, pending, h.repoExpanded, h.filterText, pinned, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf)
+	h.flatItems = GroupFolders(BuildFlatItems(sessions, pending, h.repoExpanded, h.filterText, pinned, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf), h.areaFolderOf(), h.repoExpanded)
 
 	// Resolve the attention-mute for EVERY session, not just the visible ones,
 	// so callers that count the whole fleet (statusCountsLine) read the same
@@ -8855,6 +8873,16 @@ func originOfIn(m map[string]*git.RepoInfo, repoRoot string) string {
 func (h *Home) revealCheckout(repo string) {
 	h.repoExpanded[OriginExpandKey(h.originOf(repo))] = true
 	h.repoExpanded[repo] = true
+	// A folder group holding the origin must be open too, or the row stays hidden.
+	if folderOf := h.areaFolderOf(); folderOf != nil {
+		main := h.originBaseRepo(h.originOf(repo))
+		if main == "" {
+			main = repo
+		}
+		if a, f := folderOf(main); f != "" {
+			h.repoExpanded[FolderExpandKey(a, f)] = true
+		}
+	}
 }
 
 func (h *Home) removePendingWorkspace(id string) {
@@ -9164,6 +9192,7 @@ type contextMenuTarget struct {
 	sessionID string // session rows
 	repoPath  string // checkout headers
 	originKey string // origin headers
+	folderKey string // folder-group headers
 	// pendingID identifies a "Creating…" phantom row. The context menu never
 	// sets it — a phantom has no actions — but cursor preservation needs it:
 	// handleWorkspaceCreate auto-selects the phantom, so without this case the
@@ -9182,6 +9211,10 @@ func (t contextMenuTarget) find(items []SidebarItem) int {
 			}
 		case t.repoPath != "":
 			if item.IsCheckoutHeader && item.RepoPath == t.repoPath {
+				return i
+			}
+		case t.folderKey != "":
+			if item.IsFolderHeader && item.FolderKey == t.folderKey {
 				return i
 			}
 		case t.originKey != "":
@@ -9204,6 +9237,8 @@ func (h *Home) targetForCursor() contextMenuTarget {
 	}
 	item := h.flatItems[h.cursor]
 	switch {
+	case item.IsFolderHeader:
+		return contextMenuTarget{folderKey: item.FolderKey}
 	case item.IsOriginHeader:
 		return contextMenuTarget{originKey: item.OriginKey}
 	case item.IsCheckoutHeader:
@@ -9898,6 +9933,11 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "expand_all":
 		for _, key := range h.allExpandKeys() {
 			h.setExpanded(key, true)
+		}
+		for key, open := range h.repoExpanded {
+			if !open && strings.HasPrefix(key, folderExpandPrefix) {
+				h.setExpanded(key, true)
+			}
 		}
 		h.rebuildFlatItems()
 		h.syncViewport()
