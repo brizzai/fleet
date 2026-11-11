@@ -58,6 +58,8 @@ func main() {
 		runAdd(args[1:])
 	case "list", "ls":
 		runList()
+	case "areas", "area":
+		runAreas()
 	case "remove", "rm":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: fleet remove <session>")
@@ -349,6 +351,7 @@ func printUsage() {
 Usage:
   fleet              Launch TUI
   fleet --area <name>  Launch TUI showing one configured area ("areas" in config.json)
+  fleet areas        List configured areas, their sessions and accounts
   fleet add [path]   Add a new session in a directory (default: current)
                            (--agent, --account, --prompt, --model, --effort)
   fleet list         List all sessions
