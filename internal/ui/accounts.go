@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"strings"
 	"time"
 
@@ -241,6 +242,13 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 	case "a":
 		d.err = ""
 		return d, func() tea.Msg { return accountLoginMsg{} }
+	case "l":
+		// Log the highlighted account in again, in its own directory: the fix for
+		// "logged out" and "login mismatch" alike.
+		if email := d.selectedEmail(); email != "" {
+			d.err = ""
+			return d, func() tea.Msg { return accountLoginMsg{relogin: email} }
+		}
 	case "r":
 		// Optional now that rows carry a real email, but a two-account setup
 		// reads better as "work" and "personal" than as two addresses.
@@ -402,6 +410,11 @@ func (d *AccountsDialog) View() string {
 	b.WriteString("\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", inner)))
 	b.WriteString("\n")
+	if d.mode == accountsList {
+		for _, l := range d.selectedDetails() {
+			b.WriteString(dimStyle.Render(ansi.Truncate(l, inner, "…")) + "\n")
+		}
+	}
 	// The key hints are one idea per line rather than one long wrapped run:
 	// a footer that wraps mid-chord reads as a rendering fault.
 	for i, l := range d.footer(inner) {
@@ -418,6 +431,33 @@ func (d *AccountsDialog) View() string {
 		Width(boxW)
 
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(b.String()))
+}
+
+// selectedDetails says what the highlighted account really is on disk: who its
+// config dir reports being logged in as, and where that dir is. The row shows a
+// name; this is what to check when two rows look alike or one looks wrong.
+func (d *AccountsDialog) selectedDetails() []string {
+	a, ok := d.selected()
+	if !ok {
+		return nil
+	}
+	who := a.Email
+	if mm := d.usage[a.Email].Mismatch; mm != "" {
+		who = mm + " (registered as " + a.Email + ")"
+	}
+	lines := []string{"Logged in as " + who}
+	if a.ConfigDir != "" {
+		lines = append(lines, "Folder "+shortHome(a.ConfigDir))
+	}
+	return lines
+}
+
+// shortHome abbreviates the home directory to ~.
+func shortHome(path string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(path, home+string(os.PathSeparator)) {
+		return "~" + path[len(home):]
+	}
+	return path
 }
 
 // selectedName is the human-facing name of the highlighted row.
@@ -478,7 +518,7 @@ func (d *AccountsDialog) footer(width int) []string {
 	default:
 		// No "p paste": the paste-a-token login path was removed with the
 		// config-dir rewrite, and the hint outlived it — pressing p did nothing.
-		hints = []string{"a add", "r rename", "d remove", "J/K order", "s strategy"}
+		hints = []string{"a add", "l re-login", "r rename", "d remove", "J/K order", "s strategy"}
 		// Enter only means something under the manual strategy, so it is not
 		// advertised when the strategy would ignore it.
 		if d.manual() {
@@ -706,15 +746,37 @@ func (h *Home) openAccountsDialog() tea.Cmd {
 // worked but whose token fleet missed. Here the pane is only a place for the
 // user to type; the result is read by asking `claude auth status` whether that
 // directory is logged in.
-func (h *Home) runAccountLogin() tea.Cmd {
-	dir, err := claudeaccount.NewConfigDirPath()
-	if err == nil {
+func (h *Home) runAccountLogin(relogin string) tea.Cmd {
+	var dir string
+	var err error
+	watch := true
+	if relogin != "" {
+		// Logging an existing account in again: its own directory, never a new
+		// one — a fresh dir would orphan the sessions pinned to this account and
+		// leave the broken one behind. Provision is idempotent, so it only
+		// refreshes the shared links.
+		dir = h.accounts.ConfigDirFor(relogin)
+		if dir == "" {
+			return func() tea.Msg {
+				return accountLoggedInMsg{err: fmt.Errorf("that account no longer exists"), relogin: relogin}
+			}
+		}
 		err = claudeaccount.Provision(dir)
+		// The watcher fires on "this dir is logged in", which an account with the
+		// wrong login already is — it would pull the user back before they had
+		// done anything. Only a logged-out dir can be watched; otherwise the user
+		// closes the pane themselves (Ctrl+Q), as the pane border says.
+		watch = h.accountUsageSnapshot()[relogin].LoggedOut
+	} else {
+		dir, err = claudeaccount.NewConfigDirPath()
+		if err == nil {
+			err = claudeaccount.Provision(dir)
+		}
 	}
 	if err != nil {
 		debuglog.Logger.Error("could not prepare an account config dir", "err", err)
 		return func() tea.Msg {
-			return accountLoggedInMsg{err: fmt.Errorf("could not prepare the account directory: %w", err)}
+			return accountLoggedInMsg{err: fmt.Errorf("could not prepare the account directory: %w", err), relogin: relogin}
 		}
 	}
 
@@ -733,19 +795,23 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	if err := ts.Start(cmd, claudeaccount.TmuxEnv(dir)...); err != nil {
 		debuglog.Logger.Error("could not start login session", "tmux", ts.Name, "err", err)
 		return func() tea.Msg {
-			return accountLoggedInMsg{err: fmt.Errorf("could not start `claude`: %w", err)}
+			return accountLoggedInMsg{err: fmt.Errorf("could not start `claude`: %w", err), relogin: relogin}
 		}
 	}
 
 	// Stays on screen for the whole flow, unlike anything printed into the pane.
 	// On the pane border, where it survives whatever the login flow paints.
 	ts.ApplyStatusBar(tmux.StatusBarOpts{
-		DisplayName: "Signing in to another Claude account · Ctrl+Q returns to fleet",
+		DisplayName: loginPaneTitle(relogin),
 	})
 
 	h.isAttaching.Store(true)
 	h.attachStartedAt.Store(time.Now().UnixNano())
-	h.logAction("add claude account", "", true)
+	if relogin != "" {
+		h.logAction("relogin claude account", h.accountLabel(relogin), true)
+	} else {
+		h.logAction("add claude account", "", true)
+	}
 
 	// Watch for the login completing and pull the user back the moment it does,
 	// so finishing the browser flow is the last thing they have to do. Runs
@@ -766,6 +832,9 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	h.setAccountLoginCancel(cancelWatch)
 	go func() {
 		defer cancelWatch()
+		if !watch {
+			return
+		}
 		id, err := claudeaccount.WaitForLogin(ctx, dir, accountLoginPollInterval)
 		if err != nil {
 			debuglog.Logger.Warn("account login watch ended without a login",
@@ -802,11 +871,14 @@ func (h *Home) runAccountLogin() tea.Cmd {
 				// The dir has no login, so it is litter. Removing it keeps an
 				// abandoned add from leaving a directory that Provision would
 				// keep refreshing forever.
-				if rmErr := claudeaccount.RemoveConfigDir(dir); rmErr != nil {
-					debuglog.Logger.Warn("could not remove an abandoned account dir", "dir", dir, "err", rmErr)
+				// Never for a relogin: that dir belongs to a registered account.
+				if relogin == "" {
+					if rmErr := claudeaccount.RemoveConfigDir(dir); rmErr != nil {
+						debuglog.Logger.Warn("could not remove an abandoned account dir", "dir", dir, "err", rmErr)
+					}
 				}
 				debuglog.Logger.Info("login pane closed without a login", "tmux", ts.Name, "err", err, "exec_err", execErr)
-				return accountLoggedInMsg{err: fmt.Errorf("no account was logged in")}
+				return accountLoggedInMsg{err: fmt.Errorf("no account was logged in"), relogin: relogin}
 			}
 		}
 
@@ -817,8 +889,25 @@ func (h *Home) runAccountLogin() tea.Cmd {
 			debuglog.Logger.Info("quota unavailable just after login", "err", uerr)
 		}
 		debuglog.Logger.Info("account logged in", "email", id.Email, "plan", id.Plan, "org", id.OrgUUID)
-		return accountLoggedInMsg{account: claudeaccount.WithUsage(claudeaccount.FromIdentity(id, dir), usage)}
+		return accountLoggedInMsg{account: claudeaccount.WithUsage(claudeaccount.FromIdentity(id, dir), usage), relogin: relogin}
 	})
+}
+
+// loginPaneTitle is the pane-border text of the login session.
+func loginPaneTitle(relogin string) string {
+	if relogin == "" {
+		return "Signing in to another Claude account · Ctrl+Q returns to fleet"
+	}
+	return "Signing in again as " + relogin + " · Ctrl+Q returns to fleet"
+}
+
+// reloginWrongLogin reports the email a relogin actually landed on when it is
+// not the account that was being fixed ("" when it matches, or this was an add).
+func reloginWrongLogin(msg accountLoggedInMsg) string {
+	if msg.relogin == "" || strings.EqualFold(msg.account.Email, msg.relogin) {
+		return ""
+	}
+	return msg.account.Email
 }
 
 // handleAccountLoggedIn stores a newly added account, or reports why it failed.
@@ -826,6 +915,21 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 	if msg.err != nil {
 		debuglog.Logger.Error("adding an account failed", "err", claudeaccount.Redact(msg.err.Error()))
 		h.accountsDialog.SetError(msg.err)
+		return h, nil
+	}
+
+	// A relogin that landed on somebody else must not overwrite the account's
+	// record: Upsert would rewrite the row (or, in a shared org, match another
+	// member's). The directory stays unusable and says so, which is what the
+	// user needs to see.
+	if wrong := reloginWrongLogin(msg); wrong != "" {
+		h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
+			u := m[msg.relogin]
+			u.Mismatch, u.LoggedOut = wrong, false
+			m[msg.relogin] = u
+		})
+		h.accountsDialog.Refresh(h.accounts.List(), h.accountUsageSnapshot(), h.cfg.DefaultAccount)
+		h.accountsDialog.SetError(fmt.Errorf("logged in as %s, but this account is %s — log in again as %s", wrong, msg.relogin, msg.relogin))
 		return h, nil
 	}
 

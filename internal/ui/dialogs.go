@@ -69,13 +69,20 @@ type forkSessionMsg struct {
 type (
 	// accountLoginMsg asks fleet to open a pane where the user can /login
 	// another subscription into a config directory of its own.
-	accountLoginMsg struct{}
+	accountLoginMsg struct {
+		// relogin is the key of an existing account to log in again in its own
+		// config dir ("" = add a new account).
+		relogin string
+	}
 	// accountLoggedInMsg is the result: an account already carrying its real
 	// email, organization and plan, because a completed login can be asked who
 	// it is. Nothing needs validating afterwards.
 	accountLoggedInMsg struct {
 		account claudeaccount.Account
 		err     error
+		// relogin echoes accountLoginMsg.relogin, so the handler can tell a fixed
+		// account from a new one — and a login as the wrong person from either.
+		relogin string
 	}
 	accountRemoveMsg struct{ email string }
 	// accountRenameMsg sets a display label, for anyone who prefers "work" to

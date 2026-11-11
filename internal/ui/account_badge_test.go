@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/session"
@@ -192,5 +193,76 @@ func TestAmbientIdentityLabelsAndBadges(t *testing.T) {
 				t.Errorf("badge = %q, want %q", got, tc.wantBadge)
 			}
 		})
+	}
+}
+
+func TestAccountsDialogLReloginsTheHighlightedAccount(t *testing.T) {
+	d := NewAccountsDialog()
+	d.Show(accountsFixture(), nil, "", claudeaccount.StrategyLeastUsedWeekly)
+	d.cursor = 1
+	_, cmd := d.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
+	if cmd == nil {
+		t.Fatal("l produced no command")
+	}
+	msg, ok := cmd().(accountLoginMsg)
+	if !ok || msg.relogin != "second@x.com" {
+		t.Fatalf("msg = %#v, want a relogin of second@x.com", cmd())
+	}
+	// Nothing highlighted, nothing to log in.
+	d.Show(nil, nil, "", claudeaccount.StrategyLeastUsedWeekly)
+	if _, cmd := d.Update(tea.KeyPressMsg{Code: 'l', Text: "l"}); cmd != nil {
+		t.Error("l with no accounts produced a command")
+	}
+}
+
+func TestAccountsDialogFooterShowsRealEmailAndFolder(t *testing.T) {
+	d := NewAccountsDialog()
+	d.SetSize(120, 40)
+	d.Show(accountsFixture(), map[string]claudeaccount.Usage{"first@x.com": {Mismatch: "real@y.com"}}, "", claudeaccount.StrategyLeastUsedWeekly)
+	view := ansi.Strip(d.View())
+	for _, want := range []string{"Logged in as real@y.com (registered as first@x.com)", "Folder /d/1", "l re-login"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("dialog missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestReloginWrongLogin(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  accountLoggedInMsg
+		want string
+	}{
+		{"plain add", accountLoggedInMsg{account: claudeaccount.Account{Email: "a@x.com"}}, ""},
+		{"relogin as the same person", accountLoggedInMsg{account: claudeaccount.Account{Email: "A@x.com"}, relogin: "a@x.com"}, ""},
+		{"relogin as someone else", accountLoggedInMsg{account: claudeaccount.Account{Email: "b@x.com"}, relogin: "a@x.com"}, "b@x.com"},
+	}
+	for _, tc := range tests {
+		if got := reloginWrongLogin(tc.msg); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Landing on the wrong person must not rewrite the account the user was fixing.
+func TestReloginAsSomeoneElseKeepsTheAccountAndFlagsIt(t *testing.T) {
+	h, _ := moveHome(t, nil)
+	h.Update(accountLoggedInMsg{
+		account: claudeaccount.Account{Email: "intruder@x.com", ConfigDir: "/d/1"},
+		relogin: "first@x.com",
+	})
+	if _, ok := h.accounts.Get("first@x.com"); !ok || h.accounts.Len() != 2 {
+		t.Fatalf("account set changed: len=%d", h.accounts.Len())
+	}
+	if got := h.accountUsageSnapshot()["first@x.com"].Mismatch; got != "intruder@x.com" {
+		t.Errorf("mismatch = %q, want intruder@x.com", got)
+	}
+}
+
+func TestReloginOfAnUnknownAccountFailsWithoutALoginPane(t *testing.T) {
+	h, _ := moveHome(t, nil)
+	msg, ok := h.runAccountLogin("gone@x.com")().(accountLoggedInMsg)
+	if !ok || msg.err == nil || msg.relogin != "gone@x.com" {
+		t.Fatalf("msg = %#v, want an error carrying the relogin key", msg)
 	}
 }
