@@ -1151,7 +1151,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h.handleSessionCreate(msg)
 
 	case accountLoginMsg:
-		return h, h.runAccountLogin()
+		return h, h.runAccountLogin(msg.relogin)
 
 	case accountLoggedInMsg:
 		return h.handleAccountLoggedIn(msg)
