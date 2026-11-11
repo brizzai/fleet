@@ -4475,6 +4475,7 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 		}
 	}
 	h.rebuildFlatItems()
+	h.noteHiddenNewSession(s)
 
 	// Save to storage.
 	if err := h.storage.SaveSession(s.ToRow()); err != nil {
@@ -4526,6 +4527,7 @@ func (h *Home) handleAdoptSessions(msg adoptSessionsMsg) (tea.Model, tea.Cmd) {
 
 	cmds := make([]tea.Cmd, 0, len(fresh))
 	for _, s := range fresh {
+		h.noteHiddenNewSession(s)
 		// Resolved on the worker — see adoptSessionsMsg.repoRoots.
 		repo := msg.repoRoots[s.ID]
 		if repo == "" {
