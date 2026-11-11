@@ -133,7 +133,9 @@ type (
 		auto bool
 	}
 	sessionRestartConfirmedMsg struct{ id string }
-	sessionCreateResultMsg     struct {
+	// accountMoveConfirmedMsg is the yes of the "move a busy session?" confirm.
+	accountMoveConfirmedMsg struct{ id, email string }
+	sessionCreateResultMsg  struct {
 		session *session.Session
 		err     error
 	}
@@ -1449,6 +1451,15 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// async rebuild may have moved the cursor while it was open. Getting this
 		// wrong here bills a different session's work to the chosen subscription.
 		if !h.focusContextMenuTarget() {
+			h.setInfo("That session is gone — nothing to move")
+			return h, nil
+		}
+		return h, h.requestMoveToAccount(msg.email)
+
+	case accountMoveConfirmedMsg:
+		// The confirm is modal, but an async rebuild can still move the cursor
+		// under it; moving the wrong session bills the wrong subscription.
+		if s := h.selectedSession(); s == nil || s.ID != msg.id {
 			h.setInfo("That session is gone — nothing to move")
 			return h, nil
 		}
@@ -3421,6 +3432,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h.undoDelete()
 	case "r":
 		return h, h.confirmRestartSelected()
+	case "@":
+		return h, h.openAccountPickerForKey()
 	case "R":
 		return h, h.renameSelected()
 	case "m":
@@ -4211,6 +4224,51 @@ func (h *Home) openAccountPicker() {
 	h.contextMenuTarget = h.targetForCursor()
 	h.accountPicker.SetAnchor(h.contextMenuAnchor())
 	h.accountPicker.Show("Move "+s.Title+" to", rows)
+}
+
+// openAccountPickerForKey is the `@` / palette entry to the account picker. The
+// context menu greys the item out with a note; a key has no row to grey, so each
+// refusal says why in a toast instead of doing nothing.
+func (h *Home) openAccountPickerForKey() tea.Cmd {
+	s := h.selectedSession()
+	switch {
+	case s == nil:
+		h.setInfo("Select a session to move to another account")
+	case agentOf(s) != agent.Claude:
+		h.setInfo("Accounts apply to Claude sessions only")
+	case h.accounts.Len() < 2:
+		h.setInfo("Only one Claude account — add another with Ctrl+K → Manage Claude Accounts")
+	default:
+		h.openAccountPicker()
+	}
+	return nil
+}
+
+// sessionBusyForMove reports whether relaunching the session would interrupt
+// something: it is working, starting, or waiting on the user.
+func sessionBusyForMove(s *session.Session) bool {
+	switch s.GetStatus() {
+	case session.StatusRunning, session.StatusStarting, session.StatusWaiting:
+		return true
+	}
+	return false
+}
+
+// requestMoveToAccount moves right away when the session is idle, and asks
+// first when it is busy: the move restarts the process.
+func (h *Home) requestMoveToAccount(email string) tea.Cmd {
+	s := h.selectedSession()
+	if s == nil || email == "" || email == s.Account {
+		return nil
+	}
+	if !sessionBusyForMove(s) {
+		return h.moveSelectedToAccount(email)
+	}
+	id := s.ID
+	h.confirmDialog.ShowWarning("Move to "+h.accountLabel(email)+"?", s.Title,
+		[]string{"The session is busy: it restarts, resuming the conversation"},
+		func() tea.Msg { return accountMoveConfirmedMsg{id: id, email: email} })
+	return nil
 }
 
 // moveSelectedToAccount pins the selected session to email and relaunches it.
@@ -9327,7 +9385,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 	// Each clause names the reason it actually failed. "Claude only" on a Codex
 	// row is true; showing it on a Claude session with one subscription would
 	// contradict the account this very session is running on.
-	moveAccount := ContextMenuItem{ID: "move_account", Label: "Move to Account…"}
+	moveAccount := ContextMenuItem{ID: "move_account", Label: "Move to Account…", Shortcut: "@", Key: "@"}
 	switch {
 	case s.Agent != agent.Claude:
 		moveAccount.Note = "Claude only"
@@ -9512,6 +9570,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "new_session", Name: "New Session", Shortcut: "a"},
 		{Kind: PaletteKindCommand, ID: "new_session_pick", Name: "New Session (Pick Agent)", Shortcut: "A"},
 		{Kind: PaletteKindCommand, ID: "manage_accounts", Name: "Manage Claude Accounts"},
+		{Kind: PaletteKindCommand, ID: "move_account", Name: "Move Session to Account…", Shortcut: "@"},
 		{Kind: PaletteKindCommand, ID: "connect_linear", Name: "Connect Linear"},
 		{Kind: PaletteKindCommand, ID: "connect_jira", Name: "Connect Jira"},
 		{Kind: PaletteKindCommand, ID: "my_tickets", Name: "My Tickets", Shortcut: "t"},
@@ -9728,6 +9787,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "manage_accounts":
 		return h, h.openAccountsDialog()
+
 	case "my_tickets":
 		if !ticketing.Available() {
 			h.setInfo("No ticket tracker connected — Ctrl+K → Connect Linear or Connect Jira")
@@ -9788,8 +9848,7 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "restart":
 		return h, h.confirmRestartSelected()
 	case "move_account":
-		h.openAccountPicker()
-		return h, nil
+		return h, h.openAccountPickerForKey()
 	case "allowed_accounts":
 		h.openAllowedAccounts()
 		return h, nil
