@@ -9,6 +9,7 @@ import (
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
+	"github.com/brizzai/fleet/internal/git"
 )
 
 func threeAccounts() []claudeaccount.Account {
@@ -143,5 +144,46 @@ func TestAddAndWorktreeShareAccountResolution(t *testing.T) {
 		if !strings.Contains(string(src), "resolveLaunchAccount(") || strings.Contains(string(src), "claudeaccount.Select(") {
 			t.Fatalf("%s must pick accounts through resolveLaunchAccount", f)
 		}
+	}
+}
+
+// An area pins the account for its directories; --account still wins, and an
+// area account the origin disallows (or fleet doesn't know) falls back to the
+// normal selection.
+func TestAreaAccountResolution(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	store := claudeaccount.Load()
+	for _, a := range threeAccounts() {
+		a.OrgUUID = a.Email
+		store.Upsert(a)
+	}
+	stubUsage(t, nil, nil)
+
+	dir := t.TempDir()
+	areas := []config.Area{{Name: "work", Paths: []string{dir}, Account: "second@x"}}
+	origin := originExpandKey(git.GetOriginKey(dir))
+
+	tests := []struct {
+		name     string
+		cfg      *config.Config
+		explicit string
+		want     string
+	}{
+		{"area account used", &config.Config{Areas: areas, AccountStrategy: "waterfall"}, "", "second@x"},
+		{"explicit --account wins", &config.Config{Areas: areas, AccountStrategy: "waterfall"}, "third@x", "third@x"},
+		{"not allowed here falls to normal selection", &config.Config{Areas: areas, AccountStrategy: "waterfall",
+			AllowedAccounts: map[string][]string{origin: {"first@x", "third@x"}}}, "", "first@x"},
+		{"unknown area account falls to normal selection", &config.Config{AccountStrategy: "waterfall",
+			Areas: []config.Area{{Name: "work", Paths: []string{dir}, Account: "ghost@x"}}}, "", "first@x"},
+		{"no areas: normal selection", &config.Config{AccountStrategy: "waterfall"}, "", "first@x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveLaunchAccount(tc.cfg, store, dir, agent.Claude, tc.explicit); got != tc.want {
+				t.Errorf("account = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

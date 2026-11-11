@@ -121,6 +121,13 @@ type Config struct {
 	// case configures nothing.
 	AllowedAccounts map[string][]string `json:"allowed_accounts,omitempty"`
 
+	// Areas partitions the sidebar by directory so one terminal window can show
+	// only, say, personal projects and another only work ones. Purely a view
+	// filter per fleet process (`fleet --area <name>`, or the area key to cycle);
+	// the chosen area is never stored. Unset means no areas: fleet behaves as if
+	// the feature did not exist. See internal/area.
+	Areas []Area `json:"areas,omitempty"`
+
 	// Sidebar display toggles. All default to true (on) via the *bool nil
 	// pattern, so an unconfigured fleet renders the full vocabulary. Each is
 	// surfaced in the Appearance category of the Settings dialog and drives a
@@ -188,6 +195,19 @@ type Config struct {
 	// in Load, re-merged in Save. Unexported, so the struct path never
 	// serializes it; it is re-injected manually by marshal.
 	unknownKeys map[string]json.RawMessage
+}
+
+// Area is one named slice of the sidebar, selected by directory.
+type Area struct {
+	Name string `json:"name"`
+	// Paths are directory prefixes ("~" expands to the home directory). A path
+	// belongs to the area when it equals a prefix or lies beneath it.
+	Paths []string `json:"paths"`
+	// Account optionally pins new sessions in this area to one Claude account
+	// (an email fleet knows about).
+	Account string `json:"account,omitempty"`
+	// Default marks the area that owns paths no area claims.
+	Default bool `json:"default,omitempty"`
 }
 
 // IsFirstRun reports whether this is a genuinely fresh install — no config file

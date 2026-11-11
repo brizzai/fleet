@@ -23,6 +23,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/analytics"
+	"github.com/brizzai/fleet/internal/area"
 	"github.com/brizzai/fleet/internal/chrome"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
@@ -452,6 +453,7 @@ type Home struct {
 	filterInput  textinput.Model
 	filterActive bool
 	filterText   string
+	areas        areaState // config-defined sidebar areas (internal/area); inert when none are configured
 
 	// Terminal drawer (shells). Shells are non-agent terminals scoped to a
 	// repo/worktree, shown in the drawer (never the sidebar). The drawer is
@@ -685,6 +687,7 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		cancel:                 cancel,
 		startTime:              time.Now(),
 	}
+	h.initAreas()
 	if firstRunTraceShouldRecord() {
 		h.firstRun = newFirstRunTrace(h.startTime)
 	}
@@ -2601,6 +2604,9 @@ func (h *Home) chrome(content string) tea.View {
 	// With reporting off, internal/termkeys' DECSET 1007 clear is what stops the
 	// terminal synthesizing arrow keys from the wheel instead; it stays either
 	// way, since it also covers the window before the first frame.
+	if h.areaEnabled() {
+		v.WindowTitle = "fleet · " + h.areaLabel()
+	}
 	v.MouseMode = tea.MouseModeNone
 	if mouseEnabled() {
 		v.MouseMode = tea.MouseModeCellMotion
@@ -2784,13 +2790,13 @@ func (h *Home) renderBody() string {
 		// Inner content area = total - 2 for the border on each side.
 		innerW := h.width - 2
 		innerH := contentHeight - 2
-		sidebar := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, innerH, !h.drawerHasFocus())
+		sidebar := h.renderSidebarView(gitInfoSnap, innerW, innerH)
 		sidebar = ensureExactHeight(sidebar, innerH)
 		sidebar = ensureExactWidth(sidebar, innerW)
 		// Single layout: the sidebar is the only (bottom-most) panel, so the
 		// collapsed shell chips ride its bottom border.
 		h.layout.sidebar = mouseRect{x: 1, y: sidebarContentTop, w: innerW, h: innerH}
-		b.WriteString(RenderBorderedPanelInsets(sidebar, "Sessions", statusTitle, shellChips, "", h.width, contentHeight, h.focusMode))
+		b.WriteString(RenderBorderedPanelInsets(sidebar, h.sidebarTitle(), statusTitle, shellChips, "", h.width, contentHeight, h.focusMode))
 	case "stacked":
 		sidebarHeight := (contentHeight * 55) / 100
 		if sidebarHeight < 3 {
@@ -2799,11 +2805,11 @@ func (h *Home) renderBody() string {
 		previewHeight := contentHeight - sidebarHeight - 1 // 1 for gap row
 		innerW := h.width - 2
 
-		sidebarInner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, innerW, sidebarHeight-2, !h.drawerHasFocus())
+		sidebarInner := h.renderSidebarView(gitInfoSnap, innerW, sidebarHeight-2)
 		sidebarInner = ensureExactHeight(sidebarInner, sidebarHeight-2)
 		sidebarInner = ensureExactWidth(sidebarInner, innerW)
 		h.layout.sidebar = mouseRect{x: 1, y: sidebarContentTop, w: innerW, h: sidebarHeight - 2}
-		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, "Sessions", statusTitle, h.width, sidebarHeight, h.focusMode))
+		b.WriteString(RenderBorderedPanelTopRight(sidebarInner, h.sidebarTitle(), statusTitle, h.width, sidebarHeight, h.focusMode))
 		b.WriteString("\n\n")
 
 		s, content := h.selectedPreview()
@@ -2841,10 +2847,10 @@ func (h *Home) renderBody() string {
 		if h.focusMode && !h.sidebarDirty && h.cachedSidebar != "" {
 			leftPanel = h.cachedSidebar
 		} else {
-			inner := RenderSidebar(h.flatItems, h.sessions, gitInfoSnap, h.slotBindings, h.cursor, h.viewOffset, sidebarInnerW, innerH, !h.drawerHasFocus())
+			inner := h.renderSidebarView(gitInfoSnap, sidebarInnerW, innerH)
 			inner = ensureExactHeight(inner, innerH)
 			inner = ensureExactWidth(inner, sidebarInnerW)
-			leftPanel = RenderBorderedPanelTopRight(inner, "Sessions", statusTitle, sidebarWidth, contentHeight, h.focusMode)
+			leftPanel = RenderBorderedPanelTopRight(inner, h.sidebarTitle(), statusTitle, sidebarWidth, contentHeight, h.focusMode)
 			h.cachedSidebar = leftPanel
 			h.sidebarDirty = false
 		}
@@ -3341,6 +3347,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		h.jumpToNextAttentionSession()
 		analytics.Track(analytics.EventSpaceJump, nil)
 		return h, h.fetchPreviewForSelected()
+	case areaKey:
+		return h, h.cycleArea()
 	case "left", "h":
 		h.collapseRepoAtCursor()
 		return h, nil
@@ -4017,6 +4025,15 @@ func (h *Home) resolveAccount(ag agent.Type, path string) (string, string) {
 // that gets billed is exactly the lie the account labelling exists to stop
 // telling.
 func (h *Home) selectAccountFor(path string) (claudeaccount.Account, bool) {
+	// The area owning the directory (not the one this window shows) may pin an
+	// account; it applies only when that account exists, is logged in and the
+	// origin's allowlist permits it — otherwise the normal strategy decides.
+	if h.areaEnabled() && h.accounts != nil {
+		if acct, ok := area.PickAccount(h.areas.matcher.Account(path, func() string { return git.GetMainWorktreePath(path) }),
+			h.accounts.List(), h.accountUsageSnapshot(), h.allowedAccountsFor(path)); ok {
+			return acct, true
+		}
+	}
 	return claudeaccount.Select(claudeaccount.SelectOpts{
 		Accounts: h.accounts.List(),
 		Usage:    h.accountUsageSnapshot(),
@@ -6289,7 +6306,8 @@ func (h *Home) buildJumpTree() []SidebarItem {
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
-	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
+	sessions, pending, pinned := h.areaScoped()
+	return BuildFlatItems(sessions, pending, exp, h.filterText, pinned, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
 }
 
 // jumpToNextAttentionPR moves the cursor to the first session of the next
@@ -8525,6 +8543,11 @@ func (h *Home) statusCountsLine(bg color.Color) string {
 		if h.snoozeMuted[s.ID] {
 			continue
 		}
+		// With an area selected the pill counts that area only; the others
+		// are summarized in the panel title.
+		if !h.areaShowsPath(s.ProjectPath) {
+			continue
+		}
 		counts[s.GetStatus()]++
 	}
 	summary := renderStatusSummaryOpts(counts, true)
@@ -8766,7 +8789,8 @@ func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
 	now := time.Now()
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf)
+	sessions, pending, pinned := h.areaScoped()
+	h.flatItems = BuildFlatItems(sessions, pending, h.repoExpanded, h.filterText, pinned, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf)
 
 	// Resolve the attention-mute for EVERY session, not just the visible ones,
 	// so callers that count the whole fleet (statusCountsLine) read the same
@@ -9550,6 +9574,10 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 	if h.anyTCCBlocked() {
 		commands = append(commands, PaletteItem{Kind: PaletteKindCommand, ID: "open_fda", Name: "Open Full Disk Access Settings"})
 	}
+	// Only when areas are configured: without them the command has nothing to do.
+	if h.areaEnabled() {
+		commands = append(commands, PaletteItem{Kind: PaletteKindCommand, ID: "cycle_area", Name: "Switch Area", Shortcut: areaKey})
+	}
 	for i := range commands {
 		if commands[i].Haystack == "" {
 			commands[i].Haystack = commands[i].Name
@@ -9584,6 +9612,9 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 
 	places := make([]PaletteItem, 0, len(repos))
 	for _, repo := range repos {
+		if !h.areaShowsPath(repo) {
+			continue
+		}
 		kind := PaletteKindRepo
 		branch := ""
 		if info := gitSnap[repo]; info != nil {
@@ -9744,6 +9775,8 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "frost_gate":
 		h.gate.Show()
 		return h, nil
+	case "cycle_area":
+		return h, h.cycleArea()
 	case "connect_linear":
 		h.logAction("connect linear", "", true)
 		// Opening the dialog is the feature the tip teaches, so this is where

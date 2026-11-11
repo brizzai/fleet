@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/area"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/debuglog"
@@ -89,6 +90,12 @@ func resolveLaunchAccount(cfg *config.Config, accounts *claudeaccount.Store, rep
 			os.Exit(1)
 		}
 		account = explicit
+	} else if acct, ok := areaLaunchAccount(cfg, accounts.List(), repoPath, allowed); ok {
+		// The directory's area pins an account (see internal/area); an explicit
+		// --account above still wins, and an unusable area account falls
+		// through to the normal selection below.
+		account = acct.Email
+		debuglog.Logger.Info("account select: area account", "chosen", account, "path", repoPath)
 	} else if acct, ok, note := selectLaunchAccount(cfg, accounts.List(), allowed); ok {
 		account = acct.Email
 		// On stderr: whoever runs a scripted `fleet worktree` never opens debug.log.
@@ -153,6 +160,17 @@ var readLaunchUsage = func(accounts []claudeaccount.Account) (map[string]claudea
 		Accounts:  accounts,
 		CachePath: claudeaccount.UsageCachePath(),
 	})
+}
+
+// areaLaunchAccount returns the account the area owning dir pins, when it is a
+// configured, logged-in account the origin's allowlist permits.
+func areaLaunchAccount(cfg *config.Config, all []claudeaccount.Account, dir string, allowed []string) (claudeaccount.Account, bool) {
+	m := area.New(cfg.Areas, "")
+	if !m.Enabled() {
+		return claudeaccount.Account{}, false
+	}
+	email := m.Account(dir, func() string { return git.GetMainWorktreePath(dir) })
+	return area.PickAccount(email, all, nil, allowed)
 }
 
 // selectLaunchAccount runs account_strategy with the TUI's own Select, reading

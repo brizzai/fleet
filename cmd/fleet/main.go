@@ -38,7 +38,11 @@ func main() {
 	args := os.Args[1:]
 
 	if len(args) == 0 {
-		runTUI()
+		runTUI(nil)
+		return
+	}
+	if strings.HasPrefix(args[0], "--area") {
+		runTUI(args)
 		return
 	}
 
@@ -93,7 +97,7 @@ func main() {
 	}
 }
 
-func runTUI() {
+func runTUI(args []string) {
 	// Run filesystem/tmux/hook migration before debuglog.Init creates ~/.config/fleet/.
 	// migration.Run is a no-op after the first successful invocation.
 	migration.Run()
@@ -115,6 +119,12 @@ func runTUI() {
 	}()
 
 	cfg := config.Load()
+
+	startArea, err := parseAreaFlag(args, cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "fleet:", err)
+		os.Exit(1)
+	}
 
 	if err := tmux.IsTmuxAvailable(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -179,6 +189,7 @@ func runTUI() {
 	identity := analytics.DiscoverIdentity()
 
 	model := ui.NewHome(storage, cfg, version, identity)
+	model.SetArea(startArea)
 	// v2: alt-screen and mouse mode are declared on the View each frame
 	// (see Home.chrome), not as program options.
 	p := tea.NewProgram(model)
@@ -337,6 +348,7 @@ func printUsage() {
 	fmt.Println(`
 Usage:
   fleet              Launch TUI
+  fleet --area <name>  Launch TUI showing one configured area ("areas" in config.json)
   fleet add [path]   Add a new session in a directory (default: current)
                            (--agent, --account, --prompt, --model, --effort)
   fleet list         List all sessions
