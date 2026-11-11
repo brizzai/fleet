@@ -70,7 +70,7 @@ func renderAccountUsageHeader(accounts []claudeaccount.Account, usage map[string
 		// check would do, since an account with no login never returns numbers)
 		// leaves the corner looking like a healthy setup while half of it is
 		// dead.
-		if !u.LoggedOut && !u.Known() {
+		if !u.LoggedOut && u.Mismatch == "" && !u.Known() {
 			continue
 		}
 		shown = append(shown, a)
@@ -133,6 +133,9 @@ func accountChip(a claudeaccount.Account, u claudeaccount.Usage, style string, l
 	// is something to do, and unlike a spent window it does not resolve itself.
 	if u.LoggedOut {
 		return label + red.Render("✕ logged out")
+	}
+	if u.Mismatch != "" {
+		return label + red.Render("✕ login mismatch")
 	}
 
 	fiveHour := u.Pct(windowFiveHour)

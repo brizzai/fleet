@@ -42,6 +42,7 @@ type cacheEntry struct {
 	AttemptedAt   time.Time `json:"attempted_at,omitzero"`
 	Failure       string    `json:"failure,omitempty"`
 	LoggedOut     bool      `json:"logged_out,omitempty"`
+	Mismatch      string    `json:"mismatch,omitempty"`
 }
 
 type cachedFailure string
@@ -64,7 +65,7 @@ func LoadUsageCache(path string) map[string]Usage {
 			FiveHourPct: e.FiveHourPct, FiveHourReset: e.FiveHourReset,
 			SevenDayPct: e.SevenDayPct, SevenDayReset: e.SevenDayReset,
 			FetchedAt: e.FetchedAt, AttemptedAt: e.AttemptedAt,
-			LoggedOut: e.LoggedOut,
+			LoggedOut: e.LoggedOut, Mismatch: e.Mismatch,
 		}
 		if e.Failure != "" {
 			u.Err = cachedFailure(e.Failure)
@@ -108,7 +109,7 @@ func writeUsageCache(path string, m map[string]Usage) error {
 			FiveHourPct: u.FiveHourPct, FiveHourReset: u.FiveHourReset,
 			SevenDayPct: u.SevenDayPct, SevenDayReset: u.SevenDayReset,
 			FetchedAt: u.FetchedAt, AttemptedAt: u.AttemptedAt,
-			LoggedOut: u.LoggedOut,
+			LoggedOut: u.LoggedOut, Mismatch: u.Mismatch,
 		}
 		if u.Err != nil {
 			e.Failure = FailureReason(u.Err)
@@ -254,11 +255,13 @@ func UsageForLaunch(ctx context.Context, o LaunchUsageOpts) (map[string]Usage, [
 		u := usage[a.Email]
 		fresh := u.Known() && now.Sub(u.FetchedAt) <= UsageCacheMaxAge
 		if u.Known() && !fresh && !u.Exhausted(now) {
-			usage[a.Email] = Usage{AttemptedAt: u.AttemptedAt, Err: u.Err, LoggedOut: u.LoggedOut}
+			usage[a.Email] = Usage{AttemptedAt: u.AttemptedAt, Err: u.Err, LoggedOut: u.LoggedOut, Mismatch: u.Mismatch}
 		}
 		switch {
 		case u.LoggedOut:
 			unread = append(unread, Unread{Email: a.Email, Reason: "not logged in"})
+		case u.Mismatch != "":
+			unread = append(unread, Unread{Email: a.Email, Reason: "logged in as " + u.Mismatch})
 		case !fresh:
 			unread = append(unread, Unread{Email: a.Email, Reason: FailureReason(u.Err)})
 		}

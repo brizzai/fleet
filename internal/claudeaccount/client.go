@@ -2,6 +2,7 @@ package claudeaccount
 
 import (
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -11,6 +12,11 @@ const (
 	// Keychain, so this is a floor, not a target.
 	MinPollInterval = 180 * time.Second
 
+	// IdentityCheckInterval is how often the poll re-asks each config dir who it
+	// is logged in as. Much slower than the quota poll: a login only changes when
+	// a person runs /login, and each check spawns `claude auth status`.
+	IdentityCheckInterval = 30 * time.Minute
+
 	// ExhaustedPct is the utilization at which an account is treated as spent.
 	// Not 100: the last percent is unusable in practice and rounding means a
 	// truly empty bucket can report 99.
@@ -18,6 +24,12 @@ const (
 
 	httpTimeout = 10 * time.Second
 )
+
+// IdentityCheckDue reports whether an account's login is due for re-checking.
+// The zero time (never checked) is always due, so the first poll cycle checks.
+func IdentityCheckDue(last, now time.Time) bool {
+	return last.IsZero() || now.Sub(last) >= IdentityCheckInterval
+}
 
 var httpClient = &http.Client{Timeout: httpTimeout}
 
@@ -53,15 +65,46 @@ type Usage struct {
 	// Live state: persisted only to the usage cache, which a re-login clears
 	// (ResetCachedUsage) and the next poll overwrites.
 	LoggedOut bool
+
+	// Mismatch is the email the account's config dir is REALLY logged in as,
+	// set only when it differs from the email fleet has on record for it ("" =
+	// matches, or not checked yet).
+	//
+	// Happens when someone runs /login inside a session of that account, or
+	// `claude auth login` with the wrong browser profile: the dir keeps working,
+	// so nothing fails — it just quietly bills a different subscription than the
+	// row says. Like LoggedOut it excludes the account from selection, and for
+	// the same reason: the row names an account the dir no longer is.
+	Mismatch string
+}
+
+// LoginMismatch compares the email fleet registered for an account with who its
+// config dir reports being logged in as, and returns the real email when they
+// differ ("" when they agree).
+//
+// Only a live login can mismatch: a logged-out dir is already LoggedOut, and an
+// empty reported email is a missing answer, not a different account. Case is
+// ignored, since email providers treat the two spellings as one mailbox.
+func LoginMismatch(registered string, id Identity) string {
+	// A key without an "@" is a placeholder from the setup-token era: it names
+	// no one, so there is nothing to disagree with.
+	if !strings.Contains(registered, "@") {
+		return ""
+	}
+	if !id.LoggedIn || id.Email == "" || strings.EqualFold(registered, id.Email) {
+		return ""
+	}
+	return id.Email
 }
 
 // Usable reports whether a session launched on this account could actually run.
 //
-// Only a missing login makes it false. Spent is not unusable — it is a wait,
+// Only a missing login, or a login that is a different account than the row
+// claims (Mismatch), makes it false. Spent is not unusable — it is a wait,
 // and it clears at the reset — and an unpollable account is not unusable
 // either, since fleet failing to read the Keychain or reach Anthropic says
 // nothing about the login.
-func (u Usage) Usable() bool { return !u.LoggedOut }
+func (u Usage) Usable() bool { return !u.LoggedOut && u.Mismatch == "" }
 
 // Exhausted reports whether this account should be skipped for new work.
 //

@@ -40,6 +40,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "d", BarKey: "d", BarDesc: "Del", Desc: "Delete session / repo / worktree", Section: "session"},
 	{Key: "u", Desc: "Undo delete", Section: "session"},
 	{Key: "r", BarKey: "r", BarDesc: "Restart", Desc: "Restart session", Section: "session"},
+	{Key: "@", Desc: "Move session to another Claude account", Section: "session"},
 	{Key: "R", Desc: "Rename session", Section: "session"},
 	{Key: "m", Desc: "Mark session as unread (idle → finished)", Section: "session"},
 	{Key: "z", Desc: "Snooze / wake session / repo / worktree", Section: "session"},
