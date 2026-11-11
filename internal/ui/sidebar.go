@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,6 +48,9 @@ type SidebarItem struct {
 	// it depends on the account store and the ambient login, which BuildFlatItems
 	// does not see and which change without the session list changing.
 	AccountBadge string
+	// AccountBadgeIdx is the account's position in the store (-1 = ambient),
+	// which picks its stable colour.
+	AccountBadgeIdx int
 	// GroupSnooze is a header row's OWN snooze deadline (zero = not snoozed).
 	// Only the group that holds the snooze renders a countdown — a checkout
 	// under a snoozed origin stays silent for the same reason its sessions do.
@@ -698,11 +702,13 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 		slotRaw = fmt.Sprintf(" [%d]", slot)
 	}
 
-	// Account badge: "@name" after the title. Cheap to drop and costly to
-	// overflow, so it only renders while the title keeps its minimum width.
-	badgeRaw := ""
-	if item.AccountBadge != "" {
-		badgeRaw = " @" + item.AccountBadge
+	// Account badge: the account name, right-aligned like the header counters.
+	// The title gives up width first (reserving name + a 2-cell gap); the badge
+	// is only dropped when even that would crush the title below its minimum.
+	badgeRaw := item.AccountBadge
+	badgeCost := 0
+	if badgeRaw != "" {
+		badgeCost = ansi.StringWidth(badgeRaw) + 2
 	}
 
 	// Reserve: leading indent + status symbol + selection padding + slot, plus
@@ -724,7 +730,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if !selected {
 		snoozeCost = ansi.StringWidth(snoozeRaw)
 	}
-	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost - ansi.StringWidth(badgeRaw)
+	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost - badgeCost
 	if badgeRaw != "" && maxTitleLen < 10 {
 		// No room for the badge without crushing the title: drop the badge.
 		badgeRaw = ""
@@ -749,7 +755,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	// glyph used for collapsed headers). Bg fill spans symbol + agent glyph +
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
-		row := " " + symbolRaw + " " + glyphSel + title + badgeRaw + slotRaw + " "
+		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
 		rendered := fmt.Sprintf("   %s", selTitle().Render(row))
 		// On the focused row, spell out the affordance. Exactly one note fits
 		// before the row overflows, so these are mutually exclusive: suspended
@@ -765,7 +771,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 		case item.Snooze.Muted:
 			rendered += "  " + DimStyle.Render(SnoozeGlyph+" sleeping · group snoozed")
 		}
-		return rendered
+		return rightAlignBadge(rendered, badgeRaw, item.AccountBadgeIdx, width)
 	}
 
 	styledSymbol := StatusSymbol(status)
@@ -781,18 +787,40 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if slotRaw != "" {
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
 	}
-	if badgeRaw != "" {
-		styledSlot = DimStyle.Render(badgeRaw) + styledSlot
-	}
+
 	styledSnooze := ""
 	if snoozeRaw != "" {
 		styledSnooze = DimStyle.Render(snoozeRaw)
 	}
 	if glyphRaw != "" {
 		styledGlyph := AgentGlyphStyle.Render(glyphRaw)
-		return fmt.Sprintf("    %s %s %s%s%s", styledSymbol, styledGlyph, styledTitle, styledSlot, styledSnooze)
+		return rightAlignBadge(fmt.Sprintf("    %s %s %s%s%s", styledSymbol, styledGlyph, styledTitle, styledSlot, styledSnooze), badgeRaw, item.AccountBadgeIdx, width)
 	}
-	return fmt.Sprintf("    %s %s%s%s", styledSymbol, styledTitle, styledSlot, styledSnooze)
+	return rightAlignBadge(fmt.Sprintf("    %s %s%s%s", styledSymbol, styledTitle, styledSlot, styledSnooze), badgeRaw, item.AccountBadgeIdx, width)
+}
+
+// accountBadgeColor picks from the theme colours handed to accounts in store order.
+// Red is left out: everywhere else it means a failure. A function, not a var,
+// because a theme switch reassigns the Color* values.
+func accountBadgeColor(idx int) color.Color {
+	if idx < 0 {
+		return ColorTextDim
+	}
+	pal := []color.Color{ColorAccent, ColorBlue, ColorOrange, ColorPurple, ColorGreen, ColorYellow}
+	return pal[idx%len(pal)]
+}
+
+// rightAlignBadge pads row so the badge ends at width. Dropped, not squeezed,
+// when the row (selected rows carry an extra note) has no room left.
+func rightAlignBadge(row, badge string, idx, width int) string {
+	if badge == "" {
+		return row
+	}
+	pad := width - lipgloss.Width(row) - ansi.StringWidth(badge)
+	if pad < 1 {
+		return row
+	}
+	return row + strings.Repeat(" ", pad) + lipgloss.NewStyle().Foreground(accountBadgeColor(idx)).Render(badge)
 }
 
 // Agent glyphs mark which coding agent a session runs — a quiet, dim,
