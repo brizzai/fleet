@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"path/filepath"
 	"time"
 
 	"github.com/brizzai/fleet/internal/git"
@@ -62,6 +63,11 @@ func GroupFolders(items []SidebarItem, folderOf FolderOf, expanded map[string]bo
 		items  []SidebarItem
 		folder string // FolderExpandKey, "" = loose
 		label  string
+		// home is the key of the folder this loose origin's checkout *is*
+		// (a repo sitting directly in the area whose directory also holds
+		// grouped repos), so it joins that group instead of standing beside a
+		// header with its own name.
+		home string
 	}
 	var blocks []block
 	for _, it := range items {
@@ -72,6 +78,8 @@ func GroupFolders(items []SidebarItem, folderOf FolderOf, expanded map[string]bo
 			b := block{}
 			if a, f := folderOf(it.FolderPath); f != "" {
 				b.folder, b.label = FolderExpandKey(a, f), f
+			} else if a != "" && it.FolderPath != "" {
+				b.home = FolderExpandKey(a, filepath.Base(it.FolderPath))
 			}
 			blocks = append(blocks, b)
 		}
@@ -85,23 +93,37 @@ func GroupFolders(items []SidebarItem, folderOf FolderOf, expanded map[string]bo
 		key, label string
 		blocks     []*block
 	}
+	labels := map[string]string{}
+	for _, b := range blocks {
+		if b.folder != "" {
+			labels[b.folder] = b.label
+		}
+	}
 	var entries []*entry
 	byKey := map[string]*entry{}
 	grouped := false
 	for i := range blocks {
 		b := &blocks[i]
-		if b.folder == "" {
+		key, home := b.folder, false
+		if key == "" && b.home != "" && labels[b.home] != "" {
+			key, home = b.home, true
+		}
+		if key == "" {
 			entries = append(entries, &entry{blocks: []*block{b}})
 			continue
 		}
 		grouped = true
-		e := byKey[b.folder]
+		e := byKey[key]
 		if e == nil {
-			e = &entry{key: b.folder, label: b.label}
-			byKey[b.folder] = e
+			e = &entry{key: key, label: labels[key]}
+			byKey[key] = e
 			entries = append(entries, e)
 		}
-		e.blocks = append(e.blocks, b)
+		if home {
+			e.blocks = append([]*block{b}, e.blocks...) // the folder's own repo leads
+		} else {
+			e.blocks = append(e.blocks, b)
+		}
 	}
 	if !grouped {
 		return items

@@ -164,3 +164,29 @@ func TestGroupFoldersNilIsIdentity(t *testing.T) {
 		t.Errorf("changed: %+v", got)
 	}
 }
+
+// A repo sitting directly in the area whose directory also holds grouped repos
+// (W/lavessel is a repo, W/lavessel/vessel another) joins that group as its
+// first member, instead of standing loose beside a header with its own name.
+func TestFolderOwnRepoLeadsItsGroup(t *testing.T) {
+	paths := map[string]string{
+		"vessel":   "/tmp/fo/W/lavessel/vessel",
+		"lavessel": "/tmp/fo/W/lavessel",
+		"other":    "/tmp/fo/W/other",
+	}
+	var ss []*session.Session
+	for _, n := range []string{"vessel", "lavessel", "other"} {
+		ss = append(ss, session.NewSession(n, paths[n]))
+	}
+	h := areaTestHome(t, folderAreas, "work", ss...)
+	gi := map[string]*git.RepoInfo{}
+	for _, s := range ss {
+		gi[s.ProjectPath] = &git.RepoInfo{OriginKey: "local:" + s.Title}
+	}
+	h.gitInfoCache.Store(&gi)
+	h.rebuildFlatItems()
+	want := "F:lavessel >O:lavessel >S:lavessel >O:vessel >S:vessel _ O:other S:other"
+	if got := shape(h.flatItems); got != want {
+		t.Errorf("shape =\n %s\nwant\n %s", got, want)
+	}
+}
