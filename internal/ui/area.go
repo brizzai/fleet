@@ -194,3 +194,13 @@ func (h *Home) renderSidebarView(gitInfo map[string]*git.RepoInfo, width, height
 	}
 	return RenderSidebar(h.flatItems, h.sessions, gitInfo, h.slotBindings, h.cursor, h.viewOffset, width, height, !h.drawerHasFocus())
 }
+
+// noteHiddenNewSession tells the user when a session just created (or adopted
+// from `fleet add`) belongs to an area this window is not showing, instead of
+// letting it vanish silently.
+func (h *Home) noteHiddenNewSession(s *session.Session) {
+	if h.areaShowsPath(s.ProjectPath) {
+		return
+	}
+	h.setInfo(fmt.Sprintf("Created in area %s — press %s to switch", h.areaOfPath(s.ProjectPath), areaKey))
+}
