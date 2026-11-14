@@ -255,7 +255,7 @@ func TestKnownAndNameList(t *testing.T) {
 	if Known("claud") || Known("") {
 		t.Error("Known accepted a name that isn't an agent")
 	}
-	if got, want := NameList(), "claude, codex, opencode, or copilot"; got != want {
+	if got, want := NameList(), "claude, codex, opencode, copilot, or antigravity"; got != want {
 		t.Errorf("NameList() = %q, want %q", got, want)
 	}
 }
@@ -270,5 +270,27 @@ func TestValidEffort(t *testing.T) {
 	}
 	if !Claude.ValidEffort("ultracode") || !Codex.ValidEffort("anything") {
 		t.Error("ValidEffort must only restrict Copilot")
+	}
+}
+
+func TestAntigravityLaunchCmd(t *testing.T) {
+	cases := []struct {
+		name string
+		opts LaunchOpts
+		want string
+	}{
+		{"fresh", LaunchOpts{}, "agy"},
+		{"resume", LaunchOpts{ResumeID: "abc"}, "agy --conversation abc"},
+		{"fork is dropped", LaunchOpts{ForkID: "abc"}, "agy"},
+		{"prompt after model and effort", LaunchOpts{Prompt: "x", Model: "m", Effort: "high"},
+			`agy --model m --effort high --prompt-interactive="$FLEET_INITIAL_PROMPT"`},
+	}
+	for _, c := range cases {
+		if got := Antigravity.BuildLaunchCmd(c.opts); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	if Antigravity.Binary() != "agy" || Antigravity.SupportsFork() {
+		t.Error("binary/fork mismatch")
 	}
 }
