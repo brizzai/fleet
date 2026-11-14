@@ -289,6 +289,8 @@ func installAgentHooks(ag agent.Type, projectPath string) {
 		if err := hooks.EnsureCopilotDirTrust(hooks.GetCopilotConfigDir(), projectPath); err != nil {
 			debuglog.Logger.Error("copilot dir trust seeding failed", "path", projectPath, "err", err)
 		}
+	case agent.Antigravity:
+		// No hook integration yet: status comes from the pane only.
 	default:
 		if _, err := hooks.InjectClaudeHooks(hooks.GetClaudeConfigDir()); err != nil {
 			debuglog.Logger.Error("claude hook inject failed", "err", err)

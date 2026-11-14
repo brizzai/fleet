@@ -333,7 +333,7 @@ func runUpdate() {
 }
 
 func printUsage() {
-	fmt.Printf("fleet %s - manage Claude Code, Codex, OpenCode and Copilot sessions\n", version)
+	fmt.Printf("fleet %s - manage Claude Code, Codex, OpenCode, Copilot and Antigravity sessions\n", version)
 	fmt.Println(`
 Usage:
   fleet              Launch TUI

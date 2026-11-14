@@ -19,13 +19,15 @@ const (
 	Codex    Type = "codex"
 	OpenCode Type = "opencode"
 	Copilot  Type = "copilot"
+	// Antigravity is Google's `agy` CLI.
+	Antigravity Type = "antigravity"
 
 	// Default is the agent assumed when none is recorded (legacy sessions, empty config).
 	Default = Claude
 )
 
 // All is every agent fleet can launch, in the order pickers offer them.
-var All = []Type{Claude, Codex, OpenCode, Copilot}
+var All = []Type{Claude, Codex, OpenCode, Copilot, Antigravity}
 
 // Known reports whether s names an agent exactly. Parse falls back to Claude,
 // so a caller taking a user-typed name checks this first.
@@ -40,7 +42,7 @@ func Names() []string {
 	return names
 }
 
-// NameList is "claude, codex, opencode, or copilot", for help and errors.
+// NameList is "claude, codex, opencode, copilot, or antigravity", for help and errors.
 func NameList() string {
 	names := Names()
 	return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
@@ -64,6 +66,8 @@ func (t Type) Binary() string {
 		return "opencode"
 	case Copilot:
 		return "copilot"
+	case Antigravity:
+		return "agy"
 	default:
 		return "claude"
 	}
@@ -78,6 +82,8 @@ func (t Type) DisplayName() string {
 		return "OpenCode"
 	case Copilot:
 		return "Copilot"
+	case Antigravity:
+		return "Antigravity"
 	default:
 		return "Claude"
 	}
@@ -125,6 +131,8 @@ func (t Type) promptArg() string {
 		return "--prompt=" + promptRef
 	case Copilot:
 		return "--interactive=" + promptRef
+	case Antigravity:
+		return "--prompt-interactive=" + promptRef
 	}
 	return "-- " + promptRef
 }
@@ -192,7 +200,7 @@ func (t Type) SupportsEffort() bool { return t != OpenCode }
 // SupportsFork reports whether this agent can start a new conversation forked
 // from an existing one. Copilot has no fork flag: launching it with the
 // parent's id would resume — and take over — the parent's conversation.
-func (t Type) SupportsFork() bool { return t != Copilot }
+func (t Type) SupportsFork() bool { return t != Copilot && t != Antigravity }
 
 // PreMintsSessionID reports whether fleet chooses this agent's conversation id
 // itself rather than capturing it from a hook. Copilot's `--session-id <uuid>`
@@ -305,6 +313,13 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 		cmd = "copilot"
 		if o.ResumeID != "" {
 			cmd += " --session-id=" + o.ResumeID
+		}
+
+	case Antigravity:
+		// No fork flag; a fork id is dropped like Copilot's.
+		cmd = "agy"
+		if o.ResumeID != "" {
+			cmd += " --conversation " + o.ResumeID
 		}
 
 	default: // Claude
