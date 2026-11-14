@@ -697,7 +697,7 @@ func PaneShowsWorking(a agent.Type, rawPane string) bool {
 		return codexPaneRunning(clean)
 	case agent.Copilot:
 		return copilotPaneRunning(clean)
-	case agent.OpenCode:
+	case agent.OpenCode, agent.Antigravity:
 		return false
 	default:
 		lines := strings.Split(strings.TrimRight(clean, "\n"), "\n")

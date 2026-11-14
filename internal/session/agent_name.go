@@ -13,7 +13,7 @@ func ReadAgentSessionName(a agent.Type, sessionID, projectPath string) string {
 		return ReadCodexSessionName(sessionID)
 	case agent.Copilot:
 		return ReadCopilotSessionName(sessionID)
-	case agent.OpenCode:
+	case agent.OpenCode, agent.Antigravity:
 		// OpenCode titles its sessions too, but fleet doesn't read them yet.
 		return ""
 	default:

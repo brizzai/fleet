@@ -239,7 +239,7 @@ func (s *Session) buildAgentCmd() string {
 // Codex, OpenCode and Copilot fire no event until their first turn, so they start idle
 // (sitting at their prompt) rather than flashing running.
 func (s *Session) initialRunStatus() Status {
-	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Copilot {
+	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Copilot || s.Agent == agent.Antigravity {
 		return StatusIdle
 	}
 	return StatusRunning
