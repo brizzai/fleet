@@ -1410,3 +1410,63 @@ func TestScenarioUnclassifiedFrameBreaksTheConfirmation(t *testing.T) {
 		},
 	})
 }
+
+// TestScenarioQueuedMessageMasksQuestionPrompt reproduces a session stuck at
+// finished with an AskUserQuestion on screen. The question's PermissionRequest
+// set the hook to waiting, but the user had a draft in the input box: the
+// pane read as an idle prompt until they pressed Enter, so the waiting hook
+// was overridden to finished. Pressing Enter QUEUED the draft, which fires
+// UserPromptSubmit — a running hook newer than the waiting one, though nothing
+// ran. Ten stable seconds later the stale-running rule settled to finished,
+// checking the pane only for a spinner, never for the prompt in plain view.
+// Captured from snapshot 2026-11-19T13-58-18 (that pane carries the user's
+// own PR content, so the committed preview-layout fixture stands in for it).
+func TestScenarioQueuedMessageMasksQuestionPrompt(t *testing.T) {
+	const question = "@fixture:pane_waiting_askuserquestion_single_preview.txt"
+	const idle = "@fixture:pane_finished_idle_prompt.txt"
+
+	t.Run("stale running hook with a prompt on screen settles to waiting", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "waiting hook → queued message's running hook → prompt still on screen",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "waiting", Pane: idle},
+				{At: 16 * time.Second, Hook: "running", Pane: question},
+			},
+			Checks: []ScenarioCheck{
+				{At: 16 * time.Second, Expected: StatusRunning}, // content just changed
+				{At: 27 * time.Second, Expected: StatusWaiting}, // was finished before the fix
+				{At: 40 * time.Second, Expected: StatusWaiting}, // latched, stays waiting
+			},
+		})
+	})
+
+	t.Run("prompt dismissed with Esc settles to finished", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "latched waiting → prompt leaves the screen → finished",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "running", Pane: question},
+				{At: 20 * time.Second, Pane: idle},
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusRunning},
+				{At: 11 * time.Second, Expected: StatusWaiting},
+				{At: 20 * time.Second, Expected: StatusFinished}, // not pinned at waiting
+			},
+		})
+	})
+
+	t.Run("prompt answered resumes running", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "latched waiting → agent resumes → running",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "running", Pane: question},
+				{At: 20 * time.Second, Pane: "@fixture:pane_running_compacting.txt"},
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusRunning},
+				{At: 11 * time.Second, Expected: StatusWaiting},
+				{At: 20 * time.Second, Expected: StatusRunning},
+			},
+		})
+	})
+}

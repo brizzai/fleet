@@ -1699,14 +1699,32 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 	// hook landed). Clear the override and fall through to the normal path so
 	// the stability heuristic can re-engage if Claude stops again — otherwise
 	// the session would be stuck at Running forever until the next hook.
+	//
+	// The latch also follows a prompt on screen, both ways. A prompt appearing
+	// after the override latched finished recovers to waiting; a prompt the
+	// override latched as waiting that leaves the screen for an idle box (Esc
+	// on the question) settles to finished — answering it resumes the agent,
+	// which the running escape above already covers.
 	if !s.hookOverriddenAt.IsZero() && s.hookOverriddenAt.Equal(s.hookUpdatedAt) {
-		if paneStatus == StatusRunning {
+		switch {
+		case paneStatus == StatusRunning:
 			s.hookOverriddenAt = time.Time{}
 			s.lastContentHash = ""
 			s.lastContentChangeAt = time.Time{}
 			log.Info("overridden running hook but pane shows running, resuming")
 			// fall through to normal running path
-		} else {
+		case paneStatus == StatusWaiting:
+			if s.Status != StatusWaiting {
+				log.Info("overridden running hook but pane shows waiting prompt, recovering to waiting")
+			}
+			s.Status = StatusWaiting
+			s.Acknowledged = false
+			return
+		case paneStatus == StatusFinished && s.Status == StatusWaiting:
+			s.Status = StatusFinished
+			log.Info("overridden running hook: prompt left the screen, settling to finished")
+			return
+		default:
 			return // preserve whatever state the stability override concluded
 		}
 	}
@@ -1751,6 +1769,21 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 			return
 		}
 		// Content stable >10s while hook says running — hook is stale.
+		//
+		// A prompt structurally on screen wins over finished. The newest hook
+		// isn't always the truth: a message typed while an AskUserQuestion is
+		// open is queued, and queueing fires UserPromptSubmit, so a running hook
+		// lands AFTER the PermissionRequest and masks it while nothing runs.
+		// The "never override running to waiting" rule above guards a FRESH
+		// running hook against approval text in scrollback; this one has
+		// already been ruled stale, and the only other answer is finished.
+		if paneStatus == StatusWaiting {
+			s.Status = StatusWaiting
+			s.hookOverriddenAt = s.hookUpdatedAt
+			log.Info("content stable >10s, hook says running, but pane shows a prompt — waiting",
+				"stableSince", s.lastContentChangeAt.Format(time.TimeOnly))
+			return
+		}
 		// Preserve idle if already acknowledged (don't bounce back to finished).
 		if oldStatus == StatusIdle {
 			s.Status = StatusIdle
