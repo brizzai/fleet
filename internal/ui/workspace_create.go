@@ -307,8 +307,7 @@ func (d *CreateWorkspaceDialog) View() string {
 		branch := strings.TrimSpace(d.branchInput.Value())
 		if branch != "" {
 			name := workspace.SanitizeBranchName(branch)
-			preview := workspace.DeriveWorktreePathPreview(d.repoPath, name)
-			b.WriteString(DimStyle.Render("  → " + preview))
+			b.WriteString(worktreePathPreviewLine(d.repoPath, d.provider, name))
 			b.WriteString("\n")
 		}
 	} else {
@@ -351,4 +350,16 @@ func (d *CreateWorkspaceDialog) wrapDialog(content string) string {
 
 	box := DialogStyle.Width(dialogWidth).Render(content)
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// worktreePathPreviewLine is the "→ <path>" line under a creation dialog's
+// branch field. When worktree_path is set anywhere it names the file it came
+// from, since three places can set it and the preview is where someone asks
+// why a worktree is about to land somewhere unexpected.
+func worktreePathPreviewLine(repoPath string, p workspace.Provider, name string) string {
+	line := "  → " + workspace.WorktreePathPreview(repoPath, workspace.ProviderPathTemplate(p), name)
+	if src := workspace.ProviderPathSource(p); src != "" {
+		line += "  (from " + src + ")"
+	}
+	return DimStyle.Render(line)
 }

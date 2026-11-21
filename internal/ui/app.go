@@ -629,6 +629,9 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// cfg.Theme is empty or unknown.
 	ApplyPalette(PaletteByName(cfg.Theme))
 	ApplyDisplayConfig(cfg)
+	// Every worktree provider is resolved from a repo path alone, so the
+	// user-wide placement setting rides package state set once here.
+	workspace.SetGlobalWorktreePath(cfg.WorktreePath)
 
 	h := &Home{
 		storage:                storage,
@@ -1549,6 +1552,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
+		// Worktree placement is package state read at provider resolution, so a
+		// change applies to the next worktree without a relaunch.
+		workspace.SetGlobalWorktreePath(h.cfg.WorktreePath)
 		// Display toggles are live, but the density flag changes BuildFlatItems
 		// output (inter-group spacer rows), so rebuild the flattened list.
 		h.rebuildFlatItems()
@@ -8338,6 +8344,9 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		var branches []git.BranchInfo
 		if !provider.IsCustom() {
 			repoPath = git.GetMainWorktreePath(repoPath)
+			// Placement too: the provider was resolved from the selected
+			// checkout, but .fleet.local.json usually lives only in the main one.
+			provider = workspace.ProviderPlacedFrom(provider, repoPath)
 			// The normalized main-clone path may not be a tracked gitInfoCache key
 			// (origin with only a worktree tracked), which would misgroup the
 			// Creating… phantom under a spurious local:<dir> header. Resolve the

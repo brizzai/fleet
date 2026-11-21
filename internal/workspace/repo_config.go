@@ -17,6 +17,10 @@ type RepoWorkspaceConfig struct {
 	CopyFiles CopyFilesConfig `json:"copy_files"`
 	Linear    LinearConfig    `json:"linear"`
 	Jira      JiraConfig      `json:"jira"`
+	// WorktreePath is a template for where new worktrees go (see
+	// ResolveWorktreePath). Overrides config.json's worktree_path for this repo;
+	// a .fleet.local.json value replaces a committed one.
+	WorktreePath string `json:"worktree_path,omitempty"`
 }
 
 // ShellConfig holds shell command configuration for workspace operations.
@@ -112,6 +116,10 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 		merged.Jira.Project = local.Jira.Project
 	}
 	merged.Jira.Projects = dedupeStrings(append(base.Jira.Projects, local.Jira.Projects...))
+
+	if local.WorktreePath != "" {
+		merged.WorktreePath = local.WorktreePath
+	}
 	return merged
 }
 
@@ -194,7 +202,8 @@ func ResolveProvider(repoPath string) Provider {
 	}
 
 	// Default: built-in git worktree provider.
-	return &GitWorktreeProvider{}
+	tmpl, source := WorktreePathSetting(repoPath)
+	return &GitWorktreeProvider{PathTemplate: tmpl, PathSource: source}
 }
 
 // preferredConfig returns the config from preferredName if that file exists at
@@ -202,11 +211,20 @@ func ResolveProvider(repoPath string) Provider {
 // an empty preferred file still suppresses the legacy one (intended way to
 // "disable" a stale legacy config without deleting it).
 func preferredConfig(repoPath, preferredName, legacyName string) RepoWorkspaceConfig {
-	if cfg, ok := loadRepoConfig(filepath.Join(repoPath, preferredName)); ok {
-		return cfg
-	}
-	cfg, _ := loadRepoConfig(filepath.Join(repoPath, legacyName))
+	cfg, _ := preferredConfigNamed(repoPath, preferredName, legacyName)
 	return cfg
+}
+
+// preferredConfigNamed is preferredConfig that also reports which file the
+// config was read from ("" when neither exists).
+func preferredConfigNamed(repoPath, preferredName, legacyName string) (RepoWorkspaceConfig, string) {
+	if cfg, ok := loadRepoConfig(filepath.Join(repoPath, preferredName)); ok {
+		return cfg, preferredName
+	}
+	if cfg, ok := loadRepoConfig(filepath.Join(repoPath, legacyName)); ok {
+		return cfg, legacyName
+	}
+	return RepoWorkspaceConfig{}, ""
 }
 
 // loadRepoConfig reads and parses a repo workspace config file. Returns the

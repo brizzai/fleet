@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"path/filepath"
 	"testing"
 )
 
@@ -202,31 +201,6 @@ func TestSanitizeBranchName(t *testing.T) {
 			got := SanitizeBranchName(tt.input)
 			if got != tt.want {
 				t.Errorf("SanitizeBranchName(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDeriveWorktreePath(t *testing.T) {
-	tests := []struct {
-		name     string
-		repoPath string
-		wtName   string
-		wantEnd  string // suffix the result should end with
-	}{
-		{"basic", "/code/myrepo", "feature-login", "myrepo-feature-login"},
-		{"nested repo", "/home/user/projects/app", "hotfix", "app-hotfix"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := deriveWorktreePath(tt.repoPath, tt.wtName)
-			if filepath.Base(got) != tt.wantEnd {
-				t.Errorf("deriveWorktreePath(%q, %q) base = %q, want %q", tt.repoPath, tt.wtName, filepath.Base(got), tt.wantEnd)
-			}
-			// Should be a sibling directory (same parent).
-			if filepath.Dir(got) != filepath.Dir(tt.repoPath) {
-				t.Errorf("deriveWorktreePath result parent = %q, want %q", filepath.Dir(got), filepath.Dir(tt.repoPath))
 			}
 		})
 	}
