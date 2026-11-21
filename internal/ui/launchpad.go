@@ -23,6 +23,18 @@ type Launchpad struct {
 	cursor   int
 	selected map[int]bool // multi-select: item indices checked for launch
 	loading  bool
+	takeover bool // the "take over running sessions" picker, not the first-run launchpad
+}
+
+// NewTakeover returns the picker for Claude sessions running outside fleet —
+// the launchpad's list, wording changed to say what happens to the originals.
+func NewTakeover(items []discovery.Recent) *Launchpad {
+	l := &Launchpad{takeover: true}
+	l.SetItems(items)
+	// Unlike the launchpad, start with nothing ticked: the list can include the
+	// very session the user is typing in, and resuming it is a deliberate pick.
+	l.selected = make(map[int]bool)
+	return l
 }
 
 // NewLaunchpad returns a launchpad in its pre-scan loading state.
@@ -144,7 +156,11 @@ func (l *Launchpad) View(width, height int) string {
 	rowW := cw - 4
 
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render("⬡  Welcome to fleet"))
+	title, subtitle := "⬡  Welcome to fleet", "Add the repos & worktrees you regularly work in."
+	if l.takeover {
+		title, subtitle = "⬡  Take over running sessions", "Resumes each conversation in fleet. Close the original windows after."
+	}
+	b.WriteString(TitleStyle.Render(title))
 	b.WriteString("\n")
 
 	if l.loading {
@@ -152,7 +168,7 @@ func (l *Launchpad) View(width, height int) string {
 		return place(width, height, DialogStyle.Width(cw).Render(b.String()))
 	}
 
-	b.WriteString(DimStyle.Render("Add the repos & worktrees you regularly work in."))
+	b.WriteString(DimStyle.Render(subtitle))
 	b.WriteString("\n\n")
 
 	// Window the list to the available height, keeping the cursor in view.
@@ -209,7 +225,7 @@ func (l *Launchpad) View(width, height int) string {
 	}
 	if hidden > 0 {
 		b.WriteString("\n")
-		b.WriteString(DimStyle.Render(fmt.Sprintf("   +%d more in your history", hidden)))
+		b.WriteString(DimStyle.Render(fmt.Sprintf("   +%d more", hidden)))
 		b.WriteString("\n")
 	}
 
@@ -255,7 +271,12 @@ func (l *Launchpad) renderItem(it discovery.Recent, isCursor, isChecked bool, w 
 	line1 := left + strings.Repeat(" ", gap) + DimStyle.Render(ago)
 
 	// Idle session row — the prompt, drawn like the sidebar's not-running row.
-	title := truncate(it.Title, w-8)
+	// A running session also says where it runs, so its window can be found.
+	title := it.Title
+	if it.Where != "" {
+		title += " · " + it.Where
+	}
+	title = truncate(title, w-8)
 	line2 := "    " + DimStyle.Render("│") + " " + StatusSymbol(session.StatusIdle) + " " + DimStyle.Render(title)
 	return line1 + "\n" + line2
 }
@@ -283,6 +304,9 @@ func (l *Launchpad) footer(w int) string {
 	if n > 0 {
 		cta = fmt.Sprintf("Add %d & continue", n)
 	}
+	if l.takeover {
+		cta = fmt.Sprintf("Take over %d", max(n, 1))
+	}
 	button := PrimaryAction().Render("  ⏎  " + cta + "  ")
 
 	key := func(k string) string { return HelpKeyStyle.Render(k) }
@@ -295,6 +319,9 @@ func (l *Launchpad) footer(w int) string {
 		key("A") + dim(" "+all+"   ") +
 		key("n") + dim(" path   ") +
 		key("?") + dim(" help")
+	if l.takeover {
+		hints = key("space") + dim(" toggle   ") + key("A") + dim(" "+all+"   ") + key("esc") + dim(" cancel")
+	}
 
 	return centerWithin(button, w) + "\n\n" + centerWithin(hints, w)
 }
