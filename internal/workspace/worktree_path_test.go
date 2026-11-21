@@ -182,3 +182,99 @@ func TestGitWorktreeProviderUsesTemplate(t *testing.T) {
 		t.Errorf("worktree dir still exists after Destroy (stat err %v)", err)
 	}
 }
+
+func newTestRepo(t *testing.T, root string) (string, func(args ...string)) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := filepath.Join(root, "proj")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+	return repo, git
+}
+
+// After worktree_path changes, a newer checkout of a same-named branch sits at
+// the path the template now derives. Destroying the OLD checkout by its own
+// path must remove that one, never the newer one.
+func TestDestroyPrefersExactCheckoutOverDerivedPath(t *testing.T) {
+	root := t.TempDir()
+	repo, _ := newTestRepo(t, root)
+
+	oldP := &GitWorktreeProvider{} // default sibling layout
+	old, err := oldP.Create(repo, "feat-x", "feat/x", "")
+	if err != nil {
+		t.Fatalf("Create old: %v", err)
+	}
+	newP := &GitWorktreeProvider{PathTemplate: "../aaa/{{repo}}-{{name}}"}
+	newer, err := newP.Create(repo, "feat-x", "feat-x", "")
+	if err != nil {
+		t.Fatalf("Create new: %v", err)
+	}
+
+	if err := newP.Destroy(old.Path, "feat-x"); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if _, err := os.Stat(old.Path); !os.IsNotExist(err) {
+		t.Errorf("requested checkout %s still exists (stat err %v)", old.Path, err)
+	}
+	if _, err := os.Stat(newer.Path); err != nil {
+		t.Errorf("unrelated checkout %s was removed: %v", newer.Path, err)
+	}
+}
+
+// A symlink on the way to the destination can put a worktree inside the repo
+// while the template looks outside it lexically; Create must refuse.
+func TestCreateRefusesSymlinkIntoRepo(t *testing.T) {
+	root := t.TempDir()
+	repo, _ := newTestRepo(t, root)
+	inside := filepath.Join(repo, "worktrees")
+	if err := os.Mkdir(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(inside, filepath.Join(root, "wt-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &GitWorktreeProvider{PathTemplate: "../wt-link/{{name}}"}
+	if _, err := p.Create(repo, "feat-x", "feat/x", ""); err == nil || !strings.Contains(err.Error(), "inside the repo") {
+		t.Fatalf("Create through a symlink into the repo: err = %v, want inside-the-repo refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(inside, "feat-x")); !os.IsNotExist(err) {
+		t.Errorf("worktree was created inside the repo (stat err %v)", err)
+	}
+}
+
+func TestResolveExistingPrefix(t *testing.T) {
+	root := t.TempDir()
+	realRoot, _ := filepath.EvalSymlinks(root)
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct{ in, want string }{
+		{filepath.Join(root, "link", "a", "b"), filepath.Join(realRoot, "target", "a", "b")},
+		{filepath.Join(root, "missing", "x"), filepath.Join(realRoot, "missing", "x")},
+		{filepath.Join(root, "target"), filepath.Join(realRoot, "target")},
+	}
+	for _, tt := range tests {
+		got, err := resolveExistingPrefix(tt.in)
+		if err != nil || got != tt.want {
+			t.Errorf("resolveExistingPrefix(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
+		}
+	}
+}

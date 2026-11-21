@@ -85,6 +85,9 @@ func (g *GitWorktreeProvider) Create(repoPath, name, branch, baseBranch string) 
 	if err != nil {
 		return nil, err
 	}
+	if err := checkOutsideRepoOnDisk(repoPath, path); err != nil {
+		return nil, err
+	}
 
 	debuglog.Logger.Info("git worktree create", "repo", repoPath, "name", name, "branch", branch, "baseBranch", baseBranch, "path", path)
 
@@ -246,21 +249,7 @@ func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {
 	// the other two strategies still apply.
 	derivedPath, _ := ResolveWorktreePath(mainPath, g.PathTemplate, name)
 
-	// Find the worktree to remove. Try multiple matching strategies:
-	// 1. Exact name match (ws.Name == name)
-	// 2. Derived path match (where fleet's worktree_path would have put it)
-	// 3. repoPath itself is the worktree (caller resolved GetRepoRoot to worktree path)
-	var wtPath string
-	for _, ws := range all {
-		absWS, _ := filepath.Abs(ws.Path)
-		if absWS == mainPath {
-			continue // never remove the main worktree
-		}
-		if ws.Name == name || absWS == derivedPath || absWS == absRepo {
-			wtPath = ws.Path
-			break
-		}
-	}
+	wtPath := findWorktreeToRemove(all, mainPath, absRepo, name, derivedPath)
 	if wtPath == "" {
 		debuglog.Logger.Error("git worktree destroy: not found after search", "name", name, "repo", repoPath)
 		return fmt.Errorf("worktree %q not found", name)
@@ -299,6 +288,56 @@ func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {
 	}
 	debuglog.Logger.Info("git worktree destroyed", "name", name, "path", wtPath)
 	return nil
+}
+
+// findWorktreeToRemove picks the linked worktree Destroy should remove, in
+// tiers, most precise first — the first tier with a hit wins:
+//  1. repoPath itself is a linked worktree (the caller passed the checkout);
+//  2. a worktree whose folder is named name;
+//  3. the path fleet's current worktree_path would give name.
+//
+// The order is load-bearing. The derived path reflects the template *now*, so
+// after worktree_path changes it can name a newer checkout of a same-named
+// branch; letting it win over an exact repoPath would force-remove another
+// session's files. The main worktree is never returned.
+func findWorktreeToRemove(all []WorkspaceInfo, mainPath, absRepo, name, derivedPath string) string {
+	mainCanon := canonicalPath(mainPath)
+	repoCanon := canonicalPath(absRepo)
+	derivedCanon := ""
+	if derivedPath != "" {
+		derivedCanon = canonicalPath(derivedPath)
+	}
+	tiers := []func(ws WorkspaceInfo, canon string) bool{
+		func(_ WorkspaceInfo, canon string) bool { return canon == repoCanon },
+		func(ws WorkspaceInfo, _ string) bool { return ws.Name == name },
+		func(_ WorkspaceInfo, canon string) bool { return derivedCanon != "" && canon == derivedCanon },
+	}
+	for _, match := range tiers {
+		for _, ws := range all {
+			canon := canonicalPath(ws.Path)
+			if canon == mainCanon {
+				continue // never remove the main worktree
+			}
+			if match(ws, canon) {
+				return ws.Path
+			}
+		}
+	}
+	return ""
+}
+
+// canonicalPath is p made absolute with symlinks resolved where it exists
+// (git reports realpaths, so /var vs /private/var on macOS must compare equal);
+// a path that can't be resolved is compared in its absolute form.
+func canonicalPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	return abs
 }
 
 func (g *GitWorktreeProvider) CanCreate() bool  { return true }

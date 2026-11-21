@@ -111,6 +111,55 @@ func ResolveWorktreePath(repoPath, tmpl, name string) (string, error) {
 	return p, nil
 }
 
+// checkOutsideRepoOnDisk is ResolveWorktreePath's inside-the-repo refusal
+// applied to where dest physically lands: a symlink on the way
+// (../wt-link -> repo/worktrees) passes the lexical check and still puts the
+// worktree inside the main checkout. dest's deepest existing ancestor is
+// resolved and the missing tail re-joined, so a destination whose directories
+// don't exist yet still works. It touches the disk, so it runs at creation
+// (on the worker), never from the per-frame preview.
+func checkOutsideRepoOnDisk(repoPath, dest string) error {
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+	realRepo, err := filepath.EvalSymlinks(absRepo)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+	realDest, err := resolveExistingPrefix(dest)
+	if err != nil {
+		return fmt.Errorf("resolve worktree path: %w", err)
+	}
+	if realDest == realRepo || strings.HasPrefix(realDest, realRepo+string(filepath.Separator)) {
+		return fmt.Errorf("worktree path %s resolves to %s, inside the repo (%s); point worktree_path outside it", dest, realDest, realRepo)
+	}
+	return nil
+}
+
+// resolveExistingPrefix resolves symlinks in the longest existing ancestor of
+// p (p itself included) and re-joins the components that don't exist yet.
+func resolveExistingPrefix(p string) (string, error) {
+	p = filepath.Clean(p)
+	var tail []string
+	for cur := p; ; {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			parts := append([]string{real}, tail...)
+			return filepath.Join(parts...), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p, nil // nothing on the path exists; nothing to resolve
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+	}
+}
+
 // completeTemplate makes a directory-only template (no {{name}}) name a folder
 // inside that directory.
 func completeTemplate(tmpl string) string {
