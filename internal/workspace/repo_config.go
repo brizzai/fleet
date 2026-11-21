@@ -17,6 +17,10 @@ type RepoWorkspaceConfig struct {
 	CopyFiles CopyFilesConfig `json:"copy_files"`
 	Linear    LinearConfig    `json:"linear"`
 	Jira      JiraConfig      `json:"jira"`
+	// WorktreePath is a template for where new worktrees go (see
+	// ResolveWorktreePath). Overrides config.json's worktree_path for this repo;
+	// a .fleet.local.json value replaces a committed one.
+	WorktreePath string `json:"worktree_path,omitempty"`
 }
 
 // ShellConfig holds shell command configuration for workspace operations.
@@ -112,6 +116,10 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 		merged.Jira.Project = local.Jira.Project
 	}
 	merged.Jira.Projects = dedupeStrings(append(base.Jira.Projects, local.Jira.Projects...))
+
+	if local.WorktreePath != "" {
+		merged.WorktreePath = local.WorktreePath
+	}
 	return merged
 }
 
@@ -194,7 +202,7 @@ func ResolveProvider(repoPath string) Provider {
 	}
 
 	// Default: built-in git worktree provider.
-	return &GitWorktreeProvider{}
+	return &GitWorktreeProvider{PathTemplate: WorktreePathTemplate(repoPath)}
 }
 
 // preferredConfig returns the config from preferredName if that file exists at

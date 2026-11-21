@@ -35,7 +35,11 @@ type Provider interface {
 // --- GitWorktreeProvider (built-in default) ---
 
 // GitWorktreeProvider uses git worktree commands for workspace management.
-type GitWorktreeProvider struct{}
+// PathTemplate is the worktree_path template new worktrees are placed by
+// (see ResolveWorktreePath); empty means the default sibling layout.
+type GitWorktreeProvider struct {
+	PathTemplate string
+}
 
 // worktreeRemoveMu serializes the remove/RemoveAll/prune region across Destroy
 // calls. Providers are created per-invocation (ResolveProvider doesn't cache),
@@ -74,7 +78,10 @@ func (g *GitWorktreeProvider) List(repoPath string) ([]WorkspaceInfo, error) {
 }
 
 func (g *GitWorktreeProvider) Create(repoPath, name, branch, baseBranch string) (*WorkspaceInfo, error) {
-	path := deriveWorktreePath(repoPath, name)
+	path, err := ResolveWorktreePath(repoPath, g.PathTemplate, name)
+	if err != nil {
+		return nil, err
+	}
 
 	debuglog.Logger.Info("git worktree create", "repo", repoPath, "name", name, "branch", branch, "baseBranch", baseBranch, "path", path)
 
@@ -232,11 +239,13 @@ func (g *GitWorktreeProvider) Destroy(repoPath, name string) error {
 	// and as the -C target for git worktree remove.
 	mainPath, _ := filepath.Abs(all[0].Path)
 	absRepo, _ := filepath.Abs(repoPath)
-	derivedPath, _ := filepath.Abs(deriveWorktreePath(mainPath, name))
+	// An unusable template just means there is no derived path to match on;
+	// the other two strategies still apply.
+	derivedPath, _ := ResolveWorktreePath(mainPath, g.PathTemplate, name)
 
 	// Find the worktree to remove. Try multiple matching strategies:
 	// 1. Exact name match (ws.Name == name)
-	// 2. Derived path match (worktree created by fleet: mainRepo-name)
+	// 2. Derived path match (where fleet's worktree_path would have put it)
 	// 3. repoPath itself is the worktree (caller resolved GetRepoRoot to worktree path)
 	var wtPath string
 	for _, ws := range all {
@@ -542,20 +551,4 @@ func ValidateBranchName(branch string) string {
 		}
 	}
 	return ""
-}
-
-// deriveWorktreePath computes the sibling worktree path.
-// e.g. repoPath="/code/myrepo", name="feature-login" -> "/code/myrepo-feature-login"
-func deriveWorktreePath(repoPath, name string) string {
-	absRepo, _ := filepath.Abs(repoPath)
-	parent := filepath.Dir(absRepo)
-	base := filepath.Base(absRepo)
-	return filepath.Join(parent, base+"-"+name)
-}
-
-// DeriveWorktreePathPreview returns a display-friendly relative path preview.
-func DeriveWorktreePathPreview(repoPath, name string) string {
-	absRepo, _ := filepath.Abs(repoPath)
-	base := filepath.Base(absRepo)
-	return "../" + base + "-" + name
 }

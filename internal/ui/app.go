@@ -629,6 +629,9 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 	// cfg.Theme is empty or unknown.
 	ApplyPalette(PaletteByName(cfg.Theme))
 	ApplyDisplayConfig(cfg)
+	// Every worktree provider is resolved from a repo path alone, so the
+	// user-wide placement setting rides package state set once here.
+	workspace.SetGlobalWorktreePath(cfg.WorktreePath)
 
 	h := &Home{
 		storage:                storage,

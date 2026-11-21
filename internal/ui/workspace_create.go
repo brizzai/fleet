@@ -307,7 +307,7 @@ func (d *CreateWorkspaceDialog) View() string {
 		branch := strings.TrimSpace(d.branchInput.Value())
 		if branch != "" {
 			name := workspace.SanitizeBranchName(branch)
-			preview := workspace.DeriveWorktreePathPreview(d.repoPath, name)
+			preview := workspace.WorktreePathPreview(d.repoPath, workspace.ProviderPathTemplate(d.provider), name)
 			b.WriteString(DimStyle.Render("  → " + preview))
 			b.WriteString("\n")
 		}

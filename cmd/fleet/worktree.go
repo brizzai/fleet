@@ -278,6 +278,7 @@ func runWorktree(args []string) {
 	}
 
 	cfg := config.Load()
+	workspace.SetGlobalWorktreePath(cfg.WorktreePath)
 	ag := resolveLaunchAgent(cfg, opts.agentName, !opts.noSession)
 
 	// Resolve the Claude account before doing any work. A typo here bills the

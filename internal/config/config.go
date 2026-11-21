@@ -56,13 +56,18 @@ const (
 
 // Config holds user-configurable settings.
 type Config struct {
-	TickIntervalSec      int    `json:"tick_interval_sec,omitempty"`
-	DefaultProjectPath   string `json:"default_project_path,omitempty"`
-	Editor               string `json:"editor,omitempty"`
-	Theme                string `json:"theme,omitempty"`
-	AutoNameSessions     *bool  `json:"auto_name_sessions,omitempty"`
-	AutoUpdate           *bool  `json:"auto_update,omitempty"`
-	CopyClaudeSettings   *bool  `json:"copy_claude_settings,omitempty"`
+	TickIntervalSec    int    `json:"tick_interval_sec,omitempty"`
+	DefaultProjectPath string `json:"default_project_path,omitempty"`
+	Editor             string `json:"editor,omitempty"`
+	Theme              string `json:"theme,omitempty"`
+	AutoNameSessions   *bool  `json:"auto_name_sessions,omitempty"`
+	AutoUpdate         *bool  `json:"auto_update,omitempty"`
+	CopyClaudeSettings *bool  `json:"copy_claude_settings,omitempty"`
+	// WorktreePath is where new worktrees go, as a template over {{repo}} and
+	// {{name}} (see workspace.ResolveWorktreePath), e.g. "../{{repo}}.worktrees"
+	// or "~/worktrees". Empty keeps the sibling layout ../{{repo}}-{{name}}.
+	// A repo's .fleet.json / .fleet.local.json worktree_path overrides it.
+	WorktreePath         string `json:"worktree_path,omitempty"`
 	ConfirmBeforeRestart *bool  `json:"confirm_before_restart,omitempty"`
 	// OriginDeleteRemovesWorktrees controls what forgetting a whole origin row
 	// does to worktree directories on disk. Default true: each checkout follows
