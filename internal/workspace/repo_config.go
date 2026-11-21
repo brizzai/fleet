@@ -202,7 +202,8 @@ func ResolveProvider(repoPath string) Provider {
 	}
 
 	// Default: built-in git worktree provider.
-	return &GitWorktreeProvider{PathTemplate: WorktreePathTemplate(repoPath)}
+	tmpl, source := WorktreePathSetting(repoPath)
+	return &GitWorktreeProvider{PathTemplate: tmpl, PathSource: source}
 }
 
 // preferredConfig returns the config from preferredName if that file exists at
@@ -210,11 +211,20 @@ func ResolveProvider(repoPath string) Provider {
 // an empty preferred file still suppresses the legacy one (intended way to
 // "disable" a stale legacy config without deleting it).
 func preferredConfig(repoPath, preferredName, legacyName string) RepoWorkspaceConfig {
-	if cfg, ok := loadRepoConfig(filepath.Join(repoPath, preferredName)); ok {
-		return cfg
-	}
-	cfg, _ := loadRepoConfig(filepath.Join(repoPath, legacyName))
+	cfg, _ := preferredConfigNamed(repoPath, preferredName, legacyName)
 	return cfg
+}
+
+// preferredConfigNamed is preferredConfig that also reports which file the
+// config was read from ("" when neither exists).
+func preferredConfigNamed(repoPath, preferredName, legacyName string) (RepoWorkspaceConfig, string) {
+	if cfg, ok := loadRepoConfig(filepath.Join(repoPath, preferredName)); ok {
+		return cfg, preferredName
+	}
+	if cfg, ok := loadRepoConfig(filepath.Join(repoPath, legacyName)); ok {
+		return cfg, legacyName
+	}
+	return RepoWorkspaceConfig{}, ""
 }
 
 // loadRepoConfig reads and parses a repo workspace config file. Returns the

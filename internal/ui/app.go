@@ -1552,6 +1552,9 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-read the drawer height (clamped) so a change takes effect without a
 		// relaunch; the next render/sync resizes the live stream to match.
 		h.drawerHeight = h.cfg.GetDrawerHeight()
+		// Worktree placement is package state read at provider resolution, so a
+		// change applies to the next worktree without a relaunch.
+		workspace.SetGlobalWorktreePath(h.cfg.WorktreePath)
 		// Display toggles are live, but the density flag changes BuildFlatItems
 		// output (inter-group spacer rows), so rebuild the flattened list.
 		h.rebuildFlatItems()

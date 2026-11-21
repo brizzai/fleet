@@ -88,6 +88,39 @@ func TestWorktreePathTemplatePrecedence(t *testing.T) {
 	}
 }
 
+// The source names the file that actually won, so the dialogs' "(from …)" hint
+// points at the line to edit — including a local file that exists but doesn't
+// set the key, which must fall through to .fleet.json rather than claim it.
+func TestWorktreePathSettingSource(t *testing.T) {
+	t.Cleanup(func() { SetGlobalWorktreePath("") })
+	repo := t.TempDir()
+
+	if _, src := WorktreePathSetting(repo); src != "" {
+		t.Errorf("nothing set: source = %q, want empty", src)
+	}
+	SetGlobalWorktreePath("~/worktrees")
+	if _, src := WorktreePathSetting(repo); src != WorktreePathSourceGlobal {
+		t.Errorf("global only: source = %q", src)
+	}
+	writeFile(t, repo, ".bc.json", `{"worktree_path":"../legacy"}`)
+	if _, src := WorktreePathSetting(repo); src != ".bc.json" {
+		t.Errorf("legacy repo config: source = %q", src)
+	}
+	writeFile(t, repo, ".fleet.json", `{"worktree_path":"../{{repo}}.wt"}`)
+	writeFile(t, repo, ".fleet.local.json", `{"copy_files":{"paths":[".env"]}}`)
+	if tmpl, src := WorktreePathSetting(repo); src != ".fleet.json" || tmpl != "../{{repo}}.wt" {
+		t.Errorf("local without the key: got (%q, %q), want .fleet.json's", tmpl, src)
+	}
+	writeFile(t, repo, ".fleet.local.json", `{"worktree_path":"../mine/{{name}}"}`)
+	p, ok := ResolveProvider(repo).(*GitWorktreeProvider)
+	if !ok || p.PathSource != ".fleet.local.json" || ProviderPathSource(p) != ".fleet.local.json" {
+		t.Errorf("ResolveProvider did not carry the source: %#v", ResolveProvider(repo))
+	}
+	if src := ProviderPathSource(&ShellProvider{}); src != "" {
+		t.Errorf("shell provider source = %q, want empty", src)
+	}
+}
+
 // End to end: git creates the missing parent directory, and Destroy finds the
 // worktree by the same template.
 func TestGitWorktreeProviderUsesTemplate(t *testing.T) {

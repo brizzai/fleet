@@ -37,8 +37,11 @@ type Provider interface {
 // GitWorktreeProvider uses git worktree commands for workspace management.
 // PathTemplate is the worktree_path template new worktrees are placed by
 // (see ResolveWorktreePath); empty means the default sibling layout.
+// PathSource is the file that template came from (see WorktreePathSetting),
+// shown beside the creation dialogs' path preview; empty for the default.
 type GitWorktreeProvider struct {
 	PathTemplate string
+	PathSource   string
 }
 
 // worktreeRemoveMu serializes the remove/RemoveAll/prune region across Destroy

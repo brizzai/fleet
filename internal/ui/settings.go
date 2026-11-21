@@ -11,6 +11,7 @@ import (
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/editor"
+	"github.com/brizzai/fleet/internal/workspace"
 )
 
 // settingsClosedMsg is sent when the settings dialog closes. theme is the
@@ -671,6 +672,20 @@ func buildSettingsCategories() []settingsCategory {
 			withLabel("Copy .claude", toggle(
 				(*config.Config).IsCopyClaudeSettingsEnabled,
 				func(c *config.Config, v bool) { c.CopyClaudeSettings = &v }, false)),
+			{
+				// Where new worktrees go (config worktree_path). Three presets;
+				// any other template is a hand-edited config value, shown as
+				// Custom and kept in the ring so an arrow press can't destroy it.
+				label: "Worktree location",
+				value: func(c *config.Config) string { return worktreeLocationLabel(c.WorktreePath) },
+				valueW: func() int {
+					return maxStrW(append(append([]string{}, worktreeLocationLabels...), worktreeLocationCustom))
+				},
+				cycle: func(d *SettingsDialog, dir int) {
+					d.cfg.WorktreePath = cycleWorktreeLocation(d.cfg.WorktreePath, dir)
+					workspace.SetGlobalWorktreePath(d.cfg.WorktreePath)
+				},
+			},
 			withLabel("Confirm before restart", toggle(
 				(*config.Config).IsConfirmBeforeRestartEnabled,
 				func(c *config.Config, v bool) { c.ConfirmBeforeRestart = &v }, false)),
@@ -769,6 +784,46 @@ func buildSettingsCategories() []settingsCategory {
 	}
 
 	return []settingsCategory{appearance, behavior}
+}
+
+// Worktree location presets (config worktree_path), parallel to their labels.
+// "" is the default sibling layout ../<repo>-<branch>.
+var (
+	worktreeLocationPresets = []string{"", "../{{repo}}.worktrees", "~/worktrees"}
+	worktreeLocationLabels  = []string{"Beside repo", "<repo>.worktrees/", "~/worktrees/"}
+)
+
+const worktreeLocationCustom = "Custom"
+
+// worktreeLocationIndex maps a configured template to its preset, or -1 for a
+// hand-written one. The explicit default template reads as the empty preset,
+// since both place worktrees identically.
+func worktreeLocationIndex(tmpl string) int {
+	tmpl = strings.TrimSpace(tmpl)
+	if tmpl == workspace.DefaultWorktreePathTemplate {
+		tmpl = ""
+	}
+	return indexOf(worktreeLocationPresets, tmpl)
+}
+
+func worktreeLocationLabel(tmpl string) string {
+	if i := worktreeLocationIndex(tmpl); i >= 0 {
+		return worktreeLocationLabels[i]
+	}
+	return worktreeLocationCustom
+}
+
+// cycleWorktreeLocation steps through the presets. A custom template stays in
+// the ring (ahead of the presets, like an editor this machine lacks) so cycling
+// past it and back restores it instead of silently overwriting it.
+func cycleWorktreeLocation(cur string, dir int) string {
+	ring := worktreeLocationPresets
+	idx := worktreeLocationIndex(cur)
+	if idx < 0 {
+		ring = append([]string{cur}, worktreeLocationPresets...)
+		idx = 0
+	}
+	return ring[(idx+dir+len(ring))%len(ring)]
 }
 
 // withLabel attaches a label to a row built by the generic toggle helper.

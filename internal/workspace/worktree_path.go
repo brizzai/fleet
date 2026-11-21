@@ -36,18 +36,33 @@ func globalWorktreePathTemplate() string {
 	return v
 }
 
-// WorktreePathTemplate returns the template that governs where new worktrees
-// of repoPath go: the repo's own config first, then config.json, then the
-// default. It reads the repo's config files, so callers that render on every
-// frame should resolve it once and keep it.
-func WorktreePathTemplate(repoPath string) string {
-	if t := strings.TrimSpace(loadMergedRepoConfig(repoPath).WorktreePath); t != "" {
-		return t
+// WorktreePathSourceGlobal names config.json as the source of a worktree_path
+// template, for the creation dialogs' "(from …)" hint.
+const WorktreePathSourceGlobal = "config.json"
+
+// WorktreePathSetting returns the template that governs where new worktrees of
+// repoPath go, and the file it came from: the repo's .fleet.local.json, then
+// its .fleet.json (legacy .bc names stand in for either, as everywhere), then
+// config.json. An unset setting returns the default with an empty source. It
+// reads the repo's config files, so callers that render on every frame should
+// resolve it once and keep it.
+func WorktreePathSetting(repoPath string) (tmpl, source string) {
+	for _, names := range [][2]string{{".fleet.local.json", ".bc.local.json"}, {".fleet.json", ".bc.json"}} {
+		cfg, name := preferredConfigNamed(repoPath, names[0], names[1])
+		if t := strings.TrimSpace(cfg.WorktreePath); t != "" {
+			return t, name
+		}
 	}
 	if t := globalWorktreePathTemplate(); t != "" {
-		return t
+		return t, WorktreePathSourceGlobal
 	}
-	return DefaultWorktreePathTemplate
+	return DefaultWorktreePathTemplate, ""
+}
+
+// WorktreePathTemplate is WorktreePathSetting without the source.
+func WorktreePathTemplate(repoPath string) string {
+	tmpl, _ := WorktreePathSetting(repoPath)
+	return tmpl
 }
 
 // ResolveWorktreePath turns a template into the absolute path a worktree named
@@ -148,4 +163,14 @@ func ProviderPathTemplate(p Provider) string {
 		return g.PathTemplate
 	}
 	return DefaultWorktreePathTemplate
+}
+
+// ProviderPathSource returns the file a provider's template came from
+// (".fleet.local.json", "config.json", …), or "" when it is the default — the
+// case that needs no explanation.
+func ProviderPathSource(p Provider) string {
+	if g, ok := p.(*GitWorktreeProvider); ok {
+		return g.PathSource
+	}
+	return ""
 }
