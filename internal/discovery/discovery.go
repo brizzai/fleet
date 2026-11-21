@@ -29,6 +29,7 @@ type Recent struct {
 	Title           string    // derived from the first real user prompt
 	LastUsed        time.Time // newest transcript's mtime
 	IsWorktree      bool      // cwd/.git is a file (linked worktree) vs a dir
+	Where           string    // running sessions only: status, terminal and pid, to find the original
 }
 
 const (
