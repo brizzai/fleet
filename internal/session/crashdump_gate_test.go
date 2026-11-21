@@ -131,3 +131,61 @@ func TestPruneCrashDumpsKeepsNewest(t *testing.T) {
 		t.Errorf("after prune: %v, want %v", names, want)
 	}
 }
+
+// The loaded-dead latch suppresses only the death an earlier process already
+// recorded. Once the session is seen alive after the load, its next death is
+// new and gets its dump.
+func TestLoadedDeadLiftsOnceAliveAfterLoad(t *testing.T) {
+	debuglog.Init()
+
+	t.Run("opencode error with a live pane, then the pane dies", func(t *testing.T) {
+		// OpenCode's recoverable session.error persists as StatusError while
+		// the agent is still up; that row was never a death.
+		pane := &mockPane{}
+		s := &Session{ID: "o", Agent: agent.OpenCode, Status: StatusError, loadedDead: true,
+			loadedAt: time.Now(), paneCapturer: pane}
+		dumps := recordDumps(t)
+		s.UpdateStatus()
+		pane.dead = true
+		s.UpdateStatus()
+		if got := countDumps(dumps); got != 1 {
+			t.Errorf("wrote %d dumps, want 1", got)
+		}
+	})
+
+	t.Run("fresh hook after load is a new life", func(t *testing.T) {
+		pane := &mockPane{}
+		s := &Session{ID: "c", Agent: agent.Claude, Status: StatusError, loadedDead: true,
+			loadedAt: time.Now().Add(-time.Minute), paneCapturer: pane}
+		dumps := recordDumps(t)
+		s.UpdateHookStatus(&HookStatus{Status: "running", UpdatedAt: time.Now()}, false)
+		pane.dead = true
+		s.UpdateStatus()
+		if got := countDumps(dumps); got != 1 {
+			t.Errorf("wrote %d dumps, want 1", got)
+		}
+	})
+
+	t.Run("stale hook read at startup is not a new life", func(t *testing.T) {
+		pane := &mockPane{dead: true}
+		s := &Session{ID: "c", Agent: agent.Claude, Status: StatusError, loadedDead: true,
+			loadedAt: time.Now(), paneCapturer: pane}
+		dumps := recordDumps(t)
+		s.UpdateHookStatus(&HookStatus{Status: "running", UpdatedAt: time.Now().Add(-time.Hour)}, false)
+		s.UpdateStatus()
+		if got := countDumps(dumps); got != 0 {
+			t.Errorf("wrote %d dumps, want 0", got)
+		}
+	})
+
+	t.Run("claude stays latched on a live pane until a hook proves life", func(t *testing.T) {
+		// The watcher may not have seeded the stale dead hook yet on the first
+		// pass; a live pane alone must not lift the latch for a hook-death agent.
+		s := &Session{ID: "c", Agent: agent.Claude, Status: StatusError, loadedDead: true,
+			loadedAt: time.Now(), paneCapturer: &mockPane{}}
+		s.UpdateStatus()
+		if !s.loadedDead {
+			t.Error("a live pane lifted the latch for a Claude session")
+		}
+	})
+}
