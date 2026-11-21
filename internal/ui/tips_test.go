@@ -236,3 +236,18 @@ func TestConfigIsTipSeen(t *testing.T) {
 		t.Fatal("IsTipSeen should be false for unstored id")
 	}
 }
+
+func TestZellijTipOnlyUnderZellij(t *testing.T) {
+	tip := findTip(tipZellijShiftEnter)
+	if tip == nil {
+		t.Fatal("zellij tip not registered")
+	}
+	h := newTipHome(&config.Config{}, session.StatusIdle)
+	if tip.active(h) {
+		t.Error("zellij tip active outside zellij")
+	}
+	h.zellijShiftEnterTip = true
+	if !tip.active(h) {
+		t.Error("zellij tip inactive under zellij with a session")
+	}
+}

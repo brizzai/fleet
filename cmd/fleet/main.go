@@ -122,6 +122,15 @@ func runTUI() {
 		os.Exit(1)
 	}
 
+	// One TUI per config dir. Taken before the auto-update, whose re-exec
+	// closes the lock fd (Go opens files close-on-exec) so the updated binary
+	// takes it afresh.
+	lock := acquireInstanceLock()
+	defer lock.Release()
+	// After the lock, so a refused second TUI never binds the profiling port
+	// (or reports "address in use" ahead of the real reason it's exiting).
+	startPprofFromEnv()
+
 	// Analytics is initialized inside the TUI, after the first-launch
 	// consent prompt is answered. We still defer Shutdown unconditionally
 	// because Shutdown is a no-op when Init was never called.

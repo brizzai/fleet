@@ -169,6 +169,22 @@ type Session struct {
 	paneFinishedFirstAt time.Time
 
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
+	// loadedDead marks a session read from state.db already in StatusError: its
+	// death belongs to an earlier fleet process, which wrote that dump (or had
+	// its chance to). deathRecorded is in-memory and starts false on every
+	// launch, so without this each launch re-detected the same dead tmux and
+	// wrote another dump — 29 for one session, 615 in all. Cleared by the
+	// relaunch paths together with deathRecorded. Deliberately separate from
+	// deathRecorded rather than seeding it: a stale non-dead hook file read at
+	// startup re-arms deathRecorded, which would bring the repeat dump back.
+	// Cleared once the session is seen alive after the load (clearLoadedDead*):
+	// a persisted error is not always a death — OpenCode reports a recoverable
+	// session.error with its pane still up — and a session revived in its own
+	// pane is a new life whose death must still be dumped.
+	loadedDead bool
+	// loadedAt is when FromRow built the session. A hook stamped after it is
+	// proof of a life since the load; one from before it is a stale file.
+	loadedAt time.Time
 
 	// launchResumed records whether the latest launch continued an existing
 	// conversation (a resume or fork id) rather than starting fresh, for
@@ -956,6 +972,11 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		// "finished", since it sends the same one for /clear.
 		if hs.Status != "" && hs.Status != "dead" && hs.Reason == "" {
 			s.deathRecorded = false
+			// Only a hook written after the load proves a new life; the
+			// stale file read at startup must not lift the latch.
+			if hs.UpdatedAt.After(s.loadedAt) {
+				s.loadedDead = false
+			}
 		}
 	}
 	s.hookStatus = hs.Status
@@ -1094,6 +1115,7 @@ func (s *Session) Restart() error {
 	s.TmuxSessionName = newTmux.Name
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
@@ -1184,6 +1206,7 @@ func (s *Session) RespawnClaude() error {
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	s.launchResumed = s.launchWillResumeLocked()
 	s.mu.Unlock()
 
@@ -1395,6 +1418,7 @@ func (s *Session) AdoptExternalRelaunch(tmuxName, claudeSessionID string) {
 	s.TmuxSessionName = tmuxName
 	s.Status = StatusStarting
 	s.deathRecorded = false
+	s.loadedDead = false
 	if claudeSessionID != "" {
 		s.ClaudeSessionID = claudeSessionID
 	}
@@ -1459,6 +1483,7 @@ func (s *Session) UpdateStatus() {
 		}
 		return
 	}
+	s.clearLoadedDeadIfPaneOnlyDeath()
 
 	// Hook fast path: hooks are authoritative as long as the session is alive.
 	// No time-based expiry — IsAlive/IsPaneDead above handle stale scenarios.
@@ -2220,6 +2245,25 @@ func detectPaneStatusFor(a agent.Type, clean string) Status {
 	return detectStatus(clean, debuglog.Logger)
 }
 
+// clearLoadedDeadIfPaneOnlyDeath lifts the loaded-dead latch for an agent
+// whose only death signal is the pane or tmux session going away (Codex,
+// OpenCode): for them, passing those two checks is proof the agent is alive,
+// so a row persisted as error was an in-session error (OpenCode's recoverable
+// session.error), not a death. Claude and Copilot can also die by hook, which
+// the watcher may not have seeded yet on the first pass, so they wait for a
+// fresh hook instead (UpdateHookStatus).
+func (s *Session) clearLoadedDeadIfPaneOnlyDeath() {
+	if s.Agent != agent.Codex && s.Agent != agent.OpenCode {
+		return
+	}
+	s.mu.Lock()
+	// A dead hook is still a death report, whatever the pane says.
+	if s.hookStatus != "dead" {
+		s.loadedDead = false
+	}
+	s.mu.Unlock()
+}
+
 // FromRow reconstructs a Session from a storage row, reconnecting to tmux.
 func FromRow(row *SessionRow) *Session {
 	ts := tmux.ReconnectSession(row.TmuxSession, row.Title, row.ProjectPath)
@@ -2253,6 +2297,8 @@ func FromRow(row *SessionRow) *Session {
 		// not snoozed, so nothing renders stale in the meantime.
 		snoozedUntil: row.SnoozedUntil,
 		tmuxSession:  ts,
+		loadedDead:   status == StatusError,
+		loadedAt:     time.Now(),
 	}
 }
 

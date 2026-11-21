@@ -124,3 +124,44 @@ func TestExtendedKeysSafe(t *testing.T) {
 		})
 	}
 }
+
+func TestHyperlinksSupported(t *testing.T) {
+	tests := []struct {
+		major, minor int
+		ok, want     bool
+	}{
+		{3, 3, true, false},
+		{3, 4, true, true},
+		{3, 7, true, true},
+		{4, 0, true, true},
+		{2, 9, true, false},
+		{0, 0, false, true}, // dev build: assume modern
+	}
+	for _, tt := range tests {
+		if got := hyperlinksSupported(tt.major, tt.minor, tt.ok); got != tt.want {
+			t.Errorf("hyperlinksSupported(%d, %d, %v) = %v, want %v", tt.major, tt.minor, tt.ok, got, tt.want)
+		}
+	}
+}
+
+func TestHasTerminalFeatureMatchesWholeEntries(t *testing.T) {
+	out := "xterm*:clipboard:ccolour:cstyle:focus:title\nscreen*:extkeys\n*:RGB\nxterm*:hyperlinks\n"
+	tests := []struct {
+		entry string
+		want  bool
+	}{
+		{"xterm*:hyperlinks", true},
+		{"*:RGB", true},
+		{"xterm*:extkeys", false}, // only screen*:extkeys is present
+		{"focus", false},          // a substring of an entry is not the entry
+	}
+	for _, tt := range tests {
+		if got := hasTerminalFeature(out, tt.entry); got != tt.want {
+			t.Errorf("hasTerminalFeature(%q) = %v, want %v", tt.entry, got, tt.want)
+		}
+	}
+	// Comma-joined values, as `set -as terminal-features ',x'` leaves them.
+	if !hasTerminalFeature(",xterm-256color:RGB,xterm*:extkeys", "xterm*:extkeys") {
+		t.Error("comma-joined entry not found")
+	}
+}

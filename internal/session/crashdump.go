@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -52,7 +53,7 @@ func (s *Session) triggerCrashDump(reason string) {
 		return
 	}
 	s.mu.Lock()
-	if s.deathRecorded {
+	if s.deathRecorded || s.loadedDead {
 		s.mu.Unlock()
 		return
 	}
@@ -169,6 +170,45 @@ func writeCrashDump(sessionID, title, tmuxName, reason, cachedPane string) {
 		return
 	}
 	debuglog.Logger.Warn("crashdump: written", "path", path, "id", sessionID, "reason", reason)
+	pruneCrashDumps(dir, maxCrashDumps)
+}
+
+// maxCrashDumps caps ~/.config/fleet/crashes. Dumps carry raw pane content, so
+// an unbounded directory is both clutter and a growing pile of old screens.
+const maxCrashDumps = 100
+
+// pruneCrashDumps keeps the newest `keep` dumps in dir and removes the rest.
+// Names end in a sortable timestamp, but ids differ per session, so order by
+// mtime rather than name. Best effort: a failure costs disk, not correctness.
+func pruneCrashDumps(dir string, keep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type dump struct {
+		path string
+		mod  time.Time
+	}
+	dumps := make([]dump, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".txt" {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		dumps = append(dumps, dump{filepath.Join(dir, e.Name()), info.ModTime()})
+	}
+	if len(dumps) <= keep {
+		return
+	}
+	sort.Slice(dumps, func(i, j int) bool { return dumps[i].mod.After(dumps[j].mod) })
+	for _, d := range dumps[keep:] {
+		if err := os.Remove(d.path); err != nil && !os.IsNotExist(err) {
+			debuglog.Logger.Warn("crashdump: prune failed", "path", d.path, "err", err)
+		}
+	}
 }
 
 // tmuxPaneDeadInfo queries tmux for pane death info. Returns an error rather

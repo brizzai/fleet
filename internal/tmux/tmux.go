@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/envflag"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -191,7 +192,7 @@ func allowPassthroughSupported(major, minor int, ok bool) bool {
 // the option. Called from Start (server guaranteed up) + the startup
 // bootstrap. Best-effort; a no-server attempt just returns.
 func EnsureCopyCommand() {
-	if envIsTruthy("FLEET_NO_COPY_COMMAND") {
+	if envflag.Set("FLEET_NO_COPY_COMMAND") {
 		return
 	}
 	out, err := exec.Command("tmux", "show-options", "-sv", "copy-command").Output()
@@ -319,7 +320,7 @@ func clipboardCopyCommandFor(goos string, getenv func(string) string, hasTool fu
 // after a restart still gets configured. Called from Start (server guaranteed
 // up) + the startup bootstrap. Best-effort; a no-server attempt just returns.
 func EnsureExtendedKeys() {
-	if envIsTruthy("FLEET_NO_EXTENDED_KEYS") {
+	if envflag.Set("FLEET_NO_EXTENDED_KEYS") {
 		return
 	}
 	if !extendedKeysSafe(serverVersionParts()) {
@@ -334,15 +335,89 @@ func EnsureExtendedKeys() {
 	if v := strings.TrimSpace(string(out)); v != "on" && v != "always" {
 		_ = exec.Command("tmux", "set-option", "-s", "extended-keys", "on").Run()
 	}
-	// Advertise extkeys for xterm-like outer terminals, once. Match the exact
-	// `xterm*:extkeys` entry, not a bare `extkeys` substring: a user may already
+	// Advertise extkeys for xterm-like outer terminals, once. A user may already
 	// carry extkeys for a different pattern (e.g. `screen*:extkeys`), and we still
-	// need to add the xterm entry. terminal-features is additive, so this also
-	// guards against piling up the same entry across calls.
+	// need to add the xterm entry.
+	ensureTerminalFeature("xterm*:extkeys")
+}
+
+// ExtendedKeysUsable reports whether fleet turns on extended keys for this
+// server: not opted out, and not a tmux release whose extended-keys parser is
+// broken (extendedKeysSafe). Advice that relies on tmux passing a modified key
+// through — the zellij Shift+Enter tip — is only true when this is. Reads the
+// cached server version, so the first call may run one tmux command.
+func ExtendedKeysUsable() bool {
+	return !envflag.Set("FLEET_NO_EXTENDED_KEYS") && extendedKeysSafe(serverVersionParts())
+}
+
+// ensureTerminalFeature appends entry to the server's terminal-features unless
+// an identical entry is already there. terminal-features is an array option
+// that only grows, so the check is what keeps repeated calls (every Start)
+// from piling up copies on a server fleet shares with the user. Matching is on
+// the whole entry, never a substring: `xterm*:extkeys` must not be satisfied
+// by `screen*:extkeys` or by an entry that merely contains it.
+func ensureTerminalFeature(entry string) {
 	feat, err := exec.Command("tmux", "show-options", "-sv", "terminal-features").Output()
-	if err == nil && !strings.Contains(string(feat), "xterm*:extkeys") {
-		_ = exec.Command("tmux", "set-option", "-sa", "terminal-features", "xterm*:extkeys").Run()
+	if err != nil {
+		return // No server yet (or tmux error) — retry on a later call.
 	}
+	if !hasTerminalFeature(string(feat), entry) {
+		_ = exec.Command("tmux", "set-option", "-sa", "terminal-features", entry).Run()
+	}
+}
+
+// hasTerminalFeature reports whether `show-options -sv terminal-features`
+// output already holds entry exactly. tmux prints one entry per line, but a
+// value appended in the common tmux.conf idiom
+// `set -as terminal-features ',xterm*:RGB'` can carry commas, so both split.
+// An entry itself never contains a comma (its features are ':'-separated).
+func hasTerminalFeature(out, entry string) bool {
+	for _, e := range strings.FieldsFunc(out, func(r rune) bool { return r == '\n' || r == ',' }) {
+		if strings.TrimSpace(e) == entry {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureHyperlinks lets OSC 8 hyperlinks from an agent reach the outer
+// terminal, so Cmd+click (iTerm2, Ghostty, kitty, WezTerm) opens them.
+//
+// tmux understands OSC 8 from 3.4, but only forwards it to a client whose
+// terminal it believes supports hyperlinks — the `hyperlinks` terminal
+// feature. tmux auto-detects that only for a few terminals it can identify by
+// name, so any client it can't name keeps none and every link is reduced to
+// its plain text. That includes everything nested: under zellij the client's
+// TERM is xterm-256color and tmux sees zellij, not iTerm2 — measured, an
+// attached client there reported `bpaste,ccolour,clipboard,cstyle,extkeys,
+// focus,RGB,title` and no hyperlinks.
+//
+// Appends `xterm*:hyperlinks` once through ensureTerminalFeature, the same
+// shared-server etiquette as the extkeys entry: whole-entry match, never
+// duplicated. A terminal that can't render OSC 8 ignores the
+// sequence and shows the text, which is why advertising it broadly is safe.
+// Takes effect for clients that attach afterwards. FLEET_NO_HYPERLINKS opts out.
+func EnsureHyperlinks() {
+	if envflag.Set("FLEET_NO_HYPERLINKS") {
+		return
+	}
+	if !hyperlinksSupported(serverVersion()) {
+		return
+	}
+	ensureTerminalFeature("xterm*:hyperlinks")
+}
+
+// hyperlinksSupported reports whether tmux knows the `hyperlinks` terminal
+// feature (added in 3.4). Older tmux rejects the unknown feature name; an
+// unparseable version (dev build) is treated as new, like the other gates —
+// which includes the first call landing before any server exists, since the
+// version is read once per process. The gate is best-effort: on a pre-3.4
+// server the set-option is rejected and its error ignored.
+func hyperlinksSupported(major, minor int, ok bool) bool {
+	if !ok {
+		return true
+	}
+	return major > 3 || (major == 3 && minor >= 4)
 }
 
 // extendedKeysSafe reports whether this tmux can be asked for extended keys
@@ -382,16 +457,6 @@ func extendedKeysSafe(major, minor int, suffix string, ok bool) bool {
 	return true
 }
 
-// envIsTruthy reports whether the named env var is set to a common truthy value.
-func envIsTruthy(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
-}
-
 // DirAccessBlocked reports whether the tmux server is blocked by macOS from
 // reading dir — the TCC "Operation not permitted" wall that hits ~/Documents,
 // ~/Desktop and ~/Downloads. The check must run *inside* the tmux server: it
@@ -410,7 +475,7 @@ func envIsTruthy(name string) bool {
 // Set FLEET_NO_TCC_WARNING to skip the probe entirely (e.g. a remote tmux over
 // SSH where the block is expected).
 func DirAccessBlocked(dir string) (blocked, determined bool) {
-	if dir == "" || envIsTruthy("FLEET_NO_TCC_WARNING") {
+	if dir == "" || envflag.Set("FLEET_NO_TCC_WARNING") {
 		return false, true
 	}
 	f, err := os.CreateTemp("", "fleet-tcc-*")
@@ -491,6 +556,7 @@ func (s *Session) Start(command string, env ...string) error {
 	// Forward extended keys (Shift+Enter et al.) into the pane instead of
 	// collapsing them to plain Enter.
 	EnsureExtendedKeys()
+	EnsureHyperlinks()
 
 	// Batch set options.
 	// remain-on-exit keeps the dead pane around so the crash dump can read

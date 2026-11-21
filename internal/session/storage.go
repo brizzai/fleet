@@ -12,6 +12,7 @@ import (
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/github"
+	"github.com/brizzai/fleet/internal/sqliteutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -76,6 +77,23 @@ func DefaultDBPath() string {
 	return filepath.Join(home, ".config", "fleet", "state.db")
 }
 
+// stateDBMaxConns caps the connection pool. Matches stats.db.
+const stateDBMaxConns = 4
+
+// stateDBDSN builds the driver DSN for state.db. The pragmas ride the DSN so
+// every pooled connection gets them (see sqliteutil.DSN for why that matters:
+// measured, 1359 of 1600 concurrent upserts failed with SQLITE_BUSY when they
+// were set by Exec, and the slot_bindings ON DELETE CASCADE went unenforced on
+// most connections).
+//
+// _txlock=immediate makes Begin take the write lock up front. A deferred
+// transaction that reads and then tries to write can hit SQLITE_BUSY without
+// the busy handler ever being consulted (the lock-upgrade deadlock rule);
+// starting immediate turns that into an ordinary wait under busy_timeout.
+func stateDBDSN(path string) string {
+	return sqliteutil.DSN(path, []string{"busy_timeout(5000)", "journal_mode(WAL)", "foreign_keys(1)"}, "immediate")
+}
+
 // Open opens or creates the SQLite database with WAL mode.
 func Open(dbPath string) (*StateDB, error) {
 	debuglog.Logger.Info("opening database", "path", dbPath)
@@ -85,24 +103,22 @@ func Open(dbPath string) (*StateDB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", stateDBDSN(dbPath))
 	if err != nil {
 		debuglog.Logger.Error("failed to open database", "path", dbPath, "error", err)
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+	// Bounded like stats.db. The TUI writes from several goroutines at once
+	// (the git worker fans out 4-wide), and each extra connection is one more
+	// writer contending for WAL's single write lock.
+	db.SetMaxOpenConns(stateDBMaxConns)
 
-	// Configure for concurrent access.
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			debuglog.Logger.Error("failed to set pragma", "pragma", p, "error", err)
-			db.Close()
-			return nil, fmt.Errorf("set pragma %q: %w", p, err)
-		}
+	// Ping forces the first connection open, so a bad path or a pragma the
+	// driver rejects fails here rather than on the first query.
+	if err := db.Ping(); err != nil {
+		debuglog.Logger.Error("failed to open database", "path", dbPath, "error", err)
+		db.Close()
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	s := &StateDB{db: db}

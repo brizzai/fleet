@@ -469,6 +469,12 @@ type ConfirmDialog struct {
 	// when its gen matches the gen recorded when the dialog was shown.
 	scanLine string
 	scanGen  int
+	// scanPending holds y/Enter until the scan's result lands. Every scan today
+	// guards a worktree removal (`git worktree remove --force`), and the scan
+	// is where the live uncommitted-changes check rides: the cached dirty flag
+	// can be minutes old for an idle repo, so confirming before the scan
+	// answers could discard edits the dialog never warned about.
+	scanPending bool
 
 	// requireConfirm gates y/Enter behind an explicit checkbox the user must
 	// tick first — a safety brake for the heaviest deletes (e.g. forgetting a
@@ -494,6 +500,7 @@ func (d *ConfirmDialog) ShowDanger(title, subject string, details []string, onYe
 	d.onYes = onYes
 	d.scanLine = ""
 	d.scanGen = 0 // 0 is unused (nextHolderScanGen yields ≥1); invalidates any in-flight scan
+	d.scanPending = false
 	d.resetCheckbox()
 }
 
@@ -507,6 +514,7 @@ func (d *ConfirmDialog) ShowWarning(title, subject string, details []string, onY
 	d.onYes = onYes
 	d.scanLine = ""
 	d.scanGen = 0
+	d.scanPending = false
 	d.resetCheckbox()
 }
 
@@ -527,10 +535,12 @@ func (d *ConfirmDialog) RequireCheckbox(label string) {
 }
 
 // StartScan records the generation for an in-flight async scan and shows a
-// placeholder line. A subsequent SetScan with the same gen replaces it.
+// placeholder line. A subsequent SetScan with the same gen replaces it. Until
+// it does, y/Enter is held (scanPending) — esc still cancels.
 func (d *ConfirmDialog) StartScan(gen int, placeholder string) {
 	d.scanGen = gen
 	d.scanLine = placeholder
+	d.scanPending = true
 }
 
 // SetScan replaces the async scan line, but only if the dialog is still showing
@@ -539,6 +549,7 @@ func (d *ConfirmDialog) StartScan(gen int, placeholder string) {
 func (d *ConfirmDialog) SetScan(gen int, line string) {
 	if d.visible && gen == d.scanGen {
 		d.scanLine = line
+		d.scanPending = false
 	}
 }
 
@@ -552,6 +563,7 @@ func (d *ConfirmDialog) Show(message string, onYes func() tea.Msg) {
 	d.onYes = onYes
 	d.scanLine = ""
 	d.scanGen = 0
+	d.scanPending = false
 	d.resetCheckbox()
 }
 
@@ -571,8 +583,8 @@ func (d *ConfirmDialog) Update(msg tea.Msg) (*ConfirmDialog, tea.Cmd) {
 			}
 			return d, nil
 		case "y", "enter":
-			if d.requireConfirm && !d.confirmChecked {
-				return d, nil // gated: tick the checkbox (space) first
+			if d.confirmLocked() {
+				return d, nil // gated: tick the checkbox (space) first, or wait for the scan
 			}
 			d.Hide()
 			if d.onYes != nil {
@@ -585,6 +597,14 @@ func (d *ConfirmDialog) Update(msg tea.Msg) (*ConfirmDialog, tea.Cmd) {
 		}
 	}
 	return d, nil
+}
+
+// confirmLocked reports whether y/Enter is currently refused: the checkbox is
+// unticked, or an async scan the confirm depends on hasn't answered yet. The
+// key handler and the button's greyed look both read it, so the button never
+// looks live while the key is dead.
+func (d *ConfirmDialog) confirmLocked() bool {
+	return (d.requireConfirm && !d.confirmChecked) || d.scanPending
 }
 
 func (d *ConfirmDialog) borderColor() color.Color {
@@ -652,9 +672,9 @@ func (d *ConfirmDialog) View() string {
 	if d.dialogType == "danger" {
 		actionLabel = "y Delete"
 	}
-	// Grey the action while the checkbox gate is unticked so it reads as locked.
+	// Grey the action while it's locked (checkbox unticked or scan pending).
 	actionBg, actionFg := bc, ColorBg
-	if d.requireConfirm && !d.confirmChecked {
+	if d.confirmLocked() {
 		actionBg, actionFg = ColorBorder, ColorTextDim
 	}
 	actionBtn := lipgloss.NewStyle().
