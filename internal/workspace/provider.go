@@ -85,14 +85,15 @@ func (g *GitWorktreeProvider) Create(repoPath, name, branch, baseBranch string) 
 	if err != nil {
 		return nil, err
 	}
-	if err := checkOutsideRepoOnDisk(repoPath, path); err != nil {
-		return nil, err
-	}
 
 	debuglog.Logger.Info("git worktree create", "repo", repoPath, "name", name, "branch", branch, "baseBranch", baseBranch, "path", path)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	if err := checkOutsideRepoOnDisk(ctx, repoPath, path); err != nil {
+		return nil, err
+	}
 
 	// runAdd runs `git worktree add [extra...] <path> -b <branch> [base]`,
 	// retrying without -b if the branch already exists.

@@ -1,8 +1,10 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -116,9 +118,14 @@ func ResolveWorktreePath(repoPath, tmpl, name string) (string, error) {
 // (../wt-link -> repo/worktrees) passes the lexical check and still puts the
 // worktree inside the main checkout. dest's deepest existing ancestor is
 // resolved and the missing tail re-joined, so a destination whose directories
-// don't exist yet still works. It touches the disk, so it runs at creation
-// (on the worker), never from the per-frame preview.
-func checkOutsideRepoOnDisk(repoPath, dest string) error {
+// don't exist yet still works.
+//
+// It also refuses the repo's git directory and common git directory. With the
+// default layout both sit inside the checkout, but --separate-git-dir puts
+// them elsewhere, and a worktree checked out under e.g. refs/heads/ would read
+// to git as broken refs. It touches the disk and runs git, so it runs at
+// creation (on the worker), never from the per-frame preview.
+func checkOutsideRepoOnDisk(ctx context.Context, repoPath, dest string) error {
 	absRepo, err := filepath.Abs(repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve repo path: %w", err)
@@ -131,10 +138,51 @@ func checkOutsideRepoOnDisk(repoPath, dest string) error {
 	if err != nil {
 		return fmt.Errorf("resolve worktree path: %w", err)
 	}
-	if realDest == realRepo || strings.HasPrefix(realDest, realRepo+string(filepath.Separator)) {
+	if pathWithin(realDest, realRepo) {
 		return fmt.Errorf("worktree path %s resolves to %s, inside the repo (%s); point worktree_path outside it", dest, realDest, realRepo)
 	}
+	gitDirs, err := resolvedGitDirs(ctx, absRepo)
+	if err != nil {
+		return err
+	}
+	for _, dir := range gitDirs {
+		if pathWithin(realDest, dir) {
+			return fmt.Errorf("worktree path %s resolves to %s, inside the repo's git directory (%s); point worktree_path outside it", dest, realDest, dir)
+		}
+	}
 	return nil
+}
+
+// resolvedGitDirs returns the symlink-resolved git directory and common git
+// directory of the checkout at absRepo (one entry when they coincide).
+func resolvedGitDirs(ctx context.Context, absRepo string) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", absRepo, "rev-parse", "--absolute-git-dir", "--git-common-dir").Output()
+	if err != nil {
+		return nil, fmt.Errorf("resolve git directories: %w", err)
+	}
+	var dirs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		dir := strings.TrimSpace(line)
+		if dir == "" {
+			continue
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(absRepo, dir)
+		}
+		real, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve git directory %s: %w", dir, err)
+		}
+		if len(dirs) == 0 || dirs[0] != real {
+			dirs = append(dirs, real)
+		}
+	}
+	return dirs, nil
+}
+
+// pathWithin reports whether p is dir or nested beneath it.
+func pathWithin(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
 }
 
 // resolveExistingPrefix resolves symlinks in the longest existing ancestor of

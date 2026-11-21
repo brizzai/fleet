@@ -278,3 +278,40 @@ func TestResolveExistingPrefix(t *testing.T) {
 		}
 	}
 }
+
+// With --separate-git-dir the git directory lives outside the checkout; a
+// template pointing into it would check files out under refs/heads/, which
+// git then reads as broken refs. Create must refuse it.
+func TestCreateRefusesSeparateGitDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	repo := filepath.Join(root, "proj")
+	admin := filepath.Join(root, "admin")
+	env := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main", "--separate-git-dir", admin, repo)
+	run("-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+
+	p := &GitWorktreeProvider{PathTemplate: "../admin/refs/heads/wt-{{name}}"}
+	if _, err := p.Create(repo, "feat", "feat", ""); err == nil || !strings.Contains(err.Error(), "git directory") {
+		t.Fatalf("Create into the separate git dir: err = %v, want git-directory refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(admin, "refs", "heads", "wt-feat")); !os.IsNotExist(err) {
+		t.Errorf("worktree was created inside the git dir (stat err %v)", err)
+	}
+
+	// An ordinary sibling placement still works with a separate git dir.
+	ok := &GitWorktreeProvider{}
+	if _, err := ok.Create(repo, "other", "other", ""); err != nil {
+		t.Fatalf("Create beside the repo: %v", err)
+	}
+}
