@@ -80,11 +80,15 @@ func socketFromEnv() string {
 // the inherited one. For anyone running fleet under a named socket
 // (`tmux -L work`) every session lives there, so the attach would look for it
 // on a server that has never heard of it.
+//
+// The attach first unsets the window's window-size, which ResizeWindow left at
+// manual to fit the preview, so the full-screen view follows this terminal.
 func attachArgs(name string) []string {
+	args := []string{"set-option", "-wu", "-t", name, "window-size", ";", "attach-session", "-t", name}
 	if sock := socketFromEnv(); sock != "" {
-		return []string{"-S", sock, "attach-session", "-t", name}
+		return append([]string{"-S", sock}, args...)
 	}
-	return []string{"attach-session", "-t", name}
+	return args
 }
 
 func clientEnv() []string {

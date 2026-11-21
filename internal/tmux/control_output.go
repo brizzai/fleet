@@ -59,10 +59,11 @@ func parseControlOutput(line string) (payload []byte, ok bool) {
 // OutputReader attaches a tmux control-mode client to a target session and
 // streams its panes' live output (octal-decoded) to a callback until Close.
 // It attaches to the *target* session with output enabled (unlike ControlClient,
-// which attaches to a private hidden session and suppresses output). The attached
-// client carries a size, which — since fleet's shell sessions are otherwise
-// headless — sets the pane geometry; the caller sizes it to the drawer via
-// NewOutputReader's w/h and Resize. Keystrokes are NOT sent over this connection:
+// which attaches to a private hidden session and suppresses output). tmux ignores
+// a control client's PTY size and leaves the pane at default-size (80x24) until
+// the client declares one with `refresh-client -C`, so NewOutputReader and Resize
+// send that — otherwise the shell wraps at 80 columns inside a wider emulator and
+// its redraws land on the wrong rows. Keystrokes are NOT sent over this connection:
 // the drawer forwards input through the shared ControlClient (ui.getControlClient).
 type OutputReader struct {
 	mu     sync.Mutex
@@ -100,6 +101,9 @@ func NewOutputReader(targetSession string, w, h int, onData func([]byte)) (*Outp
 		return nil, fmt.Errorf("tmux control attach failed: %w", err)
 	}
 	r := &OutputReader{ptmx: ptmx, cmd: cmd, target: targetSession}
+	if err := r.setClientSize(w, h); err != nil {
+		debuglog.Logger.Debug("tmux output reader size failed", "target", targetSession, "err", err)
+	}
 	go r.readLoop(onData)
 	debuglog.Logger.Info("tmux output reader attached", "target", targetSession, "size", fmt.Sprintf("%dx%d", w, h))
 	return r, nil
@@ -133,16 +137,25 @@ func (r *OutputReader) readLoop(onData func([]byte)) {
 // The drawer treats a failed reader like a detached one and re-attaches.
 func (r *OutputReader) Failed() bool { return r.failed.Load() }
 
-// Resize re-sizes the control client (and thus the headless pane) to w×h by
-// resizing the PTY, which delivers SIGWINCH to tmux. Keep this in lockstep with
-// the emulator's Resize or wrap points diverge.
+// Resize re-sizes the control client (and thus the headless pane) to w×h. Keep
+// this in lockstep with the emulator's Resize or wrap points diverge.
 func (r *OutputReader) Resize(w, h int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return fmt.Errorf("output reader closed")
 	}
-	return pty.Setsize(r.ptmx, winsize(w, h))
+	if err := pty.Setsize(r.ptmx, winsize(w, h)); err != nil {
+		return err
+	}
+	return r.setClientSize(w, h)
+}
+
+// setClientSize is a short write on the control connection, not a fork, so
+// Resize stays cheap on the Update goroutine.
+func (r *OutputReader) setClientSize(w, h int) error {
+	_, err := fmt.Fprintf(r.ptmx, "refresh-client -C %d,%d\n", w, h)
+	return err
 }
 
 // IsClosed reports whether the reader has been closed.
