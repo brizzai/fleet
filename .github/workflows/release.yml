@@ -12,9 +12,6 @@ on:
         type: string
 
 env:
-  # Exact patch pin: govulncheck is a required check and fails on stdlib vulns
-  # fixed only in the newest patch (1.26.11: GO-2026-6859, net/http). setup-go
-  # pulls it from go.dev until the actions manifest lists it.
   GO_VERSION: "1.26.11"
 
 permissions:
@@ -27,7 +24,7 @@ jobs:
       (github.event_name == 'workflow_dispatch') ||
       (github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'autorelease'))
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -74,7 +71,7 @@ jobs:
           fi
           git push origin "$TAG" 2>/dev/null || echo "Tag $TAG already pushed"
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
