@@ -174,3 +174,18 @@ func ProviderPathSource(p Provider) string {
 	}
 	return ""
 }
+
+// ProviderPlacedFrom returns p with its worktree placement read from repoPath
+// instead of the directory p was resolved from. The TUI resolves a provider
+// from the selected checkout, which may be a linked worktree, then creates from
+// the main checkout; .fleet.local.json is untracked and usually exists only in
+// the main one, so placement must be read there. Only the built-in provider
+// has a placement; any other provider is returned unchanged — re-resolving it
+// whole could flip built-in and custom mid-flow.
+func ProviderPlacedFrom(p Provider, repoPath string) Provider {
+	if _, ok := p.(*GitWorktreeProvider); !ok {
+		return p
+	}
+	tmpl, source := WorktreePathSetting(repoPath)
+	return &GitWorktreeProvider{PathTemplate: tmpl, PathSource: source}
+}

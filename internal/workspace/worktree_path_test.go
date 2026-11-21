@@ -121,6 +121,27 @@ func TestWorktreePathSettingSource(t *testing.T) {
 	}
 }
 
+// A linked worktree has no .fleet.local.json (it's untracked); the main
+// checkout's must govern where its sibling worktrees go.
+func TestProviderPlacedFromMainCheckout(t *testing.T) {
+	t.Cleanup(func() { SetGlobalWorktreePath("") })
+	main, linked := t.TempDir(), t.TempDir()
+	writeFile(t, main, ".fleet.local.json", `{"worktree_path":"../{{repo}}.worktrees"}`)
+
+	p := ProviderPlacedFrom(ResolveProvider(linked), main)
+	if got := ProviderPathTemplate(p); got != "../{{repo}}.worktrees" {
+		t.Errorf("template = %q, want the main checkout's", got)
+	}
+	if got := ProviderPathSource(p); got != ".fleet.local.json" {
+		t.Errorf("source = %q, want .fleet.local.json", got)
+	}
+
+	shell := &ShellProvider{}
+	if got := ProviderPlacedFrom(shell, main); got != Provider(shell) {
+		t.Errorf("custom provider was replaced: %#v", got)
+	}
+}
+
 // End to end: git creates the missing parent directory, and Destroy finds the
 // worktree by the same template.
 func TestGitWorktreeProviderUsesTemplate(t *testing.T) {

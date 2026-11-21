@@ -68,16 +68,20 @@ type settingsCategory struct {
 // categories on the left, the selected category's settings on the right, and a
 // live mock-sidebar preview for the Appearance category.
 type SettingsDialog struct {
-	visible        bool
-	width          int
-	height         int
-	cfg            *config.Config
-	origTheme      string
-	categories     []settingsCategory
-	detailWByCat   []int // natural detail-column width per category (cached; depends only on static labels/presets)
-	categoryCursor int
-	rowCursor      int
-	focus          settingsFocus
+	visible   bool
+	width     int
+	height    int
+	cfg       *config.Config
+	origTheme string
+	// origWorktreePath is worktree_path as Settings opened on it. A hand-written
+	// template must stay in the Worktree location ring for the whole visit, not
+	// just until the first arrow press moves the value onto a preset.
+	origWorktreePath string
+	categories       []settingsCategory
+	detailWByCat     []int // natural detail-column width per category (cached; depends only on static labels/presets)
+	categoryCursor   int
+	rowCursor        int
+	focus            settingsFocus
 }
 
 // NewSettingsDialog creates a settings dialog.
@@ -96,6 +100,7 @@ func NewSettingsDialog(cfg *config.Config) *SettingsDialog {
 func (d *SettingsDialog) Show() {
 	d.visible = true
 	d.origTheme = d.cfg.Theme
+	d.origWorktreePath = d.cfg.WorktreePath
 	d.categoryCursor = 0
 	d.focus = focusCategories
 	d.rowCursor = d.firstSelectableRow(0)
@@ -682,7 +687,7 @@ func buildSettingsCategories() []settingsCategory {
 					return maxStrW(append(append([]string{}, worktreeLocationLabels...), worktreeLocationCustom))
 				},
 				cycle: func(d *SettingsDialog, dir int) {
-					d.cfg.WorktreePath = cycleWorktreeLocation(d.cfg.WorktreePath, dir)
+					d.cfg.WorktreePath = cycleWorktreeLocation(d.cfg.WorktreePath, d.origWorktreePath, dir)
 					workspace.SetGlobalWorktreePath(d.cfg.WorktreePath)
 				},
 			},
@@ -813,15 +818,21 @@ func worktreeLocationLabel(tmpl string) string {
 	return worktreeLocationCustom
 }
 
-// cycleWorktreeLocation steps through the presets. A custom template stays in
-// the ring (ahead of the presets, like an editor this machine lacks) so cycling
-// past it and back restores it instead of silently overwriting it.
-func cycleWorktreeLocation(cur string, dir int) string {
+// cycleWorktreeLocation steps through the presets. A custom template — the
+// one Settings opened on (custom), or cur itself when that is custom — sits in
+// the ring ahead of the presets, like an editor this machine lacks, so stepping
+// away and back restores it instead of silently overwriting it on save.
+func cycleWorktreeLocation(cur, custom string, dir int) string {
+	if worktreeLocationIndex(cur) < 0 {
+		custom = cur
+	}
 	ring := worktreeLocationPresets
-	idx := worktreeLocationIndex(cur)
-	if idx < 0 {
-		ring = append([]string{cur}, worktreeLocationPresets...)
-		idx = 0
+	if worktreeLocationIndex(custom) < 0 {
+		ring = append([]string{custom}, worktreeLocationPresets...)
+	}
+	idx := 0 // cur is the custom entry unless it matches a preset
+	if i := worktreeLocationIndex(cur); i >= 0 {
+		idx = i + len(ring) - len(worktreeLocationPresets)
 	}
 	return ring[(idx+dir+len(ring))%len(ring)]
 }

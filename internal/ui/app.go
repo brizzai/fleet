@@ -8344,6 +8344,9 @@ func (h *Home) fetchWorkspaceListForRepo(repoPath string) tea.Cmd {
 		var branches []git.BranchInfo
 		if !provider.IsCustom() {
 			repoPath = git.GetMainWorktreePath(repoPath)
+			// Placement too: the provider was resolved from the selected
+			// checkout, but .fleet.local.json usually lives only in the main one.
+			provider = workspace.ProviderPlacedFrom(provider, repoPath)
 			// The normalized main-clone path may not be a tracked gitInfoCache key
 			// (origin with only a worktree tracked), which would misgroup the
 			// Creating… phantom under a spurious local:<dir> header. Resolve the
