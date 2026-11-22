@@ -1,6 +1,9 @@
 package github
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestDeriveCIStatus(t *testing.T) {
 	tests := []struct {
@@ -353,5 +356,82 @@ func TestDeriveCIStatusSupersededFailure(t *testing.T) {
 				t.Errorf("deriveCIStatus() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A StatusContext row (the commit-status API: policy-bot, external CI) names
+// itself with context/state, not name/status/conclusion. Reading only the
+// CheckRun fields dropped these rows as nameless ghosts, so a pending
+// approval-policy bot left a BLOCKED PR reading green (astelia-pipelines#8487)
+// and a failed external CI could never turn the badge red.
+func TestDeriveCIStatusCountsStatusContexts(t *testing.T) {
+	green := statusCheckEntry{Name: "build", Status: "COMPLETED", Conclusion: "SUCCESS"}
+	tests := []struct {
+		name   string
+		checks []statusCheckEntry
+		ignore []string
+		want   string
+	}{
+		{"pending context holds an otherwise green rollup",
+			[]statusCheckEntry{green, {Context: "policy-bot: main", State: "PENDING"}}, nil, "PENDING"},
+		{"expected context is a required status nobody posted yet",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "EXPECTED"}}, nil, "PENDING"},
+		{"failed context turns it red",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "FAILURE"}}, nil, "FAILURE"},
+		{"errored context turns it red",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "ERROR"}}, nil, "FAILURE"},
+		{"successful context stays green",
+			[]statusCheckEntry{green, {Context: "policy-bot: main", State: "SUCCESS"}}, nil, "SUCCESS"},
+		{"state is matched case-insensitively",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "failure"}}, nil, "FAILURE"},
+		{"pr_checks.ignore matches a context by its name",
+			[]statusCheckEntry{green, {Context: "policy-bot: main", State: "PENDING"}}, []string{"policy-bot*"}, "SUCCESS"},
+		{"a row with neither name nor context is still a ghost",
+			[]statusCheckEntry{green, {State: "FAILURE"}}, nil, "SUCCESS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deriveCIStatus(tt.checks, tt.ignore); got != tt.want {
+				t.Errorf("deriveCIStatus = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The rollup is decoded straight from gh's JSON, so pin the field names
+// against the shape gh actually emits for a StatusContext.
+func TestStatusContextDecodesFromGhJSON(t *testing.T) {
+	raw := `{"mergeStateStatus":"BLOCKED","statusCheckRollup":[
+		{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+		{"__typename":"StatusContext","context":"policy-bot: main","startedAt":"2026-11-22T14:15:35Z","state":"PENDING","targetUrl":"https://policy-bot.example/details/o/r/1"}]}`
+	var resp ghPRResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.MergeStateStatus != "BLOCKED" {
+		t.Errorf("MergeStateStatus = %q, want BLOCKED", resp.MergeStateStatus)
+	}
+	if got := deriveCIStatus(resp.StatusCheckRollup, nil); got != "PENDING" {
+		t.Errorf("deriveCIStatus = %q, want PENDING", got)
+	}
+}
+
+func TestReadyToMergeRespectsMergeState(t *testing.T) {
+	for _, tt := range []struct {
+		state string
+		want  bool
+	}{
+		{"CLEAN", true},
+		{"HAS_HOOKS", true},
+		{"UNSTABLE", true}, // only non-required checks failing; GitHub merges it
+		{"UNKNOWN", true},  // computed lazily: a cold read must not flicker green off
+		{"", true},         // older gh / field absent
+		{"BLOCKED", false},
+		{"BEHIND", false},
+	} {
+		pr := &PR{ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: tt.state}
+		if got := pr.ReadyToMerge(); got != tt.want {
+			t.Errorf("ReadyToMerge with %q = %v, want %v", tt.state, got, tt.want)
+		}
 	}
 }

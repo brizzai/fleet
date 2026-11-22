@@ -236,6 +236,10 @@ func prState(pr *github.PR) string {
 		return fmt.Sprintf("%d-threads", pr.UnresolvedThreads)
 	case pr.CIStatus == "PENDING":
 		return "ci-running"
+	case pr.ReviewDecision == "APPROVED" && pr.MergeStateStatus == "BEHIND":
+		return "behind"
+	case pr.ReviewDecision == "APPROVED" && pr.MergeStateStatus == "BLOCKED":
+		return "blocked"
 	case pr.ReviewDecision == "APPROVED":
 		return "approved"
 	default:

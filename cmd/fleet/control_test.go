@@ -359,3 +359,14 @@ func TestPrepareLaunchChecksTheResumedConversation(t *testing.T) {
 		t.Errorf("fresh: err = %v, memory = %q, row = %q", err, ob.Session.ClaudeSessionID, ob.Row.ClaudeSessionID)
 	}
 }
+
+// An approved PR GitHub won't merge must not read "approved" to a
+// supervising agent — that word is what it acts on.
+func TestPRStateNamesAMergeBlock(t *testing.T) {
+	for state, want := range map[string]string{"BLOCKED": "blocked", "BEHIND": "behind", "CLEAN": "approved", "": "approved"} {
+		pr := &github.PR{Number: 1, State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: state}
+		if got := prState(pr); got != want {
+			t.Errorf("prState with merge state %q = %q, want %q", state, got, want)
+		}
+	}
+}
