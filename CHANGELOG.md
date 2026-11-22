@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.49.0] - 2026-11-22
+
+### Highlights
+
+- **Antigravity CLI sessions.** You can now run Google's `agy` beside Claude, Codex, OpenCode and Copilot: pick **Antigravity** in the `A` picker (or `--agent antigravity` on `fleet add` / `fleet worktree`) and get live status, `r` resume, `Y` approve and agy's own session titles.
+
+### Added
+
+- **Antigravity CLI sessions.** You can now run Google's `agy` beside Claude, Codex, OpenCode and Copilot: pick **Antigravity** in the `A` picker (or `--agent antigravity` on `fleet add` / `fleet worktree`) and get live status, `r` resume, `Y` approve and agy's own session titles.
+- **Choose where worktrees go.** You can now pick where worktrees go in Settings (`S` → Behavior → Worktree location), or set `worktree_path` in `config.json` (or a repo's `.fleet.local.json`) to keep worktrees in one place: `"../{{repo}}.worktrees"` puts them in `fleet.worktrees/<branch>` instead of scattering `fleet-<branch>` folders next to your repo.
+
+### Improved
+
+- **Links you can Cmd+click.** URLs agents print now stay clickable through fleet's tmux, including inside zellij, instead of arriving as plain text.
+- **Idle fleet, idle CPU.** fleet now checks git every 2s only in repos with an active agent, instead of running `git status` in every repo every 2s — on large worktrees that's ~80% of a CPU core back while you're not doing anything.
+
+### Changed
+
+- **One TUI at a time.** Starting a second `fleet` TUI now tells you one is already running instead of doubling CPU and database load. Set `FLEET_ALLOW_MULTIPLE=1` to start one anyway; CLI commands are unaffected.
+
+### Fixed
+
+- **One crash dump per crash.** A dead session no longer writes a new file to `~/.config/fleet/crashes` on every launch, and the folder now keeps only the newest 100.
+- **No more "database is locked".** Background writes no longer fail with `SQLITE_BUSY`, even with CLI commands running alongside the TUI.
+- **Linux restarts fixed.** After an in-place restart on Debian or Ubuntu, `fleet status` no longer calls a running agent "exited", and `fleet send` no longer refuses it as a shell.
+
 ## [2.48.1] - 2026-11-08
 
 ### Fixed
@@ -778,7 +804,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.48.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.49.0...HEAD
+[2.49.0]: https://github.com/brizzai/fleet/releases/tag/v2.49.0
 [2.48.1]: https://github.com/brizzai/fleet/releases/tag/v2.48.1
 [2.48.0]: https://github.com/brizzai/fleet/releases/tag/v2.48.0
 [2.47.1]: https://github.com/brizzai/fleet/releases/tag/v2.47.1
