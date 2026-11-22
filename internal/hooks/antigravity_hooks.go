@@ -92,6 +92,24 @@ func antigravityCommandFor(event string) antigravityCommand {
 	}
 }
 
+// symlinkTarget is the file a symlinked hooks.json (dotfiles setups) points
+// at, so fleet writes through the link rather than renaming a regular file over
+// it. A link whose target doesn't exist yet still names that target: writing
+// creates it and the link stays.
+func symlinkTarget(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	target, err := os.Readlink(path)
+	if err != nil {
+		return path
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return target
+}
+
 // wantAntigravityHooks is fleet's entry as it should be, carrying the user's
 // enabled switch over from what is there now.
 func wantAntigravityHooks(enabled *bool) antigravityFleetHooks {
@@ -113,11 +131,7 @@ type antigravityHooksDoc struct {
 
 func readAntigravityHooks(configDir string) (*antigravityHooksDoc, error) {
 	path := filepath.Join(configDir, "hooks.json")
-	// Write through a symlinked hooks.json (dotfiles setups) rather than
-	// renaming a regular file over the link.
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
-	}
+	path = symlinkTarget(path)
 	doc := &antigravityHooksDoc{path: path, mode: 0o644, keys: map[string]json.RawMessage{}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {

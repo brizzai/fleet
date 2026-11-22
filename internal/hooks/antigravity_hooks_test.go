@@ -79,6 +79,26 @@ func TestInjectAntigravityHooksCreatesFleetEntry(t *testing.T) {
 
 // hooks.json is shared with everything else the user installs. Fleet's write
 // must leave every other key exactly as it was.
+// A dotfiles hooks.json can be a link to a file that doesn't exist yet: the
+// install creates the target and leaves the link in place.
+func TestInjectAntigravityHooksKeepsADanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	dotfiles := filepath.Join(t.TempDir(), "dotfiles")
+	link := filepath.Join(dir, "hooks.json")
+	if err := os.Symlink(filepath.Join(dotfiles, "hooks.json"), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InjectAntigravityHooks(dir); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("hooks.json symlink was replaced by a regular file")
+	}
+	if _, ok := readHooksJSON(t, dotfiles)[antigravityHookKey]; !ok {
+		t.Fatal("the link's target holds no fleet entry")
+	}
+}
+
 func TestInjectAntigravityHooksKeepsOtherHooks(t *testing.T) {
 	dir := t.TempDir()
 	user := `{"my-linter":{"PostToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"./lint.sh \"a & b\""}]}]}}`

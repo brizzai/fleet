@@ -152,6 +152,10 @@ func (o *Observer) Observe(rows []*session.SessionRow) []*Observation {
 		if c, ok := captures[ts.Name]; ok {
 			ts.SeedCapture(c)
 			ob.Capture = c
+		} else {
+			// The batch missed it: take the look here, so the status and the
+			// screen read back from this observation come from the same frame.
+			ob.Capture, _ = ts.CapturePaneFresh()
 		}
 	}
 
@@ -197,6 +201,10 @@ func (o *Observer) secondLook(obs []*Observation) {
 		if c, ok := captures[ts.Name]; ok {
 			ts.SeedCapture(c)
 			ob.Capture = c
+		} else {
+			// The batch missed it: take the look here, so the status and the
+			// screen read back from this observation come from the same frame.
+			ob.Capture, _ = ts.CapturePaneFresh()
 		}
 		ob.first = false // the activity seed already ran
 		o.updateStatus(ob)

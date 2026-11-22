@@ -257,6 +257,21 @@ func TestAntigravityNarrowPaneDockRowsReadRunning(t *testing.T) {
 	}
 }
 
+// A reply quoting a dock row sits above the input box; only the dock below it
+// says a subagent is live.
+func TestAntigravityQuotedDockRowIsNotALiveSubagent(t *testing.T) {
+	pane := StripANSI(antigravityFixture(t, "after_subagent"))
+	// The reply's own output line, not the "echo zzdone" in the prose above it.
+	i := strings.LastIndex(pane, "zzdone")
+	quoted := pane[:i] + "● Agent(example)" + pane[i+len("zzdone"):]
+	if i < 0 || !strings.Contains(quoted, "\n    ● Agent(example)\n") {
+		t.Fatal("fixture no longer holds the reply line this test rewrites")
+	}
+	if antigravityPaneRunning(quoted) {
+		t.Error("a reply quoting a dock row read as a live subagent")
+	}
+}
+
 // Y sends the key that approves what is on screen: Enter for agy's own prompts,
 // Ctrl+K for a subagent's banner (Enter would submit the empty input box).
 func TestAntigravityApproveKey(t *testing.T) {

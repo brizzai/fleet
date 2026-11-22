@@ -189,17 +189,32 @@ func antigravityPaneRunning(content string) bool {
 	if strings.HasPrefix(bar, "esc to cancel") || strings.HasSuffix(bar, "subagent(s)") {
 		return true
 	}
-	for _, l := range recent {
-		if strings.HasPrefix(strings.TrimSpace(l), "● Agent(") {
+	return antigravityDockHasAgent(recent[:len(recent)-1])
+}
+
+// antigravityDockHasAgent reads the dock: the rows between the rule above the
+// status bar and the rule under the input box. A reply quoting a dock row sits
+// above the input box, so it is never reached.
+func antigravityDockHasAgent(aboveBar []string) bool {
+	i := len(aboveBar) - 1
+	if i < 0 || !isAntigravityRule(aboveBar[i]) {
+		return false
+	}
+	for i--; i >= 0 && !isAntigravityRule(aboveBar[i]); i-- {
+		if strings.HasPrefix(strings.TrimSpace(aboveBar[i]), "● Agent(") {
 			return true
 		}
 	}
 	return false
 }
 
-// antigravityDockLines is how far up a subagent dock row is looked for: the
-// status bar, a rule, the rows, a rule, the input box. Conversation lines
-// sit above all of that, so a transcript row can't match.
+func isAntigravityRule(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return trimmed != "" && strings.Trim(trimmed, "─") == ""
+}
+
+// antigravityDockLines is how far up the status bar and dock are looked for:
+// the status bar, a rule, the rows, a rule.
 const antigravityDockLines = 10
 
 // recentNonBlankLines returns the last n non-blank lines of content, in order.
