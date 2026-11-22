@@ -30,10 +30,11 @@ var Content []byte
 const Name = "fleet"
 
 // Agent is a coding agent that reads the Agent Skills format. fleet writes into
-// two roots, not four, because the agents overlap:
+// three roots, not six, because the agents overlap:
 //
-//	~/.claude/skills  Claude Code (also read by OpenCode and Cursor)
-//	~/.agents/skills  Codex, Cursor, OpenCode, Copilot
+//	~/.claude/skills         Claude Code (also read by OpenCode and Cursor)
+//	~/.agents/skills         Codex, Cursor, OpenCode, Copilot
+//	~/.gemini/config/skills  Antigravity (CLI and App; it reads neither of the above)
 //
 // Codex reads only `.agents/skills` and Claude Code reads only `.claude/skills`,
 // so neither root alone covers both. Cursor and OpenCode read both, and are
@@ -84,6 +85,9 @@ func homeDir() string {
 
 func claudeSkillsRoot() string { return filepath.Join(hooks.GetClaudeConfigDir(), "skills") }
 func agentsSkillsRoot() string { return filepath.Join(homeDir(), ".agents", "skills") }
+func antigravitySkillsRoot() string {
+	return filepath.Join(hooks.GetAntigravityConfigDir(), "skills")
+}
 
 // agents is the full table, in the order results are reported.
 var agents = []Agent{
@@ -103,6 +107,10 @@ var agents = []Agent{
 	// ~/.agents/skills, so it shares the agents root. Binary only, like Claude:
 	// the VS Code Copilot extension creates ~/.copilot too, without the CLI.
 	{Name: "copilot", binary: "copilot", root: agentsSkillsRoot},
+	// Antigravity's global skills dir is shared by its CLI and its App (the
+	// CLI-only ~/.gemini/antigravity-cli/skills is skipped by the App). Binary
+	// only: ~/.gemini also belongs to gemini-cli, which reads skills elsewhere.
+	{Name: "antigravity", binary: "agy", root: antigravitySkillsRoot},
 }
 
 // Agents returns every agent fleet can install the skill for.

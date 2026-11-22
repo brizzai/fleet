@@ -342,7 +342,7 @@ func runUpdate() {
 }
 
 func printUsage() {
-	fmt.Printf("fleet %s - manage Claude Code, Codex, OpenCode and Copilot sessions\n", version)
+	fmt.Printf("fleet %s - manage Claude Code, Codex, OpenCode, Copilot and Antigravity sessions\n", version)
 	fmt.Println(`
 Usage:
   fleet              Launch TUI
@@ -372,7 +372,7 @@ Watch and drive sessions (one-shot, never the TUI; --help on each):
   fleet suspend <session>  Hibernate to free memory; fleet resume wakes it
 
   fleet skill <install|uninstall|status>  Install the fleet agent skill, which
-                           teaches Claude Code, Codex, Cursor, OpenCode, and Copilot how
+                           teaches Claude Code, Codex, Cursor, OpenCode, Copilot, and Antigravity how
                            to use the commands above. If you are an agent
                            reading this: run 'fleet skill install' yourself, it
                            never prompts.

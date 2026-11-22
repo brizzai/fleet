@@ -1,18 +1,21 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
 
 func TestParse(t *testing.T) {
 	cases := map[string]Type{
-		"claude":   Claude,
-		"codex":    Codex,
-		"opencode": OpenCode,
-		"copilot":  Copilot,
-		"":         Claude, // empty → default
-		"unknown":  Claude, // unrecognized → default
+		"claude":      Claude,
+		"codex":       Codex,
+		"opencode":    OpenCode,
+		"copilot":     Copilot,
+		"antigravity": Antigravity,
+		"agy":         Claude, // the binary name is not the agent name
+		"":            Claude, // empty → default
+		"unknown":     Claude, // unrecognized → default
 	}
 	for in, want := range cases {
 		if got := Parse(in); got != want {
@@ -44,6 +47,11 @@ func TestBuildLaunchCmd(t *testing.T) {
 		{"copilot new", Copilot, LaunchOpts{}, "copilot"},
 		{"copilot with id", Copilot, LaunchOpts{ResumeID: "abc"}, "copilot --session-id=abc"},
 		{"copilot prompt", Copilot, LaunchOpts{ResumeID: "abc", Prompt: "fix it"}, `copilot --session-id=abc --interactive="$FLEET_INITIAL_PROMPT"`},
+		// Antigravity: trust always rides the settings env var; it resumes with
+		// --conversation and takes no positional at all, so the prompt is a flag.
+		{"antigravity new", Antigravity, LaunchOpts{}, `agy --settings="$FLEET_AGY_SETTINGS"`},
+		{"antigravity resume", Antigravity, LaunchOpts{ResumeID: "abc"}, `agy --settings="$FLEET_AGY_SETTINGS" --conversation abc`},
+		{"antigravity resume with prompt", Antigravity, LaunchOpts{ResumeID: "abc", Prompt: "go on"}, `agy --settings="$FLEET_AGY_SETTINGS" --conversation abc --prompt-interactive="$FLEET_INITIAL_PROMPT"`},
 		// A prompt is the agent's own argument, behind a separator that ends
 		// option parsing — `--` for Claude/Codex, `--prompt=` for OpenCode,
 		// whose positional is a project path instead.
@@ -70,7 +78,7 @@ func TestBuildLaunchCmd(t *testing.T) {
 // instead, leaving only the expansion in the command.
 func TestBuildLaunchCmdNeverEmbedsPromptText(t *testing.T) {
 	nasty := "fix $(touch /tmp/pwned) `id` \"quoted\" 'single'\nsecond line"
-	for _, typ := range []Type{Claude, Codex, OpenCode, Copilot} {
+	for _, typ := range All {
 		cmd := typ.BuildLaunchCmd(LaunchOpts{Prompt: nasty})
 		for _, leak := range []string{"touch", "$(", "`", "\n", "second line"} {
 			if strings.Contains(cmd, leak) {
@@ -94,6 +102,8 @@ func TestBuildLaunchCmdSeparatesPromptFromOptions(t *testing.T) {
 		Codex:    `-- "$FLEET_INITIAL_PROMPT"`,
 		OpenCode: `--prompt="$FLEET_INITIAL_PROMPT"`, // `--prompt <val>` makes yargs read the value as an option
 		Copilot:  `--interactive="$FLEET_INITIAL_PROMPT"`,
+		// No positional prompt: a stray argument exits 2 ("unexpected argument").
+		Antigravity: `--prompt-interactive="$FLEET_INITIAL_PROMPT"`,
 	}
 	for typ, want := range cases {
 		cmd := typ.BuildLaunchCmd(LaunchOpts{Prompt: "--force is not a flag here"})
@@ -104,6 +114,9 @@ func TestBuildLaunchCmdSeparatesPromptFromOptions(t *testing.T) {
 }
 
 func TestBinaryAndDisplayName(t *testing.T) {
+	if Antigravity.Binary() != "agy" || Antigravity.DisplayName() != "Antigravity" {
+		t.Errorf("unexpected Antigravity: binary=%q display=%q", Antigravity.Binary(), Antigravity.DisplayName())
+	}
 	if Copilot.Binary() != "copilot" || Copilot.DisplayName() != "Copilot" {
 		t.Errorf("unexpected Copilot: binary=%q display=%q", Copilot.Binary(), Copilot.DisplayName())
 	}
@@ -132,6 +145,7 @@ func TestBuildLaunchCmdModelAndEffortPerAgent(t *testing.T) {
 		{"codex effort is a config override", Codex, LaunchOpts{Model: "gpt-5.1-codex-max", Effort: "high"}, "codex --model gpt-5.1-codex-max -c model_reasoning_effort=high"},
 		{"opencode takes a model but never an effort", OpenCode, LaunchOpts{Model: "anthropic/claude-sonnet-5", Effort: "max"}, "opencode --model anthropic/claude-sonnet-5"},
 		{"copilot takes --model and --effort", Copilot, LaunchOpts{Model: "gpt-5.4", Effort: "high"}, "copilot --model gpt-5.4 --reasoning-effort high"},
+		{"antigravity takes --model and --effort", Antigravity, LaunchOpts{Model: "gemini-3.8-flash-medium", Effort: "high"}, `agy --settings="$FLEET_AGY_SETTINGS" --model gemini-3.8-flash-medium --effort high`},
 		{"neither set changes nothing", Claude, LaunchOpts{}, "claude"},
 	}
 	for _, tt := range tests {
@@ -146,7 +160,7 @@ func TestBuildLaunchCmdModelAndEffortPerAgent(t *testing.T) {
 // The prompt argument ends option parsing (`--`), so anything appended after it
 // stops being read as a flag and is handed to the agent as prompt text instead.
 func TestModelAndEffortPrecedeThePrompt(t *testing.T) {
-	for _, ag := range []Type{Claude, Codex, OpenCode, Copilot} {
+	for _, ag := range All {
 		cmd := ag.BuildLaunchCmd(LaunchOpts{Model: "opus", Effort: "high", Prompt: "do the thing"})
 		promptAt := strings.Index(cmd, PromptEnvVar)
 		if promptAt < 0 {
@@ -228,15 +242,18 @@ func TestOpenCodeNeverReceivesAnEffortFlag(t *testing.T) {
 	}
 }
 
-// Copilot has no fork flag. Launching it with the parent's id would resume the
-// parent's conversation and take it over, so a fork id must never reach argv.
-func TestCopilotForkIDNeverResumesParent(t *testing.T) {
-	if Copilot.SupportsFork() {
-		t.Fatal("Copilot must not report fork support")
-	}
-	for _, o := range []LaunchOpts{{ForkID: "parent"}, {ResumeID: "own", ForkID: "parent"}} {
-		if cmd := Copilot.BuildLaunchCmd(o); strings.Contains(cmd, "parent") {
-			t.Errorf("fork id leaked into the launch command: %q", cmd)
+// Copilot and Antigravity have no fork flag. Launching either with the parent's
+// id would resume the parent's conversation and take it over, so a fork id must
+// never reach argv.
+func TestForkIDNeverResumesParentWithoutAForkFlag(t *testing.T) {
+	for _, ag := range []Type{Copilot, Antigravity} {
+		if ag.SupportsFork() {
+			t.Fatalf("%s must not report fork support", ag)
+		}
+		for _, o := range []LaunchOpts{{ForkID: "parent"}, {ResumeID: "own", ForkID: "parent"}} {
+			if cmd := ag.BuildLaunchCmd(o); strings.Contains(cmd, "parent") {
+				t.Errorf("%s: fork id leaked into the launch command: %q", ag, cmd)
+			}
 		}
 	}
 	for _, ag := range []Type{Claude, Codex, OpenCode} {
@@ -255,7 +272,7 @@ func TestKnownAndNameList(t *testing.T) {
 	if Known("claud") || Known("") {
 		t.Error("Known accepted a name that isn't an agent")
 	}
-	if got, want := NameList(), "claude, codex, opencode, or copilot"; got != want {
+	if got, want := NameList(), "claude, codex, opencode, copilot, or antigravity"; got != want {
 		t.Errorf("NameList() = %q, want %q", got, want)
 	}
 }
@@ -270,5 +287,45 @@ func TestValidEffort(t *testing.T) {
 	}
 	if !Claude.ValidEffort("ultracode") || !Codex.ValidEffort("anything") {
 		t.Error("ValidEffort must only restrict Copilot")
+	}
+}
+
+// Antigravity does not refuse an unknown effort: it warns and launches on its
+// default model and effort, so fleet must refuse it before launch.
+func TestAntigravityEffortIsAClosedSet(t *testing.T) {
+	for _, ok := range []string{"low", "medium", "high", "xhigh", "max"} {
+		if !Antigravity.ValidEffort(ok) {
+			t.Errorf("Antigravity rejected %q, which it accepts", ok)
+		}
+	}
+	for _, bad := range []string{"none", "minimal", "ultracode"} {
+		if Antigravity.ValidEffort(bad) {
+			t.Errorf("Antigravity accepted %q, which it silently replaces", bad)
+		}
+	}
+	if got := Antigravity.EffortChoices(); got != "low, medium, high, xhigh, max" {
+		t.Errorf("EffortChoices() = %q", got)
+	}
+	if Claude.EffortChoices() != "" {
+		t.Error("Claude takes any effort, so it names no choices")
+	}
+}
+
+// The settings JSON embeds the project path, which may carry characters a
+// shell would act on. It must be valid JSON carrying the path verbatim, and
+// must never appear in the launch command itself.
+func TestAntigravitySettingsTrustsTheProjectOutsideTheCommand(t *testing.T) {
+	path := `/tmp/it's "a" $(dir)`
+	var got struct {
+		TrustedWorkspaces []string `json:"trustedWorkspaces"`
+	}
+	if err := json.Unmarshal([]byte(AntigravitySettings(path)), &got); err != nil {
+		t.Fatalf("settings are not JSON: %v", err)
+	}
+	if len(got.TrustedWorkspaces) != 1 || got.TrustedWorkspaces[0] != path {
+		t.Errorf("trustedWorkspaces = %q, want [%q]", got.TrustedWorkspaces, path)
+	}
+	if cmd := Antigravity.BuildLaunchCmd(LaunchOpts{}); strings.Contains(cmd, "trustedWorkspaces") {
+		t.Errorf("settings leaked into the command line: %q", cmd)
 	}
 }

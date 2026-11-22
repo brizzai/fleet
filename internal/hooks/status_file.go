@@ -6,6 +6,13 @@ import (
 	"path/filepath"
 )
 
+// EventBackgroundWait is the event a status file carries when the agent ended
+// its own turn while subagents it started are still working, so the session is
+// still busy. Antigravity reports it as a Stop with fullyIdle=false, then
+// resumes when a subagent reports back. A name of its own, not "Stop", because
+// readers treat Stop as a finished response.
+const EventBackgroundWait = "BackgroundWait"
+
 // StatusFile is the JSON format written to ~/.config/fleet/hooks/{session_id}.json.
 type StatusFile struct {
 	Status      string `json:"status"`

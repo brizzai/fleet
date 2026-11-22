@@ -3895,7 +3895,8 @@ func (h *Home) markOnboardingSeen() {
 }
 
 // seedDirTrust pre-trusts path for agents that otherwise open on a blocking
-// folder-trust prompt (Codex, Copilot), and makes sure Copilot's hooks exist.
+// folder-trust prompt (Codex, Copilot), and makes sure Copilot's and
+// Antigravity's hooks exist (Antigravity's trust rides its launch instead).
 // File I/O: call it from the launch's tea.Cmd, never the Update loop.
 func seedDirTrust(ag agent.Type, path string) {
 	var err error
@@ -3910,6 +3911,10 @@ func seedDirTrust(ag agent.Type, path string) {
 			debuglog.Logger.Error("copilot hook inject failed", "err", herr)
 		}
 		err = hooks.EnsureCopilotDirTrust(hooks.GetCopilotConfigDir(), path)
+	case agent.Antigravity:
+		// Trust needs no seeding: it rides the launch's --settings. Hooks do,
+		// for the same reason as Copilot's.
+		_, err = hooks.InjectAntigravityHooks(hooks.GetAntigravityConfigDir())
 	}
 	if err != nil {
 		debuglog.Logger.Error("dir trust seeding failed", "agent", ag, "path", path, "err", err)
@@ -3923,7 +3928,7 @@ func (h *Home) handleSessionCreate(msg sessionCreateMsg) (tea.Model, tea.Cmd) {
 		ag = agent.Parse(h.cfg.GetDefaultAgent())
 	}
 	if _, err := exec.LookPath(ag.Binary()); err != nil {
-		h.setError("agent_cli_missing", fmt.Errorf("%s CLI not found: install %s to create sessions", ag.Binary(), ag.DisplayName()))
+		h.setError("agent_cli_missing", errors.New(ag.MissingBinaryMessage()))
 		return h, nil
 	}
 	msg.agent = ag
@@ -5549,6 +5554,12 @@ func (h *Home) maybeRepairClaudeHooks() {
 	if _, err := hooks.RepairCopilotHooks(hooks.GetCopilotConfigDir()); err != nil {
 		debuglog.Logger.Error("copilot hook repair failed", "err", err)
 	}
+	// Not only a moved binary: Antigravity's own /hooks manager erases fleet's
+	// entry whenever the user edits a hook in a session started before fleet
+	// installed it (see RepairAntigravityHooks).
+	if _, err := hooks.RepairAntigravityHooks(hooks.GetAntigravityConfigDir()); err != nil {
+		debuglog.Logger.Error("antigravity hook repair failed", "err", err)
+	}
 }
 
 // adoptSweepInterval throttles the externally-created-session sweep to its own
@@ -6497,17 +6508,26 @@ func (h *Home) quickApproveSelected() tea.Cmd {
 	h.markSessionAccessed(s)
 	ts := s.GetTmuxSession()
 	debuglog.Logger.Info("quick approve", "id", s.ID, "title", s.Title)
-	typeY := s.Agent != agent.Copilot
+	typeY := s.Agent != agent.Copilot && s.Agent != agent.Antigravity
+	isAntigravity := s.Agent == agent.Antigravity
 	return func() tea.Msg {
 		// Send "y" then Enter: menu-style prompts ignore "y" and Enter confirms;
 		// (Y/n) and (y/N) prompts accept "y" as approval, Enter submits.
 		// Copilot's menus are numbered with "1. Yes" pre-highlighted, and a typed
 		// letter there can land in the "No, and tell Copilot…" text row — so
-		// Enter alone.
+		// Enter alone. Antigravity's prompts also open on "1. Yes …", but a
+		// subagent's approval is a banner that only Ctrl+K answers, so the pane
+		// decides the key.
 		if typeY {
 			_ = ts.SendKeys("y")
 		}
-		err := ts.SendKeys("Enter")
+		key := "Enter"
+		if isAntigravity {
+			if pane, err := ts.CapturePane(); err == nil {
+				key = session.AntigravityApproveKey(pane)
+			}
+		}
+		err := ts.SendKeys(key)
 		return quickApproveMsg{err: err}
 	}
 }
@@ -7741,7 +7761,7 @@ drainPriority:
 	// above — the throttle makes that safe.
 	h.maybeSyncExternalSessions(sessions)
 
-	// 5d. Re-point Claude's and Copilot's hooks if the command they name has been
+	// 5d. Re-point Claude's, Copilot's and Antigravity's hooks if the command they name has been
 	// deleted. Self-throttled; stats a file and may rewrite settings.json, which is why it
 	// lives here rather than on the Update loop.
 	h.maybeRepairClaudeHooks()
@@ -9134,6 +9154,13 @@ func (h *Home) loadSessions() tea.Msg {
 		}
 		go diagnostics.WarmCopilotVersion() // for bug reports; slow on first run
 	}
+	// Antigravity hooks, same gating — never create ~/.gemini for users without it.
+	if _, err := exec.LookPath(agent.Antigravity.Binary()); err == nil {
+		if _, err := hooks.InjectAntigravityHooks(hooks.GetAntigravityConfigDir()); err != nil {
+			debuglog.Logger.Error("antigravity hook inject failed", "err", err)
+		}
+		go diagnostics.WarmAntigravityVersion() // for bug reports
+	}
 	// Route tmux copy-mode selections to the system clipboard (pbcopy on
 	// macOS; wl-copy/xclip/xsel on Linux), so drag/click-to-copy works on
 	// terminals that block OSC 52 (iTerm2 default) or don't support it (Apple
@@ -9153,12 +9180,12 @@ func (h *Home) loadSessions() tea.Msg {
 	ghAvailable := github.IsGHAvailable()
 
 	// Check the default agent's CLI — `a` launches it — not Claude's, or a
-	// Copilot-, Codex- or OpenCode-only user is told on every launch that they
+	// Copilot-, Codex-, OpenCode- or Antigravity-only user is told on every launch that they
 	// can't create sessions.
 	var warning string
 	def := agent.Parse(h.cfg.GetDefaultAgent())
 	if _, err := exec.LookPath(def.Binary()); err != nil {
-		warning = fmt.Sprintf("%s CLI not found: install %s to create sessions", def.Binary(), def.DisplayName())
+		warning = def.MissingBinaryMessage()
 	}
 
 	// Load persisted PR cache. A failure here is non-fatal — the bootstrap

@@ -116,6 +116,7 @@ func TestRenderSessionItem_AgentGlyph(t *testing.T) {
 		{"codex", agent.Codex, codexGlyph, claudeGlyph},
 		{"opencode", agent.OpenCode, opencodeGlyph, claudeGlyph},
 		{"copilot", agent.Copilot, copilotGlyph, claudeGlyph},
+		{"antigravity", agent.Antigravity, antigravityGlyph, claudeGlyph},
 		// Empty agent (legacy sessions) falls back to Claude.
 		{"empty falls back to claude", "", claudeGlyph, codexGlyph},
 	}

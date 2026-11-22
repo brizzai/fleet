@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/hooks"
 )
 
@@ -110,13 +111,15 @@ func TestCopilotSessionEndReasonIsAnEnum(t *testing.T) {
 	}
 }
 
-func TestCopilotHookArgs(t *testing.T) {
-	ev, ok := copilotHookArgs([]string{"--fleet-hook", "--agent", "copilot", "--event", "agentStop"})
-	if !ok || ev != "agentStop" {
-		t.Fatalf("got (%q,%v)", ev, ok)
+func TestHookAgentArgs(t *testing.T) {
+	for _, ag := range []string{"copilot", "antigravity"} {
+		name, ev := hookAgentArgs([]string{"--fleet-hook", "--agent", ag, "--event", "Stop"})
+		if name != ag || ev != "Stop" {
+			t.Fatalf("%s: got (%q,%q)", ag, name, ev)
+		}
 	}
-	if _, ok := copilotHookArgs([]string{"--fleet-hook"}); ok {
-		t.Fatal("a Claude invocation read as Copilot")
+	if name, _ := hookAgentArgs([]string{"--fleet-hook"}); name != "" {
+		t.Fatal("a Claude invocation read as another agent")
 	}
 }
 
@@ -294,5 +297,131 @@ func TestHookHandlerOnlyCopilotRecordsPromptSession(t *testing.T) {
 	}
 	if sf.PromptSessionID != "main" {
 		t.Fatalf("prompt_session_id = %q after a nested claude prompt, want main", sf.PromptSessionID)
+	}
+}
+
+func runAntigravityHook(t *testing.T, event, payload string) *hooks.StatusFile {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.WriteString(payload)
+	_ = w.Close()
+	oldStdin, oldArgs := os.Stdin, os.Args
+	os.Stdin, os.Args = r, []string{"fleet", "hook-handler", "--fleet-hook", "--agent", "antigravity", "--event", event}
+	defer func() { os.Stdin, os.Args = oldStdin, oldArgs }()
+	handleHookHandler()
+	sf, err := hooks.ReadStatusFile(filepath.Join(hooks.GetHooksDir(), "inst1.json"))
+	if err != nil {
+		return nil
+	}
+	return sf
+}
+
+func agyPayload(conv, input string, extra string) string {
+	return `{"conversationId":"` + conv + `","hookEventName":"x","lastUserInput":"` + input + `","cwd":"/w"` + extra + `}`
+}
+
+// The sequence below is the one agy 1.5.14 fired for a turn that ran a command
+// and delegated to a subagent (recorded on macOS and Linux, ids shortened):
+// the subagent fires every hook under its own id with no lastUserInput, and the
+// parent stops with fullyIdle=false, then resumes at invocationNum 0 with the
+// same input when the subagent reports back.
+func TestHookHandlerAntigravityTurnWithSubagent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FLEET_INSTANCE_ID", "inst1")
+	t.Setenv(agent.AntigravitySettingsEnvVar, `{"trustedWorkspaces":["/w"]}`)
+	const root, sub, input = "955826ad", "9be932e9", "Run the shell command"
+
+	steps := []struct {
+		event, conv, input, extra string
+		wantStatus, wantEvent     string
+		wantCount                 int
+	}{
+		{"PreInvocation", root, input, `,"invocationNum":0`, "running", "UserPromptSubmit", 1},
+		{"PostToolUse", root, input, ``, "running", "UserPromptSubmit", 1}, // repeat while running: no write
+		{"PreInvocation", root, input, `,"invocationNum":1`, "running", "UserPromptSubmit", 1},
+		{"PreInvocation", sub, "", `,"invocationNum":0`, "running", "UserPromptSubmit", 1}, // subagent: dropped
+		{"Stop", root, input, `,"fullyIdle":false`, "running", hooks.EventBackgroundWait, 1},
+		{"PostToolUse", sub, "", ``, "running", hooks.EventBackgroundWait, 1},
+		{"Stop", sub, "", `,"fullyIdle":true`, "running", hooks.EventBackgroundWait, 1},
+		{"PreInvocation", root, input, `,"invocationNum":0`, "running", "PreInvocation", 1}, // continuation, not a prompt
+		{"Stop", root, input, `,"fullyIdle":true`, "finished", "Stop", 1},
+		{"PreInvocation", root, "next prompt", `,"invocationNum":0`, "running", "UserPromptSubmit", 2},
+	}
+	for i, st := range steps {
+		sf := runAntigravityHook(t, st.event, agyPayload(st.conv, st.input, st.extra))
+		if sf == nil {
+			t.Fatalf("step %d (%s %s): no status file", i, st.event, st.conv)
+		}
+		if sf.Status != st.wantStatus || sf.Event != st.wantEvent || sf.PromptCount != st.wantCount {
+			t.Fatalf("step %d (%s %s): status=%q event=%q count=%d, want %q %q %d",
+				i, st.event, st.conv, sf.Status, sf.Event, sf.PromptCount, st.wantStatus, st.wantEvent, st.wantCount)
+		}
+		if sf.SessionID != root {
+			t.Fatalf("step %d: session id %q, want the root's — a subagent took the session over", i, sf.SessionID)
+		}
+	}
+	// Same as every agent: the latest prompt rides the status file for naming.
+	if sf := runAntigravityHook(t, "Stop", agyPayload(root, "next prompt", `,"fullyIdle":true`)); sf.UserPrompt != "next prompt" {
+		t.Errorf("user prompt = %q, want the latest prompt", sf.UserPrompt)
+	}
+}
+
+// agy has sent a turn's final Stop with fullyIdle=false after every subagent
+// finished. The user's next prompt carries new input, and must count.
+func TestHookHandlerAntigravityPromptAfterAFalseBackgroundWait(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FLEET_INSTANCE_ID", "inst1")
+	t.Setenv(agent.AntigravitySettingsEnvVar, `{"trustedWorkspaces":["/w"]}`)
+	runAntigravityHook(t, "PreInvocation", agyPayload("c", "delegate it", `,"invocationNum":0`))
+	if sf := runAntigravityHook(t, "Stop", agyPayload("c", "delegate it", `,"fullyIdle":false`)); sf.Event != hooks.EventBackgroundWait {
+		t.Fatalf("event = %q, want %q", sf.Event, hooks.EventBackgroundWait)
+	}
+	sf := runAntigravityHook(t, "PreInvocation", agyPayload("c", "now something else", `,"invocationNum":0`))
+	if sf.Event != "UserPromptSubmit" || sf.PromptCount != 2 || sf.UserPrompt != "now something else" {
+		t.Fatalf("a new prompt after BackgroundWait read as a continuation: %+v", sf)
+	}
+}
+
+// /clear starts a new conversation in the same process; its first hook carries
+// the user's prompt and a new id, and must be written (the TUI decides whether
+// to adopt it).
+func TestHookHandlerAntigravityNewConversationIsRecorded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FLEET_INSTANCE_ID", "inst1")
+	t.Setenv(agent.AntigravitySettingsEnvVar, `{"trustedWorkspaces":["/w"]}`)
+	runAntigravityHook(t, "Stop", agyPayload("old", "first", `,"fullyIdle":true`))
+	sf := runAntigravityHook(t, "PreInvocation", agyPayload("new", "after clear", `,"invocationNum":0`))
+	if sf.SessionID != "new" || sf.Status != "running" || sf.Event != "UserPromptSubmit" {
+		t.Fatalf("status file = %+v", sf)
+	}
+}
+
+func TestHookHandlerAntigravityIgnoresSessionsFleetDidNotLaunch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FLEET_INSTANCE_ID", "")
+	if sf := runAntigravityHook(t, "PreInvocation", agyPayload("c", "hi", `,"invocationNum":0`)); sf != nil {
+		t.Fatalf("wrote a status file for a session fleet didn't launch: %+v", sf)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "fleet", "debug.log")); !os.IsNotExist(err) {
+		t.Error("touched debug.log for a session fleet didn't launch")
+	}
+}
+
+// An `agy -p` a tool runs inside some other agent's session inherits
+// FLEET_INSTANCE_ID but not the agy settings variable; it must not write that
+// session's status file.
+func TestHookHandlerAntigravityIgnoresAgyRunInsideAnotherAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FLEET_INSTANCE_ID", "inst1")
+	t.Setenv(agent.AntigravitySettingsEnvVar, "")
+	if sf := runAntigravityHook(t, "PreInvocation", agyPayload("nested", "summarize", `,"invocationNum":0`)); sf != nil {
+		t.Fatalf("a nested agy wrote the host session's status file: %+v", sf)
 	}
 }

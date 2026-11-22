@@ -579,7 +579,8 @@ func menuKind(below []string) string {
 		switch {
 		case strings.Contains(lower, "approve with this feedback"):
 			return "plan"
-		case isAskUserQuestionFooter(l), strings.Contains(lower, "enter to submit answer"):
+		case isAskUserQuestionFooter(l), strings.Contains(lower, "enter to submit answer"),
+			strings.Contains(lower, "esc skip"): // Antigravity's ask_question
 			return "question"
 		case strings.Contains(lower, "esc to cancel"), strings.Contains(lower, "press enter to confirm"):
 			return "permission"
@@ -627,7 +628,7 @@ func parseBoxedMenu(clean []string) *Menu {
 		if strings.TrimSpace(t) == "" {
 			break
 		}
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(t), "❯"); ok {
+		if rest, ok := cutMenuCursor(strings.TrimSpace(t)); ok {
 			cursor = len(rows)
 			t = strings.TrimSpace(rest)
 		} else {
@@ -670,6 +671,16 @@ func parseBoxedMenu(clean []string) *Menu {
 	return m
 }
 
+// cutMenuCursor strips an unnumbered menu row's highlight marker: "❯" for
+// Claude and Copilot, "> " for Antigravity. The space is required for ">", so a
+// row whose text merely starts with ">" isn't read as highlighted.
+func cutMenuCursor(t string) (string, bool) {
+	if rest, ok := strings.CutPrefix(t, "❯"); ok {
+		return rest, true
+	}
+	return strings.CutPrefix(t, "> ")
+}
+
 // unframe strips a "│ … │" box frame from each line that has one, keeping the
 // inner text's indentation so option rows still line up.
 func unframe(lines []string) []string {
@@ -697,6 +708,8 @@ func PaneShowsWorking(a agent.Type, rawPane string) bool {
 		return codexPaneRunning(clean)
 	case agent.Copilot:
 		return copilotPaneRunning(clean)
+	case agent.Antigravity:
+		return antigravityPaneRunning(clean)
 	case agent.OpenCode:
 		return false
 	default:

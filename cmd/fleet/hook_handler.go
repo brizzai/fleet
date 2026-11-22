@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 )
@@ -24,25 +25,34 @@ type hookPayload struct {
 	Reason string `json:"reason,omitempty"`
 
 	// Copilot CLI's camelCase payload. Its event name arrives in argv instead
-	// (see copilotHookArgs); notification is the one event that also carries it.
+	// (see hookAgentArgs); notification is the one event that also carries it.
 	CopilotSessionID string `json:"sessionId,omitempty"`
 	NotificationType string `json:"notification_type,omitempty"`
+
+	// Antigravity CLI's camelCase payload. Its event name is in the payload
+	// too (hookEventName), but argv is read for it, as for Copilot.
+	ConversationID string `json:"conversationId,omitempty"`
+	LastUserInput  string `json:"lastUserInput,omitempty"`
+	InvocationNum  *int   `json:"invocationNum,omitempty"`
+	FullyIdle      *bool  `json:"fullyIdle,omitempty"`
 }
 
-// copilotHookArgs reads the `--agent copilot --event <name>` suffix fleet's
-// Copilot hooks file appends to the hook command. ok is false for any other
-// agent's invocation.
-func copilotHookArgs(args []string) (event string, ok bool) {
-	var ag string
+// hookAgentArgs reads the `--agent <name> --event <name>` suffix that fleet's
+// Copilot and Antigravity hook files append to the hook command. Both are
+// empty for an agent whose hooks don't (Claude, Codex, OpenCode).
+func hookAgentArgs(args []string) (agentName, event string) {
 	for i := 0; i+1 < len(args); i++ {
 		switch args[i] {
 		case "--agent":
-			ag = args[i+1]
+			agentName = args[i+1]
 		case "--event":
 			event = args[i+1]
 		}
 	}
-	return event, ag == "copilot" && event != ""
+	if event == "" {
+		return "", ""
+	}
+	return agentName, event
 }
 
 // normalizeCopilotEvent maps a Copilot hook onto the Claude event name the rest
@@ -75,6 +85,62 @@ func normalizeCopilotEvent(event string, p *hookPayload) (claudeEvent, status st
 		return "SessionEnd", "finished"
 	}
 	return event, ""
+}
+
+// normalizeAntigravityEvent maps an Antigravity hook onto the Claude event name
+// the rest of the handler keys on, and the status it means. drop is true for a
+// hook the session must not see at all.
+//
+// prev is the status file as it stands, the only memory a one-shot handler
+// has. Measured against agy 1.5.14:
+//   - Subagents fire every hook under their own conversation id with an empty
+//     lastUserInput, while a conversation the user types in always carries
+//     theirs. So an empty one is a subagent, dropped here before it can read as
+//     the user starting a new conversation.
+//   - PreInvocation fires before each model call; invocationNum 0 opens a turn.
+//     The exception: when a subagent reports back, the parent resumes at
+//     invocationNum 0 with the same lastUserInput, right after a Stop with
+//     fullyIdle false. That is the same turn, not a new prompt. The input has
+//     to match as well, because fullyIdle false is not reliable: agy has sent
+//     it as a turn's final Stop with every subagent done, and the user's next
+//     prompt must still count. What that can't separate: after such a false
+//     Stop, a next prompt typed with exactly the same text ("continue") reads
+//     as the same turn. The status is still right (running); only that prompt
+//     goes uncounted.
+//   - Stop with fullyIdle false usually means the agent is waiting on its
+//     subagents; the TUI's pane check settles it when it doesn't.
+//   - Nothing fires on a permission prompt, an Esc interrupt, or /exit; the
+//     pane covers those.
+func normalizeAntigravityEvent(event string, p *hookPayload, prev *hooks.StatusFile) (claudeEvent, status string, drop bool) {
+	p.SessionID = p.ConversationID
+	if p.LastUserInput == "" {
+		return event, "", true
+	}
+	sameConversation := prev.SessionID == p.SessionID
+	switch event {
+	case "PreInvocation":
+		continuation := prev.Event == hooks.EventBackgroundWait && sameConversation && prev.UserPrompt == p.LastUserInput
+		if p.InvocationNum != nil && *p.InvocationNum == 0 && !continuation {
+			p.Prompt = p.LastUserInput
+			return "UserPromptSubmit", "running", false
+		}
+		// A later model call in a turn already running says nothing new; only
+		// the edge out of another state is worth a write.
+		if prev.Status == "running" && sameConversation && prev.Event != hooks.EventBackgroundWait {
+			return event, "", true
+		}
+		return "PreInvocation", "running", false
+	case "PostToolUse":
+		// After a permission prompt is answered, the tool finishing is the first
+		// sign the session left it.
+		return "PostToolUse", "running", false
+	case "Stop":
+		if p.FullyIdle != nil && !*p.FullyIdle {
+			return hooks.EventBackgroundWait, "running", false
+		}
+		return "Stop", "finished", false
+	}
+	return event, "", false
 }
 
 // isCopilotSubagent reports whether a Copilot hook came from a subagent. A
@@ -163,11 +229,22 @@ func isCompactSessionStart(event, source string) bool {
 // Reads JSON from stdin, maps the event to a status, and writes a status file.
 // Always exits 0 to avoid blocking Claude Code.
 func handleHookHandler() {
-	copilotEvent, isCopilot := copilotHookArgs(os.Args[2:])
-	// Copilot runs hooks synchronously and for every Copilot session on the
-	// machine, fleet's or not. Leave before touching the log for the ones that
-	// aren't fleet's, or each of their tool calls would add a line to debug.log.
-	if isCopilot && os.Getenv("FLEET_INSTANCE_ID") == "" {
+	hookAgent, agentEvent := hookAgentArgs(os.Args[2:])
+	isCopilot := hookAgent == "copilot"
+	isAntigravity := hookAgent == "antigravity"
+	// Copilot and Antigravity run hooks synchronously and for every session of
+	// theirs on the machine, fleet's or not. Leave before touching the log for
+	// the ones that aren't fleet's, or each of their tool calls would add a line
+	// to debug.log. (The installed command's shell guard usually got there
+	// first; this covers a hand-edited one.)
+	if (isCopilot || isAntigravity) && os.Getenv("FLEET_INSTANCE_ID") == "" {
+		return
+	}
+	// Every agy session fleet launches carries its settings variable. Without
+	// it the hook is an `agy -p` some tool ran inside a Claude, Codex, OpenCode
+	// or Copilot session, and writing would hand that session agy's status,
+	// prompt and conversation id.
+	if isAntigravity && os.Getenv(agent.AntigravitySettingsEnvVar) == "" {
 		return
 	}
 	debuglog.Init()
@@ -209,14 +286,29 @@ func handleHookHandler() {
 		return
 	}
 
+	// Preserve user_prompt and prompt_count from previous status file.
+	hooksDir := hooks.GetHooksDir()
+	existingPath := filepath.Join(hooksDir, instanceID+".json")
+	existing, existingErr := hooks.ReadStatusFile(existingPath)
+	if existingErr != nil {
+		existing = &hooks.StatusFile{}
+	}
+
 	var status string
-	if isCopilot {
-		payload.HookEventName, status = normalizeCopilotEvent(copilotEvent, &payload)
+	switch {
+	case isCopilot:
+		payload.HookEventName, status = normalizeCopilotEvent(agentEvent, &payload)
 		if isCopilotSubagent(payload.SessionID) {
 			log.Debug("hook-handler: copilot subagent hook dropped", "event", payload.HookEventName, "instance", instanceID)
 			return
 		}
-	} else {
+	case isAntigravity:
+		var drop bool
+		payload.HookEventName, status, drop = normalizeAntigravityEvent(agentEvent, &payload, existing)
+		if drop {
+			return
+		}
+	default:
 		status = mapEventToStatus(payload.HookEventName)
 	}
 
@@ -245,17 +337,11 @@ func handleHookHandler() {
 		userPrompt = payload.Prompt
 	}
 
-	// Preserve user_prompt and prompt_count from previous status file.
-	hooksDir := hooks.GetHooksDir()
-	existingPath := filepath.Join(hooksDir, instanceID+".json")
-	var existingStatus, existingSessionID, promptSessionID string
-	if existing, err := hooks.ReadStatusFile(existingPath); err == nil {
-		existingStatus, existingSessionID = existing.Status, existing.SessionID
-		promptSessionID = existing.PromptSessionID
-		promptCount = existing.PromptCount
-		if userPrompt == "" && existing.UserPrompt != "" {
-			userPrompt = existing.UserPrompt
-		}
+	existingStatus, existingSessionID := existing.Status, existing.SessionID
+	promptSessionID := existing.PromptSessionID
+	promptCount = existing.PromptCount
+	if userPrompt == "" && existing.UserPrompt != "" {
+		userPrompt = existing.UserPrompt
 	}
 
 	// Increment prompt count on new user prompt submissions.
@@ -268,8 +354,9 @@ func handleHookHandler() {
 		}
 	}
 
-	// Copilot fires PostToolUse for every tool call; it only matters as the
-	// waiting → running edge, so a repeat would just rewrite the file and log.
+	// Copilot and Antigravity fire PostToolUse for every tool call; it only
+	// matters as the waiting → running edge, so a repeat would just rewrite the
+	// file and log.
 	if payload.HookEventName == "PostToolUse" && existingStatus == status && existingSessionID == payload.SessionID {
 		return
 	}
@@ -300,8 +387,8 @@ func handleHookHandler() {
 		log.Error("hook-handler: write failed", "err", err)
 	}
 
-	// Opportunistic cleanup of stale files — but not per tool call: Copilot
-	// blocks on its hooks, and PostToolUse fires for every one.
+	// Opportunistic cleanup of stale files — but not per tool call: Copilot and
+	// Antigravity block on their hooks, and PostToolUse fires for every one.
 	if payload.HookEventName != "PostToolUse" {
 		cleanStaleHookFiles(hooksDir)
 	}
@@ -340,6 +427,17 @@ func handleHooksCmd(args []string) {
 				fmt.Println("Copilot hooks are already installed.")
 			}
 		}
+		if _, err := exec.LookPath(agent.Antigravity.Binary()); err == nil {
+			agyDir := hooks.GetAntigravityConfigDir()
+			if installed, err := hooks.InjectAntigravityHooks(agyDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Error installing Antigravity hooks: %v\n", err)
+				os.Exit(1)
+			} else if installed {
+				fmt.Printf("Antigravity hooks installed: %s/hooks.json\n", agyDir)
+			} else {
+				fmt.Println("Antigravity hooks are already installed.")
+			}
+		}
 	case "uninstall":
 		removed, err := hooks.RemoveClaudeHooks(configDir)
 		if err != nil {
@@ -357,6 +455,14 @@ func handleHooksCmd(args []string) {
 		} else if removed {
 			fmt.Println("Copilot hooks removed successfully.")
 		}
+		// Not gated on agy being on PATH: the entry outlives an uninstalled agy,
+		// and removing it never creates ~/.gemini.
+		if removed, err := hooks.RemoveAntigravityHooks(hooks.GetAntigravityConfigDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "Error removing Antigravity hooks: %v\n", err)
+			os.Exit(1)
+		} else if removed {
+			fmt.Println("Antigravity hooks removed successfully.")
+		}
 	case "status":
 		installed := hooks.AreHooksInstalled(configDir)
 		if installed {
@@ -371,6 +477,16 @@ func handleHooksCmd(args []string) {
 				fmt.Println("Copilot: INSTALLED")
 			} else {
 				fmt.Println("Copilot: NOT INSTALLED (run 'fleet hooks install')")
+			}
+		}
+		if _, err := exec.LookPath(agent.Antigravity.Binary()); err == nil {
+			switch state := hooks.AntigravityHookState(hooks.GetAntigravityConfigDir()); state {
+			case "installed":
+				fmt.Println("Antigravity: INSTALLED")
+			case "disabled":
+				fmt.Println("Antigravity: DISABLED (switched off in agy's /hooks)")
+			default:
+				fmt.Printf("Antigravity: NOT INSTALLED (%s; run 'fleet hooks install')\n", state)
 			}
 		}
 	default:

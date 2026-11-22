@@ -46,7 +46,7 @@ func resolveLaunchAgent(cfg *config.Config, explicit string, needBinary bool) ag
 	}
 	if needBinary {
 		if _, err := exec.LookPath(ag.Binary()); err != nil {
-			fmt.Fprintf(os.Stderr, "%s CLI not found — install %s to create sessions\n", ag.Binary(), ag.DisplayName())
+			fmt.Fprintln(os.Stderr, ag.MissingBinaryMessage())
 			os.Exit(1)
 		}
 	}
@@ -288,6 +288,11 @@ func installAgentHooks(ag agent.Type, projectPath string) {
 		// Without trust the pane opens on a folder-trust menu and no hook fires.
 		if err := hooks.EnsureCopilotDirTrust(hooks.GetCopilotConfigDir(), projectPath); err != nil {
 			debuglog.Logger.Error("copilot dir trust seeding failed", "path", projectPath, "err", err)
+		}
+	case agent.Antigravity:
+		// Trust rides the launch's --settings (agent.AntigravitySettings).
+		if _, err := hooks.InjectAntigravityHooks(hooks.GetAntigravityConfigDir()); err != nil {
+			debuglog.Logger.Error("antigravity hook inject failed", "err", err)
 		}
 	default:
 		if _, err := hooks.InjectClaudeHooks(hooks.GetClaudeConfigDir()); err != nil {

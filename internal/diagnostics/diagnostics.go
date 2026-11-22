@@ -26,12 +26,19 @@ type Report struct {
 	ClaudeVersion  string
 	CodexVersion   string
 	CopilotVersion string
-	GhVersion      string
-	Config         string
-	SessionCount   int
-	RecentErrors   []string // pre-formatted from ErrorHistory
-	RecentActions  []string // pre-formatted from ActionLog
-	RecentLogs     string   // last 100 lines of debug.log
+	// AntigravityVersion is set by WarmAntigravityVersion, on machines with
+	// agy: it updates itself, so the version is the first thing a status bug
+	// against it needs. AntigravityHooks is fleet's hook state, the second
+	// (its own /hooks manager can erase or disable fleet's entry); the caller
+	// fills it, since this package can't import hooks.
+	AntigravityVersion string
+	AntigravityHooks   string
+	GhVersion          string
+	Config             string
+	SessionCount       int
+	RecentErrors       []string // pre-formatted from ErrorHistory
+	RecentActions      []string // pre-formatted from ActionLog
+	RecentLogs         string   // last 100 lines of debug.log
 
 	// Terminal environment (helps diagnose rendering/scrolling issues).
 	TerminalEnv TerminalEnv
@@ -75,6 +82,9 @@ func Collect(version string, sessionCount int) *Report {
 	r.CodexVersion = firstLine(runCmd("codex", "--version"))
 	if v := copilotVersion.Load(); v != nil {
 		r.CopilotVersion = *v
+	}
+	if v := antigravityVersion.Load(); v != nil {
+		r.AntigravityVersion = *v
 	}
 	r.GhVersion = firstLine(runCmd("gh", "--version"))
 
@@ -254,6 +264,12 @@ func (r *Report) FormatEnvironmentMarkdown(includeLogs bool, scrub Scrubber) str
 	if r.CopilotVersion != "" {
 		fmt.Fprintf(&b, "- **Copilot CLI**: %s\n", sanitize(r.CopilotVersion))
 	}
+	if r.AntigravityVersion != "" {
+		fmt.Fprintf(&b, "- **Antigravity CLI**: %s\n", sanitize(r.AntigravityVersion))
+		if r.AntigravityHooks != "" {
+			fmt.Fprintf(&b, "- **Antigravity hooks**: %s\n", r.AntigravityHooks)
+		}
+	}
 	if r.GhVersion != "" {
 		fmt.Fprintf(&b, "- **gh CLI**: %s\n", sanitize(r.GhVersion))
 	}
@@ -330,6 +346,18 @@ var copilotVersion atomic.Pointer[string]
 func WarmCopilotVersion() {
 	v := firstLine(runCmdTimeout(10*time.Second, "copilot", "--version"))
 	copilotVersion.Store(&v)
+}
+
+// antigravityVersion is filled by WarmAntigravityVersion, for the reason
+// copilotVersion is: a cold `agy --version` took 0.32s (measured), too long for
+// Collect's UI-thread call.
+var antigravityVersion atomic.Pointer[string]
+
+// WarmAntigravityVersion looks up the Antigravity CLI version for bug reports.
+// It blocks, so call it on its own goroutine.
+func WarmAntigravityVersion() {
+	v := firstLine(runCmdTimeout(5*time.Second, "agy", "--version"))
+	antigravityVersion.Store(&v)
 }
 
 func runCmd(name string, args ...string) string {

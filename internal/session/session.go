@@ -252,10 +252,10 @@ func (s *Session) buildAgentCmd() string {
 }
 
 // initialRunStatus is the status to show right after launching the agent.
-// Codex, OpenCode and Copilot fire no event until their first turn, so they start idle
-// (sitting at their prompt) rather than flashing running.
+// Codex, OpenCode, Copilot and Antigravity fire no event until their first turn, so
+// they start idle (sitting at their prompt) rather than flashing running.
 func (s *Session) initialRunStatus() Status {
-	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Copilot {
+	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Copilot || s.Agent == agent.Antigravity {
 		return StatusIdle
 	}
 	return StatusRunning
@@ -394,6 +394,12 @@ func (s *Session) sessionEnv() []string {
 	// the quotes, newlines or $(...) it contains.
 	if s.InitialPrompt != "" {
 		env = append(env, fmt.Sprintf("%s=%s", agent.PromptEnvVar, s.InitialPrompt))
+	}
+	// Every Antigravity launch reads this (its command always passes
+	// --settings), so it is set unconditionally: an unset variable would hand
+	// agy an empty --settings value.
+	if ag == agent.Antigravity {
+		env = append(env, fmt.Sprintf("%s=%s", agent.AntigravitySettingsEnvVar, agent.AntigravitySettings(resolvedProjectPath(s.ProjectPath))))
 	}
 	return env
 }
@@ -778,6 +784,9 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	if s.Agent == agent.Copilot && !s.copilotHookAccepted(hs) {
 		return false
 	}
+	if s.Agent == agent.Antigravity && !s.antigravityHookAccepted(hs) {
+		return false
+	}
 
 	// A Copilot that never fired a hook has no pid to retire, yet still sends a
 	// SessionEnd (it carries a reason) when the relaunch kills it. Copilot fires
@@ -815,8 +824,8 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		negCached := owner != "" && s.rotRejects[hs.SessionID] != nil && s.rotRejects[hs.SessionID].owner == owner
 		frozenHook, frozenHookAt := s.hookStatus, s.hookUpdatedAt
 		s.mu.RUnlock()
-		// Copilot's ownership was settled by copilotHookAccepted above.
-		if owner != "" && hs.SessionID != owner && s.Agent != agent.Copilot {
+		// Copilot's and Antigravity's ownership was settled above.
+		if owner != "" && hs.SessionID != owner && s.Agent != agent.Copilot && s.Agent != agent.Antigravity {
 			switch {
 			case forkParent != "" && owner == forkParent:
 				// This session was forked (`claude --resume <parent> --fork-session`).
@@ -1105,7 +1114,7 @@ func (s *Session) Restart() error {
 	// hook event, which flips the freshly-restarted session straight back to
 	// error and triggers a misleading crash dump.
 	s.clearHookState()
-	s.awaitRetiredCopilot(oldAgentPID, false)
+	s.awaitRetiredAgent(oldAgentPID, false)
 
 	// Recreate tmux session with same config. Mutate s.tmuxSession under
 	// s.mu so concurrent triggerCrashDump readers see a consistent pointer.
@@ -1150,7 +1159,7 @@ func (s *Session) Relaunching() bool {
 
 // beginRelaunch marks the session starting and keeps UpdateStatus off it until
 // endRelaunch. Between the kill and the new launch the old tmux is gone (or the
-// pane is at a shell) — for up to retiredExitTimeout while a Copilot exits — and
+// pane is at a shell) — for up to retiredExitTimeout while a Copilot or Antigravity exits — and
 // the liveness gates would read that as a crash, with a crash dump to match.
 func (s *Session) beginRelaunch() {
 	s.mu.Lock()
@@ -1201,8 +1210,8 @@ func (s *Session) RespawnClaude() error {
 	s.clearHookState()
 	s.markRelaunchQuiet()
 	// respawn-pane kills and relaunches in one step, leaving no gap to wait in,
-	// so a Copilot is stopped first.
-	s.awaitRetiredCopilot(oldAgentPID, true)
+	// so a Copilot or Antigravity is stopped first.
+	s.awaitRetiredAgent(oldAgentPID, true)
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
@@ -1528,6 +1537,11 @@ func (s *Session) UpdateStatus() {
 
 	if s.Agent == agent.Copilot {
 		s.updateCopilotStatus(oldStatus, hasHook, hookStatus, hookReason, log)
+		return
+	}
+
+	if s.Agent == agent.Antigravity {
+		s.updateAntigravityStatus(oldStatus, hasHook, hookStatus, log)
 		return
 	}
 
@@ -2233,6 +2247,15 @@ func (s *Session) SnapshotData(rawPane string) StatusSnapshot {
 // Copilot's own footers for Copilot ("" when its pane is at rest), Claude's
 // detector otherwise.
 func detectPaneStatusFor(a agent.Type, clean string) Status {
+	if a == agent.Antigravity {
+		switch {
+		case antigravityPaneWaiting(clean):
+			return StatusWaiting
+		case antigravityPaneRunning(clean):
+			return StatusRunning
+		}
+		return ""
+	}
 	if a == agent.Copilot {
 		switch {
 		case copilotPaneWaiting(clean):
@@ -2365,6 +2388,14 @@ func (s *Session) updatePaneLedStatus(name string, oldStatus Status, hasHook boo
 	if !captured && !hasHook {
 		return
 	}
+	if paneWaiting || paneRunning || !captured {
+		// The pane disagrees with "at rest" — or couldn't be read, which is not
+		// evidence of it — so any confirmation adjustHook has been building
+		// (Antigravity's) starts over.
+		s.mu.Lock()
+		s.resetPaneFinishedConfirmLocked()
+		s.mu.Unlock()
+	}
 	switch {
 	case paneWaiting:
 		if oldStatus != StatusWaiting {
@@ -2377,9 +2408,9 @@ func (s *Session) updatePaneLedStatus(name string, oldStatus Status, hasHook boo
 			log.Info("status changed ("+name+" pane)", "old", oldStatus, "new", StatusRunning)
 		}
 	case hasHook:
-		// Pane at rest — it can't tell running from finished from idle at the
-		// prompt, so the hook decides.
-		if adjustHook != nil {
+		// Pane at rest (or unreadable) — it can't tell running from finished
+		// from idle at the prompt, so the hook decides.
+		if adjustHook != nil && captured {
 			hookStatus = adjustHook(hookStatus)
 		}
 		s.applyHookStatus(oldStatus, hookStatus, hookReason, log)
@@ -3095,6 +3126,8 @@ func PaneIndicatesWaiting(a agent.Type, rawPane string) bool {
 		return codexPaneWaiting(clean)
 	case agent.Copilot:
 		return copilotPaneWaiting(clean)
+	case agent.Antigravity:
+		return antigravityPaneWaiting(clean)
 	case agent.OpenCode:
 		return false
 	default:

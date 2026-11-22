@@ -1,0 +1,40 @@
+
+  [1m[94mAntigravity CLI 1.5.14[0m
+  [90muser@example.com (Antigravity Starter Quota)[39m
+  [90mGemini 3.8 Flash (Medium)[39m
+  [90m/tmp/project
+
+[1m[34m> /hooks[0m
+[1m[34m  ⎿  [0m[37mExited /hooks command[39m
+
+[90m────────────────────────────────────────────────────────────
+[1m[34m> Run the shell command: sleep 20 && echo ok[0m
+
+[37m○[39m [37mThought for 5.3s[39m [37m(The command includes a `sleep` directive, which conflicts with a guideline against shell-based...)[39m
+[32m●[39m [1m[33mRan[0m [37m(sleep 20 && echo ok)[39m [37m(ctrl+o to expand)[39m
+
+  I have started the command [94msleep 20 && echo ok[39m in the background (task-2). I will notify you once it completes.
+
+  The command has completed successfully.
+
+  [1mOutput:[0m
+
+    [38;5;252mok[39m
+
+[90m────────────────────────────────────────────────────────────
+[1m[34m> Delegate to a subagent: have it run the shell command 'sleep 25 && echo slow' and report the output. While it works,[0m
+[1m[34m  do nothing else and just wait.[0m
+
+[37m○[39m [37mThought for 7.0s[39m [37m(Checking if a suitable subagent exists to execute shell commands. The existing subagents seem i...)[39m
+[32m●[39m [1m[33mSpawned[0m 1 subagent [37m(ctrl+o to expand)[39m
+
+  I have delegated the task to a subagent (Command Runner) to execute [94msleep 25 && echo slow[39m. Standing by for its
+  completion.
+
+[90m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[94m>[39m
+[90m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m●[39m Agent(self: Command Runner)[90m · Gemini 3.8 Flash[39m  [37mRun slow sleep command[90m · 4s[39m
+[90m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts[39m                                                         [33mauto[2m[39m · Gemini 3.8 Flash · medium · 1 subagent(s)
+

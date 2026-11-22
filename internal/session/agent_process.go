@@ -3,7 +3,16 @@ package session
 import (
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
+
+	"github.com/brizzai/fleet/internal/agent"
+	"github.com/brizzai/fleet/internal/debuglog"
+	"github.com/brizzai/fleet/internal/tmux"
 )
 
 // conversationSucceeds reports whether a hook arriving from newPID, under a session
@@ -70,4 +79,67 @@ func agentProcessAlive(pid int) bool {
 	}
 	// EPERM means it exists and belongs to someone else — alive for our purposes.
 	return errors.Is(err, syscall.EPERM)
+}
+
+// awaitRetiredAgent waits for the agent a relaunch is replacing to exit, for
+// the two agents that need it. Copilot holds a per-process lock on its
+// conversation, and a new process that starts while the old one is still
+// shutting down opens on a "Session in use — Resume anyway?" menu instead of
+// the conversation. Antigravity opens fine but warns "Conversation already
+// open … Sending messages from both may cause conflicts", and a busy one takes
+// ~3.3s to exit after the kill (measured), so the two would share the
+// conversation for that long. stop sends the old process
+// the SIGHUP tmux would, for callers that haven't killed it yet. The pid comes
+// from a hook and could have been recycled, so nothing happens unless it is
+// still that agent's process. Blocks for up to retiredExitTimeout: callers run
+// off the Update loop. pid is 0 when the agent never fired a hook — an idle one
+// exits in well under a second anyway (Copilot ~30ms, Antigravity ~0.2s).
+func (s *Session) awaitRetiredAgent(pid int, stop bool) {
+	if s.Agent != agent.Copilot && s.Agent != agent.Antigravity {
+		return
+	}
+	if pid <= 0 || !agentProcessAlive(pid) || !isAgentProcess(pid, s.Agent.Binary()) {
+		return
+	}
+	if stop {
+		// A pane already back at a shell has no agent left to stop, and the
+		// pid — kept since its last hook — may now be another session's.
+		if tmux.IsShellCommand(s.paneCommand()) {
+			return
+		}
+		_ = syscall.Kill(pid, syscall.SIGHUP)
+	}
+	deadline := time.Now().Add(retiredExitTimeout)
+	for agentProcessAlive(pid) {
+		if time.Now().After(deadline) {
+			debuglog.Logger.Warn("relaunch: old agent process still running", "id", s.ID, "agent", s.Agent, "pid", pid)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// agentOwnerGone reports whether the agent process behind the last hook has
+// exited. An unknown owner (status file without a pid) counts as gone, which
+// keeps the pane-only rule for that case.
+func (s *Session) agentOwnerGone() bool {
+	if s.ownerAliveFn != nil {
+		return !s.ownerAliveFn()
+	}
+	pid := s.ownerAgentPID()
+	return pid <= 0 || !agentProcessAlive(pid)
+}
+
+func (s *Session) ownerAgentPID() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ownerPID
+}
+
+// isAgentProcess reports whether pid's executable is named binary (Copilot's
+// native binary is "copilot", Antigravity's "agy"; a hook's parent is that
+// process). The pid came from a hook and may have been recycled since.
+func isAgentProcess(pid int, binary string) bool {
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	return err == nil && filepath.Base(strings.TrimSpace(string(out))) == binary
 }

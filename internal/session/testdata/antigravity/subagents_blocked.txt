@@ -1,0 +1,23 @@
+[90m────────────────────────────────────────────────────────────[39m
+[1m[34m> Delegate to two subagents in parallel: each runs the shell command sleep 20[0m
+[1m[34m  and reports back. Then summarize.[0m
+
+[37m○[39m [37mThought for 3.5s[39m [37m(Two subagents are being invoked concurrently, each runn...)[39m
+[32m●[39m [1m[33mSpawned[0m 2 subagents [37m(ctrl+o to expand)
+
+[39m  I have launched two subagents in parallel to run [94msleep 20[39m. I will summarize
+  their reports as soon as they complete.
+
+ [33m┃[39m [94mself[39m needs approval for [1m[33mBash[0m
+ [33m┃[39m [90m──────────────────────────────────────────────────────────────────────────[39m
+ [33m┃[39m
+ [33m┃[39m [33m●[39m [1m[33mBash[0m[37m(sleep 20)[39m
+ [33m┃[39m
+ [33m┃[39m [1m[33mctrl+k[0m approve · [1m[33malt+j[0m manage
+[90m────────────────────────────────────────────────────────────────────────────────
+[94m>[39m
+[90m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m●[39m Agent(self: Shell Runner 2)  [38;5;214mBlocked[39m · Bash[90m · 21s[39m
+  [38;5;220m●[39m Agent(self: Shell Runner 1)  [38;5;214mBlocked[39m · Bash[90m · 21s[39m
+[90m────────────────────────────────────────────────────────────────────────────────
+? for shortcuts[39m                          [2mGemini 3.8 Flash · high · 2 subagent(s)

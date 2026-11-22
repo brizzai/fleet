@@ -5,15 +5,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/tmux"
@@ -107,7 +103,7 @@ func (s *Session) updateCopilotStatus(oldStatus Status, hasHook bool, hookStatus
 	// The agent has run (it fired a hook), its pane is back at a shell, and
 	// its process is gone. The pane alone isn't enough: a tcsh respawn (no
 	// exec), Ctrl+Z, or a split window all show a shell over a live Copilot.
-	if hasHook && tmux.IsShellCommand(s.paneCommand()) && s.copilotOwnerGone() {
+	if hasHook && tmux.IsShellCommand(s.paneCommand()) && s.agentOwnerGone() {
 		s.applyHookStatus(oldStatus, "dead", hookReason, log)
 		return
 	}
@@ -130,37 +126,6 @@ const retiredExitTimeout = 5 * time.Second
 // a busy Copilot exits in ~1.8s), plus the up-to-5s exit wait before it.
 const retiredHookWindow = 10 * time.Second
 
-// awaitRetiredCopilot waits for the Copilot a relaunch is replacing to exit.
-// Copilot holds a per-process lock on its conversation, and a new process that
-// starts while the old one is still shutting down opens on a "Session in use —
-// Resume anyway?" menu instead of the conversation. stop sends the old process
-// the SIGHUP tmux would, for callers that haven't killed it yet. The pid comes
-// from a hook and could have been recycled, so nothing happens unless it is
-// still a copilot process. Blocks for up to retiredExitTimeout: callers run off
-// the Update loop. pid is 0 when the agent never fired a hook — an idle Copilot
-// exits in ~30ms anyway.
-func (s *Session) awaitRetiredCopilot(pid int, stop bool) {
-	if s.Agent != agent.Copilot || pid <= 0 || !agentProcessAlive(pid) || !isCopilotProcess(pid) {
-		return
-	}
-	if stop {
-		// A pane already back at a shell has no Copilot left to stop, and the
-		// pid — kept since its last hook — may now be another Copilot's.
-		if tmux.IsShellCommand(s.paneCommand()) {
-			return
-		}
-		_ = syscall.Kill(pid, syscall.SIGHUP)
-	}
-	deadline := time.Now().Add(retiredExitTimeout)
-	for agentProcessAlive(pid) {
-		if time.Now().After(deadline) {
-			debuglog.Logger.Warn("copilot relaunch: old process still running", "id", s.ID, "pid", pid)
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 // resumeWaitPID is the agent Restart replaces. Right after a Suspend the owner
 // is already cleared, yet a Copilot that has had a turn holds its conversation
 // lock for up to ~0.9s after the kill (measured), and a resume inside that
@@ -175,30 +140,6 @@ func (s *Session) resumeWaitPID() int {
 	}
 	s.suspendedPID, s.suspendedAt = 0, time.Time{}
 	return pid
-}
-
-// copilotOwnerGone reports whether the Copilot process behind the last hook has
-// exited. An unknown owner (status file without a pid) counts as gone, which
-// keeps the pane-only rule for that case.
-func (s *Session) copilotOwnerGone() bool {
-	if s.ownerAliveFn != nil {
-		return !s.ownerAliveFn()
-	}
-	pid := s.ownerAgentPID()
-	return pid <= 0 || !agentProcessAlive(pid)
-}
-
-func (s *Session) ownerAgentPID() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.ownerPID
-}
-
-// isCopilotProcess reports whether pid's executable is Copilot's (the native
-// binary is named "copilot"; the hook's parent is that process).
-func isCopilotProcess(pid int) bool {
-	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
-	return err == nil && filepath.Base(strings.TrimSpace(string(out))) == "copilot"
 }
 
 // paneCommand is the pane's foreground command from tmux's per-tick cache.

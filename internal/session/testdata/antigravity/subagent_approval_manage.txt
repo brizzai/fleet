@@ -1,0 +1,23 @@
+  [94mmain › self[39m
+  [38;5;220m●[39m running · Gemini 3.8 Flash (High) · 3m15s · 3 steps
+  [90mID: f7d11569-83cb-474c-9968-6b3beed0cbbf[39m
+  [90m────────────────────────────────────────────────────────────[39m
+
+  [1mPrompt[0m
+  [37mRun the shell command: sleep 25 && echo zzfin, and report back the exact[39m
+  [37moutput that was printed.[39m
+  [90m────────────────────────────────────────────────────────────[39m
+
+  [1mTools[0m
+    [37mBash[39m
+  [90m────────────────────────────────────────────────────────────[39m
+
+  [1m[38;5;220m⚠ Approval Required[0m
+    [94m> Bash[39m
+      sleep 25 && echo zzfin
+      [94m> 1. Yes, approve[39m
+        2. No, deny
+
+[90m  (1–20 of 27 lines)
+[39m  [1m[94m↑/↓[0m[90m navigate · [1m[94m/[0m[90m select · [1m[94menter[0m[90m confirm · [1m[94mesc[0m[90m cancel[39m
+                                         [2mGemini 3.8 Flash · high · 1 subagent(s)
