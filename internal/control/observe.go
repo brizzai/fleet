@@ -152,9 +152,9 @@ func (o *Observer) Observe(rows []*session.SessionRow) []*Observation {
 		if c, ok := captures[ts.Name]; ok {
 			ts.SeedCapture(c)
 			ob.Capture = c
-		} else {
-			// The batch missed it: take the look here, so the status and the
-			// screen read back from this observation come from the same frame.
+		} else if ob.Pane == PaneAlive || ob.Pane == PaneShell {
+			// The batch missed a pane it asked for: look at it here, so the
+			// status rules below read the same frame UpdateStatus does.
 			ob.Capture, _ = ts.CapturePaneFresh()
 		}
 	}

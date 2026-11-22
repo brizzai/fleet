@@ -175,11 +175,12 @@ func (d *antigravityHooksDoc) fleetEntry() (entry antigravityFleetHooks, ok bool
 }
 
 func (d *antigravityHooksDoc) write() error {
-	data, err := json.MarshalIndent(d.keys, "", "  ")
+	// Unescaped, so the user's own hooks keep their `&`, `<` and `>` as typed.
+	data, err := marshalJSON(d.keys, "  ")
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(d.path, append(data, '\n'), d.mode)
+	return writeFileAtomic(d.path, data, d.mode)
 }
 
 // InjectAntigravityHooks makes fleet's entry in configDir/hooks.json current,

@@ -92,6 +92,15 @@ func ParsePaneView(a agent.Type, rawPane string) PaneView {
 			if v.Menu = parseNumberedMenu(unframe(clean)); v.Menu == nil {
 				v.Menu = parseBoxedMenu(clean)
 			}
+		case agent.Antigravity:
+			// A subagent's approval is a banner over the input box, not a menu;
+			// a numbered list in the reply above it is not its options.
+			if AntigravityApproveKey(rawPane) == "C-k" {
+				break
+			}
+			if v.Menu = parseNumberedMenu(clean); v.Menu == nil {
+				v.Menu = parseBoxedMenu(clean)
+			}
 		default:
 			// Claude's folder-trust dialog is the unnumbered kind.
 			if v.Menu = parseNumberedMenu(clean); v.Menu == nil {

@@ -485,6 +485,8 @@ func handleHooksCmd(args []string) {
 				fmt.Println("Antigravity: INSTALLED")
 			case "disabled":
 				fmt.Println("Antigravity: DISABLED (switched off in agy's /hooks)")
+			case "stale":
+				fmt.Println("Antigravity: INSTALLED (outdated; run 'fleet hooks install')")
 			default:
 				fmt.Printf("Antigravity: NOT INSTALLED (%s; run 'fleet hooks install')\n", state)
 			}

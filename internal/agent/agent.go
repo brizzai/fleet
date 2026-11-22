@@ -342,8 +342,8 @@ func AntigravitySettings(projectPath string) string {
 //
 // An initial prompt appends the agent's own prompt argument to any of those —
 // `-- <prompt>` for Claude and Codex, `--prompt=<prompt>` for OpenCode,
-// `--interactive=<prompt>` for Copilot (see promptArg for why the separator
-// matters). All accept it alongside resume/fork, so a resumed conversation can
+// `--interactive=<prompt>` for Copilot, `--prompt-interactive=<prompt>` for
+// Antigravity (see promptArg for why the separator matters). All accept it alongside resume/fork, so a resumed conversation can
 // be handed a message too.
 func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	var cmd string

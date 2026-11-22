@@ -44,6 +44,9 @@ type StatusFile struct {
 	// every foreign session id it is ever asked about. Only reachable by hand-
 	// editing settings.json today, but keep the installed command simple: the
 	// failure is a silently inverted ownership gate, not a missing signal.
+	// Copilot's and Antigravity's commands are compound on purpose (the
+	// nonFleetSessionGuard prefix) and end in `exec`, so the handler still
+	// takes the shell's place and getppid() still names the agent.
 	AgentPID int `json:"agent_pid,omitempty"`
 	// PromptSessionID is the conversation the user last submitted a prompt in,
 	// kept across later events. Copilot can hold several conversations in one

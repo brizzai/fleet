@@ -286,7 +286,7 @@ func TestValidEffort(t *testing.T) {
 		t.Error("Copilot accepted a value it exits on")
 	}
 	if !Claude.ValidEffort("ultracode") || !Codex.ValidEffort("anything") {
-		t.Error("ValidEffort must only restrict Copilot")
+		t.Error("ValidEffort must only restrict Copilot and Antigravity")
 	}
 }
 

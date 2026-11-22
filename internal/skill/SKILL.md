@@ -80,20 +80,19 @@ fleet add <path>   --agent codex --model gpt-5.1-codex-max --effort high
 ```
 
 - `--model` takes whatever that agent accepts: an alias or full id for Claude (`opus`,
-  `claude-opus-5`), a model id for Codex, and `provider/model` for OpenCode
+  `claude-opus-5`), a model id for Codex, `provider/model` for OpenCode
   (`anthropic/claude-sonnet-5`), and Copilot's and Antigravity's own ids (Antigravity's are
-  slugs like `gemini-3.8-flash-medium`; `agy models` lists them). fleet passes it through and does not translate between
-  agents, so use the spelling the chosen agent uses.
+  slugs like `gemini-3.8-flash-medium`; `agy models` lists them). fleet passes it through and
+  does not translate between agents, so use the spelling the chosen agent uses.
 - `--effort` works for **Claude, Codex, Copilot and Antigravity** — it becomes `--effort` for
   Claude and Antigravity, `--reasoning-effort` for Copilot, and a `model_reasoning_effort` config
-  override for Codex. Claude
-  accepts `low|medium|high|xhigh|max|ultracode`; Codex and Copilot take their own levels, and
-  Antigravity only `low|medium|high|xhigh|max` (fleet refuses anything else, because Antigravity
-  would silently switch to its default). Passing
-  it with `--agent opencode` is an error, not a silent no-op: the command fleet launches
-  OpenCode with has no option for it, so it can only be set inside the agent. `--model`
-  works for all five (Copilot falls back to `auto` on a model it doesn't know, Antigravity to its
-  default model, with a warning in the pane).
+  override for Codex. Claude accepts `low|medium|high|xhigh|max|ultracode`; Codex and Copilot
+  take their own levels, and Antigravity only `low|medium|high|xhigh|max` (fleet refuses
+  anything else, because Antigravity would silently switch to its default). Passing it with
+  `--agent opencode` is an error, not a silent no-op: the command fleet launches OpenCode with
+  has no option for it, so it can only be set inside the agent. `--model` works for all five
+  (Copilot falls back to `auto` on a model it doesn't know, Antigravity to its default model,
+  with a warning in the pane).
 - Both apply to the **launch only**. The user can change model in-session (`/model`), and
   a later restart uses the agent's own defaults rather than re-imposing these.
 - Values must be bare names — anything with a space or a shell metacharacter is rejected

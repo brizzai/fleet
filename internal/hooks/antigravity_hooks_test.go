@@ -77,8 +77,6 @@ func TestInjectAntigravityHooksCreatesFleetEntry(t *testing.T) {
 	}
 }
 
-// hooks.json is shared with everything else the user installs. Fleet's write
-// must leave every other key exactly as it was.
 // A dotfiles hooks.json can be a link to a file that doesn't exist yet: the
 // install creates the target and leaves the link in place.
 func TestInjectAntigravityHooksKeepsADanglingSymlink(t *testing.T) {
@@ -99,9 +97,11 @@ func TestInjectAntigravityHooksKeepsADanglingSymlink(t *testing.T) {
 	}
 }
 
+// hooks.json is shared with everything else the user installs. Fleet's write
+// must leave every other key exactly as it was.
 func TestInjectAntigravityHooksKeepsOtherHooks(t *testing.T) {
 	dir := t.TempDir()
-	user := `{"my-linter":{"PostToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"./lint.sh \"a & b\""}]}]}}`
+	user := `{"my-linter":{"PostToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"./lint.sh \"a & b\" 2>&1"}]}]}}`
 	writeHooksJSON(t, dir, user)
 	if _, err := InjectAntigravityHooks(dir); err != nil {
 		t.Fatal(err)
@@ -114,6 +114,9 @@ func TestInjectAntigravityHooksKeepsOtherHooks(t *testing.T) {
 	gotJSON, _ := json.Marshal(got)
 	if string(wantJSON) != string(gotJSON) {
 		t.Errorf("user's hook changed:\n got %s\nwant %s", gotJSON, wantJSON)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "hooks.json")); !strings.Contains(string(raw), `2>&1`) {
+		t.Errorf("user's hook was re-escaped on disk:\n%s", raw)
 	}
 
 	if removed, err := RemoveAntigravityHooks(dir); err != nil || !removed {

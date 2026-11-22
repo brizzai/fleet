@@ -1561,9 +1561,9 @@ func (s *Session) UpdateStatus() {
 // applyHookStatus maps an authoritative hook/plugin status string
 // (running/waiting/finished/dead) onto the session, honoring the acknowledged
 // flag (finished→idle once acknowledged) and triggering a crash dump on dead.
-// Used by Codex and Copilot (when the pane is at rest, the hook decides; Copilot
-// also for "dead" once its pane is back at a shell) and OpenCode (which is
-// purely plugin-driven with no pane fallback).
+// Used by Codex, Copilot and Antigravity (when the pane is at rest, the hook
+// decides; Copilot and Antigravity also for "dead" once the pane is back at a
+// shell) and OpenCode (which is purely plugin-driven with no pane fallback).
 func (s *Session) applyHookStatus(oldStatus Status, hookStatus, hookReason string, log *slog.Logger) {
 	hookSaysDead := false
 	errReason := ""
@@ -2368,7 +2368,7 @@ func codexPaneWaiting(content string) bool {
 }
 
 // updatePaneLedStatus is the status rule for agents whose hooks are incomplete
-// (Codex, Copilot): a definite pane state — a wait prompt, or a working footer —
+// (Codex, Copilot, Antigravity): a definite pane state — a wait prompt, or a working footer —
 // overrides a possibly stale hook; only an at-rest pane lets the hook decide
 // running/finished/idle, and with no hook at all it settles to idle.
 // adjustHook, when set, may rewrite the hook status before it is applied.
@@ -2396,6 +2396,12 @@ func (s *Session) updatePaneLedStatus(name string, oldStatus Status, hasHook boo
 		s.resetPaneFinishedConfirmLocked()
 		s.mu.Unlock()
 	}
+	if !captured && adjustHook != nil {
+		// The raw hook is exactly what adjustHook exists to correct (a cancelled
+		// turn's hook still says running), so applying it unadjusted would undo a
+		// turn already settled. Wait for a readable pane.
+		return
+	}
 	switch {
 	case paneWaiting:
 		if oldStatus != StatusWaiting {
@@ -2410,7 +2416,7 @@ func (s *Session) updatePaneLedStatus(name string, oldStatus Status, hasHook boo
 	case hasHook:
 		// Pane at rest (or unreadable) — it can't tell running from finished
 		// from idle at the prompt, so the hook decides.
-		if adjustHook != nil && captured {
+		if adjustHook != nil {
 			hookStatus = adjustHook(hookStatus)
 		}
 		s.applyHookStatus(oldStatus, hookStatus, hookReason, log)

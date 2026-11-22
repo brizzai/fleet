@@ -193,6 +193,47 @@ func TestAntigravityFailedCaptureNeverSettlesARunningTurn(t *testing.T) {
 	}
 }
 
+// Once an interrupted turn has settled, its hook still says running. A failed
+// capture must not hand that raw hook back the status.
+func TestAntigravityFailedCaptureKeepsASettledTurnFinished(t *testing.T) {
+	s, mock := newAntigravityTestSession(t, antigravityFixture(t, "interrupted"))
+	s.UpdateHookStatus(agyHook("running", "own-id"), true)
+	s.SetStatus(StatusRunning)
+	for range 3 {
+		s.mu.Lock()
+		if !s.paneFinishedFirstAt.IsZero() {
+			s.paneFinishedFirstAt = time.Now().Add(-time.Hour)
+		}
+		s.mu.Unlock()
+		s.UpdateStatus()
+	}
+	if got := s.GetStatus(); got != StatusFinished {
+		t.Fatalf("interrupted turn = %q before the failed capture, want finished", got)
+	}
+	mock.captureErr = errors.New("capture-pane timed out")
+	s.UpdateStatus()
+	if got := s.GetStatus(); got != StatusFinished {
+		t.Fatalf("status after a failed capture = %q, want finished", got)
+	}
+}
+
+// A subagent's approval banner reads as waiting, but it has no options: a
+// numbered list in the reply above it must not be parsed as its menu.
+func TestAntigravitySubagentBannerHasNoMenu(t *testing.T) {
+	pane := antigravityFixture(t, "subagent_approval")
+	reply := "subagent and will report back with what it printed as soon as it completes."
+	if !strings.Contains(pane, reply) {
+		t.Fatal("fixture no longer holds the reply line this test extends")
+	}
+	pane = strings.Replace(pane, reply, reply+"\n\n  1. Run the tests\n  2. Fix the lint", 1)
+	if !PaneIndicatesWaiting(agent.Antigravity, pane) {
+		t.Fatal("the banner no longer reads as waiting")
+	}
+	if m := ParsePaneView(agent.Antigravity, pane).Menu; m != nil {
+		t.Errorf("banner parsed as a menu with %d options", len(m.Options))
+	}
+}
+
 // A working frame between two at-rest ones breaks the run; it must not be
 // bridged into a confirmation.
 func TestAntigravityRunningFrameResetsTheConfirmation(t *testing.T) {
