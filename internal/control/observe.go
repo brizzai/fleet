@@ -152,16 +152,63 @@ func (o *Observer) Observe(rows []*session.SessionRow) []*Observation {
 		if c, ok := captures[ts.Name]; ok {
 			ts.SeedCapture(c)
 			ob.Capture = c
+		} else if ob.Pane == PaneAlive || ob.Pane == PaneShell {
+			// The batch missed a pane it asked for: look at it here, so the
+			// status rules below read the same frame UpdateStatus does.
+			ob.Capture, _ = ts.CapturePaneFresh()
 		}
 	}
 
 	for _, ob := range obs {
 		o.updateStatus(ob)
 	}
+	o.secondLook(obs)
 	for _, ob := range obs {
 		o.fill(ob)
 	}
 	return obs
+}
+
+// secondLook re-reads the panes of Antigravity sessions whose first look left
+// an at-rest confirmation half-built. An Esc interrupt fires no hook, so the
+// hook says running over an idle pane, and settling that takes two looks
+// apart (settleInterruptedAntigravityTurn) — which the TUI's worker gets for
+// free and a one-shot `fleet status` never would, reporting the turn running
+// until the next one started. Costs at most PaneDemotionConfirmDelay, only
+// in that state.
+func (o *Observer) secondLook(obs []*Observation) {
+	var again []*Observation
+	var names []string
+	latest := time.Time{}
+	for _, ob := range obs {
+		since, pending := ob.Session.PaneDemotionPendingSince()
+		if !ob.first || ob.Agent != agent.Antigravity || !pending {
+			continue
+		}
+		again = append(again, ob)
+		names = append(names, ob.Session.GetTmuxSession().Name)
+		if since.After(latest) {
+			latest = since
+		}
+	}
+	if len(again) == 0 {
+		return
+	}
+	time.Sleep(time.Until(latest.Add(session.PaneDemotionConfirmDelay)))
+	captures := tmux.BatchCapturePanes(names)
+	for _, ob := range again {
+		ts := ob.Session.GetTmuxSession()
+		if c, ok := captures[ts.Name]; ok {
+			ts.SeedCapture(c)
+			ob.Capture = c
+		} else {
+			// The batch missed it: take the look here, so the status and the
+			// screen read back from this observation come from the same frame.
+			ob.Capture, _ = ts.CapturePaneFresh()
+		}
+		ob.first = false // the activity seed already ran
+		o.updateStatus(ob)
+	}
 }
 
 // session returns the cached Session for row, rebuilding it when the row now

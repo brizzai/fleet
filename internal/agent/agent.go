@@ -1,10 +1,12 @@
 // Package agent describes the coding agents fleet can launch in a session
-// (Claude Code, OpenAI Codex, OpenCode, and GitHub Copilot CLI) and owns the per-agent divergence:
+// (Claude Code, OpenAI Codex, OpenCode, GitHub Copilot CLI, and Antigravity CLI) and owns the
+// per-agent divergence:
 // the binary name, display name, and the launch command (including resume/fork
 // forms).
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"slices"
@@ -19,13 +21,16 @@ const (
 	Codex    Type = "codex"
 	OpenCode Type = "opencode"
 	Copilot  Type = "copilot"
+	// Antigravity is Google's Antigravity CLI. The type is named for the product
+	// and the binary is `agy`, so `--agent antigravity` reads as what it is.
+	Antigravity Type = "antigravity"
 
 	// Default is the agent assumed when none is recorded (legacy sessions, empty config).
 	Default = Claude
 )
 
 // All is every agent fleet can launch, in the order pickers offer them.
-var All = []Type{Claude, Codex, OpenCode, Copilot}
+var All = []Type{Claude, Codex, OpenCode, Copilot, Antigravity}
 
 // Known reports whether s names an agent exactly. Parse falls back to Claude,
 // so a caller taking a user-typed name checks this first.
@@ -40,7 +45,7 @@ func Names() []string {
 	return names
 }
 
-// NameList is "claude, codex, opencode, or copilot", for help and errors.
+// NameList is "claude, codex, opencode, copilot, or antigravity", for help and errors.
 func NameList() string {
 	names := Names()
 	return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
@@ -64,6 +69,8 @@ func (t Type) Binary() string {
 		return "opencode"
 	case Copilot:
 		return "copilot"
+	case Antigravity:
+		return "agy"
 	default:
 		return "claude"
 	}
@@ -78,9 +85,23 @@ func (t Type) DisplayName() string {
 		return "OpenCode"
 	case Copilot:
 		return "Copilot"
+	case Antigravity:
+		return "Antigravity"
 	default:
 		return "Claude"
 	}
+}
+
+// MissingBinaryMessage says the agent's CLI isn't on PATH. Antigravity's
+// installer puts `agy` in ~/.local/bin and, on Linux, leaves that off PATH
+// ("installed, but it is not in your active PATH"), so its message says where
+// to look.
+func (t Type) MissingBinaryMessage() string {
+	msg := fmt.Sprintf("%s CLI not found: install %s to create sessions", t.Binary(), t.DisplayName())
+	if t == Antigravity {
+		msg += " (its installer puts agy in ~/.local/bin; add that to PATH)"
+	}
+	return msg
 }
 
 // String implements fmt.Stringer.
@@ -119,12 +140,17 @@ const promptRef = `"$` + PromptEnvVar + `"`
 // a space, yargs reads the next word as a fresh option instead of the value.
 // Copilot takes its interactive first prompt through --interactive, with the
 // same `=` requirement (`-i "--fix"` exits with "Invalid command format").
+// Antigravity has no positional prompt at all: a stray argument exits with
+// "unexpected argument" (status 2), so `-- <prompt>` would be fatal there and
+// the prompt rides --prompt-interactive.
 func (t Type) promptArg() string {
 	switch t {
 	case OpenCode:
 		return "--prompt=" + promptRef
 	case Copilot:
 		return "--interactive=" + promptRef
+	case Antigravity:
+		return "--prompt-interactive=" + promptRef
 	}
 	return "-- " + promptRef
 }
@@ -192,7 +218,10 @@ func (t Type) SupportsEffort() bool { return t != OpenCode }
 // SupportsFork reports whether this agent can start a new conversation forked
 // from an existing one. Copilot has no fork flag: launching it with the
 // parent's id would resume — and take over — the parent's conversation.
-func (t Type) SupportsFork() bool { return t != Copilot }
+//
+// Antigravity can fork only from inside its own TUI (`/fork`); it has no
+// launch flag for it, and `--conversation <parent>` would resume the parent.
+func (t Type) SupportsFork() bool { return t != Copilot && t != Antigravity }
 
 // PreMintsSessionID reports whether fleet chooses this agent's conversation id
 // itself rather than capturing it from a hook. Copilot's `--session-id <uuid>`
@@ -223,19 +252,51 @@ func (t Type) effortArg(effort string) string {
 // exits on anything else (1.0.91), leaving a session at a bare shell.
 var copilotEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
-// ValidEffort reports whether the agent will start with this effort value.
-// Claude only warns on an unknown one; Copilot refuses to start.
+// antigravityEfforts are the values Antigravity's --effort accepts (1.5.14).
+// It does not exit on another one: it warns and launches on its default model
+// and effort instead, which is worse to discover later than a refusal now.
+var antigravityEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+// efforts is the closed set of effort values the agent accepts, or nil when it
+// takes any.
+func (t Type) efforts() []string {
+	switch t {
+	case Copilot:
+		return copilotEfforts
+	case Antigravity:
+		return antigravityEfforts
+	}
+	return nil
+}
+
+// ValidEffort reports whether the agent will run at this effort value.
+// Claude only warns on an unknown one; Copilot refuses to start, and
+// Antigravity silently swaps in its default.
 func (t Type) ValidEffort(effort string) bool {
-	return t != Copilot || slices.Contains(copilotEfforts, effort)
+	set := t.efforts()
+	return set == nil || slices.Contains(set, effort)
 }
 
 // EffortChoices names the accepted values for an error message ("" when the
 // agent takes any).
 func (t Type) EffortChoices() string {
-	if t == Copilot {
-		return strings.Join(copilotEfforts, ", ")
-	}
-	return ""
+	return strings.Join(t.efforts(), ", ")
+}
+
+// AntigravitySettingsEnvVar carries the per-session `--settings` JSON an
+// Antigravity launch reads. Like PromptEnvVar it travels through tmux's -e,
+// never the typed command line, because it embeds the project path: a path
+// with a quote or `$(...)` in it must not be parsed by the pane's shell.
+const AntigravitySettingsEnvVar = "FLEET_AGY_SETTINGS"
+
+// AntigravitySettings is the session-only settings JSON fleet launches
+// Antigravity with. It trusts the project directory, so the session opens at
+// its prompt instead of on "Do you trust the contents of this project?" — a
+// menu no hook reports. `--settings` is applied for this session only and never
+// written to the user's settings.json (verified), so nothing accumulates there.
+func AntigravitySettings(projectPath string) string {
+	data, _ := json.Marshal(map[string][]string{"trustedWorkspaces": {projectPath}})
+	return string(data)
 }
 
 // BuildLaunchCmd returns the shell command to run in the session's tmux pane.
@@ -267,6 +328,12 @@ func (t Type) EffortChoices() string {
 // Copilot cannot fork (SupportsFork); a fork id is dropped rather than turned
 // into a resume of the parent.
 //
+// Antigravity (the project's trust rides AntigravitySettingsEnvVar; hooks are
+// installed out-of-band; a fork id is dropped, as for Copilot):
+//
+//	agy --settings="$FLEET_AGY_SETTINGS"
+//	agy --settings="$FLEET_AGY_SETTINGS" --conversation <id>
+//
 // Model and Effort append their per-agent flags to any of those, ahead of the
 // prompt — the prompt argument must stay last, since `--` ends option parsing
 // and anything after it is no longer read as a flag. Every agent spells the
@@ -275,8 +342,8 @@ func (t Type) EffortChoices() string {
 //
 // An initial prompt appends the agent's own prompt argument to any of those —
 // `-- <prompt>` for Claude and Codex, `--prompt=<prompt>` for OpenCode,
-// `--interactive=<prompt>` for Copilot (see promptArg for why the separator
-// matters). All accept it alongside resume/fork, so a resumed conversation can
+// `--interactive=<prompt>` for Copilot, `--prompt-interactive=<prompt>` for
+// Antigravity (see promptArg for why the separator matters). All accept it alongside resume/fork, so a resumed conversation can
 // be handed a message too.
 func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 	var cmd string
@@ -305,6 +372,12 @@ func (t Type) BuildLaunchCmd(o LaunchOpts) string {
 		cmd = "copilot"
 		if o.ResumeID != "" {
 			cmd += " --session-id=" + o.ResumeID
+		}
+
+	case Antigravity:
+		cmd = `agy --settings="$` + AntigravitySettingsEnvVar + `"`
+		if o.ResumeID != "" {
+			cmd += " --conversation " + o.ResumeID
 		}
 
 	default: // Claude

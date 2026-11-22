@@ -151,7 +151,7 @@ var tipRegistry = []Tip{
 		Priority: 9, // between the palette (10) and drawer (8) tips
 		active:   func(h *Home) bool { return !h.agentSkillInstalled && len(h.sessions) >= 1 },
 		text: func(h *Home) string {
-			return "Tip: run `fleet skill install` in a terminal — it teaches Claude Code, Codex, Copilot and Cursor " +
+			return "Tip: run `fleet skill install` in a terminal — it teaches Claude Code, Codex, Copilot, Antigravity and Cursor " +
 				"to drive fleet themselves, so an agent can spin up a worktree session or message another one."
 		},
 	},

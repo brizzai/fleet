@@ -1,0 +1,40 @@
+[38;5;205m   ***   ***[39m
+[38;5;205m ****[39m
+[38;5;205m  ***********[39m
+[38;5;205m    ***********  example.com[39m
+
+[1m[36mws3[0m on [1m[35m main[0m [1m[31m[?][0m on [1m[34m user@example.com[0m
+[1m[32m➜[0m [32magy[39m --model gemini-3.8-flash-medium
+
+      [38;5;179m▄[38;5;208m[48;5;208m▀[38;5;203m[48;5;209m▀[49m▄[39m
+     [38;5;149m[48;5;113m▀[38;5;143m[48;5;107m▀[38;5;173m[48;5;173m▀[38;5;209m[48;5;209m▀[38;5;203m[48;5;167m▀▀[39m[49m
+    [38;5;107m[48;5;113m▀[38;5;71m[48;5;72m▀[38;5;72m[48;5;68m▀[38;5;67m[49m▀[38;5;103m▀[38;5;98m[48;5;68m▀[38;5;97m[48;5;62m▀[38;5;132m[48;5;97m▀[39m[49m
+   [38;5;78m▄[48;5;74m▀[38;5;73m▀[39m[49m    [38;5;68m[48;5;69m▀▀[49m▄[39m
+  [38;5;75m▄[38;5;79m[48;5;75m▀[38;5;75m[49m▀[39m      [38;5;69m▀[48;5;69m▀[49m▄[39m
+
+  [1m[94mAntigravity CLI 1.5.14[0m
+  [90muser@example.com (Antigravity Starter Quota)[39m
+  [90mGemini 3.8 Flash (Medium)[39m
+  [90m/tmp/project
+
+[1m[34m> /hooks[0m
+[1m[34m  ⎿  [0m[37mExited /hooks command[39m
+
+[90m────────────────────────────────────────────────────────────[39m
+[1m[34m> Run the shell command: sleep 20 && echo ok[0m
+
+[37m○[39m [37mThought for 5.3s[39m [37m(The command includes a `sleep` directive, which conflicts with a guideline against shell-based...)[39m
+[32m●[39m [1m[33mRan[0m [37m(sleep 20 && echo ok)[39m [37m(ctrl+o to expand)[39m
+
+  I have started the command [94msleep 20 && echo ok[39m in the background (task-2). I will notify you once it completes.
+
+  The command has completed successfully.
+
+  [1mOutput:[0m
+
+    [38;5;252mok[39m
+
+[90m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[94m>[39m
+[90m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts[39m                                                                         [33mauto[2m[39m · Gemini 3.8 Flash · medium

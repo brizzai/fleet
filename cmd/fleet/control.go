@@ -232,6 +232,16 @@ func runAnswerVerb(st *cliState, opts actOpts) error {
 		if ob.Agent == agent.OpenCode {
 			return fmt.Errorf("fleet can't read OpenCode's prompts — attach to answer it")
 		}
+		if ob.Agent == agent.Antigravity && ob.Status == session.StatusWaiting &&
+			session.AntigravityApproveKey(ob.Capture) == "C-k" {
+			// A subagent's approval is a banner, not a menu: no options to pick.
+			return fmt.Errorf("session %q is waiting on a subagent's approval, which has no options to pick — "+
+				"attach and press Ctrl+K to approve (Y in the TUI does that), or Alt+J to review it", ob.Row.Title)
+		}
+		if ob.Agent == agent.Antigravity && ob.Status == session.StatusWaiting {
+			// The sign-in screen, the Alt+J manager, or a prompt fleet can't parse.
+			return fmt.Errorf("session %q is waiting on a screen fleet can't answer — attach to answer it", ob.Row.Title)
+		}
 		return fmt.Errorf("session %q is not waiting on a prompt (status %s)", ob.Row.Title, statusWord(ob))
 	}
 	if opts.expect != "" && !menuMentions(m, opts.expect) {

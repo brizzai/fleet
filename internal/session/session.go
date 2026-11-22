@@ -252,10 +252,10 @@ func (s *Session) buildAgentCmd() string {
 }
 
 // initialRunStatus is the status to show right after launching the agent.
-// Codex, OpenCode and Copilot fire no event until their first turn, so they start idle
-// (sitting at their prompt) rather than flashing running.
+// Codex, OpenCode, Copilot and Antigravity fire no event until their first turn, so
+// they start idle (sitting at their prompt) rather than flashing running.
 func (s *Session) initialRunStatus() Status {
-	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Copilot {
+	if s.Agent == agent.Codex || s.Agent == agent.OpenCode || s.Agent == agent.Copilot || s.Agent == agent.Antigravity {
 		return StatusIdle
 	}
 	return StatusRunning
@@ -394,6 +394,12 @@ func (s *Session) sessionEnv() []string {
 	// the quotes, newlines or $(...) it contains.
 	if s.InitialPrompt != "" {
 		env = append(env, fmt.Sprintf("%s=%s", agent.PromptEnvVar, s.InitialPrompt))
+	}
+	// Every Antigravity launch reads this (its command always passes
+	// --settings), so it is set unconditionally: an unset variable would hand
+	// agy an empty --settings value.
+	if ag == agent.Antigravity {
+		env = append(env, fmt.Sprintf("%s=%s", agent.AntigravitySettingsEnvVar, agent.AntigravitySettings(resolvedProjectPath(s.ProjectPath))))
 	}
 	return env
 }
@@ -778,6 +784,9 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 	if s.Agent == agent.Copilot && !s.copilotHookAccepted(hs) {
 		return false
 	}
+	if s.Agent == agent.Antigravity && !s.antigravityHookAccepted(hs) {
+		return false
+	}
 
 	// A Copilot that never fired a hook has no pid to retire, yet still sends a
 	// SessionEnd (it carries a reason) when the relaunch kills it. Copilot fires
@@ -815,8 +824,8 @@ func (s *Session) UpdateHookStatus(hs *HookStatus, resolveRotation bool) bool {
 		negCached := owner != "" && s.rotRejects[hs.SessionID] != nil && s.rotRejects[hs.SessionID].owner == owner
 		frozenHook, frozenHookAt := s.hookStatus, s.hookUpdatedAt
 		s.mu.RUnlock()
-		// Copilot's ownership was settled by copilotHookAccepted above.
-		if owner != "" && hs.SessionID != owner && s.Agent != agent.Copilot {
+		// Copilot's and Antigravity's ownership was settled above.
+		if owner != "" && hs.SessionID != owner && s.Agent != agent.Copilot && s.Agent != agent.Antigravity {
 			switch {
 			case forkParent != "" && owner == forkParent:
 				// This session was forked (`claude --resume <parent> --fork-session`).
@@ -1105,7 +1114,7 @@ func (s *Session) Restart() error {
 	// hook event, which flips the freshly-restarted session straight back to
 	// error and triggers a misleading crash dump.
 	s.clearHookState()
-	s.awaitRetiredCopilot(oldAgentPID, false)
+	s.awaitRetiredAgent(oldAgentPID, false)
 
 	// Recreate tmux session with same config. Mutate s.tmuxSession under
 	// s.mu so concurrent triggerCrashDump readers see a consistent pointer.
@@ -1150,7 +1159,7 @@ func (s *Session) Relaunching() bool {
 
 // beginRelaunch marks the session starting and keeps UpdateStatus off it until
 // endRelaunch. Between the kill and the new launch the old tmux is gone (or the
-// pane is at a shell) — for up to retiredExitTimeout while a Copilot exits — and
+// pane is at a shell) — for up to retiredExitTimeout while a Copilot or Antigravity exits — and
 // the liveness gates would read that as a crash, with a crash dump to match.
 func (s *Session) beginRelaunch() {
 	s.mu.Lock()
@@ -1201,8 +1210,8 @@ func (s *Session) RespawnClaude() error {
 	s.clearHookState()
 	s.markRelaunchQuiet()
 	// respawn-pane kills and relaunches in one step, leaving no gap to wait in,
-	// so a Copilot is stopped first.
-	s.awaitRetiredCopilot(oldAgentPID, true)
+	// so a Copilot or Antigravity is stopped first.
+	s.awaitRetiredAgent(oldAgentPID, true)
 	s.mu.Lock()
 	s.Status = StatusStarting
 	s.deathRecorded = false
@@ -1531,6 +1540,11 @@ func (s *Session) UpdateStatus() {
 		return
 	}
 
+	if s.Agent == agent.Antigravity {
+		s.updateAntigravityStatus(oldStatus, hasHook, hookStatus, log)
+		return
+	}
+
 	if s.Agent == agent.Codex {
 		s.updatePaneLedStatus("codex", oldStatus, hasHook, hookStatus, hookReason, codexPaneWaiting, codexPaneRunning, nil, log)
 		return
@@ -1547,9 +1561,9 @@ func (s *Session) UpdateStatus() {
 // applyHookStatus maps an authoritative hook/plugin status string
 // (running/waiting/finished/dead) onto the session, honoring the acknowledged
 // flag (finished→idle once acknowledged) and triggering a crash dump on dead.
-// Used by Codex and Copilot (when the pane is at rest, the hook decides; Copilot
-// also for "dead" once its pane is back at a shell) and OpenCode (which is
-// purely plugin-driven with no pane fallback).
+// Used by Codex, Copilot and Antigravity (when the pane is at rest, the hook
+// decides; Copilot and Antigravity also for "dead" once the pane is back at a
+// shell) and OpenCode (which is purely plugin-driven with no pane fallback).
 func (s *Session) applyHookStatus(oldStatus Status, hookStatus, hookReason string, log *slog.Logger) {
 	hookSaysDead := false
 	errReason := ""
@@ -2233,6 +2247,15 @@ func (s *Session) SnapshotData(rawPane string) StatusSnapshot {
 // Copilot's own footers for Copilot ("" when its pane is at rest), Claude's
 // detector otherwise.
 func detectPaneStatusFor(a agent.Type, clean string) Status {
+	if a == agent.Antigravity {
+		switch {
+		case antigravityPaneWaiting(clean):
+			return StatusWaiting
+		case antigravityPaneRunning(clean):
+			return StatusRunning
+		}
+		return ""
+	}
 	if a == agent.Copilot {
 		switch {
 		case copilotPaneWaiting(clean):
@@ -2345,7 +2368,7 @@ func codexPaneWaiting(content string) bool {
 }
 
 // updatePaneLedStatus is the status rule for agents whose hooks are incomplete
-// (Codex, Copilot): a definite pane state — a wait prompt, or a working footer —
+// (Codex, Copilot, Antigravity): a definite pane state — a wait prompt, or a working footer —
 // overrides a possibly stale hook; only an at-rest pane lets the hook decide
 // running/finished/idle, and with no hook at all it settles to idle.
 // adjustHook, when set, may rewrite the hook status before it is applied.
@@ -2365,6 +2388,20 @@ func (s *Session) updatePaneLedStatus(name string, oldStatus Status, hasHook boo
 	if !captured && !hasHook {
 		return
 	}
+	if paneWaiting || paneRunning || !captured {
+		// The pane disagrees with "at rest" — or couldn't be read, which is not
+		// evidence of it — so any confirmation adjustHook has been building
+		// (Antigravity's) starts over.
+		s.mu.Lock()
+		s.resetPaneFinishedConfirmLocked()
+		s.mu.Unlock()
+	}
+	if !captured && adjustHook != nil {
+		// The raw hook is exactly what adjustHook exists to correct (a cancelled
+		// turn's hook still says running), so applying it unadjusted would undo a
+		// turn already settled. Wait for a readable pane.
+		return
+	}
 	switch {
 	case paneWaiting:
 		if oldStatus != StatusWaiting {
@@ -2377,8 +2414,8 @@ func (s *Session) updatePaneLedStatus(name string, oldStatus Status, hasHook boo
 			log.Info("status changed ("+name+" pane)", "old", oldStatus, "new", StatusRunning)
 		}
 	case hasHook:
-		// Pane at rest — it can't tell running from finished from idle at the
-		// prompt, so the hook decides.
+		// Pane at rest (or unreadable) — it can't tell running from finished
+		// from idle at the prompt, so the hook decides.
 		if adjustHook != nil {
 			hookStatus = adjustHook(hookStatus)
 		}
@@ -3095,6 +3132,8 @@ func PaneIndicatesWaiting(a agent.Type, rawPane string) bool {
 		return codexPaneWaiting(clean)
 	case agent.Copilot:
 		return copilotPaneWaiting(clean)
+	case agent.Antigravity:
+		return antigravityPaneWaiting(clean)
 	case agent.OpenCode:
 		return false
 	default:

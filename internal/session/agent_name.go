@@ -4,7 +4,7 @@ import "github.com/brizzai/fleet/internal/agent"
 
 // ReadAgentSessionName returns the title the agent itself keeps for a session —
 // Claude's custom-title/ai-title, the title a Codex user set with `/rename`, or
-// Copilot's own (generated, or set with `/rename`).
+// Copilot's or Antigravity's own (generated, or set with `/rename`).
 // Empty means the agent has no title of its own and fleet's prompt heuristic
 // should name the session.
 func ReadAgentSessionName(a agent.Type, sessionID, projectPath string) string {
@@ -13,6 +13,8 @@ func ReadAgentSessionName(a agent.Type, sessionID, projectPath string) string {
 		return ReadCodexSessionName(sessionID)
 	case agent.Copilot:
 		return ReadCopilotSessionName(sessionID)
+	case agent.Antigravity:
+		return ReadAntigravitySessionName(sessionID)
 	case agent.OpenCode:
 		// OpenCode titles its sessions too, but fleet doesn't read them yet.
 		return ""

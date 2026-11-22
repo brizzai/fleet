@@ -1,8 +1,10 @@
 package tmux
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSanitizeName(t *testing.T) {
@@ -162,4 +164,35 @@ func TestCaptureSentinelEntropy(t *testing.T) {
 		}
 		seen[s] = true
 	}
+}
+
+// A respawned agent must be the pane's foreground process, or every check of
+// pane_current_command reads it as having exited to a shell. tmux runs the
+// command through /bin/sh -c; on Debian/Ubuntu that is dash, which forks the
+// command instead of becoming it unless told to exec (measured with agy: the
+// pane read "sh" for the agent's whole life). macOS's sh execs on its own, so
+// this only fails there if the exec breaks outright; on Linux CI it fails
+// without the exec.
+func TestRespawnPaneLeavesTheCommandInTheForeground(t *testing.T) {
+	if err := IsTmuxAvailable(); err != nil {
+		t.Skipf("tmux not available: %v", err)
+	}
+	s := NewSessionWithPrefix("fleettest_", "respawn", t.TempDir())
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", s.Name, "-c", s.WorkDir).CombinedOutput(); err != nil {
+		t.Skipf("could not create tmux session: %v (%s)", err, out)
+	}
+	t.Cleanup(func() { _ = s.Kill() })
+
+	if err := s.RespawnPane("sleep 30", "FLEET_TEST_VAR=1"); err != nil {
+		t.Fatalf("RespawnPane: %v", err)
+	}
+	var cmd string
+	for range 50 {
+		out, _ := exec.Command("tmux", "display", "-p", "-t", s.Name, "#{pane_current_command}").Output()
+		if cmd = strings.TrimSpace(string(out)); cmd == "sleep" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("pane_current_command = %q after respawn, want sleep", cmd)
 }

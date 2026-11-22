@@ -28,9 +28,10 @@ type mockPane struct {
 	deadInfoCalls int    // PaneDeadInfo shell-outs made; counted, since not asking is the point
 	activityUnix  int64  // simulated tmux window_activity timestamp
 	hasActivity   bool   // false → GetActivity reports unknown
+	captureErr    error  // non-nil → CapturePane fails (tmux busy, timeout)
 }
 
-func (m *mockPane) CapturePane() (string, error) { return m.content, nil }
+func (m *mockPane) CapturePane() (string, error) { return m.content, m.captureErr }
 func (m *mockPane) Exists() bool                 { return !m.tmuxGone }
 func (m *mockPane) IsPaneDead() bool             { return m.dead }
 func (m *mockPane) GetActivity() (int64, bool)   { return m.activityUnix, m.hasActivity }

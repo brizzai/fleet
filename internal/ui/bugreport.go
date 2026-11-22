@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/brizzai/fleet/internal/debuglog"
 	"github.com/brizzai/fleet/internal/diagnostics"
+	"github.com/brizzai/fleet/internal/hooks"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -111,6 +112,11 @@ func (d *BugReportDialog) Show(version string, sessionCount int, errors *ErrorHi
 	d.kind = d.kinds[0]
 
 	d.report = diagnostics.Collect(version, sessionCount)
+	if d.report.AntigravityVersion != "" {
+		// Read now, not at startup: Antigravity's /hooks manager can erase
+		// fleet's entry at any point in between. One small file.
+		d.report.AntigravityHooks = hooks.AntigravityHookState(hooks.GetAntigravityConfigDir())
+	}
 	d.report.TUIWidth = tuiWidth
 	d.report.TUIHeight = tuiHeight
 	if rs != nil {

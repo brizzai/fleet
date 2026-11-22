@@ -6,6 +6,13 @@ import (
 	"path/filepath"
 )
 
+// EventBackgroundWait is the event a status file carries when the agent ended
+// its own turn while subagents it started are still working, so the session is
+// still busy. Antigravity reports it as a Stop with fullyIdle=false, then
+// resumes when a subagent reports back. A name of its own, not "Stop", because
+// readers treat Stop as a finished response.
+const EventBackgroundWait = "BackgroundWait"
+
 // StatusFile is the JSON format written to ~/.config/fleet/hooks/{session_id}.json.
 type StatusFile struct {
 	Status      string `json:"status"`
@@ -37,6 +44,9 @@ type StatusFile struct {
 	// every foreign session id it is ever asked about. Only reachable by hand-
 	// editing settings.json today, but keep the installed command simple: the
 	// failure is a silently inverted ownership gate, not a missing signal.
+	// Copilot's and Antigravity's commands are compound on purpose (the
+	// nonFleetSessionGuard prefix) and end in `exec`, so the handler still
+	// takes the shell's place and getppid() still names the agent.
 	AgentPID int `json:"agent_pid,omitempty"`
 	// PromptSessionID is the conversation the user last submitted a prompt in,
 	// kept across later events. Copilot can hold several conversations in one

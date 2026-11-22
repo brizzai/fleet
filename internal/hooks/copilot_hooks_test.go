@@ -49,7 +49,7 @@ func TestInjectCopilotHooks(t *testing.T) {
 			t.Fatalf("%s: %d entries, want 1", ev, len(entries))
 		}
 		e := entries[0]
-		if e.Type != "command" || !strings.HasPrefix(e.Bash, copilotNonFleetGuard) ||
+		if e.Type != "command" || !strings.HasPrefix(e.Bash, nonFleetSessionGuard) ||
 			!strings.HasSuffix(e.Bash, " --agent copilot --event "+ev) || !isFleetHook(e.Bash) {
 			t.Errorf("%s: unexpected entry %+v", ev, e)
 		}
@@ -168,7 +168,7 @@ func TestStripJSONComments(t *testing.T) {
 // The guard must end the hook without starting fleet when the session isn't
 // fleet's, and hand over to fleet (same stdin) when it is.
 func TestCopilotNonFleetGuardRunsInBash(t *testing.T) {
-	cmd := copilotNonFleetGuard + "cat"
+	cmd := nonFleetSessionGuard + "cat"
 	run := func(instance string) string {
 		t.Helper()
 		c := exec.Command("bash", "-c", cmd)
@@ -261,7 +261,7 @@ func TestRepairCopilotHooksNeverInstalls(t *testing.T) {
 func writeCopilotHooksFile(t *testing.T, dir, bin string) string {
 	t.Helper()
 	doc := copilotHooksDoc{Version: 1, Hooks: map[string][]copilotHookEntry{
-		"agentStop": {{Type: "command", Bash: copilotNonFleetGuard + shellQuote(bin) + " hook-handler " + fleetHookArg + " --agent copilot --event agentStop", TimeoutSec: 10}},
+		"agentStop": {{Type: "command", Bash: nonFleetSessionGuard + shellQuote(bin) + " hook-handler " + fleetHookArg + " --agent copilot --event agentStop", TimeoutSec: 10}},
 	}}
 	data, err := json.Marshal(doc)
 	if err != nil {

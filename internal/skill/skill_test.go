@@ -103,12 +103,18 @@ func TestInstallWritesOncePerSharedRoot(t *testing.T) {
 
 	// codex, cursor, opencode and copilot all read ~/.agents/skills, so they
 	// resolve to one file rather than four racing writes to the same path.
-	results := Install(agentsNamed(t, "claude", "codex", "cursor", "opencode", "copilot"))
+	// Antigravity reads neither shared root, so it gets a third.
+	results := Install(agentsNamed(t, "claude", "codex", "cursor", "opencode", "copilot", "antigravity"))
 
 	claudePath := resultFor(results, "claude").Path
 	agentsPath := resultFor(results, "codex").Path
+	antigravityPath := resultFor(results, "antigravity").Path
 	if claudePath == agentsPath {
 		t.Fatalf("claude and codex must not share a path, got %q", claudePath)
+	}
+	if antigravityPath == claudePath || antigravityPath == agentsPath ||
+		!strings.HasSuffix(antigravityPath, filepath.Join(".gemini", "config", "skills", Name, "SKILL.md")) {
+		t.Fatalf("antigravity path = %q, want its own ~/.gemini/config/skills root", antigravityPath)
 	}
 	for _, name := range []string{"cursor", "opencode", "copilot"} {
 		if got := resultFor(results, name).Path; got != agentsPath {
@@ -121,7 +127,7 @@ func TestInstallWritesOncePerSharedRoot(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{claudePath, agentsPath} {
+	for _, path := range []string{claudePath, agentsPath, antigravityPath} {
 		got, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("reading %s: %v", path, err)

@@ -773,13 +773,21 @@ func escapeTmuxFormat(s string) string {
 
 // RespawnPane kills the current pane process and restarts with the given command.
 // Optional env vars are set via -e flags on the respawned pane.
+//
+// command must be a single simple command: it is run as `exec <command>`.
+// tmux hands a command string to /bin/sh -c, and Debian/Ubuntu's sh (dash)
+// forks it rather than replacing itself, so without the exec the pane's
+// foreground process stays `sh` for the agent's whole life — and everything
+// reading pane_current_command (the "agent exited" check, `fleet send`'s guard)
+// takes a live agent for one that returned to its shell. macOS's sh already
+// execs, so there this changes nothing.
 func (s *Session) RespawnPane(command string, env ...string) error {
 	debuglog.Logger.Info("tmux respawning pane", "session", s.Name, "command", command)
 	args := []string{"respawn-pane", "-k", "-t", s.Name + ":"}
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
-	args = append(args, command)
+	args = append(args, "exec "+command)
 	cmd := exec.Command("tmux", args...)
 	if err := cmd.Run(); err != nil {
 		debuglog.Logger.Error("tmux respawn failed", "session", s.Name, "err", err)

@@ -71,10 +71,14 @@ type copilotHooksDoc struct {
 	Hooks   map[string][]copilotHookEntry `json:"hooks"`
 }
 
-// copilotNonFleetGuard ends the hook in the shell for a Copilot session fleet
-// didn't launch. Copilot blocks on every hook, for every session on the
-// machine, so this saves each of those a fleet process start (~9ms).
-const copilotNonFleetGuard = `[ -n "$FLEET_INSTANCE_ID" ] || exit 0; exec `
+// nonFleetSessionGuard ends the hook in the shell for an agent session fleet
+// didn't launch. Copilot and Antigravity install hooks for every session on the
+// machine and block on each one, so this saves each of those a fleet process
+// start (~9ms). The trailing `exec` is load-bearing too: it makes the shell
+// become fleet, so the handler's getppid() names the agent rather than the
+// shell — a shell that forks instead (Ubuntu's dash under Antigravity, measured)
+// would otherwise be recorded as the owner and read as gone a moment later.
+const nonFleetSessionGuard = `[ -n "$FLEET_INSTANCE_ID" ] || exit 0; exec `
 
 // copilotHooksJSON renders fleet's hooks file. Copilot's payload carries no
 // event name (notification aside), so each command names its own event.
@@ -83,7 +87,7 @@ func copilotHooksJSON() ([]byte, error) {
 	for _, ev := range copilotHookEvents {
 		doc.Hooks[ev] = []copilotHookEntry{{
 			Type:       "command",
-			Bash:       copilotNonFleetGuard + GetHookCommand() + " --agent copilot --event " + ev,
+			Bash:       nonFleetSessionGuard + GetHookCommand() + " --agent copilot --event " + ev,
 			TimeoutSec: 10,
 		}}
 	}
@@ -140,7 +144,7 @@ func RepairCopilotHooks(configDir string) (bool, error) {
 	}
 	for _, entries := range doc.Hooks {
 		for _, e := range entries {
-			bin := fleetHookBinary(strings.TrimPrefix(e.Bash, copilotNonFleetGuard))
+			bin := fleetHookBinary(strings.TrimPrefix(e.Bash, nonFleetSessionGuard))
 			if bin == "" || !filepath.IsAbs(bin) {
 				continue
 			}

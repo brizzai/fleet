@@ -75,6 +75,27 @@ upgrade swaps the binary without restarting a user's live server — `tmux
 3.2 server. The binary's `tmux -V` is only the fallback when no server is
 up yet. tmux ≥ 3.3 is recommended; 24.04 ships 3.4.
 
+## `/bin/sh` is dash
+
+macOS's `sh` execs a single command; Debian/Ubuntu's dash forks it and waits.
+Two places depend on the command really becoming the process, so both say
+`exec` explicitly:
+
+- `tmux.RespawnPane` runs `exec <command>` — tmux hands a respawn command to
+  `/bin/sh -c`, and without the exec the pane's foreground process reads
+  `sh` for the agent's whole life after an in-place restart (`fleet status`
+  called it exited, `fleet send` refused it).
+- Copilot's and Antigravity's hook commands go through
+  `nonFleetSessionGuard` (`… || exit 0; exec <handler>`), so the handler's
+  parent is the agent and not a forked `sh` — ownership by pid relies on it.
+
+## Antigravity install
+
+The `agy` installer puts the binary in `~/.local/bin` and doesn't add it to
+PATH (measured on Ubuntu), so fleet's "not found" message names that
+directory. With no D-Bus session (SSH, containers) agy stores its
+sign-in token in a file instead of the keyring.
+
 ## Idle-session suspend (memory pressure)
 
 The suspend sweep's pressure probe reads `/proc/pressure/memory` (PSI,

@@ -405,7 +405,7 @@ func TestAwaitRetiredCopilotWaitsForExit(t *testing.T) {
 	cmd := startFakeCopilot(t, "0.5")
 	s := &Session{Agent: agent.Copilot}
 	start := time.Now()
-	s.awaitRetiredCopilot(cmd.Process.Pid, false)
+	s.awaitRetiredAgent(cmd.Process.Pid, false)
 	if agentProcessAlive(cmd.Process.Pid) {
 		t.Fatal("returned while the old process was still running")
 	}
@@ -414,7 +414,7 @@ func TestAwaitRetiredCopilotWaitsForExit(t *testing.T) {
 	}
 }
 
-// fakeCopilotBinary builds a sleeper named "copilot", which isCopilotProcess
+// fakeCopilotBinary builds a sleeper named "copilot", which isAgentProcess
 // checks. Not a copy of /bin/sleep: macOS kills a copied system binary at exec
 // (its signature no longer matches), and the tests would then pass against an
 // already-dead pid.
@@ -448,7 +448,7 @@ func startFakeCopilot(t *testing.T, secs string) *exec.Cmd {
 		t.Fatal(err)
 	}
 	go func() { _ = cmd.Wait() }() // reap it, or a zombie reads as alive
-	if !agentProcessAlive(cmd.Process.Pid) || !isCopilotProcess(cmd.Process.Pid) {
+	if !agentProcessAlive(cmd.Process.Pid) || !isAgentProcess(cmd.Process.Pid, "copilot") {
 		t.Fatal("fake copilot is not alive and named copilot")
 	}
 	return cmd
@@ -463,7 +463,7 @@ func TestAwaitRetiredCopilotIgnoresAnotherProcess(t *testing.T) {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	s := &Session{Agent: agent.Copilot}
 	start := time.Now()
-	s.awaitRetiredCopilot(cmd.Process.Pid, false)
+	s.awaitRetiredAgent(cmd.Process.Pid, false)
 	if time.Since(start) > time.Second {
 		t.Fatal("waited on a process that isn't Copilot's")
 	}
@@ -478,7 +478,7 @@ func TestAwaitRetiredCopilotNeverSignalsAnotherProcess(t *testing.T) {
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	s := &Session{Agent: agent.Copilot}
-	s.awaitRetiredCopilot(cmd.Process.Pid, true)
+	s.awaitRetiredAgent(cmd.Process.Pid, true)
 	if !agentProcessAlive(cmd.Process.Pid) {
 		t.Fatal("signalled a non-Copilot process")
 	}
@@ -526,7 +526,7 @@ func TestAwaitRetiredCopilotStopsTheOldProcess(t *testing.T) {
 	cmd := startFakeCopilot(t, "30")
 	s := &Session{Agent: agent.Copilot, paneCmdFn: func() string { return "node" }} // Copilot still in the pane
 	start := time.Now()
-	s.awaitRetiredCopilot(cmd.Process.Pid, true)
+	s.awaitRetiredAgent(cmd.Process.Pid, true)
 	if agentProcessAlive(cmd.Process.Pid) {
 		t.Fatal("old Copilot still running after stop")
 	}
@@ -541,7 +541,7 @@ func TestAwaitRetiredCopilotSparesAPidOnceThePaneIsAShell(t *testing.T) {
 	cmd := startFakeCopilot(t, "30")
 	defer func() { _ = cmd.Process.Kill() }()
 	s := &Session{Agent: agent.Copilot, paneCmdFn: func() string { return "zsh" }}
-	s.awaitRetiredCopilot(cmd.Process.Pid, true)
+	s.awaitRetiredAgent(cmd.Process.Pid, true)
 	if !agentProcessAlive(cmd.Process.Pid) {
 		t.Fatal("signalled a pid whose pane had already exited to a shell")
 	}
@@ -749,7 +749,7 @@ func TestReportPaneStatusUsesCopilotsDetector(t *testing.T) {
 	}
 }
 
-// copilotOwnerGone's real check (not the test seam): a live owner is not gone,
+// agentOwnerGone's real check (not the test seam): a live owner is not gone,
 // an exited one is, and an unknown one falls back to the pane-only rule.
 func TestCopilotOwnerGoneChecksTheRealProcess(t *testing.T) {
 	live := startFakeCopilot(t, "30")
@@ -763,8 +763,8 @@ func TestCopilotOwnerGoneChecksTheRealProcess(t *testing.T) {
 		gone bool
 	}{{live.Process.Pid, false}, {dead.Process.Pid, true}, {0, true}} {
 		s := &Session{Agent: agent.Copilot, ownerPID: c.pid}
-		if got := s.copilotOwnerGone(); got != c.gone {
-			t.Errorf("ownerPID %d: copilotOwnerGone = %v, want %v", c.pid, got, c.gone)
+		if got := s.agentOwnerGone(); got != c.gone {
+			t.Errorf("ownerPID %d: agentOwnerGone = %v, want %v", c.pid, got, c.gone)
 		}
 	}
 }

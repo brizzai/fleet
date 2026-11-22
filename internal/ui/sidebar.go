@@ -786,11 +786,15 @@ const (
 	// dots (●○◐). A hexagon (U+2B21) was tried first but falls back to a wider
 	// glyph in those fonts, shifting the title. △ is a clean third shape, distinct
 	// from the star and the diamond. ⚇ (Misc Symbols, East-Asian-Neutral, in
-	// Menlo) reads as Copilot's goggles.
-	claudeGlyph   = "✻"
-	codexGlyph    = "◇"
-	opencodeGlyph = "△"
-	copilotGlyph  = "⚇"
+	// Menlo) reads as Copilot's goggles. ✧ (Dingbats, East-Asian-Neutral, in
+	// Menlo — checked against its cmap, where the concave diamond U+27E1 is
+	// missing) is Antigravity: the four-pointed sparkle of the Gemini models it
+	// runs, and a different silhouette from Claude's eight-spoked ✻.
+	claudeGlyph      = "✻"
+	codexGlyph       = "◇"
+	opencodeGlyph    = "△"
+	copilotGlyph     = "⚇"
+	antigravityGlyph = "✧"
 )
 
 // agentGlyph returns the sigil for a session's agent. An empty or unrecognized
@@ -803,6 +807,8 @@ func agentGlyph(t agent.Type) string {
 		return opencodeGlyph
 	case agent.Copilot:
 		return copilotGlyph
+	case agent.Antigravity:
+		return antigravityGlyph
 	default:
 		return claudeGlyph
 	}
