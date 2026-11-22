@@ -17,8 +17,10 @@ import (
 // It is deliberately NOT a Status. A snoozed session that is waiting is still
 // waiting; you just don't want to be told about it right now. Overwriting the
 // status would destroy that information and force us to reconstruct it on wake.
-// It is also not Suspend: snooze never touches the process, which is what makes
-// it safe to snooze a session that is actively running.
+// It is also not Suspend: a timed snooze never touches the process, which is
+// what makes it safe to snooze a session that is actively running. The one
+// exception is the open-ended "until I wake it" option, which also parks the
+// process — but only once the session is at rest (see snooze_park.go).
 
 // SnoozeGlyph marks a muted row. U+263E, not the more obvious U+23FE "power
 // sleep" symbol: Menlo (macOS Terminal's default) has no U+23FE glyph and would
@@ -27,8 +29,7 @@ import (
 // ansi.StringWidth reports 1 so it costs one cell like every other marker.
 const SnoozeGlyph = "☾"
 
-// SnoozeDuration is one entry in the duration picker. Fixed set, no custom
-// input — the whole point is to decide in one keystroke.
+// SnoozeDuration is one entry in the duration picker's preset list.
 type SnoozeDuration struct {
 	// ID is the analytics/label key ("30m", "1h", "4h", "tomorrow").
 	ID string
@@ -43,12 +44,19 @@ type SnoozeDuration struct {
 // rather than a literal +24h, which at 11pm would wake you at 11pm.
 const snoozeTomorrowHour = 9
 
-// SnoozeDurations is the picker's fixed menu, in display order.
+// snoozeIndefiniteID is the "until I wake it" preset: no deadline, and the
+// only snooze that suspends the process. Also its analytics duration value.
+const snoozeIndefiniteID = "indefinite"
+
+// SnoozeDurations is the picker's fixed menu, in display order. The
+// open-ended option is last, so the deadlines read shortest to longest and
+// the one with a side effect sits apart from them, just above the input.
 var SnoozeDurations = []SnoozeDuration{
 	{ID: "30m", Label: "30 minutes", resolve: func(now time.Time) time.Time { return now.Add(30 * time.Minute) }},
 	{ID: "1h", Label: "1 hour", resolve: func(now time.Time) time.Time { return now.Add(time.Hour) }},
 	{ID: "4h", Label: "4 hours", resolve: func(now time.Time) time.Time { return now.Add(4 * time.Hour) }},
 	{ID: "tomorrow", Label: "Tomorrow", resolve: snoozeTomorrow},
+	{ID: snoozeIndefiniteID, Label: "Until I wake", resolve: func(time.Time) time.Time { return session.SnoozeForever }},
 }
 
 // Resolve returns the absolute wake time for this duration.
@@ -205,6 +213,7 @@ func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID stri
 		}
 	} else {
 		h.groupSnooze[sc.groupKey] = until
+		h.groupSnoozedAt[sc.groupKey] = time.Now()
 		if err := h.storage.SetGroupSnooze(sc.groupKey, until); err != nil {
 			debuglog.Logger.Error("failed to persist group snooze", "key", sc.groupKey, "err", err)
 		}
@@ -216,7 +225,7 @@ func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID stri
 		"scope":    sc.kind,
 		"duration": durationID,
 	})
-	h.setInfo(fmt.Sprintf("Snoozed %s until %s", sc.label, formatSnoozeWake(until, time.Now())))
+	h.setInfo(fmt.Sprintf("Snoozed %s until %s", sc.label, formatSnoozeWake(until, time.Now())) + h.parkNote(sc))
 }
 
 // clearSnooze wakes the cursor's scope now. A woken group re-expands, mirroring
@@ -237,6 +246,7 @@ func (h *Home) clearSnooze(sc snoozeScope) {
 		}
 	} else {
 		delete(h.groupSnooze, sc.groupKey)
+		delete(h.groupSnoozedAt, sc.groupKey)
 		if err := h.storage.SetGroupSnooze(sc.groupKey, time.Time{}); err != nil {
 			debuglog.Logger.Error("failed to clear group snooze", "key", sc.groupKey, "err", err)
 		}
@@ -248,7 +258,7 @@ func (h *Home) clearSnooze(sc snoozeScope) {
 		"scope":  sc.kind,
 		"reason": "manual",
 	})
-	h.setInfo(fmt.Sprintf("Woke %s", sc.label))
+	h.setInfo(fmt.Sprintf("Woke %s", sc.label) + h.wakeNote(sc))
 }
 
 // maybeWakeSnoozed drops deadlines that have passed, returning true when
@@ -273,6 +283,7 @@ func (h *Home) maybeWakeSnoozed() bool {
 	for key, until := range h.groupSnooze {
 		if until.IsZero() || !until.After(now) {
 			delete(h.groupSnooze, key)
+			delete(h.groupSnoozedAt, key)
 			if err := h.storage.SetGroupSnooze(key, time.Time{}); err != nil {
 				debuglog.Logger.Error("failed to clear expired group snooze", "key", key, "err", err)
 			}
@@ -316,10 +327,23 @@ func (h *Home) expireSessionSnooze(s *session.Session) {
 // formatSnoozeWake renders a wake time for confirmation copy: a clock time
 // today, or a weekday-qualified one past midnight so "tomorrow" is unambiguous.
 func formatSnoozeWake(until, now time.Time) string {
+	if session.IsSnoozeForever(until) {
+		return "you wake it"
+	}
 	if until.YearDay() == now.YearDay() && until.Year() == now.Year() {
 		return until.Format("15:04")
 	}
 	return until.Format("Mon 15:04")
+}
+
+// snoozeMarker is the snooze suffix a row or header renders: the glyph, plus a
+// countdown when the snooze has a deadline. An "until I wake it" snooze has
+// none, so it is the bare glyph.
+func snoozeMarker(until, now time.Time) string {
+	if session.IsSnoozeForever(until) {
+		return SnoozeGlyph
+	}
+	return SnoozeGlyph + " " + formatSnoozeRemaining(until, now)
 }
 
 // formatSnoozeRemaining renders a deadline as compact time-left, capped at 3

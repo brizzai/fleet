@@ -584,6 +584,35 @@ func (s *Session) SetSnoozedUntil(until time.Time) {
 	s.snoozedUntil = until
 }
 
+// SnoozeForever is the in-memory deadline of an "until I wake it" snooze. A
+// far-future time rather than a flag, so every existing `until.After(now)`
+// check — the precedence rule, the expiry sweep, the startup reconciliation —
+// keeps treating it as live and never lapses it, without knowing it exists.
+// Storage writes it as -1 (see snoozeToUnix), never as this timestamp.
+var SnoozeForever = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+
+// IsSnoozeForever reports whether a snooze deadline is the "until I wake it"
+// sentinel rather than a real wake time.
+func IsSnoozeForever(t time.Time) bool { return !t.Before(SnoozeForever) }
+
+// LastAccessed returns when the user last attached to, resumed, restarted or
+// otherwise acted on this session (thread-safe).
+func (s *Session) LastAccessed() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastAccessedAt
+}
+
+// AdoptLastAccessed moves LastAccessedAt forward to t, never back. Used when
+// another fleet process recorded a newer access in the row.
+func (s *Session) AdoptLastAccessed(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t.After(s.LastAccessedAt) {
+		s.LastAccessedAt = t
+	}
+}
+
 // IsSnoozed reports whether the session's own snooze is still in effect at now.
 func (s *Session) IsSnoozed(now time.Time) bool {
 	s.mu.RLock()

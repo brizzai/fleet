@@ -334,6 +334,19 @@ func persistRelaunch(storage *session.StateDB, row *session.SessionRow, s *sessi
 	// is done, so an unsaved heal is recomputed and thrown away on every
 	// relaunch and the session stays pinned to a dead conversation. An empty id
 	// is `restart -fresh` dropping one, written only now that the launch worked.
+	// A relaunch from the CLI is the user picking the session back up. An
+	// "until I wake it" snooze left on the row would have the next TUI suspend
+	// it again the moment it went idle (the TUI drops its in-memory copy when
+	// it adopts the relaunch). A timed snooze is a reminder and stays.
+	// The access stamp is what exempts it from a parked GROUP's sweep.
+	if err := storage.UpdateLastAccessed(row.ID); err != nil {
+		debuglog.Logger.Error("failed to persist last access after relaunch", "id", row.ID, "err", err)
+	}
+	if session.IsSnoozeForever(row.SnoozedUntil) {
+		if err := storage.SetSessionSnooze(row.ID, time.Time{}); err != nil {
+			debuglog.Logger.Error("failed to clear indefinite snooze after relaunch", "id", row.ID, "err", err)
+		}
+	}
 	if id := s.ClaudeSessionID; id != row.ClaudeSessionID {
 		if err := storage.UpdateClaudeSessionID(row.ID, id); err != nil {
 			debuglog.Logger.Error("failed to persist healed conversation id after relaunch", "id", row.ID, "err", err)

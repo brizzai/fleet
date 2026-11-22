@@ -328,8 +328,11 @@ type sessionJSON struct {
 	Note         string     `json:"note,omitempty"`
 	Exit         string     `json:"exit,omitempty"`
 	SnoozedUntil *time.Time `json:"snoozed_until,omitempty"`
-	Turns        []turnJSON `json:"turns,omitempty"`
-	Screen       []string   `json:"screen,omitempty"`
+	// SnoozedIndefinitely is an "until I wake it" snooze, which has no
+	// deadline to report in snoozed_until.
+	SnoozedIndefinitely bool       `json:"snoozed_indefinitely,omitempty"`
+	Turns               []turnJSON `json:"turns,omitempty"`
+	Screen              []string   `json:"screen,omitempty"`
 }
 
 type prJSON struct {
@@ -427,7 +430,10 @@ func toJSON(ob *control.Observation, textMax int, withTurns bool) sessionJSON {
 	if in := ob.View.Input; in.Kind != session.InputEmpty {
 		j.Input = &inputJSON{Text: in.Text, Kind: string(in.Kind)}
 	}
-	if until := ob.Row.SnoozedUntil; until.After(time.Now()) {
+	switch until := ob.Row.SnoozedUntil; {
+	case session.IsSnoozeForever(until):
+		j.SnoozedIndefinitely = true
+	case until.After(time.Now()):
 		j.SnoozedUntil = &until
 	}
 	if withTurns {
