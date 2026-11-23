@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.50.0] - 2026-11-23
+
+### Improved
+
+- **Linear works without per-repo setup.** Once you connect Linear, ticket suggestions and lookups are on in every repo for the teams you're a member of, so you no longer need a `.fleet.local.json` line before anything happens. A repo can still name its own team, or opt out with `{"linear": {"enabled": false}}`.
+- **Tickets from My tickets always attach.** Picking a ticket in `t` now names the branch and hands the ticket to the agent even in a repo that tracks a different team, instead of quietly creating a plain branch.
+
 ## [2.49.1] - 2026-11-23
 
 ### Fixed
@@ -811,7 +818,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.49.1...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.50.0...HEAD
+[2.50.0]: https://github.com/brizzai/fleet/releases/tag/v2.50.0
 [2.49.1]: https://github.com/brizzai/fleet/releases/tag/v2.49.1
 [2.49.0]: https://github.com/brizzai/fleet/releases/tag/v2.49.0
 [2.48.1]: https://github.com/brizzai/fleet/releases/tag/v2.48.1
