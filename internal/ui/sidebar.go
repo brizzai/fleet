@@ -862,7 +862,7 @@ func prBadgeText(pr *github.PR) string {
 	if pr.ReviewDecision == "CHANGES_REQUESTED" || pr.UnresolvedThreads > 0 {
 		icons += "↩"
 	}
-	if icons == "" && pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" {
+	if icons == "" && pr.ReadyToMerge() {
 		icons = "✓"
 	}
 	// Nothing to fix: name what the PR is waiting on, so a yellow badge says
@@ -892,7 +892,7 @@ const (
 	prBadgeMerged
 	prBadgeDraft
 	prBadgeFail  // red: CI failed, changes requested, unresolved threads, or conflicts
-	prBadgeReady // green: approved + CI passed
+	prBadgeReady // green: approved + CI passed + GitHub not blocking the merge (github.PR.ReadyToMerge)
 )
 
 func prVerdict(pr *github.PR) prBadgeVerdict {
@@ -907,7 +907,7 @@ func prVerdict(pr *github.PR) prBadgeVerdict {
 		return prBadgeDraft
 	case pr.CIStatus == "FAILURE" || pr.ReviewDecision == "CHANGES_REQUESTED" || pr.UnresolvedThreads > 0 || pr.HasConflicts:
 		return prBadgeFail
-	case pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS":
+	case pr.ReadyToMerge():
 		return prBadgeReady
 	}
 	return prBadgePending

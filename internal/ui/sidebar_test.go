@@ -156,6 +156,32 @@ func TestPRBadge_WaitingOnCIVsReview(t *testing.T) {
 	}
 }
 
+// Approved with CI green is not enough: GitHub can still refuse the merge
+// (an approval-policy bot, CODEOWNERS, a strict base). The badge must not say
+// ready then — it drops to the pending tier, and the P jump (which reads
+// prVerdict) must not treat it as a green target.
+func TestPRBadge_MergeBlockedIsNotReady(t *testing.T) {
+	for _, state := range []string{"BLOCKED", "BEHIND"} {
+		pr := &github.PR{Number: 8487, State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: state}
+		if got := prBadgeText(pr); got != "#8487" {
+			t.Errorf("%s: badge = %q, want %q (no ✓)", state, got, "#8487")
+		}
+		if got := prVerdict(pr); got != prBadgePending {
+			t.Errorf("%s: verdict = %v, want prBadgePending", state, got)
+		}
+		if got := prBadgeStyle(pr).GetForeground(); got != PRPendingStyle.GetForeground() {
+			t.Errorf("%s: badge color = %v, want PRPendingStyle, not green", state, got)
+		}
+	}
+	clean := &github.PR{Number: 1, State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: "CLEAN"}
+	if got := prBadgeText(clean); got != "#1 ✓" {
+		t.Errorf("clean: badge = %q, want %q", got, "#1 ✓")
+	}
+	if got := prVerdict(clean); got != prBadgeReady {
+		t.Errorf("clean: verdict = %v, want prBadgeReady", got)
+	}
+}
+
 func TestPRBadge_Draft(t *testing.T) {
 	draft := &github.PR{Number: 133, State: "OPEN", IsDraft: true}
 	if got := prBadgeText(draft); got != "◌ #133" {

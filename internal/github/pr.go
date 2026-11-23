@@ -81,6 +81,34 @@ type PR struct {
 	UnresolvedThreads int    // count of unresolved review threads
 	HasConflicts      bool   // true when GitHub reports merge conflicts
 	IsDraft           bool   // true while the PR is a draft (not ready for review)
+	// MergeStateStatus is GitHub's own verdict on whether the PR can merge
+	// right now: CLEAN, BLOCKED, BEHIND, DIRTY, UNSTABLE, HAS_HOOKS, DRAFT or
+	// UNKNOWN (computed lazily, so a first read can be UNKNOWN).
+	MergeStateStatus string
+}
+
+// MergeBlocked reports whether GitHub refuses to merge the PR as it stands
+// for a reason the review decision and the checks fleet reads don't carry: a
+// branch-protection rule (BLOCKED — a required approval policy, CODEOWNERS,
+// conversation resolution) or a base that moved under a strict rule (BEHIND).
+//
+// A deny-list, not "== CLEAN": GitHub computes the field lazily and answers
+// UNKNOWN on a cold read, which would flicker a ready PR off green on every
+// refresh. DIRTY is already HasConflicts.
+func (pr *PR) MergeBlocked() bool {
+	return pr.MergeStateStatus == "BLOCKED" || pr.MergeStateStatus == "BEHIND"
+}
+
+// ReadyToMerge is the one definition of the green badge: an open, non-draft
+// PR with no conflicts, approved, CI passed, and nothing GitHub knows about
+// holding the merge. The sidebar badge, its colour, the P jump, the preview
+// line and `fleet status` all ask this, so none of them can call a PR ready
+// that GitHub won't merge. It is self-contained on purpose: today's callers
+// rule out drafts and conflicts before asking, but a caller that trusts this
+// alone must not be told a conflicted draft is ready.
+func (pr *PR) ReadyToMerge() bool {
+	return pr.State == "OPEN" && !pr.IsDraft && !pr.HasConflicts &&
+		pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" && !pr.MergeBlocked()
 }
 
 // IsGHAvailable checks if the gh CLI is installed and accessible.
@@ -99,13 +127,21 @@ type ghPRResponse struct {
 	ReviewDecision    string             `json:"reviewDecision"`
 	StatusCheckRollup []statusCheckEntry `json:"statusCheckRollup"`
 	Mergeable         string             `json:"mergeable"` // MERGEABLE, CONFLICTING, UNKNOWN
+	MergeStateStatus  string             `json:"mergeStateStatus"`
 	IsDraft           bool               `json:"isDraft"`
 }
 
+// statusCheckEntry is one row of the rollup. The rollup mixes two GraphQL
+// types with different field names: a CheckRun (Actions and Checks-API apps)
+// carries name/status/conclusion, a StatusContext (the older commit-status
+// API — policy-bot, external CI, many bots) carries context/state.
+// asCheckRun folds the second shape into the first.
 type statusCheckEntry struct {
 	Name         string `json:"name"`
 	Status       string `json:"status"`
 	Conclusion   string `json:"conclusion"`
+	Context      string `json:"context"`      // StatusContext only: its name
+	State        string `json:"state"`        // StatusContext only: SUCCESS, PENDING, EXPECTED, FAILURE, ERROR
 	StartedAt    string `json:"startedAt"`    // RFC3339; used to pick the latest run when a check has several
 	WorkflowName string `json:"workflowName"` // empty for status contexts; called workflows report their caller
 	DetailsURL   string `json:"detailsUrl"`   // .../actions/runs/<run>/job/<job> for check runs; carries run identity
@@ -130,7 +166,7 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch,
-		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable,isDraft",
+		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus,isDraft",
 	)
 	cmd.Dir = repoPath
 	var stderr bytes.Buffer
@@ -174,9 +210,10 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 		UnresolvedThreads: getUnresolvedThreadCount(repoPath, resp.Number, resp.URL),
 		HasConflicts:      resp.Mergeable == "CONFLICTING",
 		IsDraft:           resp.IsDraft,
+		MergeStateStatus:  resp.MergeStateStatus,
 	}
 
-	debuglog.Logger.Debug("PR fetch: ok", "path", repoPath, "branch", branch, "pr", pr.Number, "state", pr.State, "ci", pr.CIStatus)
+	debuglog.Logger.Debug("PR fetch: ok", "path", repoPath, "branch", branch, "pr", pr.Number, "state", pr.State, "ci", pr.CIStatus, "merge_state", pr.MergeStateStatus)
 	return pr, nil
 }
 
@@ -245,26 +282,56 @@ func getUnresolvedThreadCount(repoPath string, prNumber int, prURL string) int {
 // that failed and was later re-run green would still mark the PR as failed.
 // This mirrors how `gh pr checks` and the GitHub UI report status.
 //
-// Ghost entries with no name (e.g. status contexts, which expose their name
-// under a different field) are dropped, matching prior behavior. On equal or
-// missing StartedAt, the later entry in rollup order wins (GitHub returns runs
-// roughly chronologically).
+// Entries are first folded through asCheckRun, so a status context
+// participates under its context name; an entry with neither a name nor a
+// context is a ghost and is dropped. Runs are matched by kind as well as name:
+// a commit status and a check run that happen to share a name are independent
+// results (GitHub reports and enforces both), so neither may replace the
+// other — keyed on name alone, whichever started later would hide the other,
+// failure included. On equal or missing StartedAt, the later entry in rollup
+// order wins (GitHub returns runs roughly chronologically).
 func latestRunPerCheck(checks []statusCheckEntry) []statusCheckEntry {
 	latest := make(map[string]statusCheckEntry, len(checks))
 	for _, c := range checks {
+		c = asCheckRun(c)
 		if c.Name == "" {
 			continue
 		}
-		if prev, ok := latest[c.Name]; ok && c.StartedAt < prev.StartedAt {
+		key := "check\x00" + c.Name
+		if c.Context != "" { // asCheckRun keeps Context: this row is a commit status
+			key = "status\x00" + c.Name
+		}
+		if prev, ok := latest[key]; ok && c.StartedAt < prev.StartedAt {
 			continue // an existing, newer run wins
 		}
-		latest[c.Name] = c
+		latest[key] = c
 	}
 	out := make([]statusCheckEntry, 0, len(latest))
 	for _, c := range latest {
 		out = append(out, c)
 	}
 	return out
+}
+
+// asCheckRun maps a StatusContext row onto the CheckRun fields the rollup
+// logic reads. Dropping these rows (as fleet once did, reading only `name`)
+// hid every commit status from the badge: a pending approval-policy bot left
+// a PR GitHub calls BLOCKED reading green, and a failed external CI could
+// never turn it red. EXPECTED is a required context nobody has posted yet,
+// so it waits like PENDING. A row that already has a name is a CheckRun and
+// is returned untouched.
+func asCheckRun(c statusCheckEntry) statusCheckEntry {
+	if c.Name != "" || c.Context == "" {
+		return c
+	}
+	c.Name = c.Context
+	switch state := strings.ToUpper(c.State); state {
+	case "SUCCESS", "FAILURE", "ERROR":
+		c.Status, c.Conclusion = "COMPLETED", state
+	default: // PENDING, EXPECTED, or a state GitHub adds later: not done
+		c.Status, c.Conclusion = "PENDING", ""
+	}
+	return c
 }
 
 func isFailedCheck(c statusCheckEntry) bool {
