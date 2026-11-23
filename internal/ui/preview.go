@@ -173,7 +173,15 @@ func previewPRSummary(pr *github.PR) string {
 	if pr.ReviewDecision == "REVIEW_REQUIRED" && len(details) == 0 {
 		details = append(details, "review pending")
 	}
-	if pr.CIStatus == "SUCCESS" && pr.ReviewDecision == "APPROVED" && len(details) == 0 {
+	// Approved and green, yet GitHub still won't merge: name it, since the
+	// badge alone renders this as a bare yellow #N.
+	if pr.MergeStateStatus == "BEHIND" && len(details) == 0 {
+		details = append(details, "behind base")
+	}
+	if pr.MergeStateStatus == "BLOCKED" && len(details) == 0 {
+		details = append(details, "blocked by branch rules")
+	}
+	if pr.ReadyToMerge() && len(details) == 0 {
 		return base + " (ready)"
 	}
 

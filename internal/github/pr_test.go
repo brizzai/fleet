@@ -1,6 +1,9 @@
 package github
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestDeriveCIStatus(t *testing.T) {
 	tests := []struct {
@@ -353,5 +356,152 @@ func TestDeriveCIStatusSupersededFailure(t *testing.T) {
 				t.Errorf("deriveCIStatus() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A StatusContext row (the commit-status API: policy-bot, external CI) names
+// itself with context/state, not name/status/conclusion. Reading only the
+// CheckRun fields dropped these rows as nameless ghosts, so a pending
+// approval-policy bot left a BLOCKED PR reading green (astelia-pipelines#8487)
+// and a failed external CI could never turn the badge red.
+func TestDeriveCIStatusCountsStatusContexts(t *testing.T) {
+	green := statusCheckEntry{Name: "build", Status: "COMPLETED", Conclusion: "SUCCESS"}
+	tests := []struct {
+		name   string
+		checks []statusCheckEntry
+		ignore []string
+		want   string
+	}{
+		{"pending context holds an otherwise green rollup",
+			[]statusCheckEntry{green, {Context: "policy-bot: main", State: "PENDING"}}, nil, "PENDING"},
+		{"expected context is a required status nobody posted yet",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "EXPECTED"}}, nil, "PENDING"},
+		{"failed context turns it red",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "FAILURE"}}, nil, "FAILURE"},
+		{"errored context turns it red",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "ERROR"}}, nil, "FAILURE"},
+		{"successful context stays green",
+			[]statusCheckEntry{green, {Context: "policy-bot: main", State: "SUCCESS"}}, nil, "SUCCESS"},
+		{"state is matched case-insensitively",
+			[]statusCheckEntry{green, {Context: "ci/jenkins", State: "failure"}}, nil, "FAILURE"},
+		{"pr_checks.ignore matches a context by its name",
+			[]statusCheckEntry{green, {Context: "policy-bot: main", State: "PENDING"}}, []string{"policy-bot*"}, "SUCCESS"},
+		{"a row with neither name nor context is still a ghost",
+			[]statusCheckEntry{green, {State: "FAILURE"}}, nil, "SUCCESS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deriveCIStatus(tt.checks, tt.ignore); got != tt.want {
+				t.Errorf("deriveCIStatus = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The rollup is decoded straight from gh's JSON, so pin the field names
+// against the shape gh actually emits for a StatusContext.
+func TestStatusContextDecodesFromGhJSON(t *testing.T) {
+	raw := `{"mergeStateStatus":"BLOCKED","statusCheckRollup":[
+		{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+		{"__typename":"StatusContext","context":"policy-bot: main","startedAt":"2026-11-22T14:15:35Z","state":"PENDING","targetUrl":"https://policy-bot.example/details/o/r/1"}]}`
+	var resp ghPRResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.MergeStateStatus != "BLOCKED" {
+		t.Errorf("MergeStateStatus = %q, want BLOCKED", resp.MergeStateStatus)
+	}
+	if got := deriveCIStatus(resp.StatusCheckRollup, nil); got != "PENDING" {
+		t.Errorf("deriveCIStatus = %q, want PENDING", got)
+	}
+}
+
+func TestReadyToMergeRespectsMergeState(t *testing.T) {
+	for _, tt := range []struct {
+		state string
+		want  bool
+	}{
+		{"CLEAN", true},
+		{"HAS_HOOKS", true},
+		{"UNSTABLE", true}, // only non-required checks failing; GitHub merges it
+		{"UNKNOWN", true},  // computed lazily: a cold read must not flicker green off
+		{"", true},         // older gh / field absent
+		{"BLOCKED", false},
+		{"BEHIND", false},
+	} {
+		pr := &PR{State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: tt.state}
+		if got := pr.ReadyToMerge(); got != tt.want {
+			t.Errorf("ReadyToMerge with %q = %v, want %v", tt.state, got, tt.want)
+		}
+	}
+}
+
+// ReadyToMerge stands on its own: an otherwise green PR that is a draft, has
+// conflicts, or is no longer open is never ready, whatever the caller checked
+// first.
+func TestReadyToMergeIsSelfContained(t *testing.T) {
+	ready := func() *PR {
+		return &PR{State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: "CLEAN"}
+	}
+	if !ready().ReadyToMerge() {
+		t.Fatal("baseline PR should be ready")
+	}
+	for name, mutate := range map[string]func(*PR){
+		"draft":        func(p *PR) { p.IsDraft = true },
+		"conflicts":    func(p *PR) { p.HasConflicts = true },
+		"merged":       func(p *PR) { p.State = "MERGED" },
+		"closed":       func(p *PR) { p.State = "CLOSED" },
+		"no CI":        func(p *PR) { p.CIStatus = "" },
+		"not approved": func(p *PR) { p.ReviewDecision = "REVIEW_REQUIRED" },
+	} {
+		p := ready()
+		mutate(p)
+		if p.ReadyToMerge() {
+			t.Errorf("%s: ReadyToMerge = true, want false", name)
+		}
+	}
+}
+
+// A commit status and a check run can share a name and are still separate
+// results. Deduped by name alone, whichever started later replaced the other,
+// so a failed status hid behind a passing check (and the reverse) in either
+// rollup order.
+func TestLatestRunKeepsStatusAndCheckOfTheSameNameApart(t *testing.T) {
+	check := func(conclusion, at string) statusCheckEntry {
+		return statusCheckEntry{Name: "build", Status: "COMPLETED", Conclusion: conclusion, StartedAt: at}
+	}
+	status := func(state, at string) statusCheckEntry {
+		return statusCheckEntry{Context: "build", State: state, StartedAt: at}
+	}
+	tests := []struct {
+		name   string
+		checks []statusCheckEntry
+		want   string
+	}{
+		{"failed status, newer passing check",
+			[]statusCheckEntry{status("FAILURE", "2026-11-22T10:00:00Z"), check("SUCCESS", "2026-11-22T11:00:00Z")}, "FAILURE"},
+		{"failed status with no timestamp, passing check first",
+			[]statusCheckEntry{check("SUCCESS", "2026-11-22T11:00:00Z"), status("FAILURE", "")}, "FAILURE"},
+		{"failed check, newer passing status",
+			[]statusCheckEntry{check("FAILURE", "2026-11-22T10:00:00Z"), status("SUCCESS", "2026-11-22T11:00:00Z")}, "FAILURE"},
+		{"pending status beside a passing check",
+			[]statusCheckEntry{check("SUCCESS", "2026-11-22T11:00:00Z"), status("PENDING", "2026-11-22T10:00:00Z")}, "PENDING"},
+		{"both kinds passing",
+			[]statusCheckEntry{check("SUCCESS", "2026-11-22T11:00:00Z"), status("SUCCESS", "2026-11-22T10:00:00Z")}, "SUCCESS"},
+		// Same kind still collapses to the newest run, as before.
+		{"check rerun green still hides its older failure",
+			[]statusCheckEntry{check("FAILURE", "2026-11-22T10:00:00Z"), check("SUCCESS", "2026-11-22T11:00:00Z")}, "SUCCESS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deriveCIStatus(tt.checks, nil); got != tt.want {
+				t.Errorf("deriveCIStatus = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	// Ignore matching still goes by the plain name: one glob covers both kinds.
+	both := []statusCheckEntry{check("FAILURE", "2026-11-22T10:00:00Z"), status("FAILURE", "2026-11-22T11:00:00Z")}
+	if got := deriveCIStatus(append(both, statusCheckEntry{Name: "lint", Status: "COMPLETED", Conclusion: "SUCCESS"}), []string{"build"}); got != "SUCCESS" {
+		t.Errorf("ignore \"build\" should drop both kinds, got %q", got)
 	}
 }

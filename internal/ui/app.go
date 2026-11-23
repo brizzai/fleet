@@ -4187,7 +4187,7 @@ func (h *Home) healAccountBeforeRelaunch(s *session.Session) bool {
 	}
 	debuglog.Logger.Info("account heal: moved session to a usable account",
 		"id", s.ID, "title", s.Title, "from", s.Account, "to", next, "reason", reason)
-	s.Account = next
+	s.SetAccount(next)
 
 	// Said out loud, not just logged: the session is about to bill a different
 	// subscription than the one the user assigned it, which they must never
@@ -4262,7 +4262,7 @@ func (h *Home) moveSelectedToAccount(email string) tea.Cmd {
 		h.setError("account_move_failed", fmt.Errorf("could not move account: %w", err))
 		return nil
 	}
-	s.Account = email
+	s.SetAccount(email)
 	debuglog.Logger.Info("moved session account",
 		"id", s.ID, "title", s.Title, "from", from, "to", email)
 	h.logAction("move account", fmt.Sprintf("%s → %s", from, h.accountLabel(email)), true)

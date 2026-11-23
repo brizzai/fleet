@@ -145,7 +145,7 @@ func captureStatusSnapshot(s *session.Session, sessionID string, hb workerHeartb
 	// live process over a stale dead one.
 	var claudeStatus map[string]any
 	var claudeStatusRaw []byte
-	if css := findClaudeSessionStatus(snap.ClaudeSessionID); css != nil {
+	if css := findClaudeSessionStatus(snap.Account, snap.ClaudeSessionID); css != nil {
 		claudeStatus = buildClaudeStatusBlock(css, now)
 		claudeStatusRaw = css.raw
 	}
@@ -444,8 +444,9 @@ func buildClaudeLogBlock(st *claudeLogStat, hookUpdatedAt, now time.Time) map[st
 }
 
 // claudeSessionStatus mirrors the fields we read from Claude Code's own
-// per-process status file (~/.claude/sessions/<pid>.json). status is Claude's
-// first-party flag (busy / idle / shell); statusUpdatedAt is epoch-ms. raw holds
+// per-process status file (<config dir>/sessions/<pid>.json). status is Claude's
+// first-party flag (busy / idle / shell, and since 2.1.327 waiting, with the
+// reason in waitingFor); statusUpdatedAt is epoch-ms. raw holds
 // the untouched file bytes so the snapshot can freeze a verbatim copy.
 type claudeSessionStatus struct {
 	raw             []byte
@@ -453,22 +454,25 @@ type claudeSessionStatus struct {
 	PID             int    `json:"pid"`
 	SessionID       string `json:"sessionId"`
 	Status          string `json:"status"`
+	WaitingFor      string `json:"waitingFor"`
 	StatusUpdatedAt int64  `json:"statusUpdatedAt"`
 	Name            string `json:"name"`
 	Version         string `json:"version"`
 }
 
-// findClaudeSessionStatus scans ~/.claude/sessions/*.json for the file(s) whose
-// sessionId matches claudeSessionID and returns the best match. The dir is keyed
+// findClaudeSessionStatus scans the session's Claude sessions dir
+// (session.ClaudeSessionsDir: the account's CLAUDE_CONFIG_DIR, else ~/.claude)
+// for the file(s) whose sessionId matches claudeSessionID and returns the best
+// match. The dir is keyed
 // by pid, so a session can have a stale dead-process file alongside the live one:
 // a live process wins over a dead one, and newest statusUpdatedAt breaks ties.
 // Returns nil if nothing matches.
-func findClaudeSessionStatus(claudeSessionID string) *claudeSessionStatus {
-	home, err := os.UserHomeDir()
-	if err != nil {
+func findClaudeSessionStatus(account, claudeSessionID string) *claudeSessionStatus {
+	dir := session.ClaudeSessionsDir(account)
+	if dir == "" {
 		return nil
 	}
-	return findClaudeSessionStatusIn(filepath.Join(home, ".claude", "sessions"), claudeSessionID)
+	return findClaudeSessionStatusIn(dir, claudeSessionID)
 }
 
 // findClaudeSessionStatusIn is findClaudeSessionStatus with the sessions dir
@@ -501,7 +505,7 @@ func findClaudeSessionStatusIn(dir, claudeSessionID string) *claudeSessionStatus
 }
 
 // buildClaudeStatusBlock renders the Claude session status file signal for
-// snapshot.json. status is Claude Code's own busy/idle/shell flag; pid_alive
+// snapshot.json. status is Claude Code's own busy/idle/shell/waiting flag; pid_alive
 // distinguishes a live flag from a dead process's last-known value. Trust the
 // value while alive, not status_age — the flag is event-driven, not a heartbeat,
 // and it stays "idle" through /compact (so it can't explain a compaction stall).
@@ -518,6 +522,9 @@ func buildClaudeStatusBlock(css *claudeSessionStatus, now time.Time) map[string]
 		"status":    css.Status,
 		"name":      css.Name,
 		"version":   css.Version,
+	}
+	if css.WaitingFor != "" {
+		m["waiting_for"] = css.WaitingFor
 	}
 	if css.StatusUpdatedAt > 0 {
 		t := time.UnixMilli(css.StatusUpdatedAt)
