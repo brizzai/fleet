@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.49.1] - 2026-11-23
+
+### Fixed
+
+- **Green means mergeable.** The PR badge no longer shows `✓` on an approved, CI-green PR that GitHub still won't merge, such as one held by an approval-policy bot or a branch that's behind its base. Commit statuses (policy-bot, external CI) now count toward the badge too, so a failing one turns it red instead of being skipped.
+- **Questions stop reading as finished.** A session waiting on a question now shows waiting as soon as Claude asks it (Claude Code 2.1.327+), even before the question renders or after you queue a message while it's open, instead of reading finished and dropping out of the `Space` rotation.
+
 ## [2.49.0] - 2026-11-22
 
 ### Highlights
@@ -804,7 +811,8 @@ Initial open-source release.
 - `/ship` release workflow — comment `/ship` on any issue or PR to release
 - Changelog check on PRs with `/no-changelog` escape hatch
 
-[Unreleased]: https://github.com/brizzai/fleet/compare/v2.49.0...HEAD
+[Unreleased]: https://github.com/brizzai/fleet/compare/v2.49.1...HEAD
+[2.49.1]: https://github.com/brizzai/fleet/releases/tag/v2.49.1
 [2.49.0]: https://github.com/brizzai/fleet/releases/tag/v2.49.0
 [2.48.1]: https://github.com/brizzai/fleet/releases/tag/v2.48.1
 [2.48.0]: https://github.com/brizzai/fleet/releases/tag/v2.48.0
