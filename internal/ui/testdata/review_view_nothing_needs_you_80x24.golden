@@ -1,0 +1,24 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────────────────────────╮
+│ Ready: docs and a lockfile only, nothing here needs a decision.              │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed        │
+│ findings for every org, and tells a real permission error apart from an      │
+│ expired scan window.                                                         │
+│ 5 files safe to skip                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+   ✓ Nothing needs you.
+
+   The reviewer found no decision for you. 5 files are safe to skip; s shows
+   why.
+
+   A approves it. d shows the full diff if you want to read it anyway.
+
+
+
+
+
+
+
+
+
+ A approve  s why skipped  d read anyway  esc back                       ? keys

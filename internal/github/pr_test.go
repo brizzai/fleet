@@ -359,6 +359,34 @@ func TestDeriveCIStatusSupersededFailure(t *testing.T) {
 	}
 }
 
+// FailedChecks names exactly the checks behind a FAILURE — sorted, with ignored
+// and superseded failures left out, the same set the status counted.
+func TestSummarizeChecksNamesFailures(t *testing.T) {
+	checks := []statusCheckEntry{
+		{Name: "lint", Status: "COMPLETED", Conclusion: "FAILURE"},
+		{Name: "build", Status: "COMPLETED", Conclusion: "TIMED_OUT"},
+		{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "noisy-gate", Status: "COMPLETED", Conclusion: "FAILURE"},
+		// Superseded: a later run of the same workflow is still going.
+		{Name: "verdict", Status: "COMPLETED", Conclusion: "FAILURE", WorkflowName: "ci",
+			DetailsURL: "https://github.com/o/r/actions/runs/100/job/1"},
+		{Name: "suite", Status: "IN_PROGRESS", WorkflowName: "ci",
+			DetailsURL: "https://github.com/o/r/actions/runs/200/job/2"},
+	}
+	status, failed := summarizeChecks(checks, []string{"noisy-*"})
+	if status != "FAILURE" {
+		t.Fatalf("status = %q", status)
+	}
+	if len(failed) != 2 || failed[0] != "build" || failed[1] != "lint" {
+		t.Errorf("failed = %v, want [build lint]", failed)
+	}
+
+	status, failed = summarizeChecks(checks[2:3], nil)
+	if status != "SUCCESS" || failed != nil {
+		t.Errorf("all green: %q %v", status, failed)
+	}
+}
+
 // A StatusContext row (the commit-status API: policy-bot, external CI) names
 // itself with context/state, not name/status/conclusion. Reading only the
 // CheckRun fields dropped these rows as nameless ghosts, so a pending

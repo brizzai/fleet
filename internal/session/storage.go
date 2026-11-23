@@ -57,6 +57,10 @@ type SessionRow struct {
 	// SnoozedUntil is the deadline past which the session rejoins the
 	// attention surfaces. Zero = not snoozed.
 	SnoozedUntil time.Time
+	// BaseRef is the ref the session's worktree was cut from ("origin/master"),
+	// written at worktree creation. Empty for sessions with no base: `fleet
+	// add`, forks, rows older than the column.
+	BaseRef string
 }
 
 // ShellRow is the persisted form of a drawer shell (a plain non-agent
@@ -231,6 +235,16 @@ func (s *StateDB) migrate() error {
 			return err
 		}
 	}
+	// Base ref the worktree was cut from — what self-review diffs against.
+	// Empty means unknown, and the reader falls back to the PR's base and then
+	// the default branch (git.ResolveBase), so pre-existing rows still review.
+	if !s.hasColumn("sessions", "base_ref") {
+		_, err = s.db.Exec(`ALTER TABLE sessions ADD COLUMN base_ref TEXT NOT NULL DEFAULT ''`)
+		if err != nil {
+			debuglog.Logger.Error("migration failed: add base_ref column", "error", err)
+			return err
+		}
+	}
 
 	_, err = s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS slot_bindings (
@@ -315,6 +329,10 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	if err := s.migrateReview(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -343,14 +361,14 @@ func (s *StateDB) hasColumn(table, column string) bool {
 // SaveSession inserts or replaces a session row.
 func (s *StateDB) SaveSession(row *SessionRow) error {
 	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO sessions (id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until, base_ref)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		row.ID, row.Title, row.ProjectPath, string(agent.Parse(row.Agent)), row.Account, row.Status, row.TmuxSession,
 		row.CreatedAt.Unix(), row.LastAccessed.Unix(), boolToInt(row.Acknowledged),
 		row.ClaudeSessionID, row.WorkspaceName,
 		boolToInt(row.ManuallyRenamed), row.FirstPrompt, boolToInt(row.TitleGenerated),
-		row.PromptCount, timeToUnix(row.SnoozedUntil),
+		row.PromptCount, timeToUnix(row.SnoozedUntil), row.BaseRef,
 	)
 	if err != nil {
 		debuglog.Logger.Error("failed to save session", "id", row.ID, "error", err)
@@ -361,7 +379,7 @@ func (s *StateDB) SaveSession(row *SessionRow) error {
 // LoadSessions returns all sessions ordered by creation time.
 func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until
+		SELECT id, title, project_path, agent, account, status, tmux_session, created_at, last_accessed, acknowledged, claude_session_id, workspace_name, manually_renamed, first_prompt, title_generated, prompt_count, snoozed_until, base_ref
 		FROM sessions ORDER BY created_at
 	`)
 	if err != nil {
@@ -375,7 +393,7 @@ func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 		var r SessionRow
 		var createdAt, lastAccessed, snoozedUntil int64
 		var ack, manuallyRenamed, titleGenerated int
-		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Account, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount, &snoozedUntil); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ProjectPath, &r.Agent, &r.Account, &r.Status, &r.TmuxSession, &createdAt, &lastAccessed, &ack, &r.ClaudeSessionID, &r.WorkspaceName, &manuallyRenamed, &r.FirstPrompt, &titleGenerated, &r.PromptCount, &snoozedUntil, &r.BaseRef); err != nil {
 			debuglog.Logger.Error("failed to scan session row", "error", err)
 			return nil, err
 		}
@@ -412,14 +430,20 @@ func (s *StateDB) LoadSessionLaunch(id string) (row *SessionRow, ok bool, err er
 	return r, true, nil
 }
 
-// DeleteSession removes a session by ID.
+// DeleteSession removes a session by ID. Its self-review runs stay with their
+// checkout; only their pointer at this session as a send target is cleared.
 func (s *StateDB) DeleteSession(id string) error {
 	debuglog.Logger.Info("deleting session from storage", "id", id)
 	_, err := s.db.Exec("DELETE FROM sessions WHERE id = ?", id)
 	if err != nil {
 		debuglog.Logger.Error("failed to delete session", "id", id, "error", err)
+		return err
 	}
-	return err
+	if err := s.clearReviewTarget(id); err != nil {
+		debuglog.Logger.Error("failed to clear review target", "id", id, "error", err)
+		return err
+	}
+	return nil
 }
 
 // --- Shells (drawer terminals) ---

@@ -70,6 +70,8 @@ func main() {
 		runRead(args[1:])
 	case "wait":
 		runWait(args[1:])
+	case "review":
+		runReview(args[1:])
 	case "answer", "interrupt", "submit", "clear", "restart", "suspend", "resume":
 		runVerb(args[0], args[1:])
 	case "skill":
@@ -137,7 +139,7 @@ func runTUI() {
 	defer analytics.Shutdown()
 
 	// Auto-update: check for newer version on launch.
-	if cfg.IsAutoUpdateEnabled() && version != "dev" && update.ShouldCheck() {
+	if cfg.IsAutoUpdateEnabled() && update.IsReleaseBuild(version) && update.ShouldCheck() {
 		debuglog.Logger.Info("checking for updates", "current", version)
 		newVer, err := update.Update(version)
 		// A package-managed install can never swap its own binary. That's a
@@ -370,6 +372,9 @@ Watch and drive sessions (one-shot, never the TUI; --help on each):
   fleet clear <session>    Erase the unsent draft in its input box
   fleet restart <session>  Relaunch an exited agent (--fresh: new conversation)
   fleet suspend <session>  Hibernate to free memory; fleet resume wakes it
+  fleet review <session>   Self-review the session's worktree: verdict + the
+                           decisions only you can make (--show, --json,
+                           --regenerate; exit 0 none / 3 decide / 4 failed)
 
   fleet skill <install|uninstall|status>  Install the fleet agent skill, which
                            teaches Claude Code, Codex, Cursor, OpenCode, Copilot, and Antigravity how

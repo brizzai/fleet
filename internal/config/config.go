@@ -92,6 +92,9 @@ type Config struct {
 	// pressure: "off", "light" (default), "balanced", or "aggressive". Read via
 	// GetSessionSuspendMode. See internal/ui suspend sweep.
 	SessionSuspendMode string `json:"session_suspend_mode,omitempty"`
+	// ReviewModel is the model self-review's reviewer runs on (`claude -p
+	// --model`). Read via GetReviewModel, which defaults to "opus".
+	ReviewModel string `json:"review_model,omitempty"`
 
 	// TicketStartState controls the one mutation fleet ever makes against a
 	// ticket tracker: moving an issue to its first started state when a
@@ -210,6 +213,25 @@ func (c *Config) GetDefaultAgent() string {
 		return a
 	}
 	return string(agent.Default)
+}
+
+// ReviewModelDefault is the self-review reviewer's model when review_model is
+// unset — the alias Claude Code resolves to the current Opus. A review is a
+// handful of calls a day, and a missed decision costs more than the tokens.
+const ReviewModelDefault = "opus"
+
+// ReviewModels are the values the Settings cycler offers. A hand-written id
+// (e.g. "claude-opus-5") is still honoured; the cycler keeps it in the ring.
+var ReviewModels = []string{"opus", "sonnet"}
+
+// GetReviewModel returns the self-review reviewer's model, trimmed, defaulting
+// to ReviewModelDefault. The value rides in argv, so the caller validates its
+// shape (agent.ValidateLaunchValue) before launching.
+func (c *Config) GetReviewModel() string {
+	if m := strings.TrimSpace(c.ReviewModel); m != "" {
+		return m
+	}
+	return ReviewModelDefault
 }
 
 // GetAccountStrategy returns the normalized Claude-account assignment strategy.

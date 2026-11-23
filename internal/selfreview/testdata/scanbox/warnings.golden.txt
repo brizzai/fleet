@@ -1,0 +1,15 @@
+stop 1 decide did not end with ?, fixed
+stop 1 checked item says CI passed, but CI is pending: dropped
+stop 1 checked item without a valid source ("vibes"), dropped
+stop 2 why over 45 words, cut
+stop 2 checked item without a valid source ("gap"), dropped
+stop 4 id "s3" duplicated, renamed s4
+stop 5 decide over 22 words, cut
+stop 6 hunk names "services/vulns/closures/window.py", not a changed file, dropped
+stop 6 hunk services/vulns/closures/store.py:120-125 is outside the diff, anchored to the file
+8 stops, over the 7 the reviewer was asked for; all kept
+go.mod is high-risk and cannot be skipped by guide; not covered
+skip names "pipelines/collectors/README.md", not a changed file, dropped
+chapter 2: pipelines/collectors/internal/collectors/scanboxSC/collector.go is already in an earlier chapter
+chapter 4 names "docs/collectors/missing.md", not a changed file, dropped
+2 files in no chapter: added to Other changes

@@ -521,6 +521,8 @@ func (h *Home) traceDialogName() string {
 		return "stats_recap"
 	case h.statsView.IsVisible():
 		return "stats"
+	case h.reviewView.IsVisible():
+		return "review"
 	case h.consentDialog.IsVisible():
 		return ""
 	case h.onboardingDialog.IsVisible():

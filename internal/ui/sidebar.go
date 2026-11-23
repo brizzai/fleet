@@ -21,11 +21,17 @@ import (
 // for origin headers and checkout headers so existing "this is not a session"
 // guards keep working. IsOriginHeader / IsCheckoutHeader pick the specific
 // render path.
+//
+// IsReview is the checkout's self-review row (`✎ Review · 4 decisions`), the
+// first child under its checkout header. It is NOT a header (Enter opens the
+// review rather than folding a group) and carries no Session; RepoPath names
+// its checkout and Review its state. See review_row.go.
 type SidebarItem struct {
 	IsRepoHeader     bool
 	IsOriginHeader   bool
 	IsCheckoutHeader bool
 	IsSpacer         bool // visual gap row between origin groups; not selectable
+	IsReview         bool // the checkout's review row (Review holds its state)
 
 	OriginKey   string // origin grouping key (github org/repo or local:basename)
 	OriginLabel string // human-readable origin label
@@ -46,6 +52,9 @@ type SidebarItem struct {
 	// Only the group that holds the snooze renders a countdown — a checkout
 	// under a snoozed origin stays silent for the same reason its sessions do.
 	GroupSnooze time.Time
+
+	// Review is a review row's state (IsReview only).
+	Review reviewBadge
 }
 
 // RepoGroupInfo holds status counts for a checkout (used by other call sites).
@@ -400,6 +409,8 @@ func RenderSidebar(items []SidebarItem, sessions []*session.Session, gitInfo map
 			b.WriteString(renderOriginHeader(item, width, i == cursor))
 		case item.IsCheckoutHeader:
 			b.WriteString(renderCheckoutHeader(item, gitInfo[item.RepoPath], width, i == cursor))
+		case item.IsReview:
+			b.WriteString(renderReviewRow(item, width, i == cursor))
 		case item.Pending != nil:
 			b.WriteString(renderPendingItem(item.Pending, width, i == cursor))
 		default:

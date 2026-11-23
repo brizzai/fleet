@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,6 +25,21 @@ import (
 // would put a red herring in every bug report (the ! flow pastes debug.log
 // into public issues) and count as a broken updater in telemetry.
 var ErrNotReplaceable = errors.New("binary is not replaceable by this user")
+
+// releaseVersionRe matches the versions a release build carries: goreleaser
+// stamps "2.48.1", a tag-derived build "v2.48.1".
+var releaseVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
+
+// IsReleaseBuild reports whether a binary stamped with version may replace
+// itself with the latest release. Only a released version may: `make build`
+// stamps `git describe` output ("v2.48.1-1-gc65723a-dirty"), which reads as
+// older than the release it was cut from, so the updater would swap a branch
+// build for the release within seconds of launch and re-exec into it — the
+// feature under test silently gone, with nothing on screen saying why.
+// "dev" (`go build` / `make run`) is not a release either.
+func IsReleaseBuild(version string) bool {
+	return releaseVersionRe.MatchString(version)
+}
 
 const (
 	repo             = "brizzai/fleet"

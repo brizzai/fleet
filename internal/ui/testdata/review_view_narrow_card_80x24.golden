@@ -1,0 +1,24 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even    │
+│ with closures off.                                                           │
+│ 27 of 845 changed lines need you · 1 file not reviewed                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ 1 of 8 · product call ───────────────────────────────────────── ✓ ok as is ─╮
+│                                                                              │
+│ Closures kept for all orgs                                                   │
+│                                                                              │
+│ Recommend: keep as is   y                                                    │
+│                                                                              │
+│ Should orgs with closures off now store closed findings?                     │
+│                                                                              │
+│ How it works   Closed findings are stored by the closures module on every    │
+│                run now; the org's closures setting is no longer read before  │
+│                writing.                                                      │
+│                                                                              │
+│ Why it matters record() no longer checks closures_enabled, so orgs that      │
+│                turned closures off start storing closed findings; the        │
+│                migration backfills a source column for existing rows.        │
+│                                                                              │
+│ Checked        ✓ closures_enabled guard removed from record()                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ y keep  n change…  a ask…  l later  J/K change  e more  esc list        ? keys

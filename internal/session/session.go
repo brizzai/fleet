@@ -74,6 +74,7 @@ type Session struct {
 	AgentSessionName     string    // Transient: the agent's own title (Claude JSONL / Codex state DB), not persisted to SQLite.
 	AgentNameLastChecked time.Time // Transient: last time we read the agent's title.
 	WorkspaceName        string
+	BaseRef              string // ref the worktree was cut from ("origin/master"); "" = unknown (fleet add, fork, legacy row)
 	ManuallyRenamed      bool
 	FirstPrompt          string
 	TitleGenerated       bool
@@ -151,6 +152,10 @@ type Session struct {
 
 	lastContentHash     string
 	lastContentChangeAt time.Time
+	// finishedAt is when this process last saw the session go running →
+	// finished (NoteFinished). Transient: self-review's default send target is
+	// the session that most recently finished work in a checkout.
+	finishedAt time.Time
 
 	// waitingPaneConfirmed records that we've structurally observed the permission
 	// prompt on screen (detectStatus returned StatusWaiting) for the current waiting
@@ -723,6 +728,21 @@ func (s *Session) MarkUnread() {
 	if s.Status == StatusIdle {
 		s.Status = StatusFinished
 	}
+}
+
+// NoteFinished records a running → finished transition at t.
+func (s *Session) NoteFinished(t time.Time) {
+	s.mu.Lock()
+	s.finishedAt = t
+	s.mu.Unlock()
+}
+
+// FinishedAt is when this process last saw the session finish a turn; zero
+// when it hasn't (since launch).
+func (s *Session) FinishedAt() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.finishedAt
 }
 
 // IdleFor reports how long the session has shown no sign of life — the time since
@@ -2277,6 +2297,7 @@ func (s *Session) ToRow() *SessionRow {
 		Acknowledged:    s.Acknowledged,
 		ClaudeSessionID: s.ClaudeSessionID,
 		WorkspaceName:   s.WorkspaceName,
+		BaseRef:         s.BaseRef,
 		ManuallyRenamed: s.ManuallyRenamed,
 		FirstPrompt:     s.FirstPrompt,
 		TitleGenerated:  s.TitleGenerated,
@@ -2410,6 +2431,7 @@ func FromRow(row *SessionRow) *Session {
 		Acknowledged:    row.Acknowledged,
 		ClaudeSessionID: row.ClaudeSessionID,
 		WorkspaceName:   row.WorkspaceName,
+		BaseRef:         row.BaseRef,
 		ManuallyRenamed: row.ManuallyRenamed,
 		FirstPrompt:     row.FirstPrompt,
 		TitleGenerated:  row.TitleGenerated,

@@ -59,6 +59,10 @@ func (ts *ToastStack) Add(level ToastLevel, message string) {
 	}
 }
 
+// Clear drops every toast at once — for a state change that makes the ones on
+// screen stale (a review regenerating under its own "approved" toast).
+func (ts *ToastStack) Clear() { ts.toasts = nil }
+
 // View returns the rendered stack of active toasts, newest at the bottom.
 // Returns "" when nothing is active so the caller can skip compositing.
 // maxWidth bounds the toast column to the terminal width.

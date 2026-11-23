@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────────────────────────────────────────────── 8 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Decide ───────────────────────────────────────╮╭─ ready to send ────────────────────────────────────────────────────╮
+│  1  Closures kept for all orgs               ✎ ││                                                                    │
+│  2  Full snapshot every 12h                  ? ││ S sends 1 change and 1 question to ✻ api:                          │
+│  3  A 403 that is not permissions            ✓ ││                                                                    │
+│  4  How far each run reads back              ✓ ││   ✎ Closures kept for all orgs                                     │
+│  5  One stored closure                       ✓ ││     save the cursor after the upload lands                         │
+│  6  Reruns show only own window              ✓ ││   ? Full snapshot every 12h                                        │
+│  7  Cursor saved before upload               ✓ ││     does Dana know?                                                │
+│  8  COMMIT inside a migration file           ✓ ││                                                                    │
+│                                                ││ 6 answers marked ok or later stay here: the agent has nothing to   │
+│  ✓ All 8 decisions answered                    ││ do for them.                                                       │
+│▸    S send to ✻ api                            ││                                                                    │
+│                                                ││                                                                    │
+│ ────────────────────────────────────────────── ││                                                                    │
+│  ⚠ Not reviewed · 1 file                     ⏎ ││                                                                    │
+│  Safe to skip · 5 files                      s ││                                                                    │
+│                                                ││                                                                    │
+│  Not verified yet: CI running; integration     ││                                                                    │
+│  test against the SC sandbox not run           ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ ⏎ send to ✻ api  A approve instead  esc back                                                                    ? keys

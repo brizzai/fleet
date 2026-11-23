@@ -1,0 +1,24 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────── 1 of 8 answered ─╮
+│ Not ready: closed findings are now kept for every org, even with closures    │
+│ turned off, and the collector runs twice as often as before on every         │
+│ appliance.                                                                   │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed        │
+│ findings for every org, and tells a real permission error apart from an      │
+│ expired scan window.                                                         │
+│ high risk · 27 of 845 changed lines need you · 1 file not reviewed           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  1  Closures kept for all orgs                                   rec: keep   ✓
+     Should orgs with closures off now store closed findings?
+▸ 2  Full snapshot every 12h                                      rec: change
+     Is a full snapshot every 12h OK for the biggest customers?
+  3  A 403 that is not permissions                                rec: keep
+     Does endCheck book a 200 with a non-zero error_code twice?
+  4  How far each run reads back                                  rec: keep
+     Is a 36h lookback right for a 12h schedule?
+  5  One stored closure                                           rec: change
+     When the same finding is closed, reopened and closed again, is keeping
+     only the latest closure row and dropping the history the…?
+  6  Reruns show only own window                                  rec: keep
+     Is it OK that a rerun shows only its own window?
+  7  Cursor saved before upload                                   rec: change
+ y keep  n change…  a ask agent…  l later  ⏎ read code        A approve  ? keys

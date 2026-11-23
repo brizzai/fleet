@@ -764,6 +764,22 @@ func buildSettingsCategories() []settingsCategory {
 				},
 			},
 			{
+				// The model self-review's reviewer runs on (`v`). A hand-written
+				// id in config.json stays in the ring, like the editor row: the
+				// first arrow must not silently overwrite it.
+				label:  "Review model",
+				value:  func(c *config.Config) string { return c.GetReviewModel() },
+				valueW: func() int { return maxStrW(config.ReviewModels) },
+				cycle: func(d *SettingsDialog, dir int) {
+					cur := d.cfg.GetReviewModel()
+					ring := config.ReviewModels
+					if indexOf(ring, cur) < 0 {
+						ring = append([]string{cur}, ring...)
+					}
+					d.cfg.ReviewModel = cycleString(cur, ring, dir)
+				},
+			},
+			{
 				// Auto-hibernate idle sessions under memory pressure to keep the
 				// machine (and the shared tmux server) from being OOM-killed.
 				// Off / Light (critical-pressure safety net) / Balanced / Aggressive.

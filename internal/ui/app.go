@@ -39,6 +39,7 @@ import (
 	"github.com/brizzai/fleet/internal/perfwatch"
 	"github.com/brizzai/fleet/internal/proc"
 	"github.com/brizzai/fleet/internal/releasenotes"
+	"github.com/brizzai/fleet/internal/reviewjob"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/skill"
@@ -137,6 +138,9 @@ type (
 	sessionCreateResultMsg     struct {
 		session *session.Session
 		err     error
+		// reviewRunID: the session was started with a review run's answers
+		// as its first prompt; on success the run is marked sent to it.
+		reviewRunID string
 	}
 	previewMsg struct {
 		sessionID string
@@ -326,6 +330,33 @@ type Home struct {
 	statsRecapWeek   time.Time     // the last full week the tick has asked a recap for
 	statsJumps       statsJumpGate // collapses held-key jump repeats (recordStatsJump)
 
+	// reviewView is self-review's full-screen Review view (`v`). Its state —
+	// summaries, in-flight prepares, failures with no stored run, stale
+	// verdicts — lives in the review* fields below; see review_wiring.go.
+	reviewView *ReviewView
+	// reviewSummaries is every session's latest-run summary, refreshed by the
+	// worker's sweep and after each review action. Update-goroutine-only.
+	reviewSummaries map[string]reviewjob.Summary
+	// reviewPreparing marks prepares this TUI started and hasn't heard back
+	// from, so the row reads ✎… on the keypress rather than the next sweep.
+	reviewPreparing map[string]bool
+	// reviewLocalFail holds why a prepare failed before it could store a run
+	// (no row means no summary to carry the ✎! and its reason).
+	reviewLocalFail map[string]string
+	// reviewStale is CheckStale's verdict per run id (the row's "stale").
+	reviewStale map[string]bool
+	// reviewTargetPick is the send target chosen with `t` in the Review view,
+	// per checkout — the next open defaults to it. Update-goroutine-only.
+	reviewTargetPick map[string]string
+	// reviewRowKeys is which checkouts had a review row at the last rebuild;
+	// when that set changes, rebuildFlatItems keeps the cursor on its row by
+	// identity, since review rows appear and vanish on a timer.
+	reviewRowKeys string
+	// reviewWrites counts answer writes in flight. Added on the Update goroutine
+	// before the write's Cmd is returned; send and approve Wait on it, so an
+	// answer given just before S is on disk before the send reads answers.
+	reviewWrites sync.WaitGroup
+
 	// What's New badge: an animated top-right indicator shown while an unseen
 	// highlighted release exists. cachedReleases is loaded once at startup so
 	// the badge can be computed without opening the dialog.
@@ -376,6 +407,9 @@ type Home struct {
 	// lastAdoptSweepAt throttles the externally-created-session sweep, mirroring
 	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
 	lastAdoptSweepAt time.Time
+	// lastReviewSweepAt throttles the review-summary sweep (review_wiring.go).
+	// Worker-goroutine-only, so it needs no lock.
+	lastReviewSweepAt time.Time
 	// lastHookRepairAt throttles the hook-command existence check, mirroring
 	// lastSuspendSweepAt. Worker-goroutine-only, so it needs no lock.
 	lastHookRepairAt time.Time
@@ -687,6 +721,12 @@ func NewHome(storage *session.StateDB, cfg *config.Config, version string, ident
 		onboardingDialog:       NewOnboardingDialog(cfg),
 		releaseNotes:           NewReleaseNotesDialog(),
 		statsView:              NewStatsView(),
+		reviewView:             &ReviewView{},
+		reviewSummaries:        map[string]reviewjob.Summary{},
+		reviewPreparing:        map[string]bool{},
+		reviewLocalFail:        map[string]string{},
+		reviewStale:            map[string]bool{},
+		reviewTargetPick:       map[string]string{},
 		recapView:              NewRecapView(),
 		launchpad:              NewLaunchpad(),
 		bugReport:              NewBugReportDialog(),
@@ -970,6 +1010,11 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if cmd, ok := h.handleStatsMsg(msg); ok {
 		return h, cmd
 	}
+	// Self-review's messages: the view's own (answer, send, approve, …) and the
+	// async results the wiring sends back to itself.
+	if cmd, ok := h.handleReviewMsg(msg); ok {
+		return h, cmd
+	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1014,6 +1059,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.bugReport.SetSize(msg.Width, msg.Height)
 		h.releaseNotes.SetSize(msg.Width, msg.Height)
 		h.statsView.SetSize(msg.Width, msg.Height)
+		h.reviewView.SetSize(msg.Width, msg.Height)
 		h.recapView.SetSize(msg.Width, msg.Height)
 		h.syncViewport()
 		// The dropdown is pinned to a sidebar row, and a resize moves that row
@@ -1879,11 +1925,21 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Skipped for a branch that already exists, on the same rule the CLI
 			// path keeps: Create's no-`-b` retry drops the base, so the fetch
 			// would refresh a ref `worktree add` never reads.
-			if !provider.IsCustom() && baseBranch != "" && !git.BranchExists(repoPath, branch) {
+			reusedBranch := !provider.IsCustom() && git.BranchExists(repoPath, branch)
+			if !provider.IsCustom() && baseBranch != "" && !reusedBranch {
 				if ferr := git.FetchBaseRef(repoPath, baseBranch); ferr != nil {
 					debuglog.Logger.Debug("base fetch failed; branching from local refs",
 						"repo", repoPath, "base", baseBranch, "err", ferr)
 				}
+			}
+			// The base self-review diffs against (sessions.base_ref). Only
+			// when the branch is new: a reused branch was cut from who knows
+			// what, and Create's no-`-b` retry ignores the base anyway, so
+			// recording it would pin the review to a guess and shadow the
+			// PR's real base in git.ResolveBase.
+			recordedBase := ""
+			if !reusedBranch {
+				recordedBase = baseBranch
 			}
 			info, err := provider.Create(repoPath, name, branch, baseBranch)
 			var tres *ticket.Result
@@ -1904,6 +1960,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return workspaceCreateResultMsg{
 				info: info, err: err, pendingID: pendingID, repoPath: repoPath,
 				ticket: tres, ticketErr: terr, ticketTracker: tracker,
+				baseRef: recordedBase,
 			}
 		}, spinnerTickCmd)
 
@@ -1958,6 +2015,7 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			title:         msg.info.Name,
 			workspaceName: msg.info.Name,
 			prompt:        prompt,
+			baseRef:       msg.baseRef,
 		})
 
 	case paletteTicketsMsg:
@@ -2660,6 +2718,7 @@ func (h *Home) modalOpen() bool {
 		h.releaseNotes.IsVisible() ||
 		h.statsView.IsVisible() ||
 		h.recapView.IsVisible() ||
+		h.reviewView.IsVisible() ||
 		h.bugReport.IsVisible() ||
 		h.settingsDialog.IsVisible() ||
 		h.createWorkspaceDialog.IsVisible() ||
@@ -2712,6 +2771,9 @@ func (h *Home) renderBody() string {
 	if h.statsView.IsVisible() {
 		h.statsView.SetCovered(h.recapView.IsVisible())
 		return h.statsView.View()
+	}
+	if h.reviewView.IsVisible() {
+		return h.reviewView.View()
 	}
 	if h.bugReport.IsVisible() {
 		return h.bugReport.View()
@@ -2834,10 +2896,13 @@ func (h *Home) renderBody() string {
 
 		s, content := h.selectedPreview()
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
-		previewInner := RenderPreview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode)
+		previewInner := RenderPreviewWithReview(s, content, previewRepoInfo, innerW, previewHeight-2, h.focusMode, h.reviewPreviewFor(s))
+		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
+		if inner, title, ok := h.reviewRowPreview(innerW, previewHeight-2); ok {
+			previewInner, previewTitle = inner, title
+		}
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
-		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
 		b.WriteString(RenderBorderedPanelInsets(previewInner, previewTitle, "", shellChips, previewFooter, h.width, previewHeight, h.focusMode))
@@ -2896,10 +2961,13 @@ func (h *Home) renderBody() string {
 
 		s, content := h.selectedPreview()
 		previewRepoInfo := h.repoInfoFromSnap(gitInfoSnap)
-		previewInner := RenderPreview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode)
+		previewInner := RenderPreviewWithReview(s, content, previewRepoInfo, previewInnerW, previewInnerH, h.focusMode, h.reviewPreviewFor(s))
+		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
+		if inner, title, ok := h.reviewRowPreview(previewInnerW, previewInnerH); ok {
+			previewInner, previewTitle = inner, title
+		}
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
-		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
 		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
 		// collapsed chips ride the preview's bottom-left border (shellChips is
@@ -3019,6 +3087,12 @@ func (h *Home) routeToModal(msg tea.Msg) (tea.Cmd, bool) {
 	case h.statsView.IsVisible():
 		view, cmd := h.statsView.Update(cmdMsg)
 		h.statsView = view
+		return cmd, true
+	case h.reviewView.IsVisible():
+		// Raw, not remapped: the view owns a note input (n / a / x), and a
+		// Hebrew note must arrive as Hebrew. Paste reaches the input this way too.
+		view, cmd := h.reviewView.Update(msg)
+		h.reviewView = view
 		return cmd, true
 	case h.consentDialog.IsVisible():
 		dialog, cmd := h.consentDialog.Update(cmdMsg)
@@ -3163,6 +3237,35 @@ func (h *Home) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	return h, nil
 }
 
+// closeModalsOnCtrlQ closes every open overlay, dialog and full-screen view by
+// feeding each its own esc until nothing is open — esc is the cancel path every
+// one of them already has, so ctrl+q needs no per-dialog code and can't save,
+// confirm or submit anything esc wouldn't. Stacked views (the recap over Stats)
+// close together. The review view handles ctrl+q itself (it unwinds its own
+// note/confirm/help state first). Not for the consent prompt or the launchpad:
+// the first is a question that has to be answered, the second is the screen.
+// ok is false when nothing was open, so the key falls through untouched.
+func (h *Home) closeModalsOnCtrlQ() (tea.Cmd, bool) {
+	if !h.modalOpen() || h.consentDialog.IsVisible() || h.launchpadActive() || h.frost != nil {
+		return nil, false
+	}
+	if h.reviewView.IsVisible() {
+		return nil, false
+	}
+	esc := tea.KeyPressMsg{Code: tea.KeyEscape}
+	var cmds []tea.Cmd
+	// Bounded: a dialog whose esc first clears a filter or steps back a stage
+	// needs a few presses; one that ignored esc entirely must not spin.
+	for i := 0; i < 8 && h.modalOpen() && !h.consentDialog.IsVisible(); i++ {
+		cmd, handled := h.routeToModal(esc)
+		if !handled {
+			break
+		}
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...), true
+}
+
 func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// An active frost run owns every key until the user leaves it — except
 	// fleet's own quit key, which ends the run and quits, as the help bar says.
@@ -3174,6 +3277,14 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		h.endFrost()
+	}
+
+	// ctrl+q backs out of whatever is open — the chord that detaches an
+	// attached session, so "back to the sidebar" is one key everywhere.
+	if msg.String() == "ctrl+q" {
+		if cmd, ok := h.closeModalsOnCtrlQ(); ok {
+			return h, cmd
+		}
 	}
 
 	// Route to the active modal dialog/overlay first (keys + paste share this).
@@ -3352,7 +3463,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return h, h.activateCursorRow()
 	case "tab":
-		if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) &&
+			(h.flatItems[h.cursor].IsRepoHeader || h.flatItems[h.cursor].IsReview) {
 			return h, nil
 		}
 		if h.cfg.GetEnterMode() == "split" {
@@ -3570,6 +3682,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h.openReleaseNotes(true)
 	case "i":
 		return h, h.openStats()
+	case "v":
+		return h.reviewSelected()
 	case "X":
 		h.dismissActiveTip()
 		return h, nil
@@ -3734,6 +3848,11 @@ func (h *Home) activateCursorRow() tea.Cmd {
 	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
 		h.toggleRepoGroup()
 		return nil
+	}
+	// A review row opens its review (on the preparing screen while one is
+	// being generated).
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsReview {
+		return h.reviewOpenOrPrepare(h.flatItems[h.cursor].RepoPath)
 	}
 	// A suspended session has no live tmux — resume it (recreates tmux +
 	// `--resume`), then attach once it's up. Overrides split mode: there is no
@@ -4387,6 +4506,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	debuglog.Logger.Info("creating session", "title", msg.title, "path", msg.path, "agent", msg.agent, "resume", msg.resumeClaudeID)
 	s := session.NewSession(msg.title, msg.path)
 	s.WorkspaceName = msg.workspaceName
+	s.BaseRef = msg.baseRef
 	s.Agent = msg.agent
 	s.Account = msg.account
 	if msg.resumeClaudeID != "" {
@@ -4395,6 +4515,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 	// One-shot: Session.Start clears it via consumeLaunchOverridesLocked, and it
 	// is never persisted, so a restart doesn't re-ask the original question.
 	s.InitialPrompt = msg.prompt
+	reviewRunID := msg.reviewRunID
 	return func() tea.Msg {
 		seedDirTrust(msg.agent, msg.path)
 		if err := s.Start(); err != nil {
@@ -4402,7 +4523,7 @@ func (h *Home) startSessionCmd(msg sessionCreateMsg) tea.Cmd {
 			analytics.Track(analytics.EventTmuxCommandFailure, map[string]interface{}{"command": "new_session"})
 			return sessionCreateResultMsg{err: err}
 		}
-		return sessionCreateResultMsg{session: s}
+		return sessionCreateResultMsg{session: s, reviewRunID: reviewRunID}
 	}
 }
 
@@ -4504,9 +4625,16 @@ func (h *Home) handleSessionCreateResult(msg sessionCreateResultMsg) (tea.Model,
 		}
 	}
 
+	// A session started with a review's answers is now that run's target, and
+	// the run is sent — only now, so a launch that failed leaves it ready.
+	var reviewCmd tea.Cmd
+	if msg.reviewRunID != "" {
+		reviewCmd = h.reviewMarkSentCmd(msg.reviewRunID, s.ID)
+	}
+
 	// Probe for a TCC-blocked folder now that Start() has spun up the tmux server
 	// (covers both new sessions and forks, which flow through here).
-	return h, tea.Batch(h.probeTCCCmd(s.ProjectPath), h.fetchPreviewForSelected())
+	return h, tea.Batch(h.probeTCCCmd(s.ProjectPath), h.fetchPreviewForSelected(), reviewCmd)
 }
 
 // handleAdoptSessions folds sessions created by another fleet process into the
@@ -4712,6 +4840,9 @@ func (h *Home) canAutoExpand(repo string) bool {
 // (§ confirmDeleteHeader), and a session row deletes just that session. Shared by
 // the `d` key and the context menu's delete entry so the two can't drift.
 func (h *Home) deleteAtCursor() tea.Cmd {
+	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsReview {
+		return h.confirmDiscardReview(h.flatItems[h.cursor].RepoPath)
+	}
 	if h.cursor >= 0 && h.cursor < len(h.flatItems) && h.flatItems[h.cursor].IsRepoHeader {
 		item := h.flatItems[h.cursor]
 		if item.IsOriginHeader {
@@ -6106,7 +6237,7 @@ func (h *Home) expandKeyFor(item SidebarItem) string {
 	switch {
 	case item.IsOriginHeader:
 		return OriginExpandKey(item.OriginKey)
-	case item.IsCheckoutHeader:
+	case item.IsCheckoutHeader, item.IsReview:
 		return item.RepoPath
 	case item.Session != nil:
 		return session.GetRepoRoot(item.Session.ProjectPath)
@@ -6320,65 +6451,60 @@ func (h *Home) jumpToNextAttentionSession() {
 	// that header instead of restarting at the top. A collapsed origin header
 	// has no children in cand, so the scan simply moves on to the next group.
 	start := -1
-	prevID := "" // the session the cursor starts on, for recordStatsJump
-	if h.cursor >= 0 && h.cursor < len(h.flatItems) {
-		cur := h.flatItems[h.cursor]
-		if cur.Session != nil {
-			prevID = cur.Session.ID
-		}
-		for i, it := range cand {
-			switch {
-			case cur.Session != nil && it.Session != nil && it.Session.ID == cur.Session.ID:
-				start = i
-			case cur.IsOriginHeader && it.IsOriginHeader && it.OriginKey == cur.OriginKey:
-				start = i
-			case cur.IsCheckoutHeader && it.IsCheckoutHeader && it.RepoPath == cur.RepoPath:
-				start = i
-			}
-			if start != -1 {
-				break
-			}
-		}
+	prev := h.targetForCursor() // the row the cursor starts on, for recordStatsJump
+	if prev != (contextMenuTarget{}) {
+		start = prev.find(cand)
 	}
 
-	findNext := func(status session.Status) *session.Session {
+	// A review row whose decisions you haven't opened is in the same "needs
+	// you" class as a waiting session: both are blocked on you.
+	needs := func(it SidebarItem, status session.Status) bool {
+		if it.IsReview {
+			return status == session.StatusWaiting && reviewNeedsYou(it.Review)
+		}
+		return !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status
+	}
+	findNext := func(status session.Status) int {
 		for off := 1; off <= n; off++ {
-			it := cand[(start+off+n)%n] // +n keeps the index non-negative when start == -1
-			// Snoozed sessions are muted from the rotation — that IS the
-			// feature. BuildFlatItems already resolved the group umbrella, so
-			// this needs no origin/checkout lookup of its own.
+			i := (start + off + n) % n // +n keeps the index non-negative when start == -1
+			it := cand[i]
+			// Snoozed rows are muted from the rotation — that IS the feature.
+			// BuildFlatItems (and insertReviewRows) already resolved the group
+			// umbrella, so this needs no origin/checkout lookup of its own.
 			if it.Snooze.Muted {
 				continue
 			}
-			if !it.IsRepoHeader && it.Session != nil && it.Session.GetStatus() == status {
-				return it.Session
+			if needs(it, status) {
+				return i
 			}
 		}
-		return nil
+		return -1
 	}
 
-	target := findNext(session.StatusWaiting)
-	if target == nil {
-		target = findNext(session.StatusFinished)
+	ti := findNext(session.StatusWaiting)
+	if ti < 0 {
+		ti = findNext(session.StatusFinished)
 	}
-	if target == nil {
+	if ti < 0 {
 		debuglog.Logger.Debug("spacejump: no waiting/finished target outside collapsed origins", "cursor", h.cursor)
 		return // Silent no-op.
+	}
+	hit := cand[ti]
+	target := contextMenuTarget{reviewRepo: hit.RepoPath}
+	if hit.Session != nil {
+		target = contextMenuTarget{sessionID: hit.Session.ID}
 	}
 
 	// Reveal just the target's checkout (its origin is already expanded — a
 	// collapsed origin would have excluded it above), then land on it.
-	h.repoExpanded[session.GetRepoRoot(target.ProjectPath)] = true
+	h.repoExpanded[hit.RepoPath] = true
 	h.rebuildFlatItems()
-	for i, it := range h.flatItems {
-		if !it.IsRepoHeader && it.Session != nil && it.Session.ID == target.ID {
-			debuglog.Logger.Debug("spacejump: landed", "targetID", target.ID, "newCursor", i)
-			// Counted only on landing somewhere new, and once per held key.
-			h.recordStatsJump(stats.ActionSpaceJump, stats.ActionSpaceJump, prevID != target.ID)
-			h.cursor = i
-			h.syncViewport()
-			return
-		}
+	if i := target.find(h.flatItems); i >= 0 {
+		debuglog.Logger.Debug("spacejump: landed", "target", target, "newCursor", i)
+		// Counted only on landing somewhere new, and once per held key.
+		h.recordStatsJump(stats.ActionSpaceJump, stats.ActionSpaceJump, prev != target)
+		h.cursor = i
+		h.syncViewport()
 	}
 }
 
@@ -6393,7 +6519,8 @@ func (h *Home) buildJumpTree() []SidebarItem {
 		}
 	}
 	originOf, isWorktreeOf := h.originResolvers()
-	return BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, time.Now(), originOf, isWorktreeOf)
+	now := time.Now()
+	return h.withReviewRows(BuildFlatItems(h.sessions, h.pendingWorkspaces, exp, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf), now)
 }
 
 // jumpToNextAttentionPR moves the cursor to the first session of the next
@@ -7109,6 +7236,7 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 
 	h.rebuildFlatItems()
 	h.refreshTips(!h.modalOpen())
+	h.syncReviewTick()
 
 	// Daily-active heartbeat: no-op until the calendar day rolls over (or the
 	// client is disabled), so this is cheap to call every tick. Keeps DAU
@@ -7387,6 +7515,9 @@ func (h *Home) updateAndPersistStatus(s *session.Session) bool {
 		// late to spare the dump, still in time to spare the row.
 		if newStatus == session.StatusError && h.adoptExternalLaunch(s) {
 			return true
+		}
+		if oldStatus == session.StatusRunning && newStatus == session.StatusFinished {
+			s.NoteFinished(time.Now()) // self-review's default send target
 		}
 		switch newStatus {
 		case session.StatusError:
@@ -7766,6 +7897,10 @@ drainPriority:
 	// than on the Update loop. Also called on the empty-fleet early-return path
 	// above — the throttle makes that safe.
 	h.maybeSyncExternalSessions(sessions)
+
+	// 5c'. Self-review summaries for the review rows and the preview line. Reads
+	// SQLite, so it lives here; self-throttled.
+	h.maybeSyncReviewSummaries()
 
 	// 5d. Re-point Claude's, Copilot's and Antigravity's hooks if the command they name has been
 	// deleted. Self-throttled; stats a file and may rewrite settings.json, which is why it
@@ -8392,7 +8527,7 @@ func (h *Home) resolveCurrentRepo() string {
 		return ""
 	}
 	item := h.flatItems[h.cursor]
-	if item.IsRepoHeader {
+	if item.IsRepoHeader || item.IsReview {
 		return item.RepoPath
 	}
 	if item.Session != nil {
@@ -8595,6 +8730,8 @@ func (h *Home) cursorBarContext() BarContext {
 		return BarContextOrigin
 	case item.IsCheckoutHeader:
 		return BarContextCheckout
+	case item.IsReview:
+		return BarContextReview
 	case item.Session != nil:
 		return BarContextSession
 	default:
@@ -8649,6 +8786,9 @@ func (h *Home) cursorBreadcrumb(bg color.Color) string {
 			title = title[:39] + "…"
 		}
 		parts = append(parts, segStyle.Bold(true).Render(title))
+	}
+	if item.IsReview {
+		parts = append(parts, segStyle.Bold(true).Render(ReviewGlyph+" Review"))
 	}
 
 	if len(parts) == 0 {
@@ -8917,7 +9057,21 @@ func (h *Home) originResolvers() (OriginOf, IsWorktreeOf) {
 func (h *Home) rebuildFlatItems() {
 	originOf, isWorktreeOf := h.originResolvers()
 	now := time.Now()
-	h.flatItems = BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf)
+	prevTarget := h.targetForCursor()
+	h.flatItems = h.withReviewRows(BuildFlatItems(h.sessions, h.pendingWorkspaces, h.repoExpanded, h.filterText, h.pinnedRepos, h.failedWorktreeRemovals, h.groupSnooze, now, originOf, isWorktreeOf), now)
+	// Review rows come and go on a timer (a prepare lands, a sweep sees a run
+	// another process made), each shifting every row below it by one. When the
+	// set changed, keep the cursor on the row it was on — by identity, as the
+	// adoption path does — so a review appearing above never moves the
+	// highlight onto a different session. Any other rebuild leaves the cursor
+	// to its caller, as before.
+	if keys := reviewRowKeys(h.flatItems); keys != h.reviewRowKeys {
+		h.reviewRowKeys = keys
+		if idx := prevTarget.find(h.flatItems); idx >= 0 && idx != h.cursor {
+			h.cursor = idx
+			h.syncViewport()
+		}
+	}
 
 	// Resolve the attention-mute for EVERY session, not just the visible ones,
 	// so callers that count the whole fleet (statusCountsLine) read the same
@@ -8939,6 +9093,14 @@ func (h *Home) rebuildFlatItems() {
 	h.snoozeMuted = muted
 
 	h.sidebarDirty = true
+}
+
+// withReviewRows places each checkout's review row under its header
+// (insertReviewRows), muted with the checkout's snooze.
+func (h *Home) withReviewRows(items []SidebarItem, now time.Time) []SidebarItem {
+	return insertReviewRows(items, h.reviewRowBadge, func(origin, repo string) snoozeResult {
+		return snoozeState(nil, origin, repo, h.groupSnooze, now)
+	})
 }
 
 // structuralGitChange reports whether a per-repo git refresh changed a field
@@ -9305,12 +9467,20 @@ type contextMenuTarget struct {
 	// cursor sits on an unfindable row for the whole of a worktree create and
 	// silently drifts if anything is inserted above it.
 	pendingID string
+	// reviewRepo identifies a checkout's review row by its checkout. Review
+	// rows appear on a timer, so cursor preservation needs it as much as the
+	// menu does.
+	reviewRepo string
 }
 
 // find returns the index of the target's row in items, or -1 if it's gone.
 func (t contextMenuTarget) find(items []SidebarItem) int {
 	for i, item := range items {
 		switch {
+		case t.reviewRepo != "":
+			if item.IsReview && item.RepoPath == t.reviewRepo {
+				return i
+			}
 		case t.sessionID != "":
 			if item.Session != nil && item.Session.ID == t.sessionID {
 				return i
@@ -9343,6 +9513,8 @@ func (h *Home) targetForCursor() contextMenuTarget {
 		return contextMenuTarget{originKey: item.OriginKey}
 	case item.IsCheckoutHeader:
 		return contextMenuTarget{repoPath: item.RepoPath}
+	case item.IsReview:
+		return contextMenuTarget{reviewRepo: item.RepoPath}
 	case item.Session != nil:
 		return contextMenuTarget{sessionID: item.Session.ID}
 	case item.Pending != nil:
@@ -9383,6 +9555,8 @@ func (h *Home) buildContextMenuItems() (string, []ContextMenuItem) {
 		return h.checkoutContextMenu()
 	case BarContextOrigin:
 		return h.originContextMenu()
+	case BarContextReview:
+		return h.reviewContextMenu()
 	default:
 		return "", nil
 	}
@@ -9496,6 +9670,8 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		moveAccount.Enabled = true
 	}
 
+	reviewItem := h.reviewMenuItem(session.GetRepoRoot(s.ProjectPath))
+
 	items := []ContextMenuItem{
 		open,
 		{ID: "focus", Label: "Focus Preview", Shortcut: tabKey, Key: "tab", Enabled: true},
@@ -9505,6 +9681,7 @@ func (h *Home) sessionContextMenu() (string, []ContextMenuItem) {
 		{ID: "rename", Label: "Rename", Shortcut: "R", Key: "R", Enabled: true},
 		unread,
 		{ID: "editor", Label: "Open in Editor", Shortcut: "e", Key: "e", Enabled: true},
+		reviewItem,
 		{
 			ID: "open_pr", Label: "Open PR", Shortcut: "p", Key: "p",
 			Enabled: h.hasPRForCursor(),
@@ -9551,6 +9728,7 @@ func (h *Home) checkoutContextMenu() (string, []ContextMenuItem) {
 		{ID: "new_session_pick", Label: "New Session (Pick Agent)", Shortcut: "A", Key: "A", Enabled: true},
 		{ID: "new_worktree", Label: "New Worktree Session", Shortcut: "w", Key: "w", Enabled: true},
 		{ID: "branch", Label: "Switch Branch", Shortcut: "b", Key: "b", Enabled: true},
+		h.reviewMenuItem(repo),
 		{
 			ID: "open_pr", Label: "Open PR", Shortcut: "p", Key: "p",
 			Enabled: h.hasPRForCursor(),
@@ -9682,6 +9860,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "restart", Name: "Restart Session", Shortcut: "r"},
 		{Kind: PaletteKindCommand, ID: "rename", Name: "Rename Session", Shortcut: "R"},
 		{Kind: PaletteKindCommand, ID: "editor", Name: "Open in Editor", Shortcut: "e"},
+		{Kind: PaletteKindCommand, ID: "review", Name: "Review This Checkout's Changes", Shortcut: "v"},
 		{Kind: PaletteKindCommand, ID: "open_pr", Name: "Open PR", Shortcut: "p"},
 		{Kind: PaletteKindCommand, ID: "copy_pr_link", Name: "Copy PR Link", Shortcut: "⌃P"},
 		{Kind: PaletteKindCommand, ID: "approve", Name: "Quick Approve", Shortcut: "Y"},
@@ -9839,6 +10018,18 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 		return h, h.attachSelected()
 	case "focus":
 		return h, h.enterFocusMode()
+	case "review":
+		return h.reviewSelected()
+	case "review_regenerate":
+		if root, why := h.reviewCheckoutAtCursor(); why == "" && h.reviewBlocker(root) == "" {
+			return h, h.startReviewPrepare(root, true)
+		}
+		return h, nil
+	case "review_discard":
+		if root, why := h.reviewCheckoutAtCursor(); why == "" {
+			return h, h.confirmDiscardReview(root)
+		}
+		return h, nil
 	case "snooze":
 		sc, ok := h.snoozeScopeAtCursor()
 		if !ok {

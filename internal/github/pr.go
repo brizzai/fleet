@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +83,14 @@ type PR struct {
 	UnresolvedThreads int    // count of unresolved review threads
 	HasConflicts      bool   // true when GitHub reports merge conflicts
 	IsDraft           bool   // true while the PR is a draft (not ready for review)
+	// BaseRefName is the branch the PR merges into ("master"), bare — no
+	// remote prefix. Empty in a PR cache row written before it existed, until
+	// the next refresh.
+	BaseRefName string
+	// FailedChecks names the checks that make CIStatus FAILURE — the same set
+	// deriveCIStatus counts, so ignored and superseded checks are absent —
+	// sorted. Nil when nothing failed.
+	FailedChecks []string
 	// MergeStateStatus is GitHub's own verdict on whether the PR can merge
 	// right now: CLEAN, BLOCKED, BEHIND, DIRTY, UNSTABLE, HAS_HOOKS, DRAFT or
 	// UNKNOWN (computed lazily, so a first read can be UNKNOWN).
@@ -129,6 +139,7 @@ type ghPRResponse struct {
 	Mergeable         string             `json:"mergeable"` // MERGEABLE, CONFLICTING, UNKNOWN
 	MergeStateStatus  string             `json:"mergeStateStatus"`
 	IsDraft           bool               `json:"isDraft"`
+	BaseRefName       string             `json:"baseRefName"`
 }
 
 // statusCheckEntry is one row of the rollup. The rollup mixes two GraphQL
@@ -166,7 +177,7 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch,
-		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus,isDraft",
+		"--json", "number,title,url,state,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus,isDraft,baseRefName",
 	)
 	cmd.Dir = repoPath
 	var stderr bytes.Buffer
@@ -200,16 +211,19 @@ func GetPRForBranch(repoPath, branch string, ignorePatterns []string) (*PR, erro
 		return nil, nil
 	}
 
+	ciStatus, failed := summarizeChecks(resp.StatusCheckRollup, ignorePatterns)
 	pr := &PR{
 		Number:            resp.Number,
 		Title:             resp.Title,
 		URL:               resp.URL,
 		State:             resp.State,
 		ReviewDecision:    resp.ReviewDecision,
-		CIStatus:          deriveCIStatus(resp.StatusCheckRollup, ignorePatterns),
+		CIStatus:          ciStatus,
 		UnresolvedThreads: getUnresolvedThreadCount(repoPath, resp.Number, resp.URL),
 		HasConflicts:      resp.Mergeable == "CONFLICTING",
 		IsDraft:           resp.IsDraft,
+		BaseRefName:       resp.BaseRefName,
+		FailedChecks:      failed,
 		MergeStateStatus:  resp.MergeStateStatus,
 	}
 
@@ -406,8 +420,16 @@ func newestInFlightRunPerWorkflow(checks []statusCheckEntry) map[string]int64 {
 // id doesn't parse is never suppressed — an unrecognized URL shape should cost
 // a false red, not a missed one.
 func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
+	status, _ := summarizeChecks(checks, ignorePatterns)
+	return status
+}
+
+// summarizeChecks is deriveCIStatus plus the names of the checks behind a
+// FAILURE, sorted. One pass decides both, so the list can never name a check
+// the status ignored or disagree with it about what failed.
+func summarizeChecks(checks []statusCheckEntry, ignorePatterns []string) (string, []string) {
 	if len(checks) == 0 {
-		return ""
+		return "", nil
 	}
 
 	considered := make([]statusCheckEntry, 0, len(checks))
@@ -419,7 +441,7 @@ func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 	}
 	inFlightRun := newestInFlightRunPerWorkflow(considered)
 
-	hasFailure := false
+	var failed []string
 	hasPending := false
 
 	for _, check := range considered {
@@ -428,19 +450,21 @@ func deriveCIStatus(checks []statusCheckEntry, ignorePatterns []string) string {
 			if id := runID(check); id != 0 && inFlightRun[check.WorkflowName] > id {
 				continue // superseded by a later run of the same workflow
 			}
-			hasFailure = true
+			failed = append(failed, check.Name)
 		case isInFlightCheck(check):
 			hasPending = true
 		}
 	}
 
-	if hasFailure {
-		return "FAILURE"
+	if len(failed) > 0 {
+		sort.Strings(failed)
+		// A commit status and a check run can share a name and both fail.
+		return "FAILURE", slices.Compact(failed)
 	}
 	if hasPending {
-		return "PENDING"
+		return "PENDING", nil
 	}
-	return "SUCCESS"
+	return "SUCCESS", nil
 }
 
 // matchesAnyPattern reports whether name matches any of the path.Match globs in

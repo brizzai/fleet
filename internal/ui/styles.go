@@ -152,6 +152,10 @@ func ApplyPalette(p Palette) {
 	ColorOrange = p.Orange
 	ColorPurple = p.Purple
 
+	// The review view's diff tints and syntax colors are derived from the
+	// palette above — see design_review.go.
+	applyReviewPalette(p)
+
 	// 2. Rebuild all styles (lipgloss copies colors by value at construction).
 	TitleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
 	RepoHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)

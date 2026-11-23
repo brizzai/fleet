@@ -52,3 +52,22 @@ func TestCanReplaceCleansUpProbeFile(t *testing.T) {
 		t.Errorf("probe left %d file(s) behind: %v", len(entries), entries)
 	}
 }
+
+func TestIsReleaseBuild(t *testing.T) {
+	for v, want := range map[string]bool{
+		"2.48.1":                   true, // goreleaser
+		"v2.48.1":                  true, // tag-derived
+		"v10.0.12":                 true,
+		"dev":                      false, // go build / make run
+		"":                         false,
+		"v2.48.1-1-gc65723a":       false, // make build on a branch
+		"v2.48.1-1-gc65723a-dirty": false,
+		"v2.48.1-dirty":            false, // make build on a tag with local edits
+		"2.48":                     false,
+		"2.48.1-rc1":               false,
+	} {
+		if got := IsReleaseBuild(v); got != want {
+			t.Errorf("IsReleaseBuild(%q) = %v, want %v", v, got, want)
+		}
+	}
+}

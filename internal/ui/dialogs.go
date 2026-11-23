@@ -34,6 +34,13 @@ type sessionCreateMsg struct {
 	// rather than start). Empty for every other creation path, which is the
 	// long-standing behaviour.
 	prompt string
+	// baseRef is the ref a new worktree's branch was cut from, persisted as
+	// sessions.base_ref for self-review's diff. Set only by the worktree-create
+	// path, and only when it created the branch; empty everywhere else.
+	baseRef string
+	// reviewRunID is set when the session is started to carry a review run's
+	// answers (prompt): once it starts, the run is marked sent to it.
+	reviewRunID string
 }
 
 // forkSessionMsg is sent when the user forks an existing session.

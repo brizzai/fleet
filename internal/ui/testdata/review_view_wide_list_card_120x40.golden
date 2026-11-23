@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────────────────────────────────────────────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Decide ───────────────────────────────────────╮╭─ 3 of 8 · logic ───────────────────────────────────────────────────╮
+│  1  Closures kept for all orgs               ✓ ││                                                                    │
+│  2  Full snapshot every 12h                    ││ Recommend: keep as is   y                                          │
+│▸ 3  A 403 that is not permissions              ││                                                                    │
+│  4  How far each run reads back                ││ Does endCheck book a 200 with a non-zero error_code twice?         │
+│  5  One stored closure                         ││                                                                    │
+│  6  Reruns show only own window                ││ How it works   SC answers 403 both for missing permissions and for │
+│  7  Cursor saved before upload                 ││                a scan window that expired; the marker in the body  │
+│  8  COMMIT inside a migration file             ││                tells them apart.                                   │
+│                                                ││                                                                    │
+│ ────────────────────────────────────────────── ││ Why it matters A 403 without the permission marker is now treated  │
+│  ⚠ Not reviewed · 1 file                     ⏎ ││                as an expired scan window and books an endCheck     │
+│  Safe to skip · 5 files                      s ││                before returning.                                   │
+│                                                ││                                                                    │
+│  Not verified yet: CI running; integration     ││ Checked        ✓ TestForbiddenScanWindow covers the window case    │
+│  test against the SC sandbox not run           ││                                                                    │
+│                                                ││ ◆ collector.go · L122–127                                          │
+│                                                ││ 119  119       if err != nil {                                     │
+│                                                ││ 120  120           return nil, fmt.Errorf("scanbox sc: %w", err)   │
+│                                                ││ 121  121       }                                                   │
+│                                                ││ 122      -     if resp.StatusCode == http.StatusForbidden {        │
+│                                                ││      122 +     if resp.StatusCode == http.StatusForbidden && isPer…│
+│                                                ││      123 +         return nil, ErrPermission                       │
+│                                                ││      124 +     }                                                   │
+│                                                ││      125 +     if resp.StatusCode == http.StatusForbidden {        │
+│                                                ││      126 +         // Not a permissions problem: SC returns 403 fo…│
+│                                                ││      127 +         c.metrics.endCheck(resp)                        │
+│                                                ││ 123  128           return nil, ErrScanWindow                       │
+│                                                ││ 124  129       }                                                   │
+│                                                ││ 125  130       defer resp.Body.Close()                             │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ y keep  n change…  a ask agent…  l later  ⏎ read code                                                A approve  ? keys

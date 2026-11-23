@@ -15,6 +15,7 @@ import (
 	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/github"
+	"github.com/brizzai/fleet/internal/selfreview"
 	"github.com/brizzai/fleet/internal/session"
 )
 
@@ -441,6 +442,7 @@ func TestContextMenuIDsAreDispatchable(t *testing.T) {
 		menuHome(sessionRow(s), s),
 		menuHome(SidebarItem{IsRepoHeader: true, IsCheckoutHeader: true, RepoPath: "/tmp/cm-repo"}),
 		menuHome(SidebarItem{IsRepoHeader: true, IsOriginHeader: true, OriginKey: "o", OriginLabel: "o"}),
+		menuHome(SidebarItem{IsReview: true, RepoPath: "/tmp/cm-repo", Review: reviewBadge{Status: ReviewBadgeReady, Counts: selfreview.Counts{Decisions: 2, Unanswered: 2}}}),
 	}
 	// ...plus the non-suspended session, whose primary action is `attach`.
 	live := session.NewSession("live", "/tmp/cm-repo")

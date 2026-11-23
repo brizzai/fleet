@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor   1 Decide   2 Walkthrough  ──────────────────────────────────────────────── 1 of 9 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip · scope: decision 1                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Walkthrough ──────────────────────────────────╮╭─ Scope · decision 1 ───────────────────────────────────────────────╮
+│▸ Scope  ◆1 Not everything asked for is done    ││                                                                    │
+│ ────────────────────────────────────────────── ││ Whether this is the right change at all: what was asked and isn't  │
+│  1  Telling permission errors from expired     ││ done here.                                                         │
+│     windows                                    ││                                                                    │
+│     ◆4 ◆5 ◆8                                   ││   ◆1 Not everything asked for is done                              │
+│  2  Keeping closed findings for every org      ││                                                                    │
+│     ◆2 ◆6 ◆7 ◆9                                ││ Ship without the rest and track it as a follow-up?                 │
+│  3  Joining the 12h pipeline                   ││                                                                    │
+│     ◆3 ◆4 ◆8                                   ││ The ticket also asks for incremental collection: partial runs, a   │
+│  4  Collector docs                             ││ time-range record for each event stream, gaps that fill back in,   │
+│     safe to skip                               ││ and window limits set by operators. None of that is in this        │
+│  5  Other changes                              ││ change.                                                            │
+│     safe to skip                               ││                                                                    │
+│                                                ││ ⏎ opens it on Decide.                                              │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ ⏎ decide it  j/k move  esc Decide                                                                               ? keys

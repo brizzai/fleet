@@ -1,0 +1,147 @@
+diff --git a/libs/schemas/python/src/schemas/pipelines.py b/libs/schemas/python/src/schemas/pipelines.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/libs/schemas/python/src/schemas/pipelines.py
++++ b/libs/schemas/python/src/schemas/pipelines.py
+@@ -266,6 +266,8 @@ SERVICES = [
+     ServiceSpec(
+         name="scanbox_sc",
+         collector="scanboxSC",
++        # Joins the 12h data pipeline; each run pulls the full snapshot.
++        data_pipeline_cron="0 */12 * * *",
+         closures_enabled=False,
+     ),
+     ServiceSpec(
+diff --git a/pipelines/collectors/internal/collectors/scanboxSC/collector.go b/pipelines/collectors/internal/collectors/scanboxSC/collector.go
+index 2b3c4d5..6e7f809 100644
+--- a/pipelines/collectors/internal/collectors/scanboxSC/collector.go
++++ b/pipelines/collectors/internal/collectors/scanboxSC/collector.go
+@@ -118,8 +118,13 @@ func (c *Collector) fetch(ctx context.Context, req *http.Request) (*Page, error) {
+ 	resp, err := c.client.Do(req)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("scanbox sc: %w", err)
+ 	}
+-	if resp.StatusCode == http.StatusForbidden {
++	if resp.StatusCode == http.StatusForbidden && isPermissionError(resp) {
++		return nil, ErrPermission
++	}
++	if resp.StatusCode == http.StatusForbidden {
++		// Not a permissions problem: SC returns 403 for an expired scan window.
++		c.metrics.endCheck(resp)
+ 		return nil, ErrScanWindow
+ 	}
+ 	defer resp.Body.Close()
+@@ -395,9 +400,13 @@ func (c *Collector) Run(ctx context.Context, run Window) error {
+ 	for _, page := range pages {
+ 		if err := c.ingest(ctx, page); err != nil {
+ 			return err
+ 		}
+ 	}
++	// Save progress before the upload so a crash mid-upload doesn't refetch.
++	if err := c.saveCursor(ctx, run.Until); err != nil {
++		return fmt.Errorf("save cursor: %w", err)
++	}
+ 	if err := c.uploadZip(ctx, run); err != nil {
+ 		return err
+ 	}
+ 	return nil
+diff --git a/pipelines/collectors/internal/collectors/scanboxSC/collector_test.go b/pipelines/collectors/internal/collectors/scanboxSC/collector_test.go
+index 3c4d5e6..7f80912 100644
+--- a/pipelines/collectors/internal/collectors/scanboxSC/collector_test.go
++++ b/pipelines/collectors/internal/collectors/scanboxSC/collector_test.go
+@@ -210,3 +210,18 @@ func TestCollectorRetries(t *testing.T) {
+ 	}
+ }
+ 
++func TestForbiddenScanWindow(t *testing.T) {
++	srv := fakeSC(t, func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusForbidden)
++		_, _ = w.Write([]byte(`{"error_code":146,"error_msg":"scan window expired"}`))
++	})
++	c := newTestCollector(t, srv.URL)
++	_, err := c.fetch(context.Background(), mustReq(t, srv.URL))
++	if !errors.Is(err, ErrScanWindow) {
++		t.Fatalf("err = %v, want ErrScanWindow", err)
++	}
++	if got := c.metrics.endChecks(); got != 1 {
++		t.Errorf("endCheck calls = %d, want 1", got)
++	}
++}
++
+diff --git a/pipelines/collectors/internal/collectors/scanboxSC/client.go b/pipelines/collectors/internal/collectors/scanboxSC/client.go
+index 4d5e6f7..8091a2b 100644
+--- a/pipelines/collectors/internal/collectors/scanboxSC/client.go
++++ b/pipelines/collectors/internal/collectors/scanboxSC/client.go
+@@ -40,7 +40,7 @@ const (
+ 	pageSize = 1000
+ 	// maxPages bounds one run.
+ 	maxPages = 200
+-	lookback = 24 * time.Hour
++	lookback = 36 * time.Hour
+ 	// retryBackoff is doubled per attempt.
+ 	retryBackoff = 2 * time.Second
+ )
+diff --git a/services/vulns/closures/store.py b/services/vulns/closures/store.py
+index 5e6f708..9a1b2c3 100644
+--- a/services/vulns/closures/store.py
++++ b/services/vulns/closures/store.py
+@@ -88,10 +88,8 @@ class ClosureStore:
+     def record(self, org, finding):
+-        if not org.settings.closures_enabled:
+-            return None
+         closed = ClosedFinding.from_finding(finding)
+         closed.org_id = org.id
+-        self.session.add(closed)
+-        return closed
++        self.session.merge(closed)
++        return self.session.get(ClosedFinding, closed.key)
+ 
+     def window(self, org, since):
+         rows = self._query(org).filter(ClosedFinding.closed_at >= since)
+diff --git a/db/migrations/0042_keep_closed_findings.sql b/db/migrations/0042_keep_closed_findings.sql
+new file mode 100644
+index 0000000..9f8e7d6
+--- /dev/null
++++ b/db/migrations/0042_keep_closed_findings.sql
+@@ -0,0 +1,6 @@
++-- Closed findings are kept for every org, even with closures off.
++ALTER TABLE closed_findings ADD COLUMN source TEXT NOT NULL DEFAULT 'collector';
++CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS closed_findings_key
++    ON closed_findings (org_id, finding_key);
++UPDATE closed_findings SET source = 'legacy' WHERE created_at < now();
++COMMIT;
+diff --git a/go.mod b/go.mod
+index 6f70819..b2c3d4e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -12,7 +12,7 @@ require (
+ 	github.com/google/uuid v1.6.0
+ 	github.com/klauspost/compress v1.18.0
+ 	github.com/prometheus/client_golang v1.20.5
+-	github.com/scanbox/sc-go v0.4.2
++	github.com/scanbox/sc-go v0.5.0
+ 	go.uber.org/zap v1.27.0
+ 	golang.org/x/sync v0.10.0
+ 	gopkg.in/yaml.v3 v3.0.1
+diff --git a/go.sum b/go.sum
+index 7081928..c3d4e5f 100644
+--- a/go.sum
++++ b/go.sum
+@@ -201,4 +201,4 @@
+ github.com/prometheus/procfs v0.15.1 h1:YagwOFzUgYfKKHX6Dr+sHT7km/hxC76UB0learggepc=
+-github.com/scanbox/sc-go v0.4.2 h1:3fJ0aQm6ZbV1cXyQ2sT9wK4nR8pL7dE5hG0iU1oY2s=
+-github.com/scanbox/sc-go v0.4.2/go.mod h1:9kL2mN4bV6cX8zQ1wE3rT5yU7iO0pA2sD4fG6hJ8kL=
++github.com/scanbox/sc-go v0.5.0 h1:Qw1Er2Ty3Ui4Op5As6Df7Gh8Jk9Lz0Xc1Vb2Nm3Qw4E=
++github.com/scanbox/sc-go v0.5.0/go.mod h1:Rt5Yu6Io7Pa8Sd9Fg0Hj1Kl2Zx3Cv4Bn5Mq6Wr7Et8=
+ go.uber.org/zap v1.27.0 h1:aJMhYGrd5QSmlpLMr2MftRKl7t8J8PTZPA732ud/XR8=
+diff --git a/docs/collectors/scanbox-sc.md b/docs/collectors/scanbox-sc.md
+index 8192a3b..d4e5f60 100644
+--- a/docs/collectors/scanbox-sc.md
++++ b/docs/collectors/scanbox-sc.md
+@@ -30,3 +30,6 @@ Runs every 24 hours.
+ ## Schedule
+ 
+-Runs every 24 hours.
++Runs every 12 hours as part of the data pipeline. Each run pulls the
++full asset and open-vulnerability snapshot.
++
++Closed findings are now kept for every org.

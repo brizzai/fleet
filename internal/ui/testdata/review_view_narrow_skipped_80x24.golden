@@ -1,0 +1,24 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even    │
+│ with closures off.                                                           │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed        │
+│ findings for every org, and tells a real permission error apart from an      │
+│ expired scan window.                                                         │
+│ 27 of 845 changed lines need you · 1 file not reviewed                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ⚠ Not reviewed · 1
+  go.mod
+    skipped as 'patch-level dependency bump', but it is a high-risk path
+
+ Auto-skipped (tests, lockfiles, generated) · 3
+▸ collector_test.go
+  go.sum
+  scan_results.json
+
+ Reviewer: safe to skip · 2
+  collector.go (rest of file)
+    error wrapping only
+  scanbox-sc.md
+    docs match the new schedule
+
+ ⏎ read code  x review it myself  s back                                 ? keys

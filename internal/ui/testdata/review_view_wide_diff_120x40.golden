@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────────────────────────────────────────────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Full diff ──────────────────────────────────────────────────────────────────────────────────────────── 1–31 of 130 ─╮
+│ db/migrations/0042_keep_closed_findings.sql  +6 −0                                                                   │
+│ @@ -0,0 +1,6 @@                                                                                     ◆ decisions 1, 8 │
+│        1 + -- Closed findings are kept for every org, even with closures off.                                        │
+│        2 + ALTER TABLE closed_findings ADD COLUMN source TEXT NOT NULL DEFAULT 'collector';                          │
+│        3 + CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS closed_findings_key                                        │
+│        4 +     ON closed_findings (org_id, finding_key);                                                             │
+│        5 + UPDATE closed_findings SET source = 'legacy' WHERE created_at < now();                                    │
+│        6 + COMMIT;                                                                                                   │
+│                                                                                                                      │
+│ docs/collectors/scanbox-sc.md  +4 −1                                                                                 │
+│ @@ -30,3 +30,6 @@ Runs every 24 hours.                                                                               │
+│  30   30   ## Schedule                                                                                               │
+│  31   31                                                                                                             │
+│  32      - Runs every 24 hours.                                                                                      │
+│       32 + Runs every 12 hours as part of the data pipeline. Each run pulls the                                      │
+│       33 + full asset and open-vulnerability snapshot.                                                               │
+│       34 +                                                                                                           │
+│       35 + Closed findings are now kept for every org.                                                               │
+│                                                                                                                      │
+│ go.mod  +1 −1                                                                                                        │
+│ @@ -12,7 +12,7 @@ require (                                                                                          │
+│  12   12       github.com/google/uuid v1.6.0                                                                         │
+│  13   13       github.com/klauspost/compress v1.18.0                                                                 │
+│  14   14       github.com/prometheus/client_golang v1.20.5                                                           │
+│  15      -     github.com/scanbox/sc-go v0.4.2                                                                       │
+│       15 +     github.com/scanbox/sc-go v0.5.0                                                                       │
+│  16   16       go.uber.org/zap v1.27.0                                                                               │
+│  17   17       golang.org/x/sync v0.10.0                                                                             │
+│  18   18       gopkg.in/yaml.v3 v3.0.1                                                                               │
+│                                                                                                                      │
+│ go.sum  +2 −2                                                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k scroll  J/K next/prev change  esc back                                                                      ? keys

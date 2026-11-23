@@ -1,0 +1,13 @@
+ pkg/demo.go  +3 −1
+ @@ -1,4 +1,5 @@
+    1   package demo                                                           │    1   package demo
+    2                                                                          │    2
+                                                                               │    3 + import "time"
+    3                                                                          │    4
+    4   func first() {                                                         │    5   func first() {
+ @@ -40,4 +41,5 @@ func second() {
+   40       a := 1                                                             │   41       a := 1
+   41 -     retryDelay := 2 * time.Second                                      │   42 +     retryTimeout := 5 * time.Second
+                                                                               │   43 +     log.Printf("waiting %v", retryTimeout)
+   42       return a                                                           │   44       return a
+   43   }                                                                      │   45   }

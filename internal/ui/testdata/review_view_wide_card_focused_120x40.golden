@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────────────────────────────────────────────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Decide ───────────────────────────────────────╮╭─ 1 of 8 · product call ─────────────────────────────── ✓ ok as is ─╮
+│▸ 1  Closures kept for all orgs               ✓ ││                                                                    │
+│  2  Full snapshot every 12h                    ││ Recommend: keep as is   y                                          │
+│  3  A 403 that is not permissions              ││                                                                    │
+│  4  How far each run reads back                ││ Should orgs with closures off now store closed findings?           │
+│  5  One stored closure                         ││                                                                    │
+│  6  Reruns show only own window                ││ How it works   Closed findings are stored by the closures module   │
+│  7  Cursor saved before upload                 ││                on every run now; the org's closures setting is no  │
+│  8  COMMIT inside a migration file             ││                longer read before writing.                         │
+│                                                ││                                                                    │
+│ ────────────────────────────────────────────── ││ Why it matters record() no longer checks closures_enabled, so orgs │
+│  ⚠ Not reviewed · 1 file                     ⏎ ││                that turned closures off start storing closed       │
+│  Safe to skip · 5 files                      s ││                findings; the migration backfills a source column   │
+│                                                ││                for existing rows.                                  │
+│  Not verified yet: CI running; integration     ││                                                                    │
+│  test against the SC sandbox not run           ││ Checked        ✓ closures_enabled guard removed from record()      │
+│                                                ││                                                                    │
+│                                                ││ ◆ store.py · L88–92                                         1 of 2 │
+│                                                ││  88   88       def record(self, org, finding):                     │
+│                                                ││  89      -         if not org.settings.closures_enabled:           │
+│                                                ││  90      -             return None                                 │
+│                                                ││  91   89           closed = ClosedFinding.from_finding(finding)    │
+│                                                ││  92   90           closed.org_id = org.id                          │
+│                                                ││  93      -         self.session.add(closed)                        │
+│                                                ││  94      -         return closed                                   │
+│                                                ││       91 +         self.session.merge(closed)                      │
+│                                                ││       92 +         return self.session.get(ClosedFinding, closed.k…│
+│                                                ││  95   93                                                           │
+│                                                ││  96   94       def window(self, org, since):                       │
+│                                                ││  97   95           rows = self._query(org).filter(ClosedFinding.cl…│
+│                                                ││                                                                    │
+│                                                ││ ◆ 0042_keep_closed_findings.sql · L1–6                      2 of 2 │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ y keep  n change…  a ask agent…  l later  J/K next/prev change  e more context  esc list                        ? keys

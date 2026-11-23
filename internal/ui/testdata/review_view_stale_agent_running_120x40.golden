@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor · round 1 · 62055a2 + 2 uncommitted ────────────────────── opus · 74s · 9 files read · stale ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ 8 decisions need you · 29 of 845 lines · 5 files skipped                              answered 1/8     CI running +1 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Decisions ────────────────────────────────────────╮╭─ 1 of 8 ──────────────────────────────────────────────── fine ─╮
+│▸ 1 PRODUCT     Closures kept for all orgs   fine   ││ PRODUCT · Closures kept for all orgs                           │
+│  2 CUSTOMER    Full snapshot every 12h      —      ││                                                                │
+│  3 LOGIC       A 403 that is not permissi…  —      ││ Why     record() no longer checks closures_enabled, so orgs    │
+│  4 TUNING      How far each run reads back  —      ││         that turned closures off start storing closed          │
+│  5 DATA        One stored closure           —      ││         findings; the migration backfills a source column for  │
+│  6 EDGE        Reruns show only own window  —      ││         existing rows.                                         │
+│  7 BUG         Cursor saved before upload   —      ││ Checked ✓ closures_enabled guard removed from record()    code │
+│  8 UNREVIEWED  go.mod                       —      ││         · CI is green                                    claim │
+│  +1 more not shown                                 ││ Decide  Should orgs with closures off now store closed         │
+│                                                    ││         findings?                                              │
+│  Skipped     5 files · 816 lines                   ││ Answer  fine                                                   │
+│  Not covered 1 file                                ││                                                                │
+│  Pending     CI running · integration test agains… ││ services/vulns/closures/store.py · L88–92                      │
+│                                                    ││ @@ -88,10 +88,8 @@ class ClosureStore:                         │
+│                                                    ││  88   88       def record(self, org, finding):                 │
+│                                                    ││  89      -         if not org.settings.closures_enabled:       │
+│                                                    ││  90      -             return None                             │
+│                                                    ││  91   89           closed = ClosedFinding.from_finding(finding)│
+│                                                    ││  92   90           closed.org_id = org.id                      │
+│                                                    ││  93      -         self.session.add(closed)                    │
+│                                                    ││  94      -         return closed                               │
+│                                                    ││       91 +         self.session.merge(closed)                  │
+│                                                    ││       92 +         return self.session.get(ClosedFinding, clos…│
+│                                                    ││  95   93                                                       │
+│                                                    ││  96   94       def window(self, org, since):                   │
+│                                                    ││  97   95           rows = self._query(org).filter(ClosedFindin…│
+│                                                    ││                                                                │
+│                                                    ││ db/migrations/0042_keep_closed_findings.sql · L1–6             │
+│                                                    ││ @@ -0,0 +1,6 @@                                                │
+│                                                    ││        1 + -- Closed findings are kept for every org, even wit…│
+│                                                    ││        2 + ALTER TABLE closed_findings ADD COLUMN source TEXT …│
+│                                                    ││        3 + CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS clos…│
+│                                                    ││        4 +     ON closed_findings (org_id, finding_key);       │
+╰─ j/k · y fine n change a ask l later ──────────────╯╰─ ⏎ into card · J/K hunk ───────────────────────────────────────╯
+ y fine  n change  a ask  l later  ⏎ hunks  d diff  S send 1 to ✻ api · agent is running  esc back

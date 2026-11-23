@@ -1,0 +1,8 @@
+[fleet review · round 1 · tree 3f2a1c9]
+2 to change, 2 questions, 1 ok, 1 for later. Apply the changes, answer the questions, commit, then stop.
+1. CHANGE Full snapshot every 12h (libs/schemas/python/src/schemas/pipelines.py:269): start at 0 */24 *, 12h only via a flag.
+2. ASK A 403 that is not permissions (pipelines/collectors/internal/collectors/scanboxSC/collector.go:122): does endCheck book a 200 with a non-zero error_code twice?
+3. CHANGE Cursor saved before upload (pipelines/collectors/internal/collectors/scanboxSC/collector.go:405): save after the zip uploads.
+4. ASK go.mod: why the sc-go bump to v0.5.0?
+Details: .fleet/review/round-1.md
+

@@ -457,6 +457,12 @@ func runWorktree(args []string) {
 
 	s := session.NewSession(name, info.Path)
 	s.WorkspaceName = name
+	// Recorded for self-review's diff (sessions.base_ref) only when the branch
+	// was cut from it here — same rule as the TUI's `w`: a reused branch's
+	// origin is unknown, and Create ignored the base for it anyway.
+	if !reusedBranch {
+		s.BaseRef = base
+	}
 	launchSession(s, ag, launchOverrides{
 		account: account,
 		prompt:  prompt,

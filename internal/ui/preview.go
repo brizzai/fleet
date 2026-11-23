@@ -19,6 +19,13 @@ import (
 // BuildPreviewTitle / BuildPreviewFooter, freeing 5+ rows of vertical space
 // previously eaten by a metadata header block.
 func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, width, height int, focused bool) string {
+	return RenderPreviewWithReview(s, content, repoInfo, width, height, focused, reviewPreview{})
+}
+
+// RenderPreviewWithReview is RenderPreview plus the session's review line — a
+// dim `✎ <verdict>  v review` directly under the prompt strip. The zero
+// reviewPreview renders exactly what RenderPreview does.
+func RenderPreviewWithReview(s *session.Session, content string, repoInfo *git.RepoInfo, width, height int, focused bool, rv reviewPreview) string {
 	if s == nil {
 		return DimStyle.Render("  No session selected")
 	}
@@ -44,6 +51,11 @@ func RenderPreview(s *session.Session, content string, repoInfo *git.RepoInfo, w
 	contentHeight := height - 1 // 1 row for the prompt strip
 	if promptRow == "" {
 		contentHeight = height
+	}
+	if reviewRow := renderReviewPreviewLine(rv, width); reviewRow != "" {
+		b.WriteString(reviewRow)
+		b.WriteString("\n")
+		contentHeight--
 	}
 	if contentHeight < 1 {
 		contentHeight = 1

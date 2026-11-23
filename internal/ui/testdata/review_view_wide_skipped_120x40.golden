@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────────────────────────────────────────────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Files with no decision · 6 ───────────────────╮╭─ auto-skipped ─────────────────────────────────────────────────────╮
+│ ⚠ Not reviewed · 1                             ││                                                                    │
+│  go.mod                                        ││ …elines/collectors/internal/collectors/scanboxSC/collector_test.go │
+│    skipped as 'patch-level dependency bump',   ││                                                                    │
+│    but it is a high-risk path                  ││ Skipped by fleet's rules: test.                                    │
+│                                                ││                                                                    │
+│ Auto-skipped (tests, lockfiles, generated) · 3 ││ x raises it as a change of your own.                               │
+│▸ collector_test.go                             ││                                                                    │
+│  go.sum                                        ││ ◆ collector_test.go · whole file                                   │
+│  scan_results.json                             ││ @@ -210,3 +210,18 @@ func TestCollectorRetries(t *testing.T) {     │
+│                                                ││ 210  210       }                                                   │
+│ Reviewer: safe to skip · 2                     ││ 211  211   }                                                       │
+│  collector.go (rest of file)                   ││ 212  212                                                           │
+│    error wrapping only                         ││      213 + func TestForbiddenScanWindow(t *testing.T) {            │
+│  scanbox-sc.md                                 ││      214 +     srv := fakeSC(t, func(w http.ResponseWriter, r *htt…│
+│    docs match the new schedule                 ││      215 +         w.WriteHeader(http.StatusForbidden)             │
+│                                                ││      216 +         _, _ = w.Write([]byte(`{"error_code":146,"error…│
+│                                                ││      217 +     })                                                  │
+│                                                ││      218 +     c := newTestCollector(t, srv.URL)                   │
+│                                                ││      219 +     _, err := c.fetch(context.Background(), mustReq(t, …│
+│                                                ││      220 +     if !errors.Is(err, ErrScanWindow) {                 │
+│                                                ││      221 +         t.Fatalf("err = %v, want ErrScanWindow", err)   │
+│                                                ││      222 +     }                                                   │
+│                                                ││      223 +     if got := c.metrics.endChecks(); got != 1 {         │
+│                                                ││      224 +         t.Errorf("endCheck calls = %d, want 1", got)    │
+│                                                ││      225 +     }                                                   │
+│                                                ││      226 + }                                                       │
+│                                                ││      227 +                                                         │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+│                                                ││                                                                    │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ ⏎ read code  x review it myself  s back                                                                         ? keys

@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor   1 Decide   2 Walkthrough  ──────────────────────────────────────────────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Diff · pipelines/collectors/internal/collectors/scanboxSC/client.go ─────────────────────────────────── 1–10 of 10 ─╮
+│ pipelines/collectors/internal/collectors/scanboxSC/client.go  +1 −1                                                  │
+│ @@ -40,7 +40,7 @@ const (                                                                               ◆ decision 4 │
+│  40   40       pageSize = 1000                                                                                       │
+│  41   41       // maxPages bounds one run.                                                                           │
+│  42   42       maxPages = 200                                                                                        │
+│  43      -     lookback = 24 * time.Hour                                                                             │
+│       43 +     lookback = 36 * time.Hour                                                                             │
+│  44   44       // retryBackoff is doubled per attempt.                                                               │
+│  45   45       retryBackoff = 2 * time.Second                                                                        │
+│  46   46   )                                                                                                         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ j/k scroll  J/K next/prev change  esc back to the chapter                                                       ? keys

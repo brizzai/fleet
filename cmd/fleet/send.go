@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,15 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/claudeaccount"
 	"github.com/brizzai/fleet/internal/debuglog"
+	deliverpkg "github.com/brizzai/fleet/internal/deliver"
 	"github.com/brizzai/fleet/internal/git"
 	"github.com/brizzai/fleet/internal/migration"
 	"github.com/brizzai/fleet/internal/session"
-	"github.com/brizzai/fleet/internal/shell"
 	"github.com/brizzai/fleet/internal/tmux"
 )
 
@@ -201,23 +201,22 @@ func waitAfterSend(storage *session.StateDB, id string, slots map[int]string, se
 }
 
 // deliver hands message to the session behind row, waking it first if it was
-// suspended. Returns a user-facing error; prints its own success lines.
+// suspended. Returns a user-facing error; prints its own success lines. The
+// guards themselves live in internal/deliver, shared with the TUI.
 func deliver(storage *session.StateDB, row *session.SessionRow, message string, force bool) error {
 	ag := agent.Parse(row.Agent)
 	s := session.FromRow(row)
 
-	// A suspended session has no tmux to type into — fleet killed it to free
-	// memory. Its conversation survives in ClaudeSessionID, so wake it with the
-	// message as the launch prompt: the agent resumes already working on it,
-	// which is the same one-shot path `fleet worktree -p` uses.
-	if session.Status(row.Status) == session.StatusSuspended {
-		if err := accountGoneErr(row); err != nil {
-			return err
-		}
-		s.InitialPrompt = message
-		if err := s.Restart(); err != nil {
-			return fmt.Errorf("failed to wake suspended session %q: %w", row.Title, err)
-		}
+	res, err := deliverpkg.Deliver(context.Background(), deliverpkg.Deps{}, s, message, deliverpkg.Options{Force: force})
+	if res.PromptUndetectable {
+		fmt.Fprintf(os.Stderr, "Note: fleet can't tell whether an OpenCode session is waiting on a "+
+			"prompt.\nIf it is, this message is discarded and its Enter confirms the highlighted option.\n")
+	}
+	if err != nil {
+		return err
+	}
+
+	if res.Woke {
 		persistRelaunch(storage, row, s)
 		fmt.Printf("Woke suspended session '%s' (%s) with your message\n", row.Title, ag.DisplayName())
 		fmt.Printf("Sent: %s\n", summarizeText(message, 60))
@@ -227,236 +226,34 @@ func deliver(storage *session.StateDB, row *session.SessionRow, message string, 
 		return nil
 	}
 
-	ts := s.GetTmuxSession()
-	if !ts.Exists() {
-		return fmt.Errorf("session %q has no live tmux session (status %s) — restart it with fleet restart %s "+
-			"(or r in the TUI)", row.Title, row.Status, hexID(row.ID))
-	}
-	// remain-on-exit keeps a dead pane on screen, so an exited agent looks
-	// identical to a live one from the outside. Typing into it does nothing.
-	if ts.IsPaneDead() {
-		return fmt.Errorf("the %s process in session %q has exited — restart it with fleet restart %s (or r in the TUI)",
-			ag.DisplayName(), row.Title, hexID(row.ID))
-	}
-	// A live tmux session is not proof an agent is listening: the pane runs a
-	// shell and the agent is a process inside it, so `/exit` (or a crash) drops
-	// the pane back to a prompt with tmux none the wiser. Text pasted there is a
-	// command line and the Enter runs it — "delete the old build dir and rerun
-	// make" would be executed by the shell. Deliberately not bypassable with
-	// -force: there is no version of this the user wanted.
-	if paneCmd, atShell := waitForAgentInPane(row.TmuxSession); atShell {
-		return fmt.Errorf("the %s process in session %q has exited — its pane is back at a %s prompt, "+
-			"where the message would run as a shell command.\nRestart it with fleet restart %s (or r in the TUI)",
-			ag.DisplayName(), row.Title, paneCmd, hexID(row.ID))
-	}
-
-	if !force {
-		if pane, err := ts.CapturePane(); err == nil && session.PaneIndicatesWaiting(ag, pane) {
-			return fmt.Errorf("session %q is waiting on a prompt — a message typed into a menu is "+
-				"discarded and its Enter confirms the highlighted option.\nAnswer it first (attach, "+
-				"or Y to approve), or pass -force to send anyway", row.Title)
-		}
-		// The check above can't see an OpenCode prompt (no structural detector for
-		// its UI), so for that agent the guard silently withdraws at the moment it
-		// matters most: a paste into a permission menu is discarded and the Enter
-		// confirms whatever was highlighted. Refusing outright would be worse —
-		// OpenCode defaults to allow-all, so every send would need -force and the
-		// flag would become reflex — but proceeding without saying so leaves the
-		// user with a guarantee they don't have.
-		if ag == agent.OpenCode {
-			fmt.Fprintf(os.Stderr, "Note: fleet can't tell whether an OpenCode session is waiting on a "+
-				"prompt.\nIf it is, this message is discarded and its Enter confirms the highlighted option.\n")
-		}
-	}
-
-	if err := ts.PasteAndSubmit(message); err != nil {
-		return fmt.Errorf("failed to send to session %q: %w", row.Title, err)
-	}
-	// A pane whose agent is *running* is not necessarily an agent that is
-	// *listening*: for a couple of seconds after the process appears, the TUI is
-	// still painting and anything written to the pty is discarded. Measured at
-	// ~2.4s for Claude, and no signal available here distinguishes it — the
-	// process name has already flipped, and the pane content sits static
-	// mid-startup, so waiting for it to settle fires ~2s too early.
-	//
-	// So don't predict readiness, check the outcome: the message either shows up
-	// in the pane or it didn't arrive. Reporting "Sent" for a message that
-	// vanished is the worst thing this command could do, and it is exactly what
-	// happens without this. Deliberately no auto-retry — a re-paste on a false
-	// negative would submit the message twice.
-	if !confirmDelivered(ts, message) {
-		return fmt.Errorf("the message was not delivered — %q was still starting and its input "+
-			"wasn't ready yet.\nNothing reached the agent; try again in a moment", row.Title)
-	}
-
 	fmt.Printf("Sent to '%s' (%s)\n", row.Title, ag.DisplayName())
 	fmt.Printf("Message: %s\n", summarizeText(message, 60))
 	return nil
 }
 
 // accountGoneErr refuses to relaunch a Claude session pinned to an account
-// that is no longer configured: the launch would fall back to the ambient login
-// and silently bill a different subscription. The TUI heals such a pin on r; the
-// CLI can't, since which account to move to depends on quota and login state
-// that live only in a running TUI. With no accounts configured at all there is
-// nothing to heal to, so the TUI launches on the ambient login and so does this.
+// that is no longer configured — see deliverpkg.AccountGoneErr.
 func accountGoneErr(row *session.SessionRow) error {
-	if agent.Parse(row.Agent) != agent.Claude || row.Account == "" {
-		return nil
-	}
-	accounts := claudeaccount.Load()
-	if accounts.Len() == 0 || accounts.ConfigDirFor(row.Account) != "" {
-		return nil
-	}
-	return fmt.Errorf("session %q is pinned to Claude account %s, which is no longer configured — relaunching it "+
-		"would run on your default login instead. In the fleet TUI, press r on it (fleet moves it to a usable "+
-		"account) or use . → Move to Account…", row.Title, row.Account)
+	return deliverpkg.AccountGoneErr(agent.Parse(row.Agent), row.Account, row.Title)
 }
 
 // persistRelaunch records what a relaunch (Restart or RespawnClaude) changed
 // on the session, from a CLI process that exits right after.
 func persistRelaunch(storage *session.StateDB, row *session.SessionRow, s *session.Session) {
-	// Restart built a new tmux session; without persisting the new name the
-	// row points at a session that no longer exists and the next reader
-	// (TUI or CLI) reads the session as dead.
-	if s.TmuxSessionName != row.TmuxSession {
-		if err := storage.UpdateTmuxSession(row.ID, s.TmuxSessionName); err != nil {
-			debuglog.Logger.Error("failed to persist tmux session after relaunch", "id", row.ID, "err", err)
-		}
-	}
-	if err := storage.UpdateStatus(row.ID, string(s.GetStatus())); err != nil {
-		debuglog.Logger.Error("failed to persist status after relaunch", "id", row.ID, "err", err)
-	}
-	// A relaunch may have *healed* the conversation id on the way in
-	// (adoptResolvedLaunchID promotes a resolved id over a stale one — the
-	// issue #226 path). The TUI gets away with not persisting that because its
-	// hook worker re-persists moments later; a CLI process exits as soon as it
-	// is done, so an unsaved heal is recomputed and thrown away on every
-	// relaunch and the session stays pinned to a dead conversation. An empty id
-	// is `restart -fresh` dropping one, written only now that the launch worked.
-	if id := s.ClaudeSessionID; id != row.ClaudeSessionID {
-		if err := storage.UpdateClaudeSessionID(row.ID, id); err != nil {
-			debuglog.Logger.Error("failed to persist healed conversation id after relaunch", "id", row.ID, "err", err)
-		}
-	}
+	deliverpkg.PersistRelaunch(storage, row.ID, row.TmuxSession, row.ClaudeSessionID, s)
 }
-
-// agentStartupGrace bounds how long waitForAgentInPane waits for a pane to stop
-// looking like a bare shell. Generous because the cost is paid only on the
-// genuinely-exited path, which is already an error, while under-waiting
-// produces a *wrong* error on a healthy session: measured start times ranged
-// from 0.6s to 7.4s, dominated by shell rc and the agent's own boot.
-const agentStartupGrace = 10 * time.Second
-
-// agentStartupPoll is the gap between pane reads during that grace period.
-const agentStartupPoll = 150 * time.Millisecond
-
-// deliveryGrace bounds how long confirmDelivered waits for the message to show
-// up in the pane, and deliveryPoll is the gap between those reads.
-const (
-	deliveryGrace = 2 * time.Second
-	deliveryPoll  = 250 * time.Millisecond
-)
 
 // waitForAgentInPane reports whether the pane is sitting at a shell prompt with
-// no agent in the foreground, returning the command it settled on.
-//
-// It polls rather than reading once, because a single read cannot tell "the
-// agent exited" from "the agent hasn't started yet" — and both are common. A
-// session is launched by *typing* the agent's command into a fresh pane, so for
-// as long as the shell takes to source its rc, pane_current_command is `zsh`.
-// That is precisely the window the advertised script runs in:
-//
-//	gh issue view 242 | fleet wt fix-242 -p -
-//	fleet send fix-242 "also update the tests"     # ← lands mid-startup
-//
-// Reading once made that fail with "the Claude process has exited", which was
-// both false and — since this guard is deliberately not -force-able — a dead
-// end. Waiting costs nothing on a healthy session (the first read after startup
-// wins) and delays only the genuinely-exited case, which is already an error.
+// no agent in the foreground, after a startup grace — see
+// deliverpkg.WaitForAgentInPane.
 func waitForAgentInPane(tmuxSession string) (paneCmd string, atShell bool) {
-	deadline := time.Now().Add(agentStartupGrace)
-	for {
-		if paneCmd, atShell = paneAtShell(tmuxSession); !atShell {
-			return paneCmd, false
-		}
-		if time.Now().After(deadline) {
-			return paneCmd, true
-		}
-		time.Sleep(agentStartupPoll)
-	}
+	return deliverpkg.WaitForAgentInPane(tmuxSession)
 }
 
-// paneAtShell reads the pane's foreground command once. The cache is refreshed
-// first: it is a snapshot, and the TUI's tick that normally repopulates it
-// isn't running in a one-shot CLI process.
+// paneAtShell reads the pane's foreground command once, after refreshing the
+// tmux cache the TUI's tick would otherwise keep current.
 func paneAtShell(tmuxSession string) (paneCmd string, atShell bool) {
-	tmux.RefreshSessionCache()
-	paneCmd = tmux.PaneCurrentCommand(tmuxSession)
-	return paneCmd, shell.IsShellCommand(paneCmd)
-}
-
-// confirmDelivered reports whether message visibly reached the pane.
-//
-// "Visibly reached" is the right bar rather than "was submitted": a message
-// sitting in the input box is in front of the user and recoverable, whereas one
-// swallowed during startup is gone with nothing on screen to show for it.
-func confirmDelivered(ts *tmux.Session, message string) bool {
-	needle := deliveryNeedle(message)
-	if needle == "" {
-		return true // nothing distinctive to look for; don't invent a failure
-	}
-	deadline := time.Now().Add(deliveryGrace)
-	for {
-		if pane, err := ts.CapturePaneFresh(); err == nil {
-			hay := squashSpace(session.StripANSI(pane))
-			// Claude collapses a multi-line paste to a "[Pasted text #1 +N lines]"
-			// placeholder and Copilot one over 10 lines to "[Paste #1 - 12 lines]",
-			// so the text itself is never on screen to match. hay is squashed.
-			if strings.Contains(hay, needle) || strings.Contains(hay, "[Pastedtext") || strings.Contains(hay, "[Paste#") {
-				return true
-			}
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(deliveryPoll)
-	}
-}
-
-// deliveryNeedle builds what to look for in the pane: the head of the message's
-// first line, with whitespace squashed out.
-//
-// Squashing is what makes the match survive rendering — the pane wraps long
-// lines and indents continuations, so the message's own spacing is not what
-// ends up on screen. Returns "" for a message too short to identify, where a
-// match would be indistinguishable from coincidence; the caller then skips the
-// check rather than guessing.
-func deliveryNeedle(message string) string {
-	line := message
-	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
-		line = line[:i]
-	}
-	squashed := squashSpace(line)
-	r := []rune(squashed)
-	if len(r) < 6 {
-		return ""
-	}
-	if len(r) > 24 {
-		r = r[:24]
-	}
-	return string(r)
-}
-
-// squashSpace removes all whitespace, so wrapped and re-indented pane text
-// still matches the message it came from.
-func squashSpace(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, s)
+	return deliverpkg.PaneAtShell(tmuxSession)
 }
 
 // resolveSession finds the one session named by selector.

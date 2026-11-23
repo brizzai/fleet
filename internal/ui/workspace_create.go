@@ -55,6 +55,9 @@ type (
 		ticketErr error
 		// ticketTracker is the provider's display name, for the status line.
 		ticketTracker string
+		// baseRef is the base the branch was created from, "" when the
+		// branch already existed (see the closure); becomes Session.BaseRef.
+		baseRef string
 	}
 	// deleteCleanupDoneMsg fires when finalizeDelete's background cleanup
 	// (tmux kill, hook removal, optional workspace destroy) completes. The

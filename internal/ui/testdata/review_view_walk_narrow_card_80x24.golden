@@ -1,0 +1,24 @@
+╭─ Review · vulns cursor   1 Decide   2 Walkthrough  ──────── 1 of 9 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even    │
+│ with closures off.                                                           │
+│ 27 of 845 changed lines need you · 1 file not reviewed · scope: decision 1   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Chapter 1 of 5 · the heart of it ───────────────────────────────────────────╮
+│                                                                              │
+│ Telling permission errors from expired windows                               │
+│                                                                              │
+│ The client reads SC's 403 body: with the permission marker it returns        │
+│ ErrPermission and the run fails; without it the window expired, so it books  │
+│ an end check and returns ErrScanWindow, which the collector treats as an     │
+│ empty window. The cursor is saved when reading ends.                         │
+│                                                                              │
+│ Decisions here                                                               │
+│ ▸ ◆4 A 403 that is not permissions                                           │
+│   ◆5 How far each run reads back                                             │
+│   ◆8 Cursor saved before upload                                              │
+│                                                                              │
+│ Files · 1                                                                    │
+│   ◆ client.go  in decision 5                                                 │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ⏎ open on Decide  j/k move  esc chapters                                ? keys

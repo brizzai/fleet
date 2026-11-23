@@ -1,0 +1,24 @@
+╭─ Review keys ────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│ Answer (1 Decide)                      Walkthrough (2)                       │
+│   y      keep: the code stays as is      ⏎      read a chapter               │
+│   n      change… (prefilled advice)      ⏎      on a decision: answer it     │
+│   a      ask agent… (a question)         ⏎      on a file: its diff          │
+│   l      later (not sent)                esc    back to the chapters         │
+│                                                                              │
+│ Read                                   Finish                                │
+│   1 / 2  Decide / Walkthrough tab        S      send to ✻ api                │
+│   j/k    move                            A      approve: nothing left to do  │
+│   ⏎      read the code                   r      review again                 │
+│   J/K    next / previous change          v      next round, after the agent  │
+│   e      more context                    esc    back                         │
+│   s      files with no decision          ctrl+q close the review             │
+│   x      review a file yourself                                              │
+│   d      full diff                     Reviewer                              │
+│                                          opus · 74s · 9 files read, 3        │
+│                                          searches · $0.81 · 62055a2 + 2      │
+│                                          uncommitted                         │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ esc close

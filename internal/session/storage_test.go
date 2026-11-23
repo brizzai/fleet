@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/brizzai/fleet/internal/github"
 )
 
 func TestNewStorageCreatesDBAndTables(t *testing.T) {
@@ -52,6 +54,7 @@ func TestSaveAndLoadSessionsRoundTrip(t *testing.T) {
 		FirstPrompt:     "fix the login bug",
 		TitleGenerated:  true,
 		PromptCount:     3,
+		BaseRef:         "origin/master",
 	}
 
 	if err := db.SaveSession(row); err != nil {
@@ -108,6 +111,13 @@ func TestSaveAndLoadSessionsRoundTrip(t *testing.T) {
 	}
 	if got.PromptCount != row.PromptCount {
 		t.Errorf("PromptCount: got %d, want %d", got.PromptCount, row.PromptCount)
+	}
+	if got.BaseRef != row.BaseRef {
+		t.Errorf("BaseRef: got %q, want %q", got.BaseRef, row.BaseRef)
+	}
+	// And through the in-memory Session, which is what the TUI persists from.
+	if back := FromRow(got).ToRow(); back.BaseRef != row.BaseRef {
+		t.Errorf("FromRow→ToRow BaseRef: got %q, want %q", back.BaseRef, row.BaseRef)
 	}
 }
 
@@ -736,5 +746,28 @@ func TestCollapsedGroups(t *testing.T) {
 	keys, _ = db.LoadCollapsedGroups()
 	if len(keys) != 1 || keys[0] != "origin:github.com/acme/repo" {
 		t.Errorf("expected only the origin to remain collapsed, got %v", keys)
+	}
+}
+
+// The PR cache stores the PR as JSON, so fields added to github.PR ride along —
+// self-review reads BaseRefName and FailedChecks out of this cache.
+func TestPRCacheCarriesBaseAndFailedChecks(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+
+	pr := &github.PR{Number: 7, CIStatus: "FAILURE", BaseRefName: "release", FailedChecks: []string{"build", "lint"}}
+	if err := db.SavePRCacheRow(&PRCacheRow{RepoPath: "/r", Branch: "b", PR: pr, LastPRRefresh: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.LoadPRCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rows["/r"].PR
+	if got == nil || got.BaseRefName != "release" || len(got.FailedChecks) != 2 || got.FailedChecks[1] != "lint" {
+		t.Errorf("cached PR = %+v", got)
 	}
 }

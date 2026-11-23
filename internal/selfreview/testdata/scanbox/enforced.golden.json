@@ -1,0 +1,335 @@
+{
+  "v": 2,
+  "verdict": "Safe after one product call: closed findings now kept for every org, even with closures off.",
+  "summary": "Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real permission error apart from an expired scan window.",
+  "risk": "med",
+  "intent_gap": "",
+  "stops": [
+    {
+      "id": "s1",
+      "kind": "product",
+      "title": "Closures kept for all orgs",
+      "why": "record() no longer checks closures_enabled, so orgs that turned closures off start storing closed findings; the migration backfills a source column for existing rows.",
+      "how": "Closed findings are stored by the closures module on every run now; the org's closures setting is no longer read before writing.",
+      "recommend": {
+        "answer": "keep"
+      },
+      "checked": [
+        {
+          "text": "closures_enabled guard removed from record()",
+          "src": "code"
+        }
+      ],
+      "decide": "Should orgs with closures off now store closed findings?",
+      "hunks": [
+        {
+          "path": "services/vulns/closures/store.py",
+          "side": "new",
+          "start": 88,
+          "end": 92
+        },
+        {
+          "path": "db/migrations/0042_keep_closed_findings.sql",
+          "side": "new",
+          "start": 1,
+          "end": 6
+        }
+      ],
+      "lines": 12
+    },
+    {
+      "id": "s2",
+      "kind": "customer",
+      "title": "Full snapshot every 12h",
+      "why": "Joins the 12h data pipeline; each run still pulls the full asset and open-vuln snapshot, so the largest customers pay twice the load of the current daily run and the collector pod has never been measured against them at this cadence, which matters for shared…",
+      "how": "Each pipeline run reads the whole asset and open-finding snapshot, so a 12-hour cron doubles the full reads.",
+      "elsewhere": "Vulnix reads its full snapshot once a day and deltas between — pipelines/collectors/internal/collectors/vulnix/collector.go",
+      "recommend": {
+        "answer": "change",
+        "text": "Keep the daily full snapshot; run only fixes every 12 hours"
+      },
+      "checked": [
+        {
+          "text": "branch on Orca: 89s, 1.9 GB peak",
+          "src": "transcript"
+        },
+        {
+          "text": "pod limit 4.5 GiB, no override",
+          "src": "code"
+        }
+      ],
+      "decide": "Is a full snapshot every 12h OK for the biggest customers?",
+      "hunks": [
+        {
+          "path": "libs/schemas/python/src/schemas/pipelines.py",
+          "side": "new",
+          "start": 269,
+          "end": 270
+        }
+      ],
+      "lines": 2
+    },
+    {
+      "id": "s3",
+      "kind": "logic",
+      "title": "A 403 that is not permissions",
+      "why": "A 403 without the permission marker is now treated as an expired scan window and books an endCheck before returning.",
+      "how": "SC answers 403 both for missing permissions and for a scan window that expired; the marker in the body tells them apart.",
+      "recommend": {
+        "answer": "keep"
+      },
+      "checked": [
+        {
+          "text": "TestForbiddenScanWindow covers the window case",
+          "src": "test"
+        }
+      ],
+      "decide": "Does endCheck book a 200 with a non-zero error_code twice?",
+      "hunks": [
+        {
+          "path": "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+          "side": "new",
+          "start": 122,
+          "end": 127
+        }
+      ],
+      "lines": 7
+    },
+    {
+      "id": "s4",
+      "kind": "tuning",
+      "title": "How far each run reads back",
+      "why": "Lookback grows from 24h to 36h while runs move to every 12h, so each window overlaps the last two runs.",
+      "how": "Each run reads back 36 hours from its start, so consecutive 12-hour runs overlap by a day.",
+      "recommend": {
+        "answer": "keep"
+      },
+      "checked": null,
+      "decide": "Is a 36h lookback right for a 12h schedule?",
+      "hunks": [
+        {
+          "path": "pipelines/collectors/internal/collectors/scanboxSC/client.go",
+          "side": "new",
+          "start": 43,
+          "end": 43
+        }
+      ],
+      "lines": 2
+    },
+    {
+      "id": "s5",
+      "kind": "data",
+      "title": "One stored closure",
+      "why": "merge() replaces add(), so a finding closed twice keeps one row keyed by closed.key.",
+      "how": "The store upserts one closure row per finding, so a reopen and second close overwrite the first.",
+      "recommend": {
+        "answer": "change",
+        "text": "Keep every closure row"
+      },
+      "checked": [
+        {
+          "text": "unique index on (org_id, finding_key) in the migration",
+          "src": "code"
+        }
+      ],
+      "decide": "When the same finding is closed, reopened and closed again, is keeping only the latest closure row and dropping the history the…?",
+      "hunks": [
+        {
+          "path": "services/vulns/closures/store.py",
+          "side": "new",
+          "start": 91,
+          "end": 92
+        }
+      ],
+      "lines": 4
+    },
+    {
+      "id": "s6",
+      "kind": "edge",
+      "title": "Reruns show only own window",
+      "why": "window() filters on closed_at, so a rerun of an old window misses closures recorded later.",
+      "how": "A rerun reads only its own window, so it can't refill a window an earlier run missed.",
+      "recommend": {
+        "answer": "keep"
+      },
+      "checked": null,
+      "decide": "Is it OK that a rerun shows only its own window?",
+      "hunks": [
+        {
+          "path": "services/vulns/closures/store.py",
+          "side": "new",
+          "start": 0,
+          "end": 0
+        }
+      ],
+      "lines": 6
+    },
+    {
+      "id": "s7",
+      "kind": "bug",
+      "title": "Cursor saved before upload",
+      "why": "The cursor is saved before uploadZip; a failed upload skips that window for good.",
+      "how": "The cursor is written as soon as reading ends, before the upload runs, so a failed upload is never retried.",
+      "elsewhere": "EdgeWatcher saves its cursor only after the upload — pipelines/collectors/internal/collectors/edgewatcher/collector.go",
+      "recommend": {
+        "answer": "change",
+        "text": "Save the cursor after the upload lands"
+      },
+      "checked": [
+        {
+          "text": "REVIEW.md: never save a cursor before durable upload",
+          "src": "code"
+        }
+      ],
+      "decide": "Fix it?",
+      "hunks": [
+        {
+          "path": "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+          "side": "new",
+          "start": 405,
+          "end": 408
+        }
+      ],
+      "lines": 4
+    },
+    {
+      "id": "s8",
+      "kind": "migration",
+      "title": "COMMIT inside a migration file",
+      "why": "CREATE INDEX CONCURRENTLY cannot run inside a transaction, and the file ends with a bare COMMIT.",
+      "how": "The migration runner wraps each file in its own transaction.",
+      "recommend": {
+        "answer": "keep"
+      },
+      "checked": null,
+      "decide": "Does the migration runner wrap files in a transaction?",
+      "hunks": [
+        {
+          "path": "db/migrations/0042_keep_closed_findings.sql",
+          "side": "new",
+          "start": 3,
+          "end": 6
+        }
+      ],
+      "lines": 4
+    }
+  ],
+  "skipped": [
+    {
+      "path": "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+      "reason": "error wrapping only",
+      "scope": "rest",
+      "by": "guide"
+    },
+    {
+      "path": "pipelines/collectors/internal/collectors/scanboxSC/collector_test.go",
+      "reason": "test",
+      "scope": "file",
+      "by": "rule"
+    },
+    {
+      "path": "go.sum",
+      "reason": "lockfile",
+      "scope": "file",
+      "by": "rule"
+    },
+    {
+      "path": "docs/collectors/scanbox-sc.md",
+      "kind": "docs",
+      "reason": "docs match the new schedule",
+      "scope": "file",
+      "by": "guide"
+    },
+    {
+      "path": "pipelines/collectors/internal/collectors/scanboxSC/testdata/scan_results.json",
+      "reason": "generated",
+      "scope": "file",
+      "by": "rule"
+    }
+  ],
+  "pending": [
+    "CI running",
+    "integration test against the SC sandbox not run"
+  ],
+  "chapters": [
+    {
+      "id": "c1",
+      "title": "Telling permission errors from expired windows",
+      "role": "heart",
+      "text": "The client reads SC's 403 body: with the permission marker it returns ErrPermission and the run fails; without it the window expired, so it books an end check and returns ErrScanWindow, which the collector treats as an empty window. The cursor is saved when reading ends.",
+      "files": [
+        "pipelines/collectors/internal/collectors/scanboxSC/client.go"
+      ],
+      "decisions": [
+        "s3",
+        "s4",
+        "s7"
+      ]
+    },
+    {
+      "id": "c2",
+      "title": "Keeping closed findings for every org",
+      "role": "consequence",
+      "text": "The closures store now writes every closed finding it is given, and a migration adds a source column to the rows already there.",
+      "files": [
+        "services/vulns/closures/store.py",
+        "db/migrations/0042_keep_closed_findings.sql"
+      ],
+      "decisions": [
+        "s1",
+        "s5",
+        "s6",
+        "s8"
+      ]
+    },
+    {
+      "id": "c3",
+      "title": "Joining the 12h pipeline",
+      "role": "glue",
+      "text": "The pipeline table gives Scanbox SC a 12-hour cron; the SDK bump brings the client the new window parameter.",
+      "files": [
+        "libs/schemas/python/src/schemas/pipelines.py",
+        "go.mod",
+        "go.sum",
+        "pipelines/collectors/internal/collectors/scanboxSC/collector.go"
+      ],
+      "decisions": [
+        "s2",
+        "s3",
+        "s7"
+      ]
+    },
+    {
+      "id": "c4",
+      "title": "Collector docs",
+      "role": "docs",
+      "text": "The collector page describes the new schedule and the two kinds of 403.",
+      "files": [
+        "docs/collectors/scanbox-sc.md"
+      ]
+    },
+    {
+      "id": "other",
+      "title": "Other changes",
+      "role": "glue",
+      "text": "",
+      "files": [
+        "pipelines/collectors/internal/collectors/scanboxSC/collector_test.go",
+        "pipelines/collectors/internal/collectors/scanboxSC/testdata/scan_results.json"
+      ],
+      "by_fleet": true
+    }
+  ],
+  "not_covered": [
+    "go.mod"
+  ],
+  "not_covered_why": {
+    "go.mod": "skipped as 'patch-level dependency bump', but it is a high-risk path"
+  },
+  "total_files": 10,
+  "total_lines": 845,
+  "stop_lines": 27,
+  "skipped_files": 4,
+  "skipped_lines": 816,
+  "uncovered_lines": 2
+}

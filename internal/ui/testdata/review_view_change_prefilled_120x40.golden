@@ -1,0 +1,40 @@
+╭─ Review · vulns cursor    1 Decide   2 Walkthrough ──────────────────────────────────────────────── 1 of 8 answered ─╮
+│ Safe after one product call: closed findings now kept for every org, even with closures off.                         │
+│ What it does: Scanbox SC joins the twice-daily pipeline, keeps closed findings for every org, and tells a real       │
+│ permission error apart from an expired scan window.                                                                  │
+│ 27 of 845 changed lines need you · 1 file not reviewed · 5 files safe to skip                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Decide ───────────────────────────────────────╮╭─ 2 of 8 · customer impact ─────────────────────────────────────────╮
+│  1  Closures kept for all orgs               ✓ ││                                                                    │
+│▸ 2  Full snapshot every 12h                    ││ Recommend: change — keep the daily full snapshot; run only         │
+│  3  A 403 that is not permissions              ││ fixes every 12 hours   n                                           │
+│  4  How far each run reads back                ││                                                                    │
+│  5  One stored closure                         ││ Is a full snapshot every 12h OK for the biggest customers?         │
+│  6  Reruns show only own window                ││                                                                    │
+│  7  Cursor saved before upload                 ││ How it works   Each pipeline run reads the whole asset and open-   │
+│  8  COMMIT inside a migration file             ││                finding snapshot, so a 12-hour cron doubles the     │
+│                                                ││                full reads.                                         │
+│ ────────────────────────────────────────────── ││                                                                    │
+│  ⚠ Not reviewed · 1 file                     ⏎ ││ Elsewhere      Vulnix reads its full snapshot once a day and       │
+│  Safe to skip · 5 files                      s ││                deltas between                                      │
+│                                                ││                …collectors/internal/collectors/vulnix/collector.go │
+│  Not verified yet: CI running; integration     ││                                                                    │
+│  test against the SC sandbox not run           ││ Why it matters Joins the 12h data pipeline; each run still pulls   │
+│                                                ││                the full asset and open-vuln snapshot, so the       │
+│                                                ││                largest customers pay twice the load of the current │
+│                                                ││                daily run and the collector pod has never been      │
+│                                                ││                measured against them at this cadence, which        │
+│                                                ││                matters for shared…                                 │
+│                                                ││                                                                    │
+│                                                ││ Checked        ✓ branch on Orca: 89s, 1.9 GB peak                  │
+│                                                ││                ✓ pod limit 4.5 GiB, no override                    │
+│                                                ││                                                                    │
+│                                                ││ ◆ pipelines.py · L269–270                                          │
+│                                                ││ 266  266       ServiceSpec(                                        │
+│                                                ││ 267  267           name="scanbox_sc",                              │
+│                                                ││ 268  268           collector="scanboxSC",                          │
+│                                                ││      269 +         # Joins the 12h data pipeline; each run pulls t…│
+│                                                ││      270 +         data_pipeline_cron="0 */12 * * *",              │
+│                                                ││ 269  271           closures_enabled=False,                         │
+╰────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+ change › Keep the daily full snapshot; run only fixes every 12 hours                                ⏎ save  esc cancel

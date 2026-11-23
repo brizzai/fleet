@@ -1,0 +1,318 @@
+{
+ "v": 1,
+ "verdict": "Ready once you settle deploy order and whether opted-out orgs may have fixes collected.",
+ "risk": "med",
+ "intent_gap": "",
+ "stops": [
+  {
+   "id": "s1",
+   "kind": "deploy",
+   "title": "Backfill lost if collector ships first",
+   "why": "If the new collector runs before the new ingestor is live, a year of past fixes never reaches the aggregation. Customers lose that history for good.",
+   "checked": [
+    {
+     "text": "Collect saves the cursor right after client.Iter, before upload and ingestion",
+     "src": "code"
+    },
+    {
+     "text": "Accumulation into aggregated_closed_finding_rollup_view exists only in the new ingest.py run path",
+     "src": "code"
+    }
+   ],
+   "decide": "Will the ingestor reliably ship before the collector?",
+   "hunks": [
+    {
+     "path": "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+     "side": "new",
+     "start": 229,
+     "end": 268
+    },
+    {
+     "path": "pipelines/ingestors/scanbox-sc-ingestor/src/scanbox_sc_ingestor/ingest.py",
+     "side": "new",
+     "start": 97,
+     "end": 100
+    }
+   ],
+   "lines": 26,
+   "recommend": {
+    "answer": "change",
+    "text": "Ship the ingestor first and say so in the rollout notes"
+   },
+   "how": "The collector saves its cursor before it hands results to the ingestor; only the new ingestor knows how to add fixes to the history."
+  },
+  {
+   "id": "s2",
+   "kind": "product",
+   "title": "Fixes collected for orgs that opted out",
+   "why": "Orgs that turned off closed-issue collection will now have fixed findings pulled and stored on every run. Other collectors still respect that setting.",
+   "checked": [
+    {
+     "text": "analysisChecks adds one closed query per window with no collectClosedIssues gate",
+     "src": "code"
+    },
+    {
+     "text": "_accumulate_closed_fixes runs on every planned run before process_closed_issues is read",
+     "src": "code"
+    }
+   ],
+   "decide": "Is collecting fixes for orgs that opted out acceptable to product and customers?",
+   "hunks": [
+    {
+     "path": "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+     "side": "new",
+     "start": 274,
+     "end": 308
+    },
+    {
+     "path": "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+     "side": "new",
+     "start": 372,
+     "end": 394
+    }
+   ],
+   "lines": 54,
+   "recommend": {
+    "answer": "keep"
+   },
+   "how": "Each window now adds one query for fixed findings, with no check of the org's closed-issue setting."
+  },
+  {
+   "id": "s3",
+   "kind": "customer",
+   "title": "Twice-daily full reads on Orca's appliance",
+   "why": "Assets and open findings are still read in full, now every 12 hours, doubling load on the appliance. The first run also reads a year of fixes.",
+   "checked": [
+    {
+     "text": "pipelines.py sets data_pipeline_cron 0 */12 * * * for SCANBOX_SC",
+     "src": "code"
+    },
+    {
+     "text": "Old resolved query was 445 of 480 pages in Orca's nightly run",
+     "src": "transcript"
+    },
+    {
+     "text": "defaultClosedVulnerabilityBackfill is 365 days, so the first run's window spans a year",
+     "src": "code"
+    }
+   ],
+   "decide": "Is twice-daily full reading, plus a year-long first run, fine for Orca?",
+   "hunks": [
+    {
+     "path": "libs/schemas/python/src/schemas/pipelines.py",
+     "side": "new",
+     "start": 265,
+     "end": 272
+    },
+    {
+     "path": "pipelines/collectors/internal/collectors/scanboxSC/config.go",
+     "side": "new",
+     "start": 12,
+     "end": 20
+    }
+   ],
+   "lines": 12,
+   "recommend": {
+    "answer": "keep"
+   },
+   "how": "Assets and open findings are still read whole each run; only fixes are read incrementally from the cursor."
+  },
+  {
+   "id": "s4",
+   "kind": "data",
+   "title": "Fixes lost when an upload fails",
+   "why": "The cursor moves forward before the results land, so a failed upload skips fixes older than one day. Recovery means deleting a database row by hand.",
+   "checked": [
+    {
+     "text": "saveCursor runs at the end of Collect, before any upload",
+     "src": "code"
+    },
+    {
+     "text": "closedRereadOverlap is 24h, and the README says import lag is unobserved",
+     "src": "code"
+    }
+   ],
+   "decide": "Keep the cursor saved before upload, with manual recovery when one fails?",
+   "hunks": [
+    {
+     "path": "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+     "side": "new",
+     "start": 36,
+     "end": 49
+    }
+   ],
+   "lines": 14,
+   "recommend": {
+    "answer": "change",
+    "text": "Save the cursor only after the upload lands"
+   },
+   "how": "The cursor is written to the database as soon as reading ends, before the upload and ingest steps run."
+  }
+ ],
+ "skipped": [
+  {
+   "path": "docs/PIPELINE_STAGES.md",
+   "kind": "docs",
+   "reason": "Adds Scanbox SC to aggregation prose",
+   "scope": "file",
+   "by": "guide"
+  },
+  {
+   "path": "pipelines/collectors/docs/incremental-data-pipeline.md",
+   "kind": "docs",
+   "reason": "Table row and closure-signal rule",
+   "scope": "file",
+   "by": "guide"
+  },
+  {
+   "path": "pipelines/collectors/internal/collectors/scanboxSC/README.md",
+   "kind": "docs",
+   "reason": "Cursor, configuration and limitations prose",
+   "scope": "file",
+   "by": "guide"
+  },
+  {
+   "path": "pipelines/collectors/internal/collectors/scanboxSC/collector_test.go",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "pipelines/collectors/internal/collectors/scanboxSC/config_test.go",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "pipelines/collectors/internal/collectors/scanboxSC/cursor_test.go",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "pipelines/collectors/internal/collectors/scanboxSC/dry_run_test.go",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "pipelines/ingestors/scanbox-sc-ingestor/README.md",
+   "kind": "docs",
+   "reason": "Closed aggregation section",
+   "scope": "file",
+   "by": "guide"
+  },
+  {
+   "path": "pipelines/ingestors/scanbox-sc-ingestor/tests/test_closed_aggregation.py",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "pipelines/ingestors/scanbox-sc-ingestor/tests/test_data/closed_analysis_same_host_twice.json",
+   "kind": "fixture",
+   "reason": "Two patched rows for one host",
+   "scope": "file",
+   "by": "guide"
+  },
+  {
+   "path": "services/northco-dagster/tests/test_collection_ops.py",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "services/northco-dagster/tests/test_runner.py",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "services/northco-dagster/tests/test_utils.py",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  },
+  {
+   "path": "services/greenhouse/backend/src/greenhouse/tools/pipeline_monitor/tests/test_inputs.py",
+   "reason": "tests",
+   "scope": "file",
+   "by": "rule"
+  }
+ ],
+ "pending": null,
+ "total_files": 18,
+ "total_lines": 1489,
+ "stop_lines": 106,
+ "skipped_files": 14,
+ "skipped_lines": 1026,
+ "uncovered_lines": 357,
+ "reviewer": {
+  "turns": 5,
+  "cost_usd": 0.5053270000000001,
+  "duration_ms": 59826,
+  "tools": {
+   "Grep": 3,
+   "Read": 1
+  },
+  "files": [
+   "pipelines/ingestors/scanbox-sc-ingestor/src/scanbox_sc_ingestor/ingest.py",
+   "pipelines/collectors/internal",
+   "pipelines/collectors/internal/transport_layer"
+  ],
+  "files_read": 1
+ },
+ "summary": "Scanbox SC moves to the twice-daily pipeline and now also collects fixed findings since the last run. A new ingestor adds them to the yearly history customers see.",
+ "chapters": [
+  {
+   "id": "c1",
+   "title": "Reading fixes since the last run",
+   "role": "heart",
+   "text": "The collector keeps a cursor of the last fix time it saw and asks the appliance only for findings fixed after it, one query per time window. The ingestor adds those fixes to the yearly history.",
+   "files": [
+    "pipelines/collectors/internal/collectors/scanboxSC/collector.go",
+    "pipelines/ingestors/scanbox-sc-ingestor/src/scanbox_sc_ingestor/ingest.py"
+   ],
+   "decisions": [
+    "s1",
+    "s2",
+    "s4"
+   ]
+  },
+  {
+   "id": "c2",
+   "title": "Schedule, config and tests",
+   "role": "glue",
+   "text": "The pipeline schedule moves to every 12 hours, the backfill default is one year, and tests cover the new windows.",
+   "files": [
+    "libs/schemas/python/src/schemas/pipelines.py",
+    "pipelines/collectors/internal/collectors/scanboxSC/config.go",
+    "pipelines/collectors/internal/collectors/scanboxSC/collector_test.go",
+    "pipelines/collectors/internal/collectors/scanboxSC/config_test.go",
+    "pipelines/collectors/internal/collectors/scanboxSC/cursor_test.go",
+    "pipelines/collectors/internal/collectors/scanboxSC/dry_run_test.go",
+    "pipelines/ingestors/scanbox-sc-ingestor/tests/test_closed_aggregation.py",
+    "pipelines/ingestors/scanbox-sc-ingestor/tests/test_data/closed_analysis_same_host_twice.json",
+    "services/northco-dagster/tests/test_collection_ops.py",
+    "services/northco-dagster/tests/test_runner.py",
+    "services/northco-dagster/tests/test_utils.py",
+    "services/greenhouse/backend/src/greenhouse/tools/pipeline_monitor/tests/test_inputs.py"
+   ],
+   "decisions": [
+    "s3"
+   ]
+  },
+  {
+   "id": "c3",
+   "title": "Documentation",
+   "role": "docs",
+   "text": "The collector docs describe the cursor and the twice-daily schedule.",
+   "files": [
+    "docs/PIPELINE_STAGES.md",
+    "pipelines/collectors/docs/incremental-data-pipeline.md",
+    "pipelines/collectors/internal/collectors/scanboxSC/README.md",
+    "pipelines/ingestors/scanbox-sc-ingestor/README.md"
+   ]
+  }
+ ]
+}

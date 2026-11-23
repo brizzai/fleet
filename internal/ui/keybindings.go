@@ -44,6 +44,7 @@ var allKeyBindings = []KeyBinding{
 	{Key: "m", Desc: "Mark session as unread (idle → finished)", Section: "session"},
 	{Key: "z", Desc: "Snooze / wake session / repo / worktree", Section: "session"},
 	{Key: "e", Desc: "Open in editor", Section: "session"},
+	{Key: "v", Desc: "Review checkout changes (prepare / open)", Section: "session"},
 	{Key: "p", BarKey: "p", BarDesc: "PR", Desc: "Open PR in browser", Section: "session"},
 	{Key: "Ctrl+P", Desc: "Copy PR link", Section: "session"},
 	{Key: "P", Desc: "Jump to next red (else green) PR", Section: "session"},
@@ -86,6 +87,14 @@ var allKeyBindings = []KeyBinding{
 	{Key: "Esc", Desc: "Unfocus preview", Section: "focus"},
 	{Key: "all keys", Desc: "Forwarded to session", Section: "focus"},
 
+	// Review view (`v`). Keys only that screen reads; its own footer names
+	// the rest as they become available.
+	{Key: "y / n / a / l", Desc: "Answer: fine / change / ask / later", Section: "review"},
+	{Key: "Enter / Tab", Desc: "Into the stop card (J/K hunk)", Section: "review"},
+	{Key: "f / x", Desc: "Skipped files / promote one", Section: "review"},
+	{Key: "d", Desc: "Full diff, stop hunks marked", Section: "review"},
+	{Key: "S / t / A", Desc: "Send / pick its session / approve", Section: "review"},
+
 	// Attach mode (shown in overlay only, separated by blank line).
 	{Key: "Ctrl+Q", Desc: "Detach from session", Section: "attach"},
 }
@@ -99,6 +108,7 @@ const (
 	BarContextOrigin                     // cursor on an origin header (▾ brizzai 16)
 	BarContextCheckout                   // cursor on a checkout header (▾ new-ui #100)
 	BarContextSession                    // cursor on a real session row
+	BarContextReview                     // cursor on a checkout's review row (✎ Review · …)
 )
 
 // HelpBarBindings returns ALL bar bindings; kept for places that want the
@@ -153,6 +163,10 @@ func HelpBarBindingsFor(ctx BarContext, enterMode string) (context, global []str
 		context = []struct{ Key, Desc string }{
 			{"⏎", "Expand"}, {"d", "Forget"}, {"w", "Wktree"}, {".", "Menu"},
 		}
+	case BarContextReview:
+		context = []struct{ Key, Desc string }{
+			{"⏎", "Open"}, {"␣", "Jump"}, {"d", "Discard"}, {".", "Menu"},
+		}
 	default: // empty
 		context = []struct{ Key, Desc string }{
 			{"a", "New"}, {"n", "Repo"}, {"w", "Wktree"},
@@ -185,6 +199,7 @@ var helpSections = map[string]string{
 	"global":  "GLOBAL",
 	"drawer":  "TERMINAL DRAWER",
 	"focus":   "FOCUS MODE",
+	"review":  "REVIEW",
 	"attach":  "ATTACH MODE",
 }
 
