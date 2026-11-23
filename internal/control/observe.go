@@ -252,9 +252,10 @@ func (o *Observer) updateStatus(ob *Observation) {
 	// waiting hook outlives the prompt it reported, and an observer that never
 	// watched it being answered (every new CLI process) cannot tell. No prompt on
 	// screen means the agent took the answer and is working. OpenCode has no pane
-	// detector, so its plugin's word stands.
+	// detector, so its plugin's word stands, and so does Claude's own status file:
+	// it says waiting before the question renders, while the pane is still idle.
 	if ob.Status == session.StatusWaiting && ob.Agent != agent.OpenCode && ob.Capture != "" &&
-		!session.PaneIndicatesWaiting(ob.Agent, ob.Capture) {
+		s.ClaudeWaitingFor() == "" && !session.PaneIndicatesWaiting(ob.Agent, ob.Capture) {
 		ob.Status = session.StatusRunning
 	}
 	if ob.Capture == "" && (ob.Pane == PaneAlive || ob.Pane == PaneShell) {

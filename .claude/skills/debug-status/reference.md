@@ -145,13 +145,13 @@ The `snapshot.json` `claude_status` block carries Claude Code's own status flag,
 "claude_status": {
   "file": "claude_session_status.json",
   "pid": 18581, "pid_alive": true,   // false ⇒ status is a dead process's last-known value
-  "status": "busy",                  // Claude's own flag: busy | idle | shell (no "waiting" value)
+  "status": "busy",                  // Claude's own flag: busy | idle | shell | waiting (2.1.327+, reason in waiting_for)
   "status_updated_at": "...Z", "status_age": "1m9s",  // event-driven, NOT a heartbeat — trust the value, not the age
   "name": "…", "version": "2.1.201"
 }
 ```
 
-Use it as a Running-vs-Idle corroborator only: there is no `waiting` value, and it stays `idle` through `/compact`. Trust `status` while `pid_alive` is true regardless of `status_age` (a long busy turn legitimately carries a minutes-old stamp). One caveat on `pid_alive`: it is **PID-only**, so a recycled PID (the file's process exited and the OS reassigned its number) can report a dead session's last status as live — sanity-check against the pane/transcript if a `busy` reading looks impossible.
+Use it as a Running-vs-Idle corroborator, and as proof of waiting when `status` is `waiting` with a trusted `waiting_for` (fleet overrides to waiting on exactly that; `dialog open` is not trusted). Not every prompt sets it, and it stays `idle` through `/compact`. Trust `status` while `pid_alive` is true regardless of `status_age` (a long busy turn legitimately carries a minutes-old stamp). One caveat on `pid_alive`: it is **PID-only**, so a recycled PID (the file's process exited and the OS reassigned its number) can report a dead session's last status as live — sanity-check against the pane/transcript if a `busy` reading looks impossible.
 
 Implementation: `internal/ui/snapshot.go` (capture logic + `findClaudeSessionStatus`), `internal/session/session.go` `SnapshotData()` (state export).
 
