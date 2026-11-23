@@ -400,7 +400,9 @@ func (d *ConnectLinearDialog) View() string {
 			// The override lines are the exception, kept short and dim.
 			b.WriteString("\n")
 			b.WriteString("Tickets are on in every repo for your teams: ")
-			b.WriteString(PROpenStyle.Render(strings.Join(firstN(d.workspace.Mine, 8), ", ")))
+			// Bold text, not a colour: colour means status in fleet, and a
+			// team list is not one.
+			b.WriteString(PreviewHeaderStyle.Render(strings.Join(firstN(d.workspace.Mine, 8), ", ")))
 			b.WriteString("\n\n")
 			b.WriteString(DimStyle.Render("Per repo, in .fleet.local.json:"))
 			b.WriteString("\n")

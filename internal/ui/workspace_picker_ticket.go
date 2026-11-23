@@ -379,8 +379,14 @@ func (d *WorktreeDialog) PrefillTicket(identifier string, from ticket.Provider) 
 	return d.onFieldChanged(identifier)
 }
 
-// bindTicketKey makes the identifier's key resolvable through p, if the
-// dialog's keys don't already cover it.
+// bindTicketKey makes the identifier's key resolve through p for the rest of
+// this open, if it doesn't already.
+//
+// Coverage is checked per PROVIDER, not across the union: a key some other
+// tracker holds would otherwise pass the check and OwnerIn would hand the
+// lookup to whichever came first — a Jira OPS-7 fetched as Linear's OPS-7, a
+// different issue, named into a branch. So when another provider holds the
+// key it loses it here; the ticket said which tracker it came from.
 func (d *WorktreeDialog) bindTicketKey(identifier string, p ticket.Provider) {
 	if p == nil {
 		return
@@ -389,22 +395,33 @@ func (d *WorktreeDialog) bindTicketKey(identifier string, p ticket.Provider) {
 	if !ok || key == "" {
 		return
 	}
-	for _, k := range d.ticketKeys {
-		if strings.EqualFold(k, key) {
-			return
-		}
+	if owner, ok := ticketing.OwnerIn(d.bound, identifier); ok && owner.Kind() == p.Kind() {
+		return
 	}
+	isKey := func(k string) bool { return strings.EqualFold(k, key) }
+
 	// Copies throughout: the slice Show was handed belongs to the message
 	// that carried it, and writing through it would edit the caller's data.
-	d.bound = slices.Clone(d.bound)
-	d.ticketKeys = append(d.ticketKeys, key)
-	for i := range d.bound {
-		if d.bound[i].Provider.Kind() == p.Kind() {
-			d.bound[i].Keys = append(slices.Clone(d.bound[i].Keys), key)
-			return
+	bound := make([]ticketing.Bound, 0, len(d.bound)+1)
+	placed := false
+	for _, b := range d.bound {
+		keys := slices.DeleteFunc(slices.Clone(b.Keys), isKey)
+		if b.Provider.Kind() == p.Kind() {
+			keys = append(keys, key)
+			placed = true
+		}
+		if len(keys) > 0 {
+			bound = append(bound, ticketing.Bound{Provider: b.Provider, Keys: keys})
 		}
 	}
-	d.bound = append(d.bound, ticketing.Bound{Provider: p, Keys: []string{key}})
+	if !placed {
+		bound = append(bound, ticketing.Bound{Provider: p, Keys: []string{key}})
+	}
+	d.bound = bound
+	d.ticketKeys = nil
+	for _, b := range bound {
+		d.ticketKeys = append(d.ticketKeys, b.Keys...)
+	}
 }
 
 // applyResolvedBranchName rewrites the field to the ticket's branch name, but

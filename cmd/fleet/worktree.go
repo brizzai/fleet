@@ -306,10 +306,25 @@ func runWorktree(args []string) {
 		// keychain yet and every provider would report itself unavailable. The
 		// account reading too, since Linear's default keys for a repo that
 		// names no team are the user's own teams, which come from it.
-		ticketing.WarmAccounts(ctx)
+		warmErrs := ticketing.WarmAccounts(ctx)
 		t, ferr := ticketing.Fetch(ctx, repoPath, opts.ticket)
 		cancel()
 		switch {
+		case errors.Is(ferr, ticket.ErrNotConnected) && len(warmErrs) > 0:
+			// The account reading failed, so the default keys it carries are
+			// missing — this is a network answer wearing a config one's
+			// clothes. Advising a .fleet.local.json edit here would send the
+			// user to fix a setup that works, so name the real failure.
+			for kind, err := range warmErrs {
+				name := kind
+				if p, ok := ticketing.ByKind(kind); ok {
+					name = p.Name()
+				}
+				fmt.Fprintf(os.Stderr, "Couldn't read your %s account, so its teams aren't known yet: %v\n", name, err)
+			}
+			if opts.branch == "" {
+				os.Exit(1)
+			}
 		case errors.Is(ferr, ticket.ErrNotConnected):
 			// No provider will read this key here, which is a configuration
 			// answer rather than a network one — and worth its own words, since
@@ -560,13 +575,21 @@ func unclaimedTicketAdvice(repoPath, id string) string {
 	// invites a Linear user to put a team key under a "jira" block, which then
 	// fails a second time and less legibly.
 	//
-	// The Linear half says it covers your own teams already: someone reading
-	// this for a MAGMA ticket is usually not on MAGMA, and "add the team" alone
-	// would read as a step they missed for every team.
-	return fmt.Sprintf("No tracker in this repo claims %s.\n"+
-		"Linear covers the teams you're a member of automatically. For another team, or a Jira\n"+
-		"project, name it in .fleet.local.json, e.g.\n"+
-		"  {\"linear\": {\"team\": %q}}   or   {\"jira\": {\"project\": %q}}", id, key, key)
+	// When Linear is live for this repo, say it already covers your own teams:
+	// someone reading this for a MAGMA ticket is usually not on MAGMA, and
+	// "add the team" alone reads as a step they missed for every team. Only
+	// then — a Jira-only user, or a repo that switched Linear off, would be
+	// told about a setup they don't have.
+	how := "Name its Linear team or Jira project in .fleet.local.json, e.g.\n"
+	// "Defaulting" is: connected, the repo names no team of its own, and the
+	// keys still came back non-empty — your teams, with no switch-off.
+	ownTeams, _, _ := workspace.LinearRepo(repoPath)
+	if lp, ok := ticketing.ByKind("linear"); ok && lp.Available() && len(ownTeams) == 0 && len(lp.Keys(repoPath)) > 0 {
+		how = "Linear covers the teams you're a member of automatically. For another team, or a Jira\n" +
+			"project, name it in .fleet.local.json, e.g.\n"
+	}
+	return fmt.Sprintf("No tracker in this repo claims %s.\n%s"+
+		"  {\"linear\": {\"team\": %q}}   or   {\"jira\": {\"project\": %q}}", id, how, key, key)
 }
 
 // describeTicketFiles summarizes what landed on disk, so the echo-back is

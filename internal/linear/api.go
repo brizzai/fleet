@@ -630,12 +630,16 @@ func fetchAccountWith(ctx context.Context, cred Credential, useStored bool) (tic
 		sort.Strings(ws.Mine)
 	}
 
-	// Only cache a reading taken with the STORED credential. VerifyCredential
-	// calls this with a candidate the user has just pasted and that nothing has
-	// persisted yet; if the store then refuses (a denied keychain prompt is the
-	// ordinary case, which is why persistErr exists at all), Account() would go
-	// on reporting a workspace no stored credential backs — and
-	// workspaceMismatchNote reads exactly that.
+	// Only cache a reading taken with the STORED credential here. VerifyCredential
+	// calls this with a candidate nothing has made live yet, and caching it
+	// would have Account() report a workspace no live credential backs — which
+	// workspaceMismatchNote reads.
+	//
+	// The Connect dialog caches the candidate's reading itself (CacheAccount),
+	// but only AFTER SetCredential, which makes the credential live in memory
+	// even when persisting it fails. That is safe for the same reason, and it
+	// must not be skipped on persistErr: the reading carries the user's teams,
+	// and dropping it brings back #373 for the rest of the session.
 	if useStored {
 		CacheAccount(ws)
 	}

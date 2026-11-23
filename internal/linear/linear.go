@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/brizzai/fleet/internal/workspace"
@@ -59,7 +60,7 @@ var teamIDRe = regexp.MustCompile(`(?m)^\s*team_id\s*=\s*["']([A-Za-z][A-Za-z0-9
 // is the user's MEMBERSHIPS, never every team in the workspace, which can be
 // dozens and would put strangers' tickets under every branch field.
 //
-// Free and non-blocking — two small file reads and a cache read, no network —
+// Free and non-blocking — one config read and a cache read, no network —
 // because the dialog paths call it while a frame is being built. Before the
 // account reading lands (or after Disconnect) the default is empty, so an
 // unconfigured repo is quiet rather than wrong.
@@ -67,30 +68,37 @@ func TeamKeys(repoPath string) []string {
 	if repoPath == "" {
 		return nil
 	}
-	if workspace.LinearDisabled(repoPath) {
+	teams, disabled, jiraProjects := workspace.LinearRepo(repoPath)
+	if disabled {
 		return nil
 	}
-	if keys := repoTeamKeys(repoPath); len(keys) > 0 {
-		return keys
+	if len(teams) > 0 {
+		return teams
 	}
-	return memberKeys()
+	if key := linearTOMLTeam(repoPath); key != "" {
+		return []string{key}
+	}
+	// A defaulted key never outranks one the repo names explicitly. The
+	// registry breaks ties Linear-first, so without this a repo naming Jira
+	// project OPS, used by someone on a Linear team also keyed OPS, would send
+	// OPS-42 to Linear — a repo that claimed nothing from Linear before
+	// defaults existed.
+	return slices.DeleteFunc(memberKeys(), func(k string) bool {
+		return slices.Contains(jiraProjects, k)
+	})
 }
 
-// repoTeamKeys is the team(s) the repo names itself, from .fleet.json /
-// .fleet.local.json and then .linear.toml.
-func repoTeamKeys(repoPath string) []string {
-	if keys := workspace.LinearTeamKeys(repoPath); len(keys) > 0 {
-		return keys
-	}
+// linearTOMLTeam reads team_id out of a .linear.toml, or "".
+func linearTOMLTeam(repoPath string) string {
 	data, err := readFileLimited(filepath.Join(repoPath, linearConfigFile), 64<<10)
 	if err != nil {
-		return nil
+		return ""
 	}
 	m := teamIDRe.FindSubmatch(data)
 	if m == nil {
-		return nil
+		return ""
 	}
-	return []string{strings.ToUpper(string(m[1]))}
+	return strings.ToUpper(string(m[1]))
 }
 
 // readFileLimited reads at most limit bytes, so a pathological config file

@@ -47,6 +47,9 @@ type CopyFilesConfig struct {
 
 // LinearConfig names the Linear team(s) whose issues this repo tracks.
 //
+// A local team/teams with no local enabled re-enables a repo the committed
+// file switched off.
+//
 // It is an OVERRIDE, not the switch: a repo that names no team tracks the teams
 // the connected user belongs to (linear.TeamKeys). Naming one narrows the repo
 // to exactly those — or widens it to a team you are not on. Enabled false turns
@@ -116,8 +119,14 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 		merged.Linear.Team = local.Linear.Team
 	}
 	merged.Linear.Teams = dedupeStrings(append(base.Linear.Teams, local.Linear.Teams...))
-	if local.Linear.Enabled != nil {
+	switch {
+	case local.Linear.Enabled != nil:
 		merged.Linear.Enabled = local.Linear.Enabled
+	case local.Linear.Team != "" || len(local.Linear.Teams) > 0:
+		// Naming your team locally is asking for Linear here. Leaving a
+		// committed enabled:false in force would ignore that with nothing on
+		// screen saying why; only an explicit local false keeps it off.
+		merged.Linear.Enabled = nil
 	}
 
 	if local.Jira.Project != "" {
@@ -169,12 +178,17 @@ func LinearTeamKeys(repoPath string) []string {
 	return trackerKeys(cfg.Team, cfg.Teams)
 }
 
-// LinearDisabled reports whether the repo switched Linear off with
-// {"linear": {"enabled": false}} — the opt-out for a repo that should stay quiet
-// even though its user is connected.
-func LinearDisabled(repoPath string) bool {
-	e := loadMergedRepoConfig(repoPath).Linear.Enabled
-	return e != nil && !*e
+// LinearRepo returns the repo's own Linear team keys and whether it switched
+// Linear off with {"linear": {"enabled": false}}, from ONE read of the config
+// files — linear.TeamKeys needs both, and it runs while frames are built.
+//
+// It also returns the Jira project keys the repo names, so a defaulted Linear
+// key can yield to an explicit Jira one (see linear.TeamKeys).
+func LinearRepo(repoPath string) (teams []string, disabled bool, jiraProjects []string) {
+	cfg := loadMergedRepoConfig(repoPath)
+	e := cfg.Linear.Enabled
+	return trackerKeys(cfg.Linear.Team, cfg.Linear.Teams), e != nil && !*e,
+		trackerKeys(cfg.Jira.Project, cfg.Jira.Projects)
 }
 
 // JiraProjectKeys returns the merged, upper-cased Jira project keys for a repo,

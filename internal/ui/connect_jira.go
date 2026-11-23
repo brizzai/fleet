@@ -461,9 +461,13 @@ func jiraConnectErrorLine(err error) string {
 
 // firstN bounds a list rendered on one line. A real Jira site has hundreds of
 // projects and the whole point of the line is the example underneath it.
+//
+// The cut is counted ("+3 more"), not a bare "…": on Linear's done screen the
+// list is the teams that are now ON, and an uncounted cut let a team missing
+// from it read as off.
 func firstN(in []string, n int) []string {
 	if len(in) <= n {
 		return in
 	}
-	return append(in[:n:n], "…")
+	return append(in[:n:n], fmt.Sprintf("+%d more", len(in)-n))
 }

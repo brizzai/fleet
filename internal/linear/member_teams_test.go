@@ -63,6 +63,23 @@ func TestTeamKeysDefaultsToYourTeams(t *testing.T) {
 		t.Errorf("a local enabled:true must override a committed false, got %v", got)
 	}
 
+	// A local team re-enables a repo the committed file switched off: naming
+	// your team is asking for Linear there.
+	localTeam := t.TempDir()
+	write(localTeam, ".fleet.json", `{"linear":{"enabled":false}}`)
+	write(localTeam, ".fleet.local.json", `{"linear":{"team":"ops"}}`)
+	if got := TeamKeys(localTeam); !slices.Equal(got, []string{"OPS"}) {
+		t.Errorf("a local team must re-enable a committed enabled:false, got %v", got)
+	}
+
+	// A defaulted key yields to a Jira project the repo names explicitly, or
+	// the Linear-first registry would send that project's tickets to Linear.
+	jiraRepo := t.TempDir()
+	write(jiraRepo, ".fleet.json", `{"jira":{"project":"PLAT"}}`)
+	if got := TeamKeys(jiraRepo); !slices.Equal(got, []string{"MAGMA"}) {
+		t.Errorf("a defaulted key must yield to an explicit Jira project, got %v", got)
+	}
+
 	// Disconnected (or before the startup read lands): quiet, not wrong.
 	SetAccountForTest(ticket.Account{})
 	if got := TeamKeys(bare); got != nil {

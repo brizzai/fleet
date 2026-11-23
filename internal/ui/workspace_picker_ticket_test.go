@@ -739,3 +739,34 @@ func TestPickedTicketResolvesInARepoThatDoesNotTrackIt(t *testing.T) {
 		t.Error("with no provider, a repo tracking nothing must stay inert")
 	}
 }
+
+// TestPickedTicketWinsAKeyAnotherTrackerHolds: a Jira OPS-7 picked from My
+// tickets in a repo where Linear holds OPS (say, as one of your default teams)
+// must go to Jira. Checking only the key union let it fall to Linear's OPS-7,
+// a different issue, which then named the branch.
+func TestPickedTicketWinsAKeyAnotherTrackerHolds(t *testing.T) {
+	handed := boundToBoth([]string{"OPS", "MAGMA"}, nil)
+	d := NewWorktreeDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, nil, "/repo", "master", handed, nil)
+
+	d.PrefillTicket("OPS-7", jira.New())
+	if p, ok := ticketing.OwnerIn(d.bound, "OPS-7"); !ok || p.Kind() != "jira" {
+		t.Fatalf("OPS-7 must route to the tracker it came from (jira), got %v %v", p, ok)
+	}
+	if p, ok := ticketing.OwnerIn(d.bound, "MAGMA-1"); !ok || p.Kind() != "linear" {
+		t.Errorf("the other Linear keys must be untouched, got %v %v", p, ok)
+	}
+	if len(handed[0].Keys) != 2 {
+		t.Errorf("binding must not write through the handed slice: %v", handed[0].Keys)
+	}
+
+	// Already owned by the right tracker: nothing moves.
+	d2 := NewWorktreeDialog()
+	d2.SetSize(120, 40)
+	d2.Show(nil, nil, nil, "/repo", "master", boundTo("MAGMA"), nil)
+	d2.PrefillTicket("MAGMA-1", linear.New())
+	if len(d2.bound) != 1 || len(d2.bound[0].Keys) != 1 {
+		t.Errorf("a key its own tracker already owns must not be rebound: %+v", d2.bound)
+	}
+}
