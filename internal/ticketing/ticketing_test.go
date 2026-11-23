@@ -18,6 +18,7 @@ type fake struct {
 	keys      []string
 	tickets   []ticket.Ticket
 	err       error
+	acct      ticket.Account
 }
 
 func (f *fake) Kind() string                    { return f.kind }
@@ -28,7 +29,7 @@ func (f *fake) Keys(string) []string            { return f.keys }
 func (f *fake) Warm(context.Context)            {}
 func (f *fake) ConnectedVia() string            { return "" }
 func (f *fake) Disconnect() error               { return nil }
-func (f *fake) Account() (ticket.Account, bool) { return ticket.Account{}, false }
+func (f *fake) Account() (ticket.Account, bool) { return f.acct, len(f.acct.Keys) > 0 }
 
 func (f *fake) FetchAccount(context.Context) (ticket.Account, error) {
 	return ticket.Account{}, nil
@@ -322,3 +323,34 @@ func TestMaterializeIgnoresAnUnknownProviderKind(t *testing.T) {
 }
 
 var errSentinel = errors.New("routed here")
+
+// TestNamedTicketResolvesThroughTheAccount pins the CLI half of #373: `fleet
+// wt --ticket OPS-12` names a ticket outright, so a connected account whose
+// workspace has the key is enough even when the repo's keys don't cover it.
+// The repo's own claim still comes first.
+func TestNamedTicketResolvesThroughTheAccount(t *testing.T) {
+	lin := &fake{kind: "linear", name: "Linear", available: true, keys: []string{"MAGMA"},
+		acct:    ticket.Account{Keys: []string{"MAGMA", "OPS"}},
+		tickets: []ticket.Ticket{{Identifier: "OPS-12", Title: "from linear"}}}
+	jir := &fake{kind: "jira", name: "Jira", available: true, keys: []string{"OPS"},
+		tickets: []ticket.Ticket{{Identifier: "OPS-12", Title: "from jira"}}}
+
+	swap(t, lin)
+	got, err := Fetch(context.Background(), "/repo", "OPS-12")
+	if err != nil || got.Title != "from linear" {
+		t.Fatalf("a key in the account's workspace must resolve when named, got %v %v", got, err)
+	}
+
+	// The repo naming OPS for Jira wins over Linear's workspace having it.
+	swap(t, lin, jir)
+	if got, _ := Fetch(context.Background(), "/repo", "OPS-12"); got.Title != "from jira" {
+		t.Errorf("the repo's own claim must come first, got %q", got.Title)
+	}
+
+	// A disconnected provider's cached account is not a credential.
+	lin.available = false
+	swap(t, lin)
+	if _, err := Fetch(context.Background(), "/repo", "OPS-12"); !errors.Is(err, ticket.ErrNotConnected) {
+		t.Errorf("a disconnected provider must not resolve, got %v", err)
+	}
+}

@@ -185,6 +185,17 @@ func (t Ticket) Ok() bool { return t.Identifier != "" }
 type Account struct {
 	Name string   // "Brizz" / "acme.atlassian.net"
 	Keys []string // Linear team keys / Jira project keys, upper-cased and sorted
+
+	// Mine is the subset of Keys the connected user is a member of —
+	// upper-cased and sorted, nil when the tracker has no such notion (Jira).
+	//
+	// It is what lets a provider turn tickets on in a repo that names no keys
+	// of its own: teams belong to people rather than to repos, and asking every
+	// user to name theirs in every repo is the step people missed (#373).
+	// Deliberately NOT Keys: a workspace can hold dozens of teams, and putting
+	// all of them under every repo's branch field is the noise the per-repo
+	// gate exists to prevent. A user's own memberships are usually one to three.
+	Mine []string
 }
 
 // SortAssigned applies the ordering the tickets tab depends on.

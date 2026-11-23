@@ -74,6 +74,32 @@ func Warm(ctx context.Context) {
 	}
 }
 
+// WarmAccounts is Warm plus one account reading per connected provider.
+//
+// The account is not decoration: Linear's default keys for a repo that names
+// no team are the user's team memberships, which come from that reading. So
+// every path that is about to ask "which keys does this repo track" — the
+// TUI's startup, and `fleet worktree --ticket` in a one-shot process that has
+// read nothing yet — warms both. Network, so never on the Update goroutine.
+//
+// A failed reading is reported per provider and does not stop the others.
+func WarmAccounts(ctx context.Context) map[string]error {
+	Warm(ctx)
+	var errs map[string]error
+	for _, p := range providers {
+		if !p.Available() {
+			continue
+		}
+		if _, err := p.FetchAccount(ctx); err != nil {
+			if errs == nil {
+				errs = map[string]error{}
+			}
+			errs[p.Kind()] = err
+		}
+	}
+	return errs
+}
+
 // ConnectedNames lists the display names of the connected trackers, in registry
 // order — for the one line a dialog draws while it is searching.
 func ConnectedNames() []string {
@@ -95,9 +121,10 @@ type Bound struct {
 // For returns the connected providers this repo tracks, each with its keys.
 //
 // BOTH gates: a provider with no credential is skipped even when the repo names
-// its keys, and a repo naming no keys gets nothing even from a connected
-// provider. Empty means every ticket surface stays inert, which is the
-// opt-out-by-absence rule in one line.
+// its keys, and a provider with no keys for the repo contributes nothing. What
+// "keys for the repo" means is the provider's call — Linear falls back to the
+// user's own teams, Jira does not (see ticket.Provider.Keys). Empty means every
+// ticket surface stays inert.
 //
 // Free and non-blocking — a couple of small file reads per provider.
 func For(repoPath string) []Bound {
@@ -159,13 +186,49 @@ func ClaimedBy(repoPath, id string) (ticket.Provider, bool) {
 	return nil, false
 }
 
-// Fetch reads one issue through whichever provider owns its key in this repo.
+// Fetch reads one issue through whichever provider owns its key in this repo,
+// or — for an identifier you named outright — whichever connected account
+// has that key at all.
 func Fetch(ctx context.Context, repoPath, id string) (ticket.Ticket, error) {
-	p, ok := Owner(repoPath, id)
+	p, ok := ownerForNamed(repoPath, id)
 	if !ok {
 		return ticket.Ticket{}, ticket.ErrNotConnected
 	}
 	return p.Fetch(ctx, id)
+}
+
+// ownerForNamed resolves the provider for an identifier the user NAMED (`fleet
+// wt --ticket OPS-12`), as opposed to one inferred from text.
+//
+// The repo's keys come first, so a key the repo claims goes where the repo
+// says. Past them, a connected account whose workspace has the key is enough:
+// naming a ticket is choosing to work on it, the same reason the TUI's My
+// tickets hand-off binds the key for that one open. The repo gate decides
+// whether ticket SURFACES appear; it is not a rule about which issue you may
+// work on. Cached account readings only — no network here.
+func ownerForNamed(repoPath, id string) (ticket.Provider, bool) {
+	if p, ok := Owner(repoPath, id); ok {
+		return p, true
+	}
+	prefix, _, ok := strings.Cut(strings.ToUpper(strings.TrimSpace(id)), "-")
+	if !ok || prefix == "" {
+		return nil, false
+	}
+	for _, p := range providers {
+		if !p.Available() {
+			continue
+		}
+		acct, known := p.Account()
+		if !known {
+			continue
+		}
+		for _, k := range acct.Keys {
+			if strings.EqualFold(k, prefix) {
+				return p, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // Materialize writes a ticket into a worktree through the provider that owns it.
@@ -182,7 +245,7 @@ func Fetch(ctx context.Context, repoPath, id string) (ticket.Ticket, error) {
 func Materialize(ctx context.Context, repoPath string, o ticket.Opts) (ticket.Result, error) {
 	p, ok := ByKind(o.Provider)
 	if !ok {
-		if p, ok = Owner(repoPath, o.Identifier); !ok {
+		if p, ok = ownerForNamed(repoPath, o.Identifier); !ok {
 			return ticket.Result{}, ticket.ErrNotConnected
 		}
 	}

@@ -47,11 +47,14 @@ type CopyFilesConfig struct {
 
 // LinearConfig names the Linear team(s) whose issues this repo tracks.
 //
-// Its presence is what turns the ticket features on for a repo: without it (and
-// without a .linear.toml) a repo behaves exactly as it did before Linear
-// existed, which is the property that lets a connected user keep unrelated
-// repos quiet. Team is the common single-team form; Teams is for a repo that
-// genuinely spans several.
+// A local team/teams with no local enabled re-enables a repo the committed
+// file switched off.
+//
+// It is an OVERRIDE, not the switch: a repo that names no team tracks the teams
+// the connected user belongs to (linear.TeamKeys). Naming one narrows the repo
+// to exactly those — or widens it to a team you are not on. Enabled false turns
+// Linear off for the repo, which is how a personal repo stays quiet. Team is the
+// common single-team form; Teams is for a repo that genuinely spans several.
 //
 // They do NOT merge the same way: a local `team` REPLACES the committed one,
 // while `teams` lists are appended and deduped. Personal team membership
@@ -62,6 +65,11 @@ type CopyFilesConfig struct {
 type LinearConfig struct {
 	Team  string   `json:"team,omitempty"`
 	Teams []string `json:"teams,omitempty"`
+
+	// Enabled is nil when unset. A pointer so "not mentioned" and "false" stay
+	// distinct: a local file that names a team must not switch off a repo the
+	// committed file left on, and only an explicit false does. Local wins.
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // JiraConfig names the Jira project(s) whose issues this repo tracks.
@@ -111,6 +119,15 @@ func loadMergedRepoConfig(repoPath string) RepoWorkspaceConfig {
 		merged.Linear.Team = local.Linear.Team
 	}
 	merged.Linear.Teams = dedupeStrings(append(base.Linear.Teams, local.Linear.Teams...))
+	switch {
+	case local.Linear.Enabled != nil:
+		merged.Linear.Enabled = local.Linear.Enabled
+	case local.Linear.Team != "" || len(local.Linear.Teams) > 0:
+		// Naming your team locally is asking for Linear here. Leaving a
+		// committed enabled:false in force would ignore that with nothing on
+		// screen saying why; only an explicit local false keeps it off.
+		merged.Linear.Enabled = nil
+	}
 
 	if local.Jira.Project != "" {
 		merged.Jira.Project = local.Jira.Project
@@ -159,6 +176,19 @@ func CopyFilesPatterns(repoPath string) []string {
 func LinearTeamKeys(repoPath string) []string {
 	cfg := loadMergedRepoConfig(repoPath).Linear
 	return trackerKeys(cfg.Team, cfg.Teams)
+}
+
+// LinearRepo returns the repo's own Linear team keys and whether it switched
+// Linear off with {"linear": {"enabled": false}}, from ONE read of the config
+// files — linear.TeamKeys needs both, and it runs while frames are built.
+//
+// It also returns the Jira project keys the repo names, so a defaulted Linear
+// key can yield to an explicit Jira one (see linear.TeamKeys).
+func LinearRepo(repoPath string) (teams []string, disabled bool, jiraProjects []string) {
+	cfg := loadMergedRepoConfig(repoPath)
+	e := cfg.Linear.Enabled
+	return trackerKeys(cfg.Linear.Team, cfg.Linear.Teams), e != nil && !*e,
+		trackerKeys(cfg.Jira.Project, cfg.Jira.Projects)
 }
 
 // JiraProjectKeys returns the merged, upper-cased Jira project keys for a repo,

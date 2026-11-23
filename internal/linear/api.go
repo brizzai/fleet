@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -249,9 +250,14 @@ const assignedIssuesQuery = `query Mine($first: Int!) {
   }
 }`
 
+// workspaceQuery reads the workspace, every team it holds, and the teams the
+// viewer belongs to. The last is the default key set for a repo that names no
+// team (see TeamKeys), and it rides this query rather than a second one so the
+// startup read and the Connect dialog's verification both get it for free.
 const workspaceQuery = `query Workspace {
   organization { name }
   teams(first: 250) { nodes { key name } }
+  viewer { teams(first: 250) { nodes { key } } }
 }`
 
 const updateStateMutation = `mutation Start($id: String!, $stateId: String!) {
@@ -586,6 +592,13 @@ func fetchAccountWith(ctx context.Context, cred Credential, useStored bool) (tic
 				Name string `json:"name"`
 			} `json:"nodes"`
 		} `json:"teams"`
+		Viewer *struct {
+			Teams struct {
+				Nodes []struct {
+					Key string `json:"key"`
+				} `json:"nodes"`
+			} `json:"teams"`
+		} `json:"viewer"`
 	}
 
 	var err error
@@ -608,19 +621,54 @@ func fetchAccountWith(ctx context.Context, cred Credential, useStored bool) (tic
 		}
 	}
 	sort.Strings(ws.Keys)
+	if out.Viewer != nil {
+		for _, t := range out.Viewer.Teams.Nodes {
+			if t.Key != "" {
+				ws.Mine = append(ws.Mine, strings.ToUpper(t.Key))
+			}
+		}
+		sort.Strings(ws.Mine)
+	}
 
-	// Only cache a reading taken with the STORED credential. VerifyCredential
-	// calls this with a candidate the user has just pasted and that nothing has
-	// persisted yet; if the store then refuses (a denied keychain prompt is the
-	// ordinary case, which is why persistErr exists at all), Account() would go
-	// on reporting a workspace no stored credential backs — and
-	// workspaceMismatchNote reads exactly that.
+	// Only cache a reading taken with the STORED credential here. VerifyCredential
+	// calls this with a candidate nothing has made live yet, and caching it
+	// would have Account() report a workspace no live credential backs — which
+	// workspaceMismatchNote reads.
+	//
+	// The Connect dialog caches the candidate's reading itself (CacheAccount),
+	// but only AFTER SetCredential, which makes the credential live in memory
+	// even when persisting it fails. That is safe for the same reason, and it
+	// must not be skipped on persistErr: the reading carries the user's teams,
+	// and dropping it brings back #373 for the rest of the session.
 	if useStored {
-		wsCache.mu.Lock()
-		wsCache.ws, wsCache.loaded = ws, true
-		wsCache.mu.Unlock()
+		CacheAccount(ws)
 	}
 	return ws, nil
+}
+
+// CacheAccount installs a reading as the connected workspace's.
+//
+// For the Connect dialog, which verifies a candidate credential with
+// VerifyCredential (deliberately uncached) and then makes it live with
+// SetCredential. Without this the reading taken a moment earlier is thrown
+// away, and everything that reads Account() — the default team keys above all
+// — stays empty until the next launch, which is exactly the session in which a
+// user who just connected tries it out (#373).
+func CacheAccount(ws ticket.Account) {
+	wsCache.mu.Lock()
+	wsCache.ws, wsCache.loaded = ws, true
+	wsCache.mu.Unlock()
+}
+
+// memberKeys returns the cached keys of the teams the user belongs to. Free and
+// non-blocking: nil until an account reading has landed, and after Disconnect.
+func memberKeys() []string {
+	wsCache.mu.RLock()
+	defer wsCache.mu.RUnlock()
+	if !wsCache.loaded || len(wsCache.ws.Mine) == 0 {
+		return nil
+	}
+	return slices.Clone(wsCache.ws.Mine)
 }
 
 // SetAccountForTest installs a workspace reading without a network call, so UI
@@ -629,5 +677,5 @@ func SetAccountForTest(ws ticket.Account) {
 	wsCache.mu.Lock()
 	defer wsCache.mu.Unlock()
 	wsCache.ws = ws
-	wsCache.loaded = ws.Name != "" || len(ws.Keys) > 0
+	wsCache.loaded = ws.Name != "" || len(ws.Keys) > 0 || len(ws.Mine) > 0
 }

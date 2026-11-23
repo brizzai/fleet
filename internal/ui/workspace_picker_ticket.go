@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -358,14 +359,69 @@ func (d *WorktreeDialog) workspaceMismatchNote(owner ticket.Provider) (string, b
 // It goes through the same debounce and generation guard as typing, so the
 // resolved title arrives by exactly the path a typed identifier would — there
 // is no second way for a ticket to become a branch name.
-func (d *WorktreeDialog) PrefillTicket(identifier string) tea.Cmd {
+//
+// from is the tracker the ticket came from, or nil. When the repo's keys don't
+// cover the identifier's key, the dialog binds that one key to from for the
+// rest of this open — otherwise the lookup is gated off and the identifier is
+// created as a literal branch name with no ticket behind it, which is what
+// #373 reported: the tickets tab spans every repo, the repo gate does not, and
+// the hand-off between them fell through it. The repo gate decides whether
+// ticket surfaces appear at all; it is not a rule about which issue you may
+// work on, and you just picked this one.
+func (d *WorktreeDialog) PrefillTicket(identifier string, from ticket.Provider) tea.Cmd {
 	if identifier == "" || !d.visible {
 		return nil
 	}
+	d.bindTicketKey(identifier, from)
 	d.newBranchInput.SetValue(identifier)
 	d.newBranchInput.SetCursor(len([]rune(identifier)))
 	d.setSelection(focusNewBranch, ticketOnInput)
 	return d.onFieldChanged(identifier)
+}
+
+// bindTicketKey makes the identifier's key resolve through p for the rest of
+// this open, if it doesn't already.
+//
+// Coverage is checked per PROVIDER, not across the union: a key some other
+// tracker holds would otherwise pass the check and OwnerIn would hand the
+// lookup to whichever came first — a Jira OPS-7 fetched as Linear's OPS-7, a
+// different issue, named into a branch. So when another provider holds the
+// key it loses it here; the ticket said which tracker it came from.
+func (d *WorktreeDialog) bindTicketKey(identifier string, p ticket.Provider) {
+	if p == nil {
+		return
+	}
+	key, _, ok := strings.Cut(strings.ToUpper(strings.TrimSpace(identifier)), "-")
+	if !ok || key == "" {
+		return
+	}
+	if owner, ok := ticketing.OwnerIn(d.bound, identifier); ok && owner.Kind() == p.Kind() {
+		return
+	}
+	isKey := func(k string) bool { return strings.EqualFold(k, key) }
+
+	// Copies throughout: the slice Show was handed belongs to the message
+	// that carried it, and writing through it would edit the caller's data.
+	bound := make([]ticketing.Bound, 0, len(d.bound)+1)
+	placed := false
+	for _, b := range d.bound {
+		keys := slices.DeleteFunc(slices.Clone(b.Keys), isKey)
+		if b.Provider.Kind() == p.Kind() {
+			keys = append(keys, key)
+			placed = true
+		}
+		if len(keys) > 0 {
+			bound = append(bound, ticketing.Bound{Provider: b.Provider, Keys: keys})
+		}
+	}
+	if !placed {
+		bound = append(bound, ticketing.Bound{Provider: p, Keys: []string{key}})
+	}
+	d.bound = bound
+	d.ticketKeys = nil
+	for _, b := range bound {
+		d.ticketKeys = append(d.ticketKeys, b.Keys...)
+	}
 }
 
 // applyResolvedBranchName rewrites the field to the ticket's branch name, but

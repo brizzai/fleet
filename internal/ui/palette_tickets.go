@@ -169,7 +169,8 @@ func (h *Home) ticketPaletteItems(tickets []ticket.Ticket) []PaletteItem {
 			// The category, beside the name: the name is what the team called
 			// the state and cannot be compared, and this is what the tickets
 			// tab's todo-only scope filters on.
-			TicketStarted: t.State == ticket.StateStarted,
+			TicketStarted:  t.State == ticket.StateStarted,
+			TicketProvider: t.Provider,
 			// Haystack must be exactly Name + " " + <right column>, because the
 			// renderer maps matched haystack indexes back onto those two
 			// strings by offset. Composing it any other way lights up the
@@ -198,9 +199,11 @@ func (h *Home) ticketPaletteItems(tickets []ticket.Ticket) []PaletteItem {
 // the same screen that always confirms them.
 func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
 	var tickets []ticket.Ticket
+	var providerKind string
 	for _, it := range h.commandPalette.items {
 		if it.Kind == PaletteKindTicket && it.ID == identifier {
 			tickets = append(tickets, ticket.Ticket{Identifier: it.ID})
+			providerKind = it.TicketProvider
 		}
 	}
 	if s := h.sessionsByTicket(tickets)[identifier]; s != nil {
@@ -219,6 +222,7 @@ func (h *Home) openTicketFromPalette(identifier string) (tea.Model, tea.Cmd) {
 	// means the base branch and the repo are confirmed on the same screen that
 	// always confirms them.
 	h.pendingTicketID = identifier
+	h.pendingTicketProvider = providerKind
 	h.worktreeDialog.ShowLoading()
 	return h, tea.Batch(h.fetchWorkspaceListForRepo(repoPath), spinnerTickCmd)
 }
