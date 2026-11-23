@@ -435,3 +435,47 @@ func TestReadyToMergeRespectsMergeState(t *testing.T) {
 		}
 	}
 }
+
+// A commit status and a check run can share a name and are still separate
+// results. Deduped by name alone, whichever started later replaced the other,
+// so a failed status hid behind a passing check (and the reverse) in either
+// rollup order.
+func TestLatestRunKeepsStatusAndCheckOfTheSameNameApart(t *testing.T) {
+	check := func(conclusion, at string) statusCheckEntry {
+		return statusCheckEntry{Name: "build", Status: "COMPLETED", Conclusion: conclusion, StartedAt: at}
+	}
+	status := func(state, at string) statusCheckEntry {
+		return statusCheckEntry{Context: "build", State: state, StartedAt: at}
+	}
+	tests := []struct {
+		name   string
+		checks []statusCheckEntry
+		want   string
+	}{
+		{"failed status, newer passing check",
+			[]statusCheckEntry{status("FAILURE", "2026-11-22T10:00:00Z"), check("SUCCESS", "2026-11-22T11:00:00Z")}, "FAILURE"},
+		{"failed status with no timestamp, passing check first",
+			[]statusCheckEntry{check("SUCCESS", "2026-11-22T11:00:00Z"), status("FAILURE", "")}, "FAILURE"},
+		{"failed check, newer passing status",
+			[]statusCheckEntry{check("FAILURE", "2026-11-22T10:00:00Z"), status("SUCCESS", "2026-11-22T11:00:00Z")}, "FAILURE"},
+		{"pending status beside a passing check",
+			[]statusCheckEntry{check("SUCCESS", "2026-11-22T11:00:00Z"), status("PENDING", "2026-11-22T10:00:00Z")}, "PENDING"},
+		{"both kinds passing",
+			[]statusCheckEntry{check("SUCCESS", "2026-11-22T11:00:00Z"), status("SUCCESS", "2026-11-22T10:00:00Z")}, "SUCCESS"},
+		// Same kind still collapses to the newest run, as before.
+		{"check rerun green still hides its older failure",
+			[]statusCheckEntry{check("FAILURE", "2026-11-22T10:00:00Z"), check("SUCCESS", "2026-11-22T11:00:00Z")}, "SUCCESS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deriveCIStatus(tt.checks, nil); got != tt.want {
+				t.Errorf("deriveCIStatus = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	// Ignore matching still goes by the plain name: one glob covers both kinds.
+	both := []statusCheckEntry{check("FAILURE", "2026-11-22T10:00:00Z"), status("FAILURE", "2026-11-22T11:00:00Z")}
+	if got := deriveCIStatus(append(both, statusCheckEntry{Name: "lint", Status: "COMPLETED", Conclusion: "SUCCESS"}), []string{"build"}); got != "SUCCESS" {
+		t.Errorf("ignore \"build\" should drop both kinds, got %q", got)
+	}
+}

@@ -280,9 +280,12 @@ func getUnresolvedThreadCount(repoPath string, prNumber int, prURL string) int {
 //
 // Entries are first folded through asCheckRun, so a status context
 // participates under its context name; an entry with neither a name nor a
-// context is a ghost and is dropped. On equal or
-// missing StartedAt, the later entry in rollup order wins (GitHub returns runs
-// roughly chronologically).
+// context is a ghost and is dropped. Runs are matched by kind as well as name:
+// a commit status and a check run that happen to share a name are independent
+// results (GitHub reports and enforces both), so neither may replace the
+// other — keyed on name alone, whichever started later would hide the other,
+// failure included. On equal or missing StartedAt, the later entry in rollup
+// order wins (GitHub returns runs roughly chronologically).
 func latestRunPerCheck(checks []statusCheckEntry) []statusCheckEntry {
 	latest := make(map[string]statusCheckEntry, len(checks))
 	for _, c := range checks {
@@ -290,10 +293,14 @@ func latestRunPerCheck(checks []statusCheckEntry) []statusCheckEntry {
 		if c.Name == "" {
 			continue
 		}
-		if prev, ok := latest[c.Name]; ok && c.StartedAt < prev.StartedAt {
+		key := "check\x00" + c.Name
+		if c.Context != "" { // asCheckRun keeps Context: this row is a commit status
+			key = "status\x00" + c.Name
+		}
+		if prev, ok := latest[key]; ok && c.StartedAt < prev.StartedAt {
 			continue // an existing, newer run wins
 		}
-		latest[c.Name] = c
+		latest[key] = c
 	}
 	out := make([]statusCheckEntry, 0, len(latest))
 	for _, c := range latest {
