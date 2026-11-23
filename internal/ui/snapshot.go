@@ -145,7 +145,7 @@ func captureStatusSnapshot(s *session.Session, sessionID string, hb workerHeartb
 	// live process over a stale dead one.
 	var claudeStatus map[string]any
 	var claudeStatusRaw []byte
-	if css := findClaudeSessionStatus(s.Account, snap.ClaudeSessionID); css != nil {
+	if css := findClaudeSessionStatus(snap.Account, snap.ClaudeSessionID); css != nil {
 		claudeStatus = buildClaudeStatusBlock(css, now)
 		claudeStatusRaw = css.raw
 	}

@@ -207,6 +207,13 @@ type Session struct {
 	// claudeWaitingFn overrides claudeWaitingFor in tests; nil reads Claude's
 	// real per-process status file.
 	claudeWaitingFn func() string
+	// claudeWaiting is the reason Claude's status file gave on the last status
+	// pass ("" when it doesn't say waiting); claudeBumpedFrom is the status that
+	// reading overrode to waiting, handed back once the file stops saying so.
+	// Without it a status a latch was only preserving (an ambiguous frame on an
+	// overridden running hook) would stay waiting after the question is gone.
+	claudeWaiting    string
+	claudeBumpedFrom Status
 	// Copilot test seams; nil reads tmux's pane-command cache / the real events.jsonl.
 	paneCmdFn        func() string
 	copilotAbortedFn func() bool
@@ -689,6 +696,15 @@ func (s *Session) MarkAccessed() {
 }
 
 // Acknowledge marks the session as seen by the user.
+// SetAccount repoints a live session at another Claude account. Under s.mu
+// because the status worker reads Account to find Claude's status file
+// (claudeWaitingFor); takes effect for the process on its next launch.
+func (s *Session) SetAccount(email string) {
+	s.mu.Lock()
+	s.Account = email
+	s.mu.Unlock()
+}
+
 func (s *Session) Acknowledge() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1367,6 +1383,8 @@ func (s *Session) resetHookStateLocked() {
 	s.hookReason = ""
 	s.hookUpdatedAt = time.Time{}
 	s.hookOverriddenAt = time.Time{}
+	s.claudeWaiting = ""
+	s.claudeBumpedFrom = ""
 	s.ownerSessionID = ""
 	if s.ownerPID > 0 {
 		s.retiredPID, s.retiredAt = s.ownerPID, time.Now()
@@ -1663,6 +1681,16 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus, hookReason 
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
+		// Claude's file has stopped saying waiting: hand back the status it
+		// overrode, so the hook and pane below start from their own verdict.
+		if claudeWaiting == "" && s.claudeBumpedFrom != "" {
+			if s.Status == StatusWaiting {
+				s.Status = s.claudeBumpedFrom
+				s.Acknowledged = s.claudeBumpedFrom == StatusIdle
+			}
+			s.claudeBumpedFrom = ""
+		}
+
 		switch hookStatus {
 		case "running":
 			s.applyHookRunning(oldStatus, paneContent, paneStatus, log)
@@ -1684,7 +1712,12 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus, hookReason 
 		// message's running hook masking an open question. It only ever adds
 		// waiting; the latches the apply* functions set stay in place, so once
 		// Claude stops saying so the pane takes over exactly as before.
-		if claudeWaiting != "" && !hookSaysDead && s.Status != StatusWaiting {
+		if hookSaysDead {
+			claudeWaiting = ""
+		}
+		s.claudeWaiting = claudeWaiting
+		if claudeWaiting != "" && s.Status != StatusWaiting {
+			s.claudeBumpedFrom = s.Status
 			s.Status = StatusWaiting
 			s.Acknowledged = false
 			if oldStatus != StatusWaiting {
@@ -1730,6 +1763,11 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 	// override latched as waiting that leaves the screen for an idle box (Esc
 	// on the question) settles to finished — answering it resumes the agent,
 	// which the running escape above already covers.
+	//
+	// Only a prompt shown by its layout counts (paneShowsPromptStructurally): the
+	// text fallback matches approval wording left in scrollback, and a running
+	// hook is otherwise never overridden to waiting by the pane.
+	promptOnScreen := paneStatus == StatusWaiting && paneShowsPromptStructurally(paneContent, log)
 	if !s.hookOverriddenAt.IsZero() && s.hookOverriddenAt.Equal(s.hookUpdatedAt) {
 		switch {
 		case paneStatus == StatusRunning:
@@ -1738,7 +1776,7 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 			s.lastContentChangeAt = time.Time{}
 			log.Info("overridden running hook but pane shows running, resuming")
 			// fall through to normal running path
-		case paneStatus == StatusWaiting:
+		case promptOnScreen:
 			if s.Status != StatusWaiting {
 				log.Info("overridden running hook but pane shows waiting prompt, recovering to waiting")
 			}
@@ -1802,7 +1840,9 @@ func (s *Session) applyHookRunning(oldStatus Status, paneContent string, paneSta
 		// The "never override running to waiting" rule above guards a FRESH
 		// running hook against approval text in scrollback; this one has
 		// already been ruled stale, and the only other answer is finished.
-		if paneStatus == StatusWaiting {
+		// Even so, only a structural prompt counts (promptOnScreen), never
+		// the approvalPatterns text fallback.
+		if promptOnScreen {
 			s.Status = StatusWaiting
 			s.hookOverriddenAt = s.hookUpdatedAt
 			log.Info("content stable >10s, hook says running, but pane shows a prompt — waiting",
@@ -2252,6 +2292,7 @@ type StatusSnapshot struct {
 	ProjectPath     string
 	TmuxSessionName string
 	ClaudeSessionID string
+	Account         string
 
 	Status       Status
 	Acknowledged bool
@@ -2285,6 +2326,7 @@ func (s *Session) SnapshotData(rawPane string) StatusSnapshot {
 		ProjectPath:         s.ProjectPath,
 		TmuxSessionName:     s.TmuxSessionName,
 		ClaudeSessionID:     s.ClaudeSessionID,
+		Account:             s.Account,
 		Status:              s.Status,
 		Acknowledged:        s.Acknowledged,
 		HookStatus:          s.hookStatus,
@@ -2807,6 +2849,40 @@ func hasWhimsicalDuration(lower string) bool {
 // from code or conversation text containing approval-related strings.
 // recentLines is ordered from bottom (index 0 = last non-empty line).
 func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
+	if detectWaitingStructural(recentLines, log) {
+		return StatusWaiting
+	}
+
+	// Text pattern fallback: highly specific strings that only appear in
+	// Claude's permission UI, not in normal code or conversation.
+	bottomContent := strings.Join(recentLines[:min(15, len(recentLines))], "\n")
+	for _, pattern := range approvalPatterns {
+		if strings.Contains(bottomContent, pattern) {
+			log.Debug("detectStatus: matched approval pattern", "pattern", pattern)
+			return StatusWaiting
+		}
+	}
+
+	return ""
+}
+
+// paneShowsPromptStructurally reports whether content shows a prompt by its
+// layout alone — the numbered menu with its footer, the team waiting box, or
+// the AskUserQuestion footer — leaving out detectWaiting's approvalPatterns
+// text fallback. It is the bar for overriding a running hook to waiting: the
+// fallback matches anywhere in the bottom 15 lines, so a "Yes, allow once"
+// still in scrollback would otherwise pin a session to waiting.
+func paneShowsPromptStructurally(content string, log *slog.Logger) bool {
+	if content == "" {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	return detectWaitingStructural(extractRecentLines(lines, 50), log)
+}
+
+// detectWaitingStructural is detectWaiting's layout checks, without the text
+// fallback. recentLines is ordered from bottom (index 0 = last non-empty line).
+func detectWaitingStructural(recentLines []string, log *slog.Logger) bool {
 	bottomN := 15
 	if bottomN > len(recentLines) {
 		bottomN = len(recentLines)
@@ -2853,7 +2929,7 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 	}
 	if hasCursorOnOption && hasOtherOption && hasMenuFooter {
 		log.Debug("detectStatus: matched permission menu structure")
-		return StatusWaiting
+		return true
 	}
 
 	// Structural check: team waiting box.
@@ -2863,7 +2939,7 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 		trimmedLine := strings.TrimSpace(recentLines[i])
 		if strings.HasPrefix(trimmedLine, "│") && strings.Contains(trimmedLine, "Waiting for team lead") {
 			log.Debug("detectStatus: matched team waiting box", "line", trimmedLine)
-			return StatusWaiting
+			return true
 		}
 	}
 
@@ -2890,21 +2966,10 @@ func detectWaiting(recentLines []string, _ string, log *slog.Logger) Status {
 	for i := 0; i < footerN; i++ {
 		if isAskUserQuestionFooter(recentLines[i]) {
 			log.Debug("detectStatus: matched askuserquestion footer")
-			return StatusWaiting
+			return true
 		}
 	}
-
-	// Text pattern fallback: highly specific strings that only appear in
-	// Claude's permission UI, not in normal code or conversation.
-	bottomContent := strings.Join(recentLines[:bottomN], "\n")
-	for _, pattern := range approvalPatterns {
-		if strings.Contains(bottomContent, pattern) {
-			log.Debug("detectStatus: matched approval pattern", "pattern", pattern)
-			return StatusWaiting
-		}
-	}
-
-	return ""
+	return false
 }
 
 // isAskUserQuestionFooter reports whether line is the AskUserQuestion dialog's

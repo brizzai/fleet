@@ -121,3 +121,14 @@ func (s *Session) claudeWaitingFor() string {
 	}
 	return reason
 }
+
+// ClaudeWaitingFor reports the reason Claude's own status file gave for being
+// blocked on the user on the last status pass, or "". A waiting status that
+// rests on it holds even when no prompt is on screen yet (the question's
+// PermissionRequest lands before the dialog renders), so a reader that checks
+// the pane for a prompt must not overrule it.
+func (s *Session) ClaudeWaitingFor() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.claudeWaiting
+}

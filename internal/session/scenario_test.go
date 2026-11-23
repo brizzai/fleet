@@ -166,11 +166,9 @@ func runScenario(t *testing.T, sc Scenario) {
 				mock.activityUnix = time.Now().Add(-e.ActivityAge).Unix()
 			}
 
-			// Acknowledge.
+			// Acknowledge, as the TUI does (finished → idle as well as the flag).
 			if e.Acknowledge {
-				s.mu.Lock()
-				s.Acknowledged = true
-				s.mu.Unlock()
+				s.Acknowledge()
 			}
 
 			// Inject the transcript tiebreaker result.
@@ -1513,6 +1511,66 @@ func TestScenarioClaudeStatusFileConfirmsWaiting(t *testing.T) {
 			Checks: []ScenarioCheck{
 				{At: 0, Expected: StatusWaiting}, // no 10s wait for the stale-hook rule
 				{At: 3 * time.Second, Expected: StatusRunning},
+			},
+		})
+	})
+
+	// The override latched a stale running hook as finished and then only
+	// preserves whatever status it finds. When Claude's file bumped that to
+	// waiting, an ambiguous frame after the question closed kept it waiting.
+	ambiguous := "some build output\nanother line of output\n"
+	t.Run("an ambiguous frame after the question closes hands back the latched status", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "latched finished → claude waiting → claude clears on an ambiguous frame → finished",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "running", Pane: idle},
+				{At: 12 * time.Second, ClaudeWaiting: &inputNeeded},
+				{At: 15 * time.Second, Pane: ambiguous, ClaudeWaiting: &notWaiting},
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusRunning},
+				{At: 11 * time.Second, Expected: StatusFinished},
+				{At: 12 * time.Second, Expected: StatusWaiting},
+				{At: 15 * time.Second, Expected: StatusFinished},
+				{At: 20 * time.Second, Expected: StatusFinished},
+			},
+		})
+	})
+
+	t.Run("a question dismissed on an acknowledged session returns to idle", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "latched + acknowledged → claude waiting → claude clears → idle, not unread",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "running", Pane: idle},
+				{At: 12 * time.Second, Acknowledge: true},
+				{At: 13 * time.Second, ClaudeWaiting: &inputNeeded},
+				{At: 15 * time.Second, ClaudeWaiting: &notWaiting},
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusRunning},
+				{At: 11 * time.Second, Expected: StatusFinished},
+				{At: 12 * time.Second, Expected: StatusIdle},
+				{At: 13 * time.Second, Expected: StatusWaiting},
+				{At: 15 * time.Second, Expected: StatusIdle},
+			},
+		})
+	})
+
+	// The stale-running rule settles to waiting only on a prompt shown by its
+	// layout. Approval wording left in scrollback matches detectWaiting's text
+	// fallback, and must not pin the row to waiting.
+	t.Run("approval wording in scrollback doesn't turn a stale running hook waiting", func(t *testing.T) {
+		prose := "⏺ When the prompt came up I picked Yes, allow once and it ran.\n\n" +
+			"────────────────────────\n❯ \n────────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)\n"
+		runScenario(t, Scenario{
+			Name: "hook=running, stale, pane prose quotes an approval option → finished",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "running", Pane: prose},
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusRunning},
+				{At: 11 * time.Second, Expected: StatusFinished},
+				{At: 20 * time.Second, Expected: StatusFinished},
 			},
 		})
 	})

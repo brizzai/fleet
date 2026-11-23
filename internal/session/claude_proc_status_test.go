@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/brizzai/fleet/internal/proc"
 )
 
 // writeProcStatus writes a Claude per-process status file the way Claude Code
@@ -79,7 +81,10 @@ func TestClaudeWaitingForReadsTheOwnersFile(t *testing.T) {
 	}
 	dead := cmd.Process.Pid
 	writeProcStatus(t, dir, dead, fmt.Sprintf(waiting, dead))
-	if got := (&Session{ownerPID: dead, ownerSessionID: sid}).claudeWaitingFor(); got != "" {
+	got := (&Session{ownerPID: dead, ownerSessionID: sid}).claudeWaitingFor()
+	// The OS may hand a reaped pid to another process under load; that is a
+	// live owner, not a failure of the dead-owner rule.
+	if got != "" && !proc.Alive(dead) {
 		t.Errorf("dead owner: got %q, want \"\"", got)
 	}
 
