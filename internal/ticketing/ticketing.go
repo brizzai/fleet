@@ -74,6 +74,32 @@ func Warm(ctx context.Context) {
 	}
 }
 
+// WarmAccounts is Warm plus one account reading per connected provider.
+//
+// The account is not decoration: Linear's default keys for a repo that names
+// no team are the user's team memberships, which come from that reading. So
+// every path that is about to ask "which keys does this repo track" — the
+// TUI's startup, and `fleet worktree --ticket` in a one-shot process that has
+// read nothing yet — warms both. Network, so never on the Update goroutine.
+//
+// A failed reading is reported per provider and does not stop the others.
+func WarmAccounts(ctx context.Context) map[string]error {
+	Warm(ctx)
+	var errs map[string]error
+	for _, p := range providers {
+		if !p.Available() {
+			continue
+		}
+		if _, err := p.FetchAccount(ctx); err != nil {
+			if errs == nil {
+				errs = map[string]error{}
+			}
+			errs[p.Kind()] = err
+		}
+	}
+	return errs
+}
+
 // ConnectedNames lists the display names of the connected trackers, in registry
 // order — for the one line a dialog draws while it is searching.
 func ConnectedNames() []string {
@@ -95,9 +121,10 @@ type Bound struct {
 // For returns the connected providers this repo tracks, each with its keys.
 //
 // BOTH gates: a provider with no credential is skipped even when the repo names
-// its keys, and a repo naming no keys gets nothing even from a connected
-// provider. Empty means every ticket surface stays inert, which is the
-// opt-out-by-absence rule in one line.
+// its keys, and a provider with no keys for the repo contributes nothing. What
+// "keys for the repo" means is the provider's call — Linear falls back to the
+// user's own teams, Jira does not (see ticket.Provider.Keys). Empty means every
+// ticket surface stays inert.
 //
 // Free and non-blocking — a couple of small file reads per provider.
 func For(repoPath string) []Bound {

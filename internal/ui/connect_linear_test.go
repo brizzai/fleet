@@ -2,6 +2,8 @@ package ui
 
 import (
 	"errors"
+
+	"github.com/charmbracelet/x/ansi"
 	"strings"
 	"testing"
 
@@ -270,5 +272,35 @@ func TestConnectPasteReachesTheKeyField(t *testing.T) {
 	d, _ = d.Update(tea.PasteMsg{Content: "stray"})
 	if got := d.input.Value(); got != "" {
 		t.Fatalf("paste on the chooser wrote %q into the hidden key field", got)
+	}
+}
+
+// TestConnectedScreenNamesYourTeams pins what the done screen promises after
+// #373: your teams are on everywhere, with nothing left to do. It used to end
+// on a per-repo .fleet.local.json step, which is the one people missed.
+func TestConnectedScreenNamesYourTeams(t *testing.T) {
+	d := connectDialog(t)
+	d.stage = connectWorking
+	d, _ = d.Update(linearConnectedMsg{
+		workspace: ticket.Account{Name: "Astelia", Keys: []string{"MAGMA", "OPS", "PLAT"}, Mine: []string{"MAGMA", "PLAT"}},
+		via:       "API key",
+	})
+	got := ansi.Strip(d.View())
+	if !strings.Contains(got, "every repo for your teams") || !strings.Contains(got, "MAGMA, PLAT") {
+		t.Errorf("the done screen must name the teams that are now on:\n%s", got)
+	}
+	if strings.Contains(got, "OPS") {
+		t.Errorf("a team you are not on must not be presented as on:\n%s", got)
+	}
+	if !strings.Contains(got, `"enabled": false`) {
+		t.Errorf("the done screen must name the per-repo off switch:\n%s", got)
+	}
+
+	// On no team, there is no default, so the per-repo step is still the way.
+	d = connectDialog(t)
+	d.stage = connectWorking
+	d, _ = d.Update(linearConnectedMsg{workspace: ticket.Account{Name: "Astelia", Keys: []string{"OPS"}}})
+	if got := ansi.Strip(d.View()); !strings.Contains(got, `{"linear": {"team": "OPS"}}`) {
+		t.Errorf("with no team memberships the screen must show the per-repo line:\n%s", got)
 	}
 }

@@ -303,8 +303,10 @@ func runWorktree(args []string) {
 	if opts.ticket != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		// Warm first: this is a one-shot process, so nothing has read the
-		// keychain yet and every provider would report itself unavailable.
-		ticketing.Warm(ctx)
+		// keychain yet and every provider would report itself unavailable. The
+		// account reading too, since Linear's default keys for a repo that
+		// names no team are the user's own teams, which come from it.
+		ticketing.WarmAccounts(ctx)
 		t, ferr := ticketing.Fetch(ctx, repoPath, opts.ticket)
 		cancel()
 		switch {
@@ -557,8 +559,13 @@ func unclaimedTicketAdvice(repoPath, id string) string {
 	// line is the only thing telling them what to write. A single Jira example
 	// invites a Linear user to put a team key under a "jira" block, which then
 	// fails a second time and less legibly.
+	//
+	// The Linear half says it covers your own teams already: someone reading
+	// this for a MAGMA ticket is usually not on MAGMA, and "add the team" alone
+	// would read as a step they missed for every team.
 	return fmt.Sprintf("No tracker in this repo claims %s.\n"+
-		"Name its Linear team or Jira project in .fleet.local.json, e.g.\n"+
+		"Linear covers the teams you're a member of automatically. For another team, or a Jira\n"+
+		"project, name it in .fleet.local.json, e.g.\n"+
 		"  {\"linear\": {\"team\": %q}}   or   {\"jira\": {\"project\": %q}}", id, key, key)
 }
 

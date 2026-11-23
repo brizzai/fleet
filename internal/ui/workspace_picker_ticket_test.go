@@ -677,3 +677,65 @@ func TestMismatchNoteForAnIdentifierChecksOnlyItsOwner(t *testing.T) {
 		t.Error("a search must stay silent while any bound tracker sees its keys")
 	}
 }
+
+// TestPickedTicketResolvesInARepoThatDoesNotTrackIt pins the hand-off half of
+// #373: My tickets spans every repo, the worktree dialog is gated on the repo's
+// keys, and a ticket picked in one and handed to the other fell through the
+// gap — no lookup, no branch name, no ticket.md, and a session started with
+// nothing on it.
+//
+// Picking a ticket is choosing to work on it, so the dialog binds that one key
+// to the tracker the ticket came from, for this open only.
+func TestPickedTicketResolvesInARepoThatDoesNotTrackIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		bound []ticketing.Bound
+	}{
+		{"repo tracks nothing", nil},
+		{"repo tracks a different team", boundTo("PLAT")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handed := tc.bound
+			d := NewWorktreeDialog()
+			d.SetSize(120, 40)
+			d.Show(nil, nil, nil, "/repo", "master", handed, nil)
+
+			if cmd := d.PrefillTicket("MAGMA-2630", linear.New()); cmd == nil {
+				t.Fatal("a picked ticket must start a lookup even when the repo tracks no key for it")
+			}
+			if !d.ticketsEnabled() {
+				t.Fatal("ticket surfaces must be live for a picked ticket")
+			}
+			if p, ok := ticketing.OwnerIn(d.bound, "MAGMA-2630"); !ok || p.Kind() != "linear" {
+				t.Fatalf("MAGMA-2630 must route to the tracker it came from, got %v %v", p, ok)
+			}
+
+			d.applyTickets(worktreeTicketsMsg{
+				gen: d.ticketGen, byID: true, provider: "linear", tracker: "Linear",
+				tickets: []ticket.Ticket{{Provider: "linear", Identifier: "MAGMA-2630", Title: "Pipeline runner enrichment"}},
+			})
+			want := ticket.BranchNameFor("MAGMA-2630", "Pipeline runner enrichment")
+			if got := d.newBranchInput.Value(); got != want {
+				t.Errorf("branch = %q, want %q", got, want)
+			}
+			if tk := d.ticketForCurrentInput(); tk == nil || tk.Identifier != "MAGMA-2630" {
+				t.Errorf("the created worktree must carry the ticket, got %v", tk)
+			}
+
+			// The slice the dialog was handed belongs to the message that
+			// carried it; binding must not write through it.
+			if len(handed) == 1 && len(handed[0].Keys) != 1 {
+				t.Errorf("PrefillTicket edited the caller's bound slice: %v", handed[0].Keys)
+			}
+		})
+	}
+
+	// With no tracker to route to, behaviour is unchanged: still inert.
+	d := NewWorktreeDialog()
+	d.SetSize(120, 40)
+	d.Show(nil, nil, nil, "/repo", "master", nil, nil)
+	d.PrefillTicket("MAGMA-2630", nil)
+	if d.ticketsEnabled() {
+		t.Error("with no provider, a repo tracking nothing must stay inert")
+	}
+}

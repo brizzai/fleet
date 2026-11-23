@@ -331,6 +331,10 @@ func verifyAndStoreLinearKey(ctx context.Context, key string) tea.Cmd {
 		}
 		// Not an error path: the credential is already live. See linearConnectedMsg.
 		persistErr := linear.SetCredential(cred)
+		// Kept, not discarded: it carries the user's teams, which are the
+		// default keys for every repo that names none. Dropping it left a user
+		// who had just connected with nothing until a restart (#373).
+		linear.CacheAccount(ws)
 		return linearConnectedMsg{workspace: ws, via: linear.ConnectedVia(), persistErr: persistErr}
 	}
 }
@@ -355,6 +359,7 @@ func signInToLinear(ctx context.Context) tea.Cmd {
 		}
 		cred.Workspace = ws.Name
 		persistErr := linear.SetCredential(cred)
+		linear.CacheAccount(ws) // see verifyAndStoreLinearKey
 		return linearConnectedMsg{workspace: ws, via: linear.ConnectedVia(), persistErr: persistErr}
 	}
 }
@@ -387,14 +392,35 @@ func (d *ConnectLinearDialog) View() string {
 			b.WriteString(DimStyle.Render("To make it stick, set " + linear.APIKeyEnvVar + " in your shell instead."))
 			b.WriteString("\n")
 		}
-		if len(d.workspace.Keys) > 0 {
+		switch {
+		case len(d.workspace.Mine) > 0:
+			// The user's teams are on everywhere with nothing more to do, so
+			// that is what the screen says — naming them, because "tickets are
+			// on" without saying for which teams leaves the user to find out.
+			// The override lines are the exception, kept short and dim.
 			b.WriteString("\n")
-			b.WriteString(DimStyle.Render("Teams: " + strings.Join(d.workspace.Keys, ", ")))
+			b.WriteString("Tickets are on in every repo for your teams: ")
+			b.WriteString(PROpenStyle.Render(strings.Join(firstN(d.workspace.Mine, 8), ", ")))
 			b.WriteString("\n\n")
-			// The per-repo step is the part people miss, so it is spelled out
-			// rather than left to documentation: a connected fleet still does
-			// nothing in a repo until that repo names a team.
-			b.WriteString(DimStyle.Render("Turn a repo on by naming its team in .fleet.local.json:"))
+			b.WriteString(DimStyle.Render("Per repo, in .fleet.local.json:"))
+			b.WriteString("\n")
+			// Padded to a shared column: the team key's length varies, and
+			// a ragged gap reads as two unrelated lines.
+			only := fmt.Sprintf(`{"linear": {"team": %q}}`, d.workspace.Mine[0])
+			quiet := `{"linear": {"enabled": false}}`
+			w := max(len(only), len(quiet))
+			b.WriteString(DimStyle.Render(fmt.Sprintf("  %-*s  only this team", w, only)))
+			b.WriteString("\n")
+			b.WriteString(DimStyle.Render(fmt.Sprintf("  %-*s  keep this repo quiet", w, quiet)))
+			b.WriteString("\n")
+		case len(d.workspace.Keys) > 0:
+			// A user on no team (or a key scoped away from team membership)
+			// has no default to fall back on, so the per-repo step is still
+			// the only way on — spelled out, since it is the part people miss.
+			b.WriteString("\n")
+			b.WriteString(DimStyle.Render("Teams: " + strings.Join(firstN(d.workspace.Keys, 12), ", ")))
+			b.WriteString("\n\n")
+			b.WriteString(DimStyle.Render("You're not on any team, so name one per repo in .fleet.local.json:"))
 			b.WriteString("\n")
 			b.WriteString(DimStyle.Render(fmt.Sprintf(`  {"linear": {"team": %q}}`, d.workspace.Keys[0])))
 			b.WriteString("\n")

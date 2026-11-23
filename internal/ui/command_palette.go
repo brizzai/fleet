@@ -76,6 +76,11 @@ type PaletteItem struct {
 	// carried as a bool rather than the whole StateType because "is it started"
 	// is the only question anything here asks of it.
 	TicketStarted bool
+
+	// TicketProvider is the Kind of the tracker a ticket row came from, so a
+	// pick can be routed back to it without asking the repo which tracker owns
+	// the key — the repo may own none of them (#373).
+	TicketProvider string
 }
 
 // PaletteTab restricts which kinds of items show in the palette.

@@ -543,6 +543,10 @@ type Home struct {
 	// worktree dialog is being opened for it. Consumed when that dialog shows,
 	// so it can never leak into the next unrelated `w`.
 	pendingTicketID string
+	// pendingTicketProvider is the Kind of the tracker pendingTicketID came
+	// from, consumed with it. It is what lets the dialog resolve a ticket the
+	// repo's own keys don't cover — picking a ticket IS choosing to work on it.
+	pendingTicketProvider string
 	// accountWorkerOnce guards the quota poller — see startAccountWorker.
 	accountWorkerOnce sync.Once
 	// accountLoginCancel stops the in-flight login watcher, if any. Written from
@@ -859,15 +863,9 @@ func warmTickets() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		ticketing.Warm(ctx)
-		for _, p := range ticketing.All() {
-			if !p.Available() {
-				continue
-			}
-			if _, err := p.FetchAccount(ctx); err != nil {
-				debuglog.Logger.Debug("ticket: could not read account at startup",
-					"provider", p.Kind(), "error", err)
-			}
+		for kind, err := range ticketing.WarmAccounts(ctx) {
+			debuglog.Logger.Debug("ticket: could not read account at startup",
+				"provider", kind, "error", err)
 		}
 		return nil
 	}
@@ -1776,8 +1774,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if id := h.pendingTicketID; id != "" {
 			// Consumed here and nowhere else, so a ticket picked once cannot
 			// leak into the next unrelated `w`.
-			h.pendingTicketID = ""
-			if cmd := h.worktreeDialog.PrefillTicket(id); cmd != nil {
+			kind := h.pendingTicketProvider
+			h.pendingTicketID, h.pendingTicketProvider = "", ""
+			// Resolved here rather than in the dialog, which acts only on what
+			// it was handed. Nil when the provider is unknown or has since
+			// disconnected; the dialog then falls back to the repo's own keys.
+			var p ticket.Provider
+			if found, ok := ticketing.ByKind(kind); ok && found.Available() {
+				p = found
+			}
+			if cmd := h.worktreeDialog.PrefillTicket(id, p); cmd != nil {
 				return h, cmd
 			}
 		}

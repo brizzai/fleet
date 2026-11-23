@@ -38,10 +38,11 @@ type Provider interface {
 	// Keys returns the tracker keys this repo tracks — Linear team keys, Jira
 	// project keys — or nil if it tracks none.
 	//
-	// Nil is the answer that keeps an unrelated repo silent for a connected
-	// user, so there is deliberately NO fallback to "everything in the
-	// workspace": that would put ticket suggestions under the branch field of
-	// every repo on the machine.
+	// A provider may fall back to the USER's own keys for a repo that names
+	// none (Linear does: the teams you are a member of), but never to
+	// "everything in the workspace": that would put strangers' tickets under
+	// the branch field of every repo on the machine. Jira has no membership to
+	// read, so it stays per-repo.
 	//
 	// Free and non-blocking — two small file reads, no network — because the
 	// dialog paths call it while a frame is being built.

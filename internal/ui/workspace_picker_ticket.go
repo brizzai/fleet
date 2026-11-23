@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -358,14 +359,52 @@ func (d *WorktreeDialog) workspaceMismatchNote(owner ticket.Provider) (string, b
 // It goes through the same debounce and generation guard as typing, so the
 // resolved title arrives by exactly the path a typed identifier would — there
 // is no second way for a ticket to become a branch name.
-func (d *WorktreeDialog) PrefillTicket(identifier string) tea.Cmd {
+//
+// from is the tracker the ticket came from, or nil. When the repo's keys don't
+// cover the identifier's key, the dialog binds that one key to from for the
+// rest of this open — otherwise the lookup is gated off and the identifier is
+// created as a literal branch name with no ticket behind it, which is what
+// #373 reported: the tickets tab spans every repo, the repo gate does not, and
+// the hand-off between them fell through it. The repo gate decides whether
+// ticket surfaces appear at all; it is not a rule about which issue you may
+// work on, and you just picked this one.
+func (d *WorktreeDialog) PrefillTicket(identifier string, from ticket.Provider) tea.Cmd {
 	if identifier == "" || !d.visible {
 		return nil
 	}
+	d.bindTicketKey(identifier, from)
 	d.newBranchInput.SetValue(identifier)
 	d.newBranchInput.SetCursor(len([]rune(identifier)))
 	d.setSelection(focusNewBranch, ticketOnInput)
 	return d.onFieldChanged(identifier)
+}
+
+// bindTicketKey makes the identifier's key resolvable through p, if the
+// dialog's keys don't already cover it.
+func (d *WorktreeDialog) bindTicketKey(identifier string, p ticket.Provider) {
+	if p == nil {
+		return
+	}
+	key, _, ok := strings.Cut(strings.ToUpper(strings.TrimSpace(identifier)), "-")
+	if !ok || key == "" {
+		return
+	}
+	for _, k := range d.ticketKeys {
+		if strings.EqualFold(k, key) {
+			return
+		}
+	}
+	// Copies throughout: the slice Show was handed belongs to the message
+	// that carried it, and writing through it would edit the caller's data.
+	d.bound = slices.Clone(d.bound)
+	d.ticketKeys = append(d.ticketKeys, key)
+	for i := range d.bound {
+		if d.bound[i].Provider.Kind() == p.Kind() {
+			d.bound[i].Keys = append(slices.Clone(d.bound[i].Keys), key)
+			return
+		}
+	}
+	d.bound = append(d.bound, ticketing.Bound{Provider: p, Keys: []string{key}})
 }
 
 // applyResolvedBranchName rewrites the field to the ticket's branch name, but
