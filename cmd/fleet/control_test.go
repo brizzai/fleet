@@ -303,11 +303,11 @@ func TestFormatting(t *testing.T) {
 		t.Errorf("hexID = %q", got)
 	}
 	for pr, want := range map[*github.PR]string{
-		{Number: 1, State: "MERGED"}:                           "#1(merged)",
-		{Number: 2, State: "OPEN", CIStatus: "FAILURE"}:        "#2(ci-failed)",
-		{Number: 3, State: "OPEN", ReviewDecision: "APPROVED"}: "#3(approved)",
-		{Number: 4, State: "OPEN", IsDraft: true}:              "#4(draft)",
-		{Number: 5, State: "OPEN", UnresolvedThreads: 2}:       "#5(2-threads)",
+		{Number: 1, State: "MERGED"}:                                                "#1(merged)",
+		{Number: 2, State: "OPEN", CIStatus: "FAILURE"}:                             "#2(ci-failed)",
+		{Number: 3, State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS"}: "#3(approved)",
+		{Number: 4, State: "OPEN", IsDraft: true}:                                   "#4(draft)",
+		{Number: 5, State: "OPEN", UnresolvedThreads: 2}:                            "#5(2-threads)",
 	} {
 		if got := prShort(pr); got != want {
 			t.Errorf("prShort = %q, want %q", got, want)
@@ -368,5 +368,11 @@ func TestPRStateNamesAMergeBlock(t *testing.T) {
 		if got := prState(pr); got != want {
 			t.Errorf("prState with merge state %q = %q, want %q", state, got, want)
 		}
+	}
+	// Approved but with no CI at all: the badge isn't green, so the CLI must
+	// not say "approved" either.
+	noCI := &github.PR{Number: 1, State: "OPEN", ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN"}
+	if got := prState(noCI); got == "approved" {
+		t.Errorf("prState for an approved PR with no CI = %q, want anything but approved (badge isn't green)", got)
 	}
 }

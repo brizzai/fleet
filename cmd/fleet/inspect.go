@@ -236,12 +236,14 @@ func prState(pr *github.PR) string {
 		return fmt.Sprintf("%d-threads", pr.UnresolvedThreads)
 	case pr.CIStatus == "PENDING":
 		return "ci-running"
+	// "approved" is what a supervising agent acts on, so it means exactly what
+	// the green badge means — never just the review decision.
+	case pr.ReadyToMerge():
+		return "approved"
 	case pr.ReviewDecision == "APPROVED" && pr.MergeStateStatus == "BEHIND":
 		return "behind"
 	case pr.ReviewDecision == "APPROVED" && pr.MergeStateStatus == "BLOCKED":
 		return "blocked"
-	case pr.ReviewDecision == "APPROVED":
-		return "approved"
 	default:
 		return "open"
 	}

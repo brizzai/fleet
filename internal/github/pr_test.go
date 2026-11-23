@@ -429,9 +429,35 @@ func TestReadyToMergeRespectsMergeState(t *testing.T) {
 		{"BLOCKED", false},
 		{"BEHIND", false},
 	} {
-		pr := &PR{ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: tt.state}
+		pr := &PR{State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: tt.state}
 		if got := pr.ReadyToMerge(); got != tt.want {
 			t.Errorf("ReadyToMerge with %q = %v, want %v", tt.state, got, tt.want)
+		}
+	}
+}
+
+// ReadyToMerge stands on its own: an otherwise green PR that is a draft, has
+// conflicts, or is no longer open is never ready, whatever the caller checked
+// first.
+func TestReadyToMergeIsSelfContained(t *testing.T) {
+	ready := func() *PR {
+		return &PR{State: "OPEN", ReviewDecision: "APPROVED", CIStatus: "SUCCESS", MergeStateStatus: "CLEAN"}
+	}
+	if !ready().ReadyToMerge() {
+		t.Fatal("baseline PR should be ready")
+	}
+	for name, mutate := range map[string]func(*PR){
+		"draft":        func(p *PR) { p.IsDraft = true },
+		"conflicts":    func(p *PR) { p.HasConflicts = true },
+		"merged":       func(p *PR) { p.State = "MERGED" },
+		"closed":       func(p *PR) { p.State = "CLOSED" },
+		"no CI":        func(p *PR) { p.CIStatus = "" },
+		"not approved": func(p *PR) { p.ReviewDecision = "REVIEW_REQUIRED" },
+	} {
+		p := ready()
+		mutate(p)
+		if p.ReadyToMerge() {
+			t.Errorf("%s: ReadyToMerge = true, want false", name)
 		}
 	}
 }

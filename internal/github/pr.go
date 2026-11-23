@@ -99,12 +99,16 @@ func (pr *PR) MergeBlocked() bool {
 	return pr.MergeStateStatus == "BLOCKED" || pr.MergeStateStatus == "BEHIND"
 }
 
-// ReadyToMerge is the one definition of the green badge: approved, CI passed,
-// and nothing GitHub knows about holding the merge. The sidebar badge, its
-// colour, the P jump, the preview line and `fleet status` all ask this, so
-// none of them can call a PR ready that GitHub won't merge.
+// ReadyToMerge is the one definition of the green badge: an open, non-draft
+// PR with no conflicts, approved, CI passed, and nothing GitHub knows about
+// holding the merge. The sidebar badge, its colour, the P jump, the preview
+// line and `fleet status` all ask this, so none of them can call a PR ready
+// that GitHub won't merge. It is self-contained on purpose: today's callers
+// rule out drafts and conflicts before asking, but a caller that trusts this
+// alone must not be told a conflicted draft is ready.
 func (pr *PR) ReadyToMerge() bool {
-	return pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" && !pr.MergeBlocked()
+	return pr.State == "OPEN" && !pr.IsDraft && !pr.HasConflicts &&
+		pr.ReviewDecision == "APPROVED" && pr.CIStatus == "SUCCESS" && !pr.MergeBlocked()
 }
 
 // IsGHAvailable checks if the gh CLI is installed and accessible.
