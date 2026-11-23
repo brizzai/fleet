@@ -1,4 +1,4 @@
 ---
 type: fixed
 ---
-**Questions stop reading as finished.** A session waiting on a question now shows waiting even after you queue a message while the question is open. Before, it flipped to finished after 10 seconds and dropped out of the `Space` rotation.
+**Questions stop reading as finished.** A session waiting on a question now shows waiting as soon as Claude asks it (Claude Code 2.1.327+), even before the question renders or after you queue a message while it's open, instead of reading finished and dropping out of the `Space` rotation.

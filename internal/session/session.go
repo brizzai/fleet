@@ -204,6 +204,9 @@ type Session struct {
 	tmuxSession  *tmux.Session
 	paneCapturer PaneCapturer // optional override for testing; if nil, uses tmuxSession
 	convActiveFn func() bool  // optional override for testing; if nil, reads the real transcript
+	// claudeWaitingFn overrides claudeWaitingFor in tests; nil reads Claude's
+	// real per-process status file.
+	claudeWaitingFn func() string
 	// Copilot test seams; nil reads tmux's pane-command cache / the real events.jsonl.
 	paneCmdFn        func() string
 	copilotAbortedFn func() bool
@@ -1648,6 +1651,13 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus, hookReason 
 		}
 	}
 
+	// Claude's own word that it is blocked on the user (see claude_proc_status.go).
+	// Read before the lock like the transcript: one small file, keyed by pid.
+	claudeWaiting := ""
+	if hookStatus != "dead" {
+		claudeWaiting = s.claudeWaitingFor()
+	}
+
 	hookSaysDead := false
 	func() {
 		s.mu.Lock()
@@ -1665,6 +1675,21 @@ func (s *Session) updateStatusFromHook(oldStatus Status, hookStatus, hookReason 
 			s.lastContentChangeAt = time.Time{}
 			s.Status = StatusError
 			hookSaysDead = true
+		}
+
+		// Applied last, over whatever the hook and pane concluded: when Claude
+		// says it is waiting on the user, it is. This covers the gaps where
+		// fleet's own signals disagree with the screen — a waiting hook
+		// overridden to finished before the prompt rendered, or a queued
+		// message's running hook masking an open question. It only ever adds
+		// waiting; the latches the apply* functions set stay in place, so once
+		// Claude stops saying so the pane takes over exactly as before.
+		if claudeWaiting != "" && !hookSaysDead && s.Status != StatusWaiting {
+			s.Status = StatusWaiting
+			s.Acknowledged = false
+			if oldStatus != StatusWaiting {
+				log.Info("claude's status file says waiting, overriding", "waitingFor", claudeWaiting, "hookStatus", hookStatus, "paneStatus", paneStatus)
+			}
 		}
 
 		if s.Status != oldStatus {

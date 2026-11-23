@@ -60,6 +60,9 @@ type ScenarioEvent struct {
 	ActivityAge time.Duration // simulate tmux window_activity this long ago (0 = no activity data)
 	HookAge     time.Duration // backdate the hook's UpdatedAt by this much (0 = now); simulates a stale hook
 	ConvActive  *bool         // inject conversationActivePastHook result; nil = leave unchanged
+	// ClaudeWaiting injects what Claude's own status file reports (a waitingFor
+	// reason, or "" for not waiting); nil = leave unchanged.
+	ClaudeWaiting *string
 	// Sleep blocks for real before the event is applied. The engine replays a
 	// timeline in an instant, which is fine for everything keyed off an injected
 	// timestamp but not for a guard that reads the wall clock directly — see
@@ -98,13 +101,15 @@ func runScenario(t *testing.T, sc Scenario) {
 	// Transcript tiebreaker stub: events flip this via ConvActive; the closure is
 	// read on the single test goroutine, so no synchronization is needed.
 	convActive := false
+	claudeWaiting := ""
 	s := &Session{
-		ID:           "test-scenario",
-		Title:        sc.Name,
-		Status:       StatusStarting,
-		Agent:        sc.Agent,
-		paneCapturer: mock,
-		convActiveFn: func() bool { return convActive },
+		ID:              "test-scenario",
+		Title:           sc.Name,
+		Status:          StatusStarting,
+		Agent:           sc.Agent,
+		paneCapturer:    mock,
+		convActiveFn:    func() bool { return convActive },
+		claudeWaitingFn: func() string { return claudeWaiting },
 	}
 
 	// Build sorted timeline.
@@ -171,6 +176,9 @@ func runScenario(t *testing.T, sc Scenario) {
 			// Inject the transcript tiebreaker result.
 			if e.ConvActive != nil {
 				convActive = *e.ConvActive
+			}
+			if e.ClaudeWaiting != nil {
+				claudeWaiting = *e.ClaudeWaiting
 			}
 
 			// Adjust content timing for stability checks.
@@ -1466,6 +1474,57 @@ func TestScenarioQueuedMessageMasksQuestionPrompt(t *testing.T) {
 				{At: 0, Expected: StatusRunning},
 				{At: 11 * time.Second, Expected: StatusWaiting},
 				{At: 20 * time.Second, Expected: StatusRunning},
+			},
+		})
+	})
+}
+
+// TestScenarioClaudeStatusFileConfirmsWaiting covers the half of snapshot
+// 2026-11-19T13-58-18 the pane alone can't fix: the question's PermissionRequest
+// landed while the pane still read as an idle prompt (the question had not
+// rendered), so the waiting hook was overridden to finished — while Claude's own
+// status file already said "waiting", waitingFor "input needed".
+func TestScenarioClaudeStatusFileConfirmsWaiting(t *testing.T) {
+	const idle = "@fixture:pane_finished_idle_prompt.txt"
+	inputNeeded, notWaiting := "input needed", ""
+
+	t.Run("waiting hook on an idle pane stays waiting", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "hook=waiting, pane idle, claude says input needed → waiting",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "waiting", Pane: idle, ClaudeWaiting: &inputNeeded},
+				{At: 10 * time.Second, ClaudeWaiting: &notWaiting}, // Esc: Claude stops waiting
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusWaiting},                 // was finished before
+				{At: 5 * time.Second, Expected: StatusWaiting},   // not overridden on a later tick
+				{At: 10 * time.Second, Expected: StatusFinished}, // the pane takes over again
+			},
+		})
+	})
+
+	t.Run("queued message's running hook doesn't mask it", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "hook=running, pane idle, claude says input needed → waiting at once",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "running", Pane: idle, ClaudeWaiting: &inputNeeded},
+				{At: 3 * time.Second, Pane: "@fixture:pane_running_compacting.txt", ClaudeWaiting: &notWaiting},
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusWaiting}, // no 10s wait for the stale-hook rule
+				{At: 3 * time.Second, Expected: StatusRunning},
+			},
+		})
+	})
+
+	t.Run("a dead hook still wins", func(t *testing.T) {
+		runScenario(t, Scenario{
+			Name: "hook=dead with a leftover waiting status file → error",
+			Events: []ScenarioEvent{
+				{At: 0, Hook: "dead", Pane: idle, ClaudeWaiting: &inputNeeded},
+			},
+			Checks: []ScenarioCheck{
+				{At: 0, Expected: StatusError},
 			},
 		})
 	})
