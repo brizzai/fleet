@@ -145,8 +145,12 @@ type Config struct {
 	ShowDirtyIndicator *bool  `json:"show_dirty_indicator,omitempty"` // "*" dirty-worktree marker
 	ShowSlotBadges     *bool  `json:"show_slot_badges,omitempty"`     // "[N]" hotkey slot badge
 	ShowHeaderCounts   *bool  `json:"show_header_counts,omitempty"`   // session count on origin/checkout headers
-	ChevronStyle       string `json:"chevron_style,omitempty"`        // "triangle" (default ▾▸) or "plusminus" (−+)
-	SidebarDensity     string `json:"sidebar_density,omitempty"`      // "normal" (default) or "compact" (no inter-group gap)
+	// SessionLiveStats shows cost, idle time and account quota for the selected
+	// session in the preview footer (default: true). Config-only on purpose: it is
+	// a quiet detail line, not a sidebar column.
+	SessionLiveStats *bool  `json:"session_live_stats,omitempty"`
+	ChevronStyle     string `json:"chevron_style,omitempty"`   // "triangle" (default ▾▸) or "plusminus" (−+)
+	SidebarDensity   string `json:"sidebar_density,omitempty"` // "normal" (default) or "compact" (no inter-group gap)
 
 	// AnalyticsConsentSeen is true once the user has been shown the
 	// first-launch consent prompt and answered it (either way). When false,
@@ -655,6 +659,10 @@ func (c *Config) IsShowDirtyIndicator() bool { return boolDefaultTrue(c.ShowDirt
 
 // IsShowSlotBadges reports whether "[N]" hotkey slot badges are shown (default: true).
 func (c *Config) IsShowSlotBadges() bool { return boolDefaultTrue(c.ShowSlotBadges) }
+
+// IsSessionLiveStats reports whether the preview footer shows the selected
+// session's cost, idle time and account quota (default: true).
+func (c *Config) IsSessionLiveStats() bool { return boolDefaultTrue(c.SessionLiveStats) }
 
 // IsShowHeaderCounts reports whether session counts are shown on headers (default: true).
 func (c *Config) IsShowHeaderCounts() bool { return boolDefaultTrue(c.ShowHeaderCounts) }

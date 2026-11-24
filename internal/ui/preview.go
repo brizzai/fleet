@@ -201,7 +201,7 @@ func previewPRSummary(pr *github.PR) string {
 // information — you want it for the one session you are looking at, not on
 // forty rows at once — and here it costs no title width. Callers pass "" when
 // no accounts are configured, so a single-subscription fleet is unchanged.
-func BuildPreviewFooter(s *session.Session, account string, maxWidth int) string {
+func BuildPreviewFooter(s *session.Session, account string, live []string, maxWidth int) string {
 	if s == nil {
 		return ""
 	}
@@ -223,7 +223,20 @@ func BuildPreviewFooter(s *session.Session, account string, maxWidth int) string
 	if account != "" {
 		parts = append(parts, DimStyle.Render(account))
 	}
-	return strings.Join(parts, DimStyle.Render(" · "))
+	// Live chips (cost, idle, quota) go last and are the first to go: they are
+	// glanceable extras, so a narrow panel keeps path, clock and account and
+	// drops them from the end rather than truncating the path to make room.
+	sep := DimStyle.Render(" · ")
+	for _, c := range live {
+		parts = append(parts, DimStyle.Render(c))
+	}
+	out := strings.Join(parts, sep)
+	for len(live) > 0 && maxWidth > 0 && lipgloss.Width(out) > maxWidth {
+		parts = parts[:len(parts)-1]
+		live = live[:len(live)-1]
+		out = strings.Join(parts, sep)
+	}
+	return out
 }
 
 // shortenPath replaces the user's home dir with "~". Falls back to the

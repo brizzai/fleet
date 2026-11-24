@@ -316,10 +316,14 @@ type Home struct {
 	// attach callback tee into it off the Update goroutine — and is nil when
 	// stats.db could not be opened (every recorder method is nil-safe).
 	// statsScanning / statsReportGen / statsRecap* are Update-goroutine only.
-	statsStore       *stats.Store
-	statsView        *StatsView
-	recapView        *RecapView
-	statsScanning    bool
+	statsStore    *stats.Store
+	statsView     *StatsView
+	recapView     *RecapView
+	statsScanning bool
+	// liveCost is the selected session's running cost for the preview footer
+	// (see livestats.go); liveCostBusy keeps one read in flight at a time.
+	liveCost         map[string]liveCostEntry
+	liveCostBusy     bool
 	statsReportGen   map[stats.Range]int
 	statsRecap       stats.Recap   // last computed recap for the last full week
 	statsRecapUnseen bool          // the "Your week" badge is showing
@@ -1121,6 +1125,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return h.handleTick()
+
+	case liveCostMsg:
+		h.handleLiveCost(msg)
+		return h, nil
 
 	case hookChangedMsg:
 		// HookWatcher detected a status file change. Do immediate hook-only sync,
@@ -2838,7 +2846,7 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactHeight(previewInner, previewHeight-2)
 		previewInner = ensureExactWidth(previewInner, innerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, h.width-6)
-		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.width-6)
+		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.previewLiveStats(s), h.width-6)
 		// Stacked: preview is the bottom-most panel, so it carries the chips.
 		b.WriteString(RenderBorderedPanelInsets(previewInner, previewTitle, "", shellChips, previewFooter, h.width, previewHeight, h.focusMode))
 	default: // dual
@@ -2900,7 +2908,7 @@ func (h *Home) renderBody() string {
 		previewInner = ensureExactHeight(previewInner, previewInnerH)
 		previewInner = ensureExactWidth(previewInner, previewInnerW)
 		previewTitle := BuildPreviewTitle(s, previewRepoInfo, h.focusMode, previewWidth-6)
-		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), previewWidth-6)
+		previewFooter := BuildPreviewFooter(s, h.previewAccountLabel(s), h.previewLiveStats(s), previewWidth-6)
 		// Dual: the drawer opens from the bottom of this right column, so its
 		// collapsed chips ride the preview's bottom-left border (shellChips is
 		// "" while the drawer is open, since the drawer then shows the shells).
@@ -7124,7 +7132,7 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	// Preview is now handled by the faster previewTick, no need to fetch here.
 	// Re-arm the badge shimmer if it should be running but isn't (e.g. it
 	// stopped while a modal was open, and the modal has since closed).
-	return h, tea.Batch(h.tick(), h.ensureWhatsNewShimmer(), h.maybeRecapNewWeek(time.Now()))
+	return h, tea.Batch(h.tick(), h.ensureWhatsNewShimmer(), h.maybeRecapNewWeek(time.Now()), h.maybeRefreshLiveCost(time.Now()))
 }
 
 // bootstrapRepoSet returns the union of repo roots derived from sessions and

@@ -14,6 +14,12 @@ type price struct {
 // "claude-opus-4" (the 4.0/4.1 rate) never shadows "claude-opus-4-8".
 // Source: Anthropic's published pricing as of 2026-09.
 var prices = map[string]price{
+	// Cross-checked against ccusage (LiteLLM prices) on 448 real Sonnet 5.5 and
+	// 4 Fable 5.2 model-session rows: tokens matched exactly and these rates
+	// reproduce its dollars to the cent. Without them both fell through to the
+	// older family entry and read ~50-60% too high (cache reads dominate).
+	"claude-sonnet-5-5": {2, 10, 0.10},
+	"claude-fable-5-2":  {8, 40, 0.20},
 	"claude-fable-5-1":  {10, 50, 0.25},
 	"claude-mythos-5-1": {10, 50, 0.25},
 	"claude-fable-5":    {10, 50, 1.00},
