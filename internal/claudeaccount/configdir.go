@@ -58,14 +58,16 @@ func NewConfigDirPath() (string, error) {
 }
 
 // sharedDirs are symlinked from the user's real ~/.claude into every account
-// dir, so switching account never means losing your own setup.
+// dir, so switching account never means losing your own setup. Files work the
+// same way: CLAUDE.md is the user's global instructions, and without it every
+// session on an added account would run without them, with nothing to say so.
 //
 // projects/ is the load-bearing one: it holds the conversation transcripts that
 // `claude --resume` replays and that fleet reads for auto-naming. Sharing it is
 // also what lets a session move between accounts and still resume the same
 // conversation. Concurrent writers are not a new risk — fleet has always run
 // many sessions against this one directory.
-var sharedDirs = []string{"projects", "skills", "plugins", "agents", "commands", "ide"}
+var sharedDirs = []string{"projects", "skills", "plugins", "agents", "commands", "ide", "CLAUDE.md"}
 
 // provisionMu serializes Provision. Package-level rather than per-dir: it is
 // held for a handful of syscalls on every session launch, and a map of mutexes
@@ -110,12 +112,12 @@ func Provision(dir string) error {
 			continue // the user doesn't have this one; nothing to share
 		}
 		dst := filepath.Join(dir, name)
-		// Replace only a symlink we own. A real directory here means something
-		// wrote into the account dir directly, and deleting it would destroy
-		// data we didn't create.
+		// Replace only a symlink we own. A real directory or file here means
+		// something wrote into the account dir directly, and deleting it would
+		// destroy data we didn't create.
 		if fi, err := os.Lstat(dst); err == nil {
 			if fi.Mode()&os.ModeSymlink == 0 {
-				debuglog.Logger.Warn("account dir holds a real directory where a shared link belongs; leaving it",
+				debuglog.Logger.Warn("account dir holds a real entry where a shared link belongs; leaving it",
 					"dir", dir, "entry", name)
 				continue
 			}
