@@ -817,9 +817,10 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 		return h, nil
 	}
 
-	// Upsert matches on organization, so logging the same subscription in twice
-	// updates the existing account instead of creating a second row for it —
-	// and can therefore store under a key that is not msg.account.Email.
+	// Upsert matches on organization (unless the two logins are different
+	// members of it), so logging the same subscription in twice updates the
+	// existing account instead of creating a second row for it — and can
+	// therefore store under a key that is not msg.account.Email.
 	// Everything below indexes by account, so it uses the key Upsert wrote.
 	key := h.accounts.Upsert(msg.account)
 
