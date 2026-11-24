@@ -483,6 +483,11 @@ type ConfirmDialog struct {
 	requireConfirm bool
 	confirmChecked bool
 	confirmLabel   string
+
+	// yesOnly makes Enter inert so only an explicit `y` confirms — the default
+	// answer is "no". Used when closing something that is still working: a
+	// reflexive Enter must not stop it. Reset on every Show*.
+	yesOnly bool
 }
 
 // NewConfirmDialog creates a new confirmation dialog.
@@ -524,7 +529,12 @@ func (d *ConfirmDialog) resetCheckbox() {
 	d.requireConfirm = false
 	d.confirmChecked = false
 	d.confirmLabel = ""
+	d.yesOnly = false
 }
+
+// RequireYes makes Enter inert so only `y` confirms (default is "no"). Chain
+// it after a Show* call, like RequireCheckbox.
+func (d *ConfirmDialog) RequireYes() { d.yesOnly = true }
 
 // RequireCheckbox gates this prompt behind an explicit checkbox the user must
 // tick (space) before y/Enter acts. Chain it after a Show* call, like StartScan.
@@ -583,6 +593,10 @@ func (d *ConfirmDialog) Update(msg tea.Msg) (*ConfirmDialog, tea.Cmd) {
 			}
 			return d, nil
 		case "y", "enter":
+			if keyMsg.String() == "enter" && d.yesOnly {
+				d.Hide() // default is "no": Enter declines, only an explicit y confirms
+				return d, nil
+			}
 			if d.confirmLocked() {
 				return d, nil // gated: tick the checkbox (space) first, or wait for the scan
 			}
@@ -677,6 +691,10 @@ func (d *ConfirmDialog) View() string {
 	if d.confirmLocked() {
 		actionBg, actionFg = ColorBorder, ColorTextDim
 	}
+	cancelLabel := "n Cancel"
+	if d.yesOnly {
+		cancelLabel = "n / Enter Cancel" // Enter is the default answer here: it declines
+	}
 	actionBtn := lipgloss.NewStyle().
 		Background(actionBg).
 		Foreground(actionFg).
@@ -688,7 +706,7 @@ func (d *ConfirmDialog) View() string {
 		Background(ColorBorder).
 		Foreground(ColorText).
 		Padding(0, 1).
-		Render("n Cancel")
+		Render(cancelLabel)
 	b.WriteString(actionBtn + "  " + cancelBtn)
 
 	boxStyle := lipgloss.NewStyle().

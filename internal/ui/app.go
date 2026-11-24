@@ -3443,6 +3443,8 @@ func (h *Home) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return h, h.deleteAtCursor()
 	case "u":
 		return h.undoDelete()
+	case "U":
+		return h.reopenLastClosed()
 	case "r":
 		return h, h.confirmRestartSelected()
 	case "R":
@@ -4747,9 +4749,18 @@ func (h *Home) confirmDeleteSelected() tea.Cmd {
 		details = append(details, "Worktree kept — press d on its header to remove it")
 	}
 
+	// A session that is mid-turn or waiting on a prompt loses that work when
+	// closed (the conversation survives: U reopens it). Default answer: no.
+	working := closeNeedsYes(s.GetStatus())
+	if working {
+		details = append([]string{"Still working — closing stops it. Reopen with U to resume the conversation"}, details...)
+	}
 	h.confirmDialog.ShowDanger("Delete Session?", s.Title, details, func() tea.Msg {
 		return sessionDeleteMsg{id: id}
 	})
+	if working {
+		h.confirmDialog.RequireYes()
+	}
 	return nil
 }
 
@@ -6741,6 +6752,11 @@ func (h *Home) deferDelete(msg sessionDeleteMsg) (tea.Model, tea.Cmd) {
 	if err := h.storage.DeleteSession(msg.id); err != nil {
 		debuglog.Logger.Error("failed to delete session from storage", "id", msg.id, "err", err)
 	}
+	// Remember it for "Reopen last closed session" (U). Forgotten again if the
+	// delete is undone inside the 5s window.
+	if err := h.storage.RecordClosed(row, time.Now()); err != nil {
+		debuglog.Logger.Warn("could not record closed session", "id", msg.id, "err", err)
+	}
 
 	// Handle repo unpin if requested.
 	if msg.unpinRepo {
@@ -6799,6 +6815,9 @@ func (h *Home) undoDelete() (tea.Model, tea.Cmd) {
 	if err := h.storage.SaveSession(pd.Row); err != nil {
 		h.setError("undo_delete_failed", fmt.Errorf("undo failed: %w", err))
 		return h, nil
+	}
+	if err := h.storage.DeleteClosed(pd.Session.ID); err != nil {
+		debuglog.Logger.Warn("could not forget closed session after undo", "id", pd.Session.ID, "err", err)
 	}
 
 	// Re-pin repo if it was unpinned.
@@ -9679,6 +9698,7 @@ func (h *Home) buildPaletteItems() []PaletteItem {
 		{Kind: PaletteKindCommand, ID: "fork", Name: "Fork Session", Shortcut: "f"},
 		{Kind: PaletteKindCommand, ID: "fork_worktree", Name: "Fork to Worktree", Shortcut: "F"},
 		{Kind: PaletteKindCommand, ID: "delete", Name: "Delete (session / repo / worktree)", Shortcut: "d"},
+		{Kind: PaletteKindCommand, ID: "reopen_closed", Name: "Reopen Last Closed Session", Shortcut: "U"},
 		{Kind: PaletteKindCommand, ID: "restart", Name: "Restart Session", Shortcut: "r"},
 		{Kind: PaletteKindCommand, ID: "rename", Name: "Rename Session", Shortcut: "R"},
 		{Kind: PaletteKindCommand, ID: "editor", Name: "Open in Editor", Shortcut: "e"},
@@ -9936,6 +9956,8 @@ func (h *Home) dispatchCommand(id string) (tea.Model, tea.Cmd) {
 	case "toggle_group":
 		h.toggleRepoGroup()
 		return h, nil
+	case "reopen_closed":
+		return h.reopenLastClosed()
 	case "resume":
 		// A suspended session's tmux is gone, so "attach" would fail — it has to be
 		// restarted with --resume first.

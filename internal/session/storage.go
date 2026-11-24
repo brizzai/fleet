@@ -315,6 +315,21 @@ func (s *StateDB) migrate() error {
 		return err
 	}
 
+	// Recently closed sessions, so the last few can be reopened (--resume) after
+	// the undo window. Holds a JSON snapshot of the row: it is only ever read
+	// back whole, and the live sessions schema stays untouched.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS closed_sessions (
+			id        TEXT PRIMARY KEY,
+			closed_at INTEGER NOT NULL,
+			row_json  TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		debuglog.Logger.Error("migration failed: create closed_sessions table", "error", err)
+		return err
+	}
+
 	return nil
 }
 
