@@ -258,6 +258,8 @@ func (d *AllowedAccountsDialog) renderRow(i int, r allowedAccountRow, width int)
 	switch {
 	case r.usage.LoggedOut:
 		state = "✕ logged out"
+	case r.usage.Mismatch != "":
+		state = "✕ login mismatch"
 	case r.usage.Known():
 		state = ansi.Strip(renderQuotaCell(r.usage))
 	default:

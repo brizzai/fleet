@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"strings"
 	"time"
 
@@ -84,7 +85,8 @@ func (d *AccountsDialog) beginInput(mode accountsMode, value, placeholder string
 }
 
 // manual reports whether the pinned-account strategy is in force, which is the
-// only mode where the ★ marker and the ⏎ binding mean anything.
+// only mode that reads the default: the ★ shows regardless, but the ⏎ binding
+// only means anything here.
 func (d *AccountsDialog) manual() bool {
 	return claudeaccount.ParseStrategy(d.strategy) == claudeaccount.StrategyManual
 }
@@ -241,6 +243,13 @@ func (d *AccountsDialog) Update(msg tea.Msg) (*AccountsDialog, tea.Cmd) {
 	case "a":
 		d.err = ""
 		return d, func() tea.Msg { return accountLoginMsg{} }
+	case "l":
+		// Log the highlighted account in again, in its own directory: the fix for
+		// "logged out" and "login mismatch" alike.
+		if email := d.selectedEmail(); email != "" {
+			d.err = ""
+			return d, func() tea.Msg { return accountLoginMsg{relogin: email} }
+		}
 	case "r":
 		// Optional now that rows carry a real email, but a two-account setup
 		// reads better as "work" and "personal" than as two addresses.
@@ -369,6 +378,21 @@ func (d *AccountsDialog) View() string {
 		for i, a := range d.accounts {
 			b.WriteString(d.renderRow(i, a, inner) + "\n")
 		}
+		// The ★ shows whenever a default is set, but only the manual strategy
+		// reads it — said once here, so the marker is never mistaken for live.
+		if !d.manual() && d.hasDefault() {
+			b.WriteString("\n" + dimStyle.Render(ansi.Truncate("★ default account (used only in manual)", inner, "…")) + "\n")
+		}
+		// Spelled out under the list: the row only has room for the verdict, and
+		// the real email is what the user needs to decide what to do.
+		if a, ok := d.selected(); ok {
+			if mm := d.usage[a.Email].Mismatch; mm != "" {
+				b.WriteString("\n")
+				for _, l := range wrapTo(inner, "✕ login mismatch: "+a.Name()+" is now logged in as "+mm+". Excluded from new sessions until it is fixed.") {
+					b.WriteString(errStyle.Render(l) + "\n")
+				}
+			}
+		}
 		if d.mode == accountsConfirmRm {
 			b.WriteString("\n" + errStyle.Render(ansi.Truncate("Remove "+d.selectedName()+"?  y / n", inner, "…")) + "\n")
 			// Named because it survives: fleet deletes the account's config
@@ -392,6 +416,11 @@ func (d *AccountsDialog) View() string {
 	b.WriteString("\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", inner)))
 	b.WriteString("\n")
+	if d.mode == accountsList {
+		for _, l := range d.selectedDetails() {
+			b.WriteString(dimStyle.Render(ansi.Truncate(l, inner, "…")) + "\n")
+		}
+	}
 	// The key hints are one idea per line rather than one long wrapped run:
 	// a footer that wraps mid-chord reads as a rendering fault.
 	for i, l := range d.footer(inner) {
@@ -408,6 +437,33 @@ func (d *AccountsDialog) View() string {
 		Width(boxW)
 
 	return lipgloss.Place(d.width, d.height, lipgloss.Center, lipgloss.Center, boxStyle.Render(b.String()))
+}
+
+// selectedDetails says what the highlighted account really is on disk: who its
+// config dir reports being logged in as, and where that dir is. The row shows a
+// name; this is what to check when two rows look alike or one looks wrong.
+func (d *AccountsDialog) selectedDetails() []string {
+	a, ok := d.selected()
+	if !ok {
+		return nil
+	}
+	who := a.Email
+	if mm := d.usage[a.Email].Mismatch; mm != "" {
+		who = mm + " (registered as " + a.Email + ")"
+	}
+	lines := []string{"Logged in as " + who}
+	if a.ConfigDir != "" {
+		lines = append(lines, "Folder "+shortHome(a.ConfigDir))
+	}
+	return lines
+}
+
+// shortHome abbreviates the home directory to ~.
+func shortHome(path string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(path, home+string(os.PathSeparator)) {
+		return "~" + path[len(home):]
+	}
+	return path
 }
 
 // selectedName is the human-facing name of the highlighted row.
@@ -436,6 +492,16 @@ func (d *AccountsDialog) strategyRow(width int) string {
 	return lipgloss.NewStyle().Foreground(ColorAccent).Render(label) +
 		strings.Repeat(" ", pad) +
 		lipgloss.NewStyle().Foreground(ColorTextDim).Render(hint)
+}
+
+// hasDefault reports whether the pinned default names a configured account.
+func (d *AccountsDialog) hasDefault() bool {
+	for _, a := range d.accounts {
+		if a.Email == d.defaultAccount {
+			return true
+		}
+	}
+	return false
 }
 
 // manualNeedsDefault reports whether the manual strategy is on with nothing
@@ -468,7 +534,7 @@ func (d *AccountsDialog) footer(width int) []string {
 	default:
 		// No "p paste": the paste-a-token login path was removed with the
 		// config-dir rewrite, and the hint outlived it — pressing p did nothing.
-		hints = []string{"a add", "r rename", "d remove", "J/K order", "s strategy"}
+		hints = []string{"a add", "l re-login", "r rename", "d remove", "J/K order", "s strategy"}
 		// Enter only means something under the manual strategy, so it is not
 		// advertised when the strategy would ignore it.
 		if d.manual() {
@@ -544,7 +610,7 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 		cursorCol = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("▸")
 	}
 	starCol := "  "
-	if d.manual() && a.Email == d.defaultAccount {
+	if a.Email == d.defaultAccount {
 		starCol = lipgloss.NewStyle().Foreground(ColorAccent).Render("★") + " "
 	}
 	const leadCells = 3
@@ -562,6 +628,8 @@ func (d *AccountsDialog) renderRow(i int, a claudeaccount.Account, width int) st
 		switch {
 		case u.LoggedOut:
 			right = lipgloss.NewStyle().Foreground(ColorRed).Render("✕ logged out")
+		case u.Mismatch != "":
+			right = lipgloss.NewStyle().Foreground(ColorRed).Render("✕ login mismatch")
 		case u.Known():
 			right = renderQuotaCell(u)
 		case u.Err != nil:
@@ -694,15 +762,37 @@ func (h *Home) openAccountsDialog() tea.Cmd {
 // worked but whose token fleet missed. Here the pane is only a place for the
 // user to type; the result is read by asking `claude auth status` whether that
 // directory is logged in.
-func (h *Home) runAccountLogin() tea.Cmd {
-	dir, err := claudeaccount.NewConfigDirPath()
-	if err == nil {
+func (h *Home) runAccountLogin(relogin string) tea.Cmd {
+	var dir string
+	var err error
+	watch := true
+	if relogin != "" {
+		// Logging an existing account in again: its own directory, never a new
+		// one — a fresh dir would orphan the sessions pinned to this account and
+		// leave the broken one behind. Provision is idempotent, so it only
+		// refreshes the shared links.
+		dir = h.accounts.ConfigDirFor(relogin)
+		if dir == "" {
+			return func() tea.Msg {
+				return accountLoggedInMsg{err: fmt.Errorf("that account no longer exists"), relogin: relogin}
+			}
+		}
 		err = claudeaccount.Provision(dir)
+		// The watcher fires on "this dir is logged in", which an account with the
+		// wrong login already is — it would pull the user back before they had
+		// done anything. Only a logged-out dir can be watched; otherwise the user
+		// closes the pane themselves (Ctrl+Q), as the pane border says.
+		watch = h.accountUsageSnapshot()[relogin].LoggedOut
+	} else {
+		dir, err = claudeaccount.NewConfigDirPath()
+		if err == nil {
+			err = claudeaccount.Provision(dir)
+		}
 	}
 	if err != nil {
 		debuglog.Logger.Error("could not prepare an account config dir", "err", err)
 		return func() tea.Msg {
-			return accountLoggedInMsg{err: fmt.Errorf("could not prepare the account directory: %w", err)}
+			return accountLoggedInMsg{err: fmt.Errorf("could not prepare the account directory: %w", err), relogin: relogin}
 		}
 	}
 
@@ -721,19 +811,23 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	if err := ts.Start(cmd, claudeaccount.TmuxEnv(dir)...); err != nil {
 		debuglog.Logger.Error("could not start login session", "tmux", ts.Name, "err", err)
 		return func() tea.Msg {
-			return accountLoggedInMsg{err: fmt.Errorf("could not start `claude`: %w", err)}
+			return accountLoggedInMsg{err: fmt.Errorf("could not start `claude`: %w", err), relogin: relogin}
 		}
 	}
 
 	// Stays on screen for the whole flow, unlike anything printed into the pane.
 	// On the pane border, where it survives whatever the login flow paints.
 	ts.ApplyStatusBar(tmux.StatusBarOpts{
-		DisplayName: "Signing in to another Claude account · Ctrl+Q returns to fleet",
+		DisplayName: loginPaneTitle(relogin),
 	})
 
 	h.isAttaching.Store(true)
 	h.attachStartedAt.Store(time.Now().UnixNano())
-	h.logAction("add claude account", "", true)
+	if relogin != "" {
+		h.logAction("relogin claude account", h.accountLabel(relogin), true)
+	} else {
+		h.logAction("add claude account", "", true)
+	}
 
 	// Watch for the login completing and pull the user back the moment it does,
 	// so finishing the browser flow is the last thing they have to do. Runs
@@ -754,6 +848,9 @@ func (h *Home) runAccountLogin() tea.Cmd {
 	h.setAccountLoginCancel(cancelWatch)
 	go func() {
 		defer cancelWatch()
+		if !watch {
+			return
+		}
 		id, err := claudeaccount.WaitForLogin(ctx, dir, accountLoginPollInterval)
 		if err != nil {
 			debuglog.Logger.Warn("account login watch ended without a login",
@@ -790,11 +887,14 @@ func (h *Home) runAccountLogin() tea.Cmd {
 				// The dir has no login, so it is litter. Removing it keeps an
 				// abandoned add from leaving a directory that Provision would
 				// keep refreshing forever.
-				if rmErr := claudeaccount.RemoveConfigDir(dir); rmErr != nil {
-					debuglog.Logger.Warn("could not remove an abandoned account dir", "dir", dir, "err", rmErr)
+				// Never for a relogin: that dir belongs to a registered account.
+				if relogin == "" {
+					if rmErr := claudeaccount.RemoveConfigDir(dir); rmErr != nil {
+						debuglog.Logger.Warn("could not remove an abandoned account dir", "dir", dir, "err", rmErr)
+					}
 				}
 				debuglog.Logger.Info("login pane closed without a login", "tmux", ts.Name, "err", err, "exec_err", execErr)
-				return accountLoggedInMsg{err: fmt.Errorf("no account was logged in")}
+				return accountLoggedInMsg{err: fmt.Errorf("no account was logged in"), relogin: relogin}
 			}
 		}
 
@@ -805,8 +905,25 @@ func (h *Home) runAccountLogin() tea.Cmd {
 			debuglog.Logger.Info("quota unavailable just after login", "err", uerr)
 		}
 		debuglog.Logger.Info("account logged in", "email", id.Email, "plan", id.Plan, "org", id.OrgUUID)
-		return accountLoggedInMsg{account: claudeaccount.WithUsage(claudeaccount.FromIdentity(id, dir), usage)}
+		return accountLoggedInMsg{account: claudeaccount.WithUsage(claudeaccount.FromIdentity(id, dir), usage), relogin: relogin}
 	})
+}
+
+// loginPaneTitle is the pane-border text of the login session.
+func loginPaneTitle(relogin string) string {
+	if relogin == "" {
+		return "Signing in to another Claude account · Ctrl+Q returns to fleet"
+	}
+	return "Signing in again as " + relogin + " · Ctrl+Q returns to fleet"
+}
+
+// reloginWrongLogin reports the email a relogin actually landed on when it is
+// not the account that was being fixed ("" when it matches, or this was an add).
+func reloginWrongLogin(msg accountLoggedInMsg) string {
+	if msg.relogin == "" || strings.EqualFold(msg.account.Email, msg.relogin) {
+		return ""
+	}
+	return msg.account.Email
 }
 
 // handleAccountLoggedIn stores a newly added account, or reports why it failed.
@@ -814,6 +931,21 @@ func (h *Home) handleAccountLoggedIn(msg accountLoggedInMsg) (tea.Model, tea.Cmd
 	if msg.err != nil {
 		debuglog.Logger.Error("adding an account failed", "err", claudeaccount.Redact(msg.err.Error()))
 		h.accountsDialog.SetError(msg.err)
+		return h, nil
+	}
+
+	// A relogin that landed on somebody else must not overwrite the account's
+	// record: Upsert would rewrite the row (or, in a shared org, match another
+	// member's). The directory stays unusable and says so, which is what the
+	// user needs to see.
+	if wrong := reloginWrongLogin(msg); wrong != "" {
+		h.writeAccountUsage(func(m map[string]claudeaccount.Usage) {
+			u := m[msg.relogin]
+			u.Mismatch, u.LoggedOut = wrong, false
+			m[msg.relogin] = u
+		})
+		h.accountsDialog.Refresh(h.accounts.List(), h.accountUsageSnapshot(), h.cfg.DefaultAccount)
+		h.accountsDialog.SetError(fmt.Errorf("logged in as %s, but this account is %s — log in again as %s", wrong, msg.relogin, msg.relogin))
 		return h, nil
 	}
 
@@ -865,6 +997,7 @@ func (h *Home) maybePollAccountUsage() {
 	}
 
 	now := time.Now()
+	h.resolveAmbientIdentity(now)
 	current := h.accountUsageSnapshot()
 	// Collected as a delta and merged under CompareAndSwap at the end: a whole
 	// replacement map would clobber an account added on the Update goroutine
@@ -873,6 +1006,15 @@ func (h *Home) maybePollAccountUsage() {
 
 	for _, a := range accounts {
 		prev, had := current[a.Email]
+		// Identity first, ahead of the quota throttle: it has its own, slower
+		// clock. A changed verdict is recorded even on a cycle where the quota
+		// poll is not due, and the quota poll below keeps whatever it decided.
+		if mm, checked := h.checkAccountIdentity(a, prev.Mismatch, now); checked {
+			if mm != prev.Mismatch {
+				prev.Mismatch = mm
+				updates[a.Email] = prev
+			}
+		}
 		// Paced on AttemptedAt, not FetchedAt: a failing account must back off
 		// at the same slow cadence as a healthy one rather than retrying every
 		// cycle, and FetchedAt no longer advances on failure.
@@ -884,6 +1026,10 @@ func (h *Home) maybePollAccountUsage() {
 		// its owner is actually looking at it.
 		if had && !prev.PollDue(now) {
 			continue
+		}
+		// prev may have just taken a new verdict above; updates is the freshest.
+		if up, ok := updates[a.Email]; ok {
+			prev = up
 		}
 
 		// /api/oauth/usage is the whole mechanism, and it costs nothing.
@@ -920,6 +1066,7 @@ func (h *Home) maybePollAccountUsage() {
 		}
 
 		u.AttemptedAt = now
+		u.Mismatch = prev.Mismatch
 		debuglog.Logger.Info("account usage polled",
 			"account", a.Email,
 			"five_hour_pct", u.FiveHourPct, "five_hour_reset", u.FiveHourReset.Format(time.RFC3339),
@@ -938,6 +1085,84 @@ func (h *Home) maybePollAccountUsage() {
 	if err := claudeaccount.SaveUsageCache(claudeaccount.UsageCachePath(), updates); err != nil {
 		debuglog.Logger.Warn("could not write account usage cache", "err", err)
 	}
+}
+
+// resolveAmbientIdentity learns who the default login is, so a session with no
+// pinned account can be labelled with a real email instead of "your logged-in
+// account". Worker goroutine only: it spawns `claude auth status`.
+//
+// Re-asked on the identity interval rather than once, since the default login
+// can change under a running fleet; a failed ask keeps the old answer.
+func (h *Home) resolveAmbientIdentity(now time.Time) {
+	h.ambientMu.RLock()
+	last := h.ambientCheckedAt
+	h.ambientMu.RUnlock()
+	if !claudeaccount.IdentityCheckDue(last, now) {
+		return
+	}
+	id, err := claudeaccount.IdentifyAmbient(context.Background())
+	h.ambientMu.Lock()
+	defer h.ambientMu.Unlock()
+	h.ambientCheckedAt = now
+	switch {
+	case err == nil:
+		h.ambientEmail = id.Email
+	case errors.Is(err, claudeaccount.ErrNotLoggedIn):
+		h.ambientEmail = ""
+	default:
+		debuglog.Logger.Warn("could not identify the ambient login", "err", claudeaccount.Redact(err.Error()))
+	}
+}
+
+// ambientIdentity returns the default login's email ("" = not resolved yet) and
+// the registered account that is the same mailbox, if any.
+func (h *Home) ambientIdentity() (string, claudeaccount.Account, int, bool) {
+	h.ambientMu.RLock()
+	email := h.ambientEmail
+	h.ambientMu.RUnlock()
+	if email == "" || h.accounts == nil {
+		return email, claudeaccount.Account{}, -1, false
+	}
+	for i, a := range h.accounts.List() {
+		if strings.EqualFold(a.Email, email) {
+			return email, a, i, true
+		}
+	}
+	return email, claudeaccount.Account{}, -1, false
+}
+
+// checkAccountIdentity asks the account's config dir who it is logged in as,
+// when that is due, and returns the resulting mismatch verdict (the real email
+// when it differs from the registered one, else "").
+//
+// checked is false when nothing was asked — not due, or `claude` could not
+// answer — and then the previous verdict stands: fleet failing to run the CLI
+// says nothing about the login. Worker goroutine only (the throttle map is
+// unsynchronised), and never the UI thread: it spawns a process.
+func (h *Home) checkAccountIdentity(a claudeaccount.Account, prev string, now time.Time) (mismatch string, checked bool) {
+	if h.identityCheckedAt == nil {
+		h.identityCheckedAt = map[string]time.Time{}
+	}
+	if !claudeaccount.IdentityCheckDue(h.identityCheckedAt[a.Email], now) {
+		return prev, false
+	}
+	h.identityCheckedAt[a.Email] = now
+	id, err := claudeaccount.Identify(context.Background(), a.ConfigDir)
+	switch {
+	case errors.Is(err, claudeaccount.ErrNotLoggedIn):
+		// LoggedOut owns this state (set by the quota poll); no email to compare.
+		return "", true
+	case err != nil:
+		debuglog.Logger.Warn("account identity check failed",
+			"account", a.Email, "err", claudeaccount.Redact(err.Error()))
+		return prev, false
+	}
+	mm := claudeaccount.LoginMismatch(a.Email, id)
+	if mm != "" && mm != prev {
+		debuglog.Logger.Error("account config dir is logged in as a different email; excluding it from new sessions",
+			"account", a.Email, "logged_in_as", mm)
+	}
+	return mm, true
 }
 
 // persistAccounts saves the store, re-points the token resolver and refreshes
@@ -1018,12 +1243,26 @@ func (h *Home) stopAccountLoginWatch() {
 // it: the key survives on the session row, the subscription behind it does not.
 func (h *Home) accountLabel(email string) string {
 	if email == "" {
-		return "your logged-in account"
+		return h.ambientLabel("your logged-in account")
 	}
 	if a, ok := h.accounts.Get(email); ok {
 		return a.Name()
 	}
-	return "your logged-in account (its account was removed)"
+	return h.ambientLabel("your logged-in account") + " (its account was removed)"
+}
+
+// ambientLabel names the default login: the registered account's own name when
+// that mailbox is registered, "ambient · <email>" when it is only the default
+// login, and fallback while it has not been resolved yet.
+func (h *Home) ambientLabel(fallback string) string {
+	email, a, _, matched := h.ambientIdentity()
+	switch {
+	case matched:
+		return a.Name()
+	case email != "":
+		return "ambient · " + email
+	}
+	return fallback
 }
 
 // agentOf resolves a session's agent, treating the legacy empty value as Claude
@@ -1041,4 +1280,40 @@ func (h *Home) previewAccountLabel(s *session.Session) string {
 		return ""
 	}
 	return h.accountLabel(s.Account)
+}
+
+// accountBadge is the short account name for a session's sidebar row, or "" when
+// there is nothing worth saying (same silence rule as previewAccountLabel), plus
+// the account's store position for its colour (-1 = ambient).
+//
+// A session with no pin, or one pinned to an account since removed, really runs
+// on the ambient login (see accountLabel), so both read "ambient".
+func (h *Home) accountBadge(s *session.Session) (string, int) {
+	if s == nil || h.accounts == nil || h.accounts.Len() < 2 || agentOf(s) != agent.Claude {
+		return "", -1
+	}
+	if s.Account != "" {
+		for i, a := range h.accounts.List() {
+			if a.Email == s.Account {
+				return accountShortLabel(a), i
+			}
+		}
+	}
+	email, a, idx, matched := h.ambientIdentity()
+	switch {
+	case matched:
+		return accountShortLabel(a), idx
+	case email != "":
+		return accountShortLabel(claudeaccount.Account{Email: email}), -1
+	}
+	return "ambient", -1
+}
+
+// stampAccountBadges fills each session row's account badge. Render-time, so a
+// rename, add, remove or move shows on the next frame without rebuilding the
+// tree.
+func (h *Home) stampAccountBadges(items []SidebarItem) {
+	for i := range items {
+		items[i].AccountBadge, items[i].AccountBadgeIdx = h.accountBadge(items[i].Session)
+	}
 }
