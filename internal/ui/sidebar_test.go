@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/brizzai/fleet/internal/agent"
 	"github.com/brizzai/fleet/internal/github"
 	"github.com/brizzai/fleet/internal/session"
@@ -204,5 +206,34 @@ func TestPRBadge_Draft(t *testing.T) {
 	}
 	if got := prBadgeStyle(draftApproved).GetForeground(); got != PRDraftStyle.GetForeground() {
 		t.Errorf("approved-draft badge color = %v, want PRDraftStyle (dim), not green", got)
+	}
+}
+
+// ✎ marks a session with unsent text in its box; a session without one renders
+// exactly as before, and the marker never pushes the row past its width.
+func TestRenderSessionItem_DraftMarker(t *testing.T) {
+	const width = 44
+	long := "a really quite long session title that will certainly need truncating"
+	for _, selected := range []bool{false, true} {
+		plain := session.NewSession(long, "/tmp/w")
+		plain.SetStatus(session.StatusIdle)
+		drafted := session.NewSession(long, "/tmp/w")
+		drafted.SetStatus(session.StatusIdle)
+		drafted.SetInputDraft(true)
+
+		a := renderSessionItem(SidebarItem{Session: plain}, width, selected, 2)
+		b := renderSessionItem(SidebarItem{Session: drafted}, width, selected, 2)
+		if strings.Contains(a, DraftGlyph) {
+			t.Errorf("selected=%v: no draft, yet the row carries %s: %q", selected, DraftGlyph, a)
+		}
+		if !strings.Contains(b, DraftGlyph) {
+			t.Errorf("selected=%v: draft present but the row has no %s: %q", selected, DraftGlyph, b)
+		}
+		if !selected && ansi.StringWidth(b) > width {
+			t.Errorf("draft row is %d cells, over the %d budget: %q", ansi.StringWidth(b), width, b)
+		}
+		if w := ansi.StringWidth(DraftGlyph); w != 1 {
+			t.Errorf("%s is %d cells wide; the alignment budget assumes 1", DraftGlyph, w)
+		}
 	}
 }
