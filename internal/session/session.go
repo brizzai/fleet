@@ -168,6 +168,10 @@ type Session struct {
 	paneFinishedFrames  int
 	paneFinishedFirstAt time.Time
 
+	// inputDraft: the pane's input box holds text the user typed and has not
+	// sent. Refreshed by UpdateStatus from the same pane capture status uses.
+	inputDraft bool
+
 	deathRecorded bool // crash dump already written for the current life of this session; reset by Restart
 	// loadedDead marks a session read from state.db already in StatusError: its
 	// death belongs to an earlier fleet process, which wrote that dump (or had
@@ -1514,6 +1518,7 @@ func (s *Session) UpdateStatus() {
 		return
 	}
 	s.clearLoadedDeadIfPaneOnlyDeath()
+	s.refreshInputDraft()
 
 	// Hook fast path: hooks are authoritative as long as the session is alive.
 	// No time-based expiry — IsAlive/IsPaneDead above handle stale scenarios.

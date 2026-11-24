@@ -693,6 +693,15 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 		slotRaw = fmt.Sprintf(" [%d]", slot)
 	}
 
+	// ✎ marks a session with text typed in its input box and not sent: the one
+	// thing a row can't otherwise tell you, and the reason a "finished" session
+	// may still be waiting on you. Always shown when true (it is rare and
+	// actionable); it rides the title's budget like the slot badge.
+	draftRaw := ""
+	if s.HasInputDraft() {
+		draftRaw = " " + DraftGlyph
+	}
+
 	// Reserve: leading indent + status symbol + selection padding + slot, plus
 	// the agent glyph and its trailing space when it's shown (2 cells).
 	reserve := 13
@@ -712,7 +721,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if !selected {
 		snoozeCost = ansi.StringWidth(snoozeRaw)
 	}
-	maxTitleLen := width - reserve - len(slotRaw) - snoozeCost
+	maxTitleLen := width - reserve - len(slotRaw) - ansi.StringWidth(draftRaw) - snoozeCost
 	if maxTitleLen < 10 {
 		maxTitleLen = 10
 	}
@@ -732,7 +741,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	// glyph used for collapsed headers). Bg fill spans symbol + agent glyph +
 	// title + slot in one continuous render so the row reads as a single pill.
 	if selected {
-		row := " " + symbolRaw + " " + glyphSel + title + slotRaw + " "
+		row := " " + symbolRaw + " " + glyphSel + title + draftRaw + slotRaw + " "
 		rendered := fmt.Sprintf("   %s", selTitle().Render(row))
 		// On the focused row, spell out the affordance. Exactly one note fits
 		// before the row overflows, so these are mutually exclusive: suspended
@@ -764,6 +773,10 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if slotRaw != "" {
 		styledSlot = SlotBadgeDimStyle.Render(slotRaw)
 	}
+	if draftRaw != "" {
+		// Dim like the slot badge: colour stays the status dot's alone.
+		styledSlot = DimStyle.Render(draftRaw) + styledSlot
+	}
 	styledSnooze := ""
 	if snoozeRaw != "" {
 		styledSnooze = DimStyle.Render(snoozeRaw)
@@ -774,6 +787,11 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	}
 	return fmt.Sprintf("    %s %s%s%s", styledSymbol, styledTitle, styledSlot, styledSnooze)
 }
+
+// DraftGlyph marks a session whose input box holds unsent text. U+270E is
+// Dingbats and East-Asian-Neutral (always one cell), in Menlo, and is the same
+// pencil `fleet status` already prints for the same fact.
+const DraftGlyph = "✎"
 
 // Agent glyphs mark which coding agent a session runs — a quiet, dim,
 // monochrome sigil that sits between the status dot and the title. Identity is
