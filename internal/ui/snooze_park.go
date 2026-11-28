@@ -19,11 +19,11 @@ import (
 // a running one is parked when it finishes and a waiting one stays muted and
 // live until someone answers it. Waking (`z`) only ends the mute; the process
 // comes back lazily on Enter, like any suspended row.
-
-// parkSweepInterval throttles the tick-driven park sweep, matching the wake
-// sweep. A session that finishes is parked within this window; a fresh
-// snooze doesn't wait for it (the snoozeSelectedMsg handler parks at once).
-const parkSweepInterval = snoozeSweepInterval
+//
+// A finished session is parked too, and suspending it replaces Finished, so
+// it comes back from a wake as a plain suspended row rather than an unread
+// one. That trade is deliberate: the user set it aside for good, and keeping
+// it running until someone looked at it would hold the memory this is for.
 
 // parkIntent reports whether an "until I wake it" snooze asks for this session
 // to be parked — its own, or one on its checkout or origin group. A group parks
@@ -31,6 +31,10 @@ const parkSweepInterval = snoozeSweepInterval
 // one created or opened since is the user working there on purpose, and
 // re-suspending it every time it went idle would fight them. The group's
 // snooze still mutes it — parking and muting are separate.
+//
+// groupAt is whole seconds (it is stored that way), and so are a reloaded
+// session's timestamps, so "before" is strict: a session created or opened in
+// the same second as the snooze is not known to predate it, and stays running.
 func parkIntent(s *session.Session, originKey, repo string, groups, groupAt map[string]time.Time) bool {
 	if session.IsSnoozeForever(s.SnoozedUntil()) {
 		return true
@@ -40,52 +44,27 @@ func parkIntent(s *session.Session, originKey, repo string, groups, groupAt map[
 			continue
 		}
 		at := groupAt[key]
-		if !s.CreatedAt.After(at) && !s.LastAccessed().After(at) {
+		if s.CreatedAt.Before(at) && s.LastAccessed().Before(at) {
 			return true
 		}
 	}
 	return false
 }
 
-// parkableNow reports whether a session can be suspended without losing anything:
-// at rest, and resumable — with no conversation id the resume would start a
-// fresh agent and the conversation would be gone.
-func parkableNow(s *session.Session) bool {
-	switch s.GetStatus() {
-	case session.StatusIdle, session.StatusFinished:
-	default:
-		return false
-	}
-	return s.GetClaudeSessionID() != "" && !s.Relaunching()
+// wantsPark is parkIntent against this Home's group snoozes.
+func (h *Home) wantsPark(s *session.Session) bool {
+	originOf, _ := h.originResolvers()
+	repo := session.GetRepoRoot(s.ProjectPath)
+	return parkIntent(s, originOf(repo), repo, h.groupSnooze, h.groupSnoozedAt)
 }
 
-// parkCandidates returns the sessions an "until I wake it" snooze should
-// suspend right now. skip holds sessions the user is looking at (attached, or
-// focused in the split), which are never pulled out from under them.
-func parkCandidates(sessions []*session.Session, originOf func(string) string, groups, groupAt map[string]time.Time, skip map[string]bool) []*session.Session {
-	var out []*session.Session
-	for _, s := range sessions {
-		if skip[s.ID] || !parkableNow(s) {
-			continue
-		}
-		repo := session.GetRepoRoot(s.ProjectPath)
-		if parkIntent(s, originOf(repo), repo, groups, groupAt) {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// parkSkipSet is the sessions parking must leave alone: the attached one (its
-// id is written by the attach path under workerMu) and, in split focus mode,
-// the one being typed into.
+// parkSkipSet is the sessions parking must leave alone: the attached one and,
+// in split focus mode, the one being typed into.
 func (h *Home) parkSkipSet() map[string]bool {
 	skip := map[string]bool{}
-	h.workerMu.Lock()
-	if h.attachedSessionID != "" {
-		skip[h.attachedSessionID] = true
+	if id := h.attachedID(); id != "" {
+		skip[id] = true
 	}
-	h.workerMu.Unlock()
 	if h.focusMode {
 		if s := h.selectedSession(); s != nil {
 			skip[s.ID] = true
@@ -98,15 +77,28 @@ func (h *Home) parkSkipSet() map[string]bool {
 // to park, returning the teardown command (nil when there is none). scope
 // limits it to some sessions (nil = all): picking a snooze parks only what it
 // covers, so the toast that follows counts only that.
+//
+// It waits for the status worker's first completed pass: until then a status
+// may still be the one loaded from the row, and a session that row calls
+// finished may already be running a turn a CLI started while fleet was closed.
 func (h *Home) parkSnoozedNow(scope func(*session.Session) bool) tea.Cmd {
-	originOf, _ := h.originResolvers()
+	if h.lastWorkerCycleNano.Load() == 0 {
+		return nil
+	}
+	if err := h.refreshIndefiniteSnoozes(); err != nil {
+		debuglog.Logger.Error("park: re-read snoozes", "err", err)
+		return nil // stale state is no basis for a kill; the next sweep retries
+	}
+	skip := h.parkSkipSet()
 	var targets []*session.Session
-	for _, s := range parkCandidates(h.sessions, originOf, h.groupSnooze, h.groupSnoozedAt, h.parkSkipSet()) {
+	for _, s := range h.sessions {
 		if scope != nil && !scope(s) {
 			continue
 		}
-		repo := session.GetRepoRoot(s.ProjectPath)
-		if !h.stillWantsPark(s, originOf(repo), repo) {
+		if skip[s.ID] || !s.CanSuspend() || !h.wantsPark(s) {
+			continue
+		}
+		if !h.adoptSessionRow(s) || !h.wantsPark(s) {
 			continue
 		}
 		targets = append(targets, s)
@@ -115,17 +107,60 @@ func (h *Home) parkSnoozedNow(scope func(*session.Session) bool) tea.Cmd {
 		return nil
 	}
 	debuglog.Logger.Info("parking snoozed sessions", "n", len(targets))
-	return h.suspendSessions(targets, true)
+	return h.suspendSessions(targets, suspendSnoozed)
 }
 
-// stillWantsPark re-reads the session's row before it is suspended and adopts
-// what another fleet process wrote there: `fleet restart` respawns in place
-// (no tmux rename, so relaunchedElsewhere never sees it) and clears the snooze
-// in the row, and every CLI relaunch stamps last_accessed. Suspending is the
-// one step here that can't be quietly undone, so it compares before it acts,
-// like updateAndPersistStatus does before clobbering a status. A failed read
-// errs on the side of not suspending.
-func (h *Home) stillWantsPark(s *session.Session, originKey, repo string) bool {
+// refreshIndefiniteSnoozes adopts what other fleet processes wrote about the
+// "until I wake it" snoozes this one holds: a group woken elsewhere, or a
+// session whose snooze `fleet restart` cleared while respawning in place (no
+// tmux rename, so relaunchedElsewhere never sees it). Suspending is the one
+// step here that can't be quietly undone, so it compares before it acts, like
+// updateAndPersistStatus does before clobbering a status. It also keeps the
+// sidebar honest between parks: a session picked up from the CLI stops
+// rendering as snoozed within one sweep.
+func (h *Home) refreshIndefiniteSnoozes() error {
+	changed := false
+	for key, until := range h.groupSnooze {
+		if !session.IsSnoozeForever(until) {
+			continue
+		}
+		stored, at, ok, err := h.storage.LoadGroupSnooze(key)
+		if err != nil {
+			return fmt.Errorf("group %s: %w", key, err)
+		}
+		switch {
+		case !ok:
+			h.dropGroupSnooze(key)
+			changed = true
+		case !session.IsSnoozeForever(stored):
+			h.groupSnooze[key] = stored
+			changed = true
+		default:
+			h.groupSnoozedAt[key] = at
+		}
+	}
+	for _, s := range h.sessions {
+		if !session.IsSnoozeForever(s.SnoozedUntil()) {
+			continue
+		}
+		if !h.adoptSessionRow(s) {
+			continue // a missing row is a session being deleted; nothing to show
+		}
+		if !session.IsSnoozeForever(s.SnoozedUntil()) {
+			changed = true
+		}
+	}
+	if changed {
+		h.rebuildFlatItems()
+	}
+	return nil
+}
+
+// adoptSessionRow re-reads a session's row and adopts a cleared "until I wake
+// it" snooze and a newer last access (every CLI relaunch stamps one). It
+// reports false when the row can't be read or is gone, which means: don't
+// suspend.
+func (h *Home) adoptSessionRow(s *session.Session) bool {
 	until, lastAccessed, ok, err := h.storage.LoadSessionSnooze(s.ID)
 	if err != nil {
 		debuglog.Logger.Error("park: re-read session row", "id", s.ID, "err", err)
@@ -138,40 +173,31 @@ func (h *Home) stillWantsPark(s *session.Session, originKey, repo string) bool {
 		s.SetSnoozedUntil(until)
 	}
 	s.AdoptLastAccessed(lastAccessed)
-	return parkIntent(s, originKey, repo, h.groupSnooze, h.groupSnoozedAt)
-}
-
-// maybeParkSnoozed is parkSnoozedNow on the tick, throttled.
-func (h *Home) maybeParkSnoozed() tea.Cmd {
-	now := time.Now()
-	if !h.lastParkSweepAt.IsZero() && now.Sub(h.lastParkSweepAt) < parkSweepInterval {
-		return nil
-	}
-	h.lastParkSweepAt = now
-	return h.parkSnoozedNow(nil)
+	return true
 }
 
 // endIndefiniteSnooze drops a session's own "until I wake it" snooze when the
-// user picks the session back up (attach, resume, or a relaunch from the CLI).
+// user picks the session back up (attach, resume, restart, split focus).
 // Leaving it would have the sweep suspend the session again the moment it next
-// went idle. A timed snooze is a reminder and is left to run.
+// went idle. A timed snooze is a reminder and is left to run; the row write is
+// conditional for the same reason, in case another process set one meanwhile.
 func (h *Home) endIndefiniteSnooze(s *session.Session) {
 	if !session.IsSnoozeForever(s.SnoozedUntil()) {
 		return
 	}
 	s.SetSnoozedUntil(time.Time{})
-	if err := h.storage.SetSessionSnooze(s.ID, time.Time{}); err != nil {
+	if err := h.storage.ClearIndefiniteSessionSnooze(s.ID); err != nil {
 		debuglog.Logger.Error("failed to clear indefinite snooze", "id", s.ID, "err", err)
 	}
 	h.rebuildFlatItems()
 }
 
 // parkNote is the tail of the "Snoozed …" toast, saying what the snooze will
-// do to the process. Computed from the same rules the sweep applies, so it
-// can't promise a suspend the sweep won't make. Empty for a timed snooze or
-// when there is nothing to park.
+// do to the processes it doesn't suspend right away. The ones it does suspend
+// get their own toast once the teardown finishes (sessionsSuspendedMsg), which
+// counts what really happened, so this one doesn't count them. Empty when no
+// "until I wake it" snooze (the session's own or its group's) covers the scope.
 func (h *Home) parkNote(sc snoozeScope) string {
-	originOf, _ := h.originResolvers()
 	inScope := h.inSnoozeScope(sc)
 	skip := h.parkSkipSet()
 	// now: suspended right away. later: busy, parked once it settles.
@@ -180,17 +206,13 @@ func (h *Home) parkNote(sc snoozeScope) string {
 	// session would be a promise the sweep doesn't keep.
 	now, later, unresumable := 0, 0, 0
 	for _, s := range h.sessions {
-		if !inScope(s) || s.GetStatus() == session.StatusSuspended {
-			continue
-		}
-		repo := session.GetRepoRoot(s.ProjectPath)
-		if !parkIntent(s, originOf(repo), repo, h.groupSnooze, h.groupSnoozedAt) {
+		if !inScope(s) || s.GetStatus() == session.StatusSuspended || !h.wantsPark(s) {
 			continue
 		}
 		switch {
 		case s.GetClaudeSessionID() == "":
 			unresumable++
-		case !skip[s.ID] && parkableNow(s):
+		case !skip[s.ID] && s.CanSuspend():
 			now++
 		default:
 			later++
@@ -198,9 +220,9 @@ func (h *Home) parkNote(sc snoozeScope) string {
 	}
 	switch {
 	case now > 0 && later+unresumable > 0:
-		return fmt.Sprintf(" · suspending %d, the rest once idle", now)
+		return " · the rest suspend once idle"
 	case now > 0:
-		return " · suspending to free memory"
+		return ""
 	case later > 0:
 		return " · suspends once idle"
 	case unresumable > 0:
@@ -212,12 +234,6 @@ func (h *Home) parkNote(sc snoozeScope) string {
 // wakeNote is the tail of the "Woke …" toast: resume is lazy, so a wake that
 // leaves suspended sessions behind says how to bring them back.
 func (h *Home) wakeNote(sc snoozeScope) string {
-	if sc.session != nil {
-		if sc.session.GetStatus() == session.StatusSuspended {
-			return " · enter to resume"
-		}
-		return ""
-	}
 	inScope := h.inSnoozeScope(sc)
 	n := 0
 	for _, s := range h.sessions {
@@ -225,10 +241,12 @@ func (h *Home) wakeNote(sc snoozeScope) string {
 			n++
 		}
 	}
-	switch n {
-	case 0:
+	switch {
+	case n == 0:
 		return ""
-	case 1:
+	case sc.session != nil:
+		return " · enter to resume"
+	case n == 1:
 		return " · 1 suspended, enter to resume it"
 	}
 	return fmt.Sprintf(" · %d suspended, enter to resume each", n)
@@ -246,13 +264,4 @@ func (h *Home) inSnoozeScope(sc snoozeScope) func(*session.Session) bool {
 		repo := session.GetRepoRoot(s.ProjectPath)
 		return repo == sc.groupKey || OriginExpandKey(originOf(repo)) == sc.groupKey
 	}
-}
-
-// snoozedRowHint is the selected row's own-snooze suffix:
-// "☾ snoozed 3h · z to wake", or "☾ snoozed · z to wake" with no deadline.
-func snoozedRowHint(until, now time.Time) string {
-	if session.IsSnoozeForever(until) {
-		return SnoozeGlyph + " snoozed · z to wake"
-	}
-	return SnoozeGlyph + " snoozed " + formatSnoozeRemaining(until, now) + " · z to wake"
 }

@@ -1,25 +1,34 @@
 package ui
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/brizzai/fleet/internal/analytics"
-	"github.com/brizzai/fleet/internal/config"
 	"github.com/brizzai/fleet/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
 
+// newParkTestHome is a persisted Home whose status worker counts as having
+// completed a pass, since parking waits for one.
 func newParkTestHome(t *testing.T) (*Home, *session.StateDB) {
 	t.Helper()
-	storage, err := session.Open(filepath.Join(t.TempDir(), "park.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
+	h := newPersistTestHome(t)
+	h.lastWorkerCycleNano.Store(1)
+	return h, h.storage
+}
+
+// snoozeGroup persists an "until I wake it" group snooze stamped at, and
+// mirrors it in memory, as applySnoozeUntil would. The park sweep re-reads the
+// row, so a memory-only group would read as woken elsewhere.
+func snoozeGroup(t *testing.T, h *Home, key string, at time.Time) {
+	t.Helper()
+	at = at.Truncate(time.Second)
+	if err := h.storage.SetGroupSnoozeAt(key, session.SnoozeForever, at); err != nil {
+		t.Fatalf("SetGroupSnoozeAt: %v", err)
 	}
-	t.Cleanup(func() { storage.Close() })
-	return NewHome(storage, &config.Config{TickIntervalSec: 2}, "test", analytics.Identity{}), storage
+	h.groupSnooze[key] = session.SnoozeForever
+	h.groupSnoozedAt[key] = at
 }
 
 // saveRows persists sessions: the park sweep re-reads each row before it
@@ -69,74 +78,196 @@ func TestSnoozeDialogOffersIndefinite(t *testing.T) {
 	}
 }
 
-// TestParkCandidates pins who an "until I wake it" snooze suspends. At rest
-// and resumable only — a running or waiting session is never killed silently,
-// and one with no conversation id would lose its conversation on resume. A
-// group parks only the sessions that were already there, untouched, when it
-// was snoozed: creating or opening one since is the user working there.
-func TestParkCandidates(t *testing.T) {
+// TestParkIntent pins who an "until I wake it" snooze asks to park, and
+// CanSuspend who can be parked now. At rest and resumable only — a running or
+// waiting session is never killed silently, and one with no conversation id
+// would lose its conversation on resume. A group parks only the sessions that
+// were already there, untouched, when it was snoozed: creating or opening one
+// since is the user working there. "Before" is strict, because after a reload
+// every one of these timestamps is whole seconds.
+func TestParkIntent(t *testing.T) {
 	now := time.Now()
 	const repo, origin = "/tmp/park", "github.com/acme/park"
-	at := now.Add(-time.Hour)
+	at := now.Add(-time.Hour).Truncate(time.Second)
 	before := at.Add(-time.Hour)
-	originOf := func(string) string { return origin }
-
-	ownIdle := parkable("own-idle", "/tmp/own", session.StatusIdle)
-	ownIdle.SetSnoozedUntil(session.SnoozeForever)
-	ownFinished := parkable("own-finished", "/tmp/own", session.StatusFinished)
-	ownFinished.SetSnoozedUntil(session.SnoozeForever)
-	ownRunning := parkable("own-running", "/tmp/own", session.StatusRunning)
-	ownRunning.SetSnoozedUntil(session.SnoozeForever)
-	ownWaiting := parkable("own-waiting", "/tmp/own", session.StatusWaiting)
-	ownWaiting.SetSnoozedUntil(session.SnoozeForever)
-	ownSuspended := parkable("own-suspended", "/tmp/own", session.StatusSuspended)
-	ownSuspended.SetSnoozedUntil(session.SnoozeForever)
-	noID := parkable("no-id", "/tmp/own", session.StatusIdle)
-	noID.ClaudeSessionID = ""
-	noID.SetSnoozedUntil(session.SnoozeForever)
-	deadline := parkable("deadline", "/tmp/own", session.StatusIdle)
-	deadline.SetSnoozedUntil(now.Add(time.Hour))
-	unsnoozed := parkable("unsnoozed", "/tmp/own", session.StatusIdle)
-	attached := parkable("attached", "/tmp/own", session.StatusIdle)
-	attached.SetSnoozedUntil(session.SnoozeForever)
-
-	groupOld := parkable("group-old", repo, session.StatusIdle)
-	groupOld.CreatedAt, groupOld.LastAccessedAt = before, before
-	groupNew := parkable("group-new", repo, session.StatusIdle)
-	groupNew.CreatedAt, groupNew.LastAccessedAt = now, now
-	groupTouched := parkable("group-touched", repo, session.StatusIdle)
-	groupTouched.CreatedAt, groupTouched.LastAccessedAt = before, now
-
-	sessions := []*session.Session{
-		ownIdle, ownFinished, ownRunning, ownWaiting, ownSuspended, noID,
-		deadline, unsnoozed, attached, groupOld, groupNew, groupTouched,
-	}
 	groups := map[string]time.Time{repo: session.SnoozeForever, "/tmp/own": now.Add(time.Hour)}
 	groupAt := map[string]time.Time{repo: at}
 
-	got := parkCandidates(sessions, originOf, groups, groupAt, map[string]bool{attached.ID: true})
-	gotIDs := map[string]bool{}
-	for _, s := range got {
-		gotIDs[s.Title] = true
+	cases := []struct {
+		name          string
+		repo          string
+		status        session.Status
+		noID          bool
+		own           time.Time
+		created, used time.Time
+		wantIntent    bool
+		wantNow       bool
+	}{
+		{name: "own idle", repo: "/tmp/own", status: session.StatusIdle, own: session.SnoozeForever, wantIntent: true, wantNow: true},
+		{name: "own finished", repo: "/tmp/own", status: session.StatusFinished, own: session.SnoozeForever, wantIntent: true, wantNow: true},
+		{name: "own running", repo: "/tmp/own", status: session.StatusRunning, own: session.SnoozeForever, wantIntent: true},
+		{name: "own waiting", repo: "/tmp/own", status: session.StatusWaiting, own: session.SnoozeForever, wantIntent: true},
+		{name: "own suspended", repo: "/tmp/own", status: session.StatusSuspended, own: session.SnoozeForever, wantIntent: true},
+		{name: "no conversation id", repo: "/tmp/own", status: session.StatusIdle, noID: true, own: session.SnoozeForever, wantIntent: true},
+		{name: "deadline snooze", repo: "/tmp/own", status: session.StatusIdle, own: now.Add(time.Hour), wantNow: true},
+		{name: "not snoozed", repo: "/tmp/own", status: session.StatusIdle, wantNow: true},
+		{name: "group, untouched", repo: repo, status: session.StatusIdle, created: before, used: before, wantIntent: true, wantNow: true},
+		{name: "group, created since", repo: repo, status: session.StatusIdle, created: now, used: now, wantNow: true},
+		{name: "group, opened since", repo: repo, status: session.StatusIdle, created: before, used: now, wantNow: true},
+		{name: "group, same second", repo: repo, status: session.StatusIdle, created: at, used: at, wantNow: true},
 	}
-	want := map[string]bool{"own-idle": true, "own-finished": true, "group-old": true}
-	for title := range want {
-		if !gotIDs[title] {
-			t.Errorf("%s was not parked", title)
-		}
-	}
-	for title := range gotIDs {
-		if !want[title] {
-			t.Errorf("%s was parked, must not be", title)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := parkable(tc.name, tc.repo, tc.status)
+			if tc.noID {
+				s.ClaudeSessionID = ""
+			}
+			s.SetSnoozedUntil(tc.own)
+			s.CreatedAt, s.LastAccessedAt = tc.created, tc.used
+			if got := parkIntent(s, origin, tc.repo, groups, groupAt); got != tc.wantIntent {
+				t.Errorf("parkIntent = %v, want %v", got, tc.wantIntent)
+			}
+			if got := s.CanSuspend(); got != tc.wantNow {
+				t.Errorf("CanSuspend = %v, want %v", got, tc.wantNow)
+			}
+		})
 	}
 
 	// Through the origin umbrella too, not only the checkout.
-	byOrigin := parkCandidates([]*session.Session{groupOld}, originOf,
+	s := parkable("by-origin", "/tmp/elsewhere", session.StatusIdle)
+	s.CreatedAt, s.LastAccessedAt = before, before
+	if !parkIntent(s, origin, "/tmp/elsewhere",
 		map[string]time.Time{OriginExpandKey(origin): session.SnoozeForever},
-		map[string]time.Time{OriginExpandKey(origin): at}, nil)
-	if len(byOrigin) != 1 {
-		t.Errorf("origin-snoozed session parked %d times, want 1", len(byOrigin))
+		map[string]time.Time{OriginExpandKey(origin): at}) {
+		t.Error("an origin-snoozed session is not asked to park")
+	}
+}
+
+// TestParkSkipsWhatTheUserIsUsing: the attached session and the one focused in
+// the split are never pulled out from under the user.
+func TestParkSkipsWhatTheUserIsUsing(t *testing.T) {
+	h, storage := newParkTestHome(t)
+	attached := parkable("attached", "/tmp/park-skip", session.StatusIdle)
+	attached.SetSnoozedUntil(session.SnoozeForever)
+	focused := parkable("focused", "/tmp/park-skip", session.StatusIdle)
+	focused.SetSnoozedUntil(session.SnoozeForever)
+	h.sessions = []*session.Session{attached, focused}
+	saveRows(t, storage, attached, focused)
+	h.rebuildFlatItems()
+	h.attachedSessionID = attached.ID
+	for i, it := range h.flatItems {
+		if it.Session == focused {
+			h.cursor = i
+		}
+	}
+	h.focusMode = true
+
+	if cmd := h.parkSnoozedNow(nil); cmd != nil {
+		t.Errorf("parked a session in use: attached=%s focused=%s", attached.GetStatus(), focused.GetStatus())
+	}
+}
+
+// TestParkWaitsForTheFirstWorkerPass: before the status worker has run, a
+// status is still the row's, and a row saying finished may hide a turn a CLI
+// started while fleet was closed.
+func TestParkWaitsForTheFirstWorkerPass(t *testing.T) {
+	h, storage := newParkTestHome(t)
+	h.lastWorkerCycleNano.Store(0)
+	s := parkable("own", "/tmp/park-boot", session.StatusFinished)
+	s.SetSnoozedUntil(session.SnoozeForever)
+	h.sessions = []*session.Session{s}
+	saveRows(t, storage, s)
+	if cmd := h.parkSnoozedNow(nil); cmd != nil {
+		t.Error("parked before the status worker's first pass")
+	}
+	h.lastWorkerCycleNano.Store(1)
+	if cmd := h.parkSnoozedNow(nil); cmd == nil {
+		t.Error("did not park once the worker had run")
+	}
+}
+
+// TestParkSkipsAMissingRow: a session whose row is gone is mid-delete (inside
+// the undo window); suspending it would kill what undo is meant to restore.
+func TestParkSkipsAMissingRow(t *testing.T) {
+	h, _ := newParkTestHome(t)
+	s := parkable("own", "/tmp/park-gone", session.StatusIdle)
+	s.SetSnoozedUntil(session.SnoozeForever)
+	h.sessions = []*session.Session{s}
+	if cmd := h.parkSnoozedNow(nil); cmd != nil {
+		t.Error("parked a session with no row")
+	}
+}
+
+// TestFocusEndsIndefiniteSnooze: in split Enter mode, focusing a session and
+// typing into it is picking it back up, as attaching is. Otherwise the sweep
+// suspends it as soon as focus ends and its turn settles.
+func TestFocusEndsIndefiniteSnooze(t *testing.T) {
+	h, storage := newParkTestHome(t)
+	s := parkable("own", "/tmp/park-focus", session.StatusWaiting)
+	s.SetSnoozedUntil(session.SnoozeForever)
+	h.sessions = []*session.Session{s}
+	saveRows(t, storage, s)
+	h.rebuildFlatItems()
+	for i, it := range h.flatItems {
+		if it.Session == s {
+			h.cursor = i
+		}
+	}
+	_ = h.enterFocusMode()
+	h.focusMode = false // focus ended
+	s.SetStatus(session.StatusFinished)
+	if !s.SnoozedUntil().IsZero() {
+		t.Error("focus kept the indefinite snooze")
+	}
+	if cmd := h.parkSnoozedNow(nil); cmd != nil {
+		t.Error("a session the user focused was parked once its turn ended")
+	}
+}
+
+// TestRefreshAdoptsAGroupWokenElsewhere: another fleet process woke the group.
+// This one must stop parking its members, and drop the snooze it still holds.
+func TestRefreshAdoptsAGroupWokenElsewhere(t *testing.T) {
+	h, storage := newParkTestHome(t)
+	const repo = "/tmp/park-woken"
+	past := time.Now().Add(-time.Hour)
+	member := parkable("member", repo, session.StatusIdle)
+	member.CreatedAt, member.LastAccessedAt = past, past
+	h.sessions = []*session.Session{member}
+	saveRows(t, storage, member)
+	snoozeGroup(t, h, repo, past.Add(time.Minute))
+
+	if err := storage.SetGroupSnooze(repo, time.Time{}); err != nil { // the other process's wake
+		t.Fatal(err)
+	}
+	if cmd := h.parkSnoozedNow(nil); cmd != nil {
+		t.Error("parked a member of a group woken elsewhere")
+	}
+	if _, still := h.groupSnooze[repo]; still {
+		t.Error("the woken group's snooze stayed in memory")
+	}
+	if _, still := h.groupSnoozedAt[repo]; still {
+		t.Error("the woken group's snoozed_at stayed in memory")
+	}
+}
+
+// TestRefreshShowsACLIRestartWithoutParking: an in-place `fleet restart` cleared
+// the snooze in the row. The sidebar must stop showing it as snoozed on the
+// next sweep, even though the session is running and so never a park candidate.
+func TestRefreshShowsACLIRestartWithoutParking(t *testing.T) {
+	h, storage := newParkTestHome(t)
+	s := parkable("own", "/tmp/park-cli-restart", session.StatusRunning)
+	s.SetSnoozedUntil(session.SnoozeForever)
+	h.sessions = []*session.Session{s}
+	saveRows(t, storage, s)
+	if err := storage.ClearIndefiniteSessionSnooze(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.parkSnoozedNow(nil)
+	if !s.SnoozedUntil().IsZero() {
+		t.Error("a snooze the CLI cleared still shows in the TUI")
+	}
+	if h.snoozeMuted[s.ID] {
+		t.Error("the session is still muted")
 	}
 }
 
@@ -148,11 +279,7 @@ func TestIndefiniteSnoozeParksAtOnce(t *testing.T) {
 	h, storage := newParkTestHome(t)
 	idle := parkable("idle", "/tmp/park-now", session.StatusIdle)
 	running := parkable("running", "/tmp/park-now", session.StatusRunning)
-	for _, s := range []*session.Session{idle, running} {
-		if err := storage.SaveSession(s.ToRow()); err != nil {
-			t.Fatalf("SaveSession: %v", err)
-		}
-	}
+	saveRows(t, storage, idle, running)
 	h.sessions = []*session.Session{idle, running}
 
 	h.applySnoozeUntil(snoozeScope{session: idle, label: "idle", kind: "session"}, session.SnoozeForever, snoozeIndefiniteID)
@@ -244,11 +371,7 @@ func TestResumeEndsIndefiniteSnooze(t *testing.T) {
 	timed := parkable("timed", "/tmp/park-resume", session.StatusSuspended)
 	until := time.Now().Add(time.Hour).Truncate(time.Second)
 	timed.SetSnoozedUntil(until)
-	for _, s := range []*session.Session{parked, timed} {
-		if err := storage.SaveSession(s.ToRow()); err != nil {
-			t.Fatalf("SaveSession: %v", err)
-		}
-	}
+	saveRows(t, storage, parked, timed)
 	h.sessions = []*session.Session{parked, timed}
 
 	_ = h.resumeSelected(parked) // the returned Restart is not run
@@ -333,7 +456,7 @@ func TestIndefiniteGroupSnoozeParksMembers(t *testing.T) {
 
 	sc := snoozeScope{groupKey: repo, label: "park-group", kind: "checkout"}
 	h.applySnoozeUntil(sc, session.SnoozeForever, snoozeIndefiniteID)
-	if !strings.Contains(h.infoMsg, "until you wake it") || !strings.Contains(h.infoMsg, "suspending 1, the rest once idle") {
+	if !strings.Contains(h.infoMsg, "until you wake it") || !strings.Contains(h.infoMsg, "the rest suspend once idle") {
 		t.Errorf("toast = %q", h.infoMsg)
 	}
 	if h.parkSnoozedNow(nil) == nil || idle.GetStatus() != session.StatusSuspended {
@@ -370,14 +493,9 @@ func TestParkRereadsTheRowBeforeKilling(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	member := parkable("member", repo, session.StatusIdle)
 	member.CreatedAt, member.LastAccessedAt = past, past
-	for _, s := range []*session.Session{own, member} {
-		if err := storage.SaveSession(s.ToRow()); err != nil {
-			t.Fatalf("SaveSession: %v", err)
-		}
-	}
+	saveRows(t, storage, own, member)
 	h.sessions = []*session.Session{own, member}
-	h.groupSnooze[repo] = session.SnoozeForever
-	h.groupSnoozedAt[repo] = past.Add(time.Minute)
+	snoozeGroup(t, h, repo, past.Add(time.Minute))
 
 	// What the CLI does behind the TUI's back.
 	if err := storage.SetSessionSnooze(own.ID, time.Time{}); err != nil {
@@ -415,22 +533,32 @@ func TestRestartEndsIndefiniteSnooze(t *testing.T) {
 // parked group is in use now; marking it accessed is what keeps the group's
 // sweep from suspending it again once it finishes.
 func TestExternalRelaunchExemptsGroupMember(t *testing.T) {
-	h, _ := newParkTestHome(t)
+	h, storage := newParkTestHome(t)
 	const repo = "/tmp/park-ext-group"
 	past := time.Now().Add(-time.Hour)
 	s := parkable("member", repo, session.StatusSuspended)
 	s.CreatedAt, s.LastAccessedAt = past, past
-	h.sessions = []*session.Session{s}
-	h.sessionByID = map[string]*session.Session{s.ID: s}
-	h.groupSnooze[repo] = session.SnoozeForever
-	h.groupSnoozedAt[repo] = past.Add(time.Minute)
+	// The control: an untouched member the group still parks, so a pass here
+	// can't come from the sweep doing nothing at all.
+	untouched := parkable("untouched", repo, session.StatusIdle)
+	untouched.CreatedAt, untouched.LastAccessedAt = past, past
+	h.sessions = []*session.Session{s, untouched}
+	h.sessionByID = map[string]*session.Session{s.ID: s, untouched.ID: untouched}
+	saveRows(t, storage, s, untouched)
+	snoozeGroup(t, h, repo, past.Add(time.Minute))
 
 	h.handleExternalRelaunches(externalRelaunchMsg{changes: []externalRelaunch{{
 		id: s.ID, fromTmux: s.TmuxSessionName, tmuxSession: "fleet_elsewhere",
 	}}})
+	if !s.LastAccessed().After(h.groupSnoozedAt[repo]) {
+		t.Fatalf("relaunch did not mark the member accessed after the group's cutoff: %v", s.LastAccessed())
+	}
 	s.SetStatus(session.StatusFinished)
-	if cmd := h.parkSnoozedNow(nil); cmd != nil {
-		t.Error("the group re-parked a session the CLI just woke")
+	if cmd := h.parkSnoozedNow(nil); cmd == nil {
+		t.Fatal("the untouched member was not parked")
+	}
+	if got := s.GetStatus(); got != session.StatusFinished {
+		t.Errorf("the group re-parked a session the CLI just woke: %s", got)
 	}
 }
 
@@ -449,7 +577,7 @@ func TestSnoozeToastAndParkStayInScope(t *testing.T) {
 
 	sc := snoozeScope{session: a, label: "a", kind: "session"}
 	h.applySnoozeUntil(sc, session.SnoozeForever, snoozeIndefiniteID)
-	if !strings.HasSuffix(h.infoMsg, " · suspending to free memory") {
+	if h.infoMsg != "Snoozed a until you wake it" {
 		t.Errorf("toast = %q, want it to describe only the snoozed row", h.infoMsg)
 	}
 	if h.parkSnoozedNow(h.inSnoozeScope(sc)) == nil {

@@ -206,17 +206,26 @@ func (h *Home) applySnooze(sc snoozeScope, d SnoozeDuration) {
 // it out of your way, and a fold is the strongest way to say "not today". The
 // user can still re-expand it.
 func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID string) {
+	// Row first, then memory, and a failed write is reported rather than just
+	// logged: the park sweep re-reads the row and adopts what it says, so a
+	// snooze held only in memory would quietly drop on the next sweep.
 	if sc.session != nil {
-		sc.session.SetSnoozedUntil(until)
 		if err := h.storage.SetSessionSnooze(sc.session.ID, until); err != nil {
-			debuglog.Logger.Error("failed to persist session snooze", "id", sc.session.ID, "err", err)
+			h.setError("snooze_persist_failed", fmt.Errorf("snooze not saved: %w", err))
+			return
 		}
+		sc.session.SetSnoozedUntil(until)
 	} else {
-		h.groupSnooze[sc.groupKey] = until
-		h.groupSnoozedAt[sc.groupKey] = time.Now()
-		if err := h.storage.SetGroupSnooze(sc.groupKey, until); err != nil {
-			debuglog.Logger.Error("failed to persist group snooze", "key", sc.groupKey, "err", err)
+		// One stamp for memory and the row, in the row's whole seconds, so the
+		// "untouched since" comparison reads the same before and after a
+		// restart (see parkIntent).
+		at := time.Now().Truncate(time.Second)
+		if err := h.storage.SetGroupSnoozeAt(sc.groupKey, until, at); err != nil {
+			h.setError("snooze_persist_failed", fmt.Errorf("snooze not saved: %w", err))
+			return
 		}
+		h.groupSnooze[sc.groupKey] = until
+		h.groupSnoozedAt[sc.groupKey] = at
 		h.setExpanded(sc.groupKey, false)
 	}
 	h.rebuildFlatItems()
@@ -240,16 +249,9 @@ func (h *Home) applySnoozeUntil(sc snoozeScope, until time.Time, durationID stri
 // schema change on snoozed_groups for a fairly small nicety.
 func (h *Home) clearSnooze(sc snoozeScope) {
 	if sc.session != nil {
-		sc.session.SetSnoozedUntil(time.Time{})
-		if err := h.storage.SetSessionSnooze(sc.session.ID, time.Time{}); err != nil {
-			debuglog.Logger.Error("failed to clear session snooze", "id", sc.session.ID, "err", err)
-		}
+		h.clearSessionSnooze(sc.session)
 	} else {
-		delete(h.groupSnooze, sc.groupKey)
-		delete(h.groupSnoozedAt, sc.groupKey)
-		if err := h.storage.SetGroupSnooze(sc.groupKey, time.Time{}); err != nil {
-			debuglog.Logger.Error("failed to clear group snooze", "key", sc.groupKey, "err", err)
-		}
+		h.clearGroupSnooze(sc.groupKey)
 		h.setExpanded(sc.groupKey, true)
 	}
 	h.rebuildFlatItems()
@@ -261,18 +263,23 @@ func (h *Home) clearSnooze(sc snoozeScope) {
 	h.setInfo(fmt.Sprintf("Woke %s", sc.label) + h.wakeNote(sc))
 }
 
-// maybeWakeSnoozed drops deadlines that have passed, returning true when
-// anything changed. Runs on the ~2s Update tick rather than the worker: unlike
-// the idle-suspend sweep (which probes sysctl and must not block Update), this
-// is clock arithmetic plus a small SQLite write, and keeping it here means
-// groupSnooze stays a plain single-threaded map.
-func (h *Home) maybeWakeSnoozed() bool {
-	now := time.Now()
+// snoozeSweepDue throttles the snooze sweep (wakeSnoozed, then the park in
+// parkSnoozedNow) to snoozeSweepInterval, stamping the sweep when it is due.
+func (h *Home) snoozeSweepDue(now time.Time) bool {
 	if !h.lastSnoozeSweepAt.IsZero() && now.Sub(h.lastSnoozeSweepAt) < snoozeSweepInterval {
 		return false
 	}
 	h.lastSnoozeSweepAt = now
+	return true
+}
 
+// wakeSnoozed drops deadlines that have passed, returning true when anything
+// changed. Runs on the ~2s Update tick (behind snoozeSweepDue) rather than the
+// worker: unlike the idle-suspend sweep (which probes sysctl and must not
+// block Update), this is clock arithmetic plus a small SQLite write, and
+// keeping it here means groupSnooze stays a plain single-threaded map.
+func (h *Home) wakeSnoozed() bool {
+	now := time.Now()
 	changed := false
 	for _, s := range h.sessions {
 		if until := s.SnoozedUntil(); !until.IsZero() && !until.After(now) {
@@ -282,11 +289,7 @@ func (h *Home) maybeWakeSnoozed() bool {
 	}
 	for key, until := range h.groupSnooze {
 		if until.IsZero() || !until.After(now) {
-			delete(h.groupSnooze, key)
-			delete(h.groupSnoozedAt, key)
-			if err := h.storage.SetGroupSnooze(key, time.Time{}); err != nil {
-				debuglog.Logger.Error("failed to clear expired group snooze", "key", key, "err", err)
-			}
+			h.clearGroupSnooze(key)
 			// Symmetric with the auto-collapse in applySnooze.
 			h.setExpanded(key, true)
 			changed = true
@@ -297,6 +300,14 @@ func (h *Home) maybeWakeSnoozed() bool {
 		h.rebuildFlatItems()
 	}
 	return changed
+}
+
+// clearSessionSnooze drops a session's own snooze from memory and its row.
+func (h *Home) clearSessionSnooze(s *session.Session) {
+	s.SetSnoozedUntil(time.Time{})
+	if err := h.storage.SetSessionSnooze(s.ID, time.Time{}); err != nil {
+		debuglog.Logger.Error("failed to clear session snooze", "id", s.ID, "err", err)
+	}
 }
 
 // expireSessionSnooze clears a session's own lapsed deadline and, if the
@@ -315,10 +326,7 @@ func (h *Home) maybeWakeSnoozed() bool {
 // simply doesn't stick — the worker's no-hook path settles it back to idle
 // within a cycle — which is harmless and identical on both paths.
 func (h *Home) expireSessionSnooze(s *session.Session) {
-	s.SetSnoozedUntil(time.Time{})
-	if err := h.storage.SetSessionSnooze(s.ID, time.Time{}); err != nil {
-		debuglog.Logger.Error("failed to clear expired session snooze", "id", s.ID, "err", err)
-	}
+	h.clearSessionSnooze(s)
 	if s.GetStatus() == session.StatusIdle {
 		h.flagUnread(s)
 	}
@@ -340,10 +348,22 @@ func formatSnoozeWake(until, now time.Time) string {
 // countdown when the snooze has a deadline. An "until I wake it" snooze has
 // none, so it is the bare glyph.
 func snoozeMarker(until, now time.Time) string {
+	return SnoozeGlyph + snoozeCountdown(until, now)
+}
+
+// snoozedRowHint is the selected row's own-snooze suffix:
+// "☾ snoozed 3h · z to wake", or "☾ snoozed · z to wake" with no deadline.
+func snoozedRowHint(until, now time.Time) string {
+	return SnoozeGlyph + " snoozed" + snoozeCountdown(until, now) + " · z to wake"
+}
+
+// snoozeCountdown is " <time left>", or "" for an "until I wake it" snooze,
+// which has no deadline to count down to.
+func snoozeCountdown(until, now time.Time) string {
 	if session.IsSnoozeForever(until) {
-		return SnoozeGlyph
+		return ""
 	}
-	return SnoozeGlyph + " " + formatSnoozeRemaining(until, now)
+	return " " + formatSnoozeRemaining(until, now)
 }
 
 // formatSnoozeRemaining renders a deadline as compact time-left, capped at 3

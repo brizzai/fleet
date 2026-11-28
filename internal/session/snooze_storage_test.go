@@ -280,9 +280,9 @@ func TestGroupSnoozedAtRecorded(t *testing.T) {
 	if err := db.SetGroupSnooze("/tmp/checkout", SnoozeForever); err != nil {
 		t.Fatalf("SetGroupSnooze: %v", err)
 	}
-	at, err := db.LoadGroupSnoozedAt()
+	_, at, err := db.LoadSnoozedGroupsAt()
 	if err != nil {
-		t.Fatalf("LoadGroupSnoozedAt: %v", err)
+		t.Fatalf("LoadSnoozedGroupsAt: %v", err)
 	}
 	got := at["/tmp/checkout"]
 	if got.Before(before) || got.After(time.Now()) {
@@ -314,14 +314,66 @@ func TestGroupSnoozedAtMigration(t *testing.T) {
 	if err := db.SetGroupSnooze("/tmp/new", SnoozeForever); err != nil {
 		t.Fatalf("SetGroupSnooze after migration: %v", err)
 	}
-	at, err := db.LoadGroupSnoozedAt()
+	_, at, err := db.LoadSnoozedGroupsAt()
 	if err != nil {
-		t.Fatalf("LoadGroupSnoozedAt: %v", err)
+		t.Fatalf("LoadSnoozedGroupsAt: %v", err)
 	}
 	if !at["origin:x"].IsZero() {
 		t.Errorf("pre-migration row snoozed_at = %v, want zero (unknown)", at["origin:x"])
 	}
 	if at["/tmp/new"].IsZero() {
 		t.Error("new row has no snoozed_at")
+	}
+}
+
+// TestLoadGroupSnooze: the park sweep re-reads one group before suspending its
+// members, so the single-row read must agree with the bulk load and report a
+// woken group as absent.
+func TestLoadGroupSnooze(t *testing.T) {
+	db := openTestDB(t)
+	at := time.Unix(1_700_000_000, 0)
+	if err := db.SetGroupSnoozeAt("/tmp/checkout", SnoozeForever, at); err != nil {
+		t.Fatalf("SetGroupSnoozeAt: %v", err)
+	}
+	until, gotAt, ok, err := db.LoadGroupSnooze("/tmp/checkout")
+	if err != nil || !ok {
+		t.Fatalf("LoadGroupSnooze: ok=%v err=%v", ok, err)
+	}
+	if !IsSnoozeForever(until) || !gotAt.Equal(at) {
+		t.Errorf("got until=%v at=%v, want forever at %v", until, gotAt, at)
+	}
+	if err := db.SetGroupSnooze("/tmp/checkout", time.Time{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if _, _, ok, err := db.LoadGroupSnooze("/tmp/checkout"); ok || err != nil {
+		t.Errorf("after clear: ok=%v err=%v, want absent", ok, err)
+	}
+}
+
+// TestClearIndefiniteSessionSnoozeKeepsATimedOne: the CLI clears an "until I
+// wake it" snooze on relaunch from a row it read earlier. If the TUI set a
+// timed snooze in between, that deadline must survive.
+func TestClearIndefiniteSessionSnoozeKeepsATimedOne(t *testing.T) {
+	db := openTestDB(t)
+	row := &SessionRow{ID: "abc-1", Title: "t", ProjectPath: "/tmp/p", Status: "idle", SnoozedUntil: SnoozeForever}
+	if err := db.SaveSession(row); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := db.ClearIndefiniteSessionSnooze(row.ID); err != nil {
+		t.Fatalf("clear forever: %v", err)
+	}
+	if until, _, _, _ := db.LoadSessionSnooze(row.ID); !until.IsZero() {
+		t.Errorf("indefinite snooze not cleared: %v", until)
+	}
+
+	timed := time.Now().Add(time.Hour).Truncate(time.Second)
+	if err := db.SetSessionSnooze(row.ID, timed); err != nil {
+		t.Fatalf("SetSessionSnooze: %v", err)
+	}
+	if err := db.ClearIndefiniteSessionSnooze(row.ID); err != nil {
+		t.Fatalf("clear timed: %v", err)
+	}
+	if until, _, _, _ := db.LoadSessionSnooze(row.ID); !until.Equal(timed) {
+		t.Errorf("timed snooze = %v, want %v kept", until, timed)
 	}
 }

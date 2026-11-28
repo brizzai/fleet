@@ -327,6 +327,19 @@ func persistRelaunch(storage *session.StateDB, row *session.SessionRow, s *sessi
 	if err := storage.UpdateStatus(row.ID, string(s.GetStatus())); err != nil {
 		debuglog.Logger.Error("failed to persist status after relaunch", "id", row.ID, "err", err)
 	}
+	// A relaunch from the CLI is the user picking the session back up. An
+	// "until I wake it" snooze left on the row would have the next TUI suspend
+	// it again the moment it went idle (the TUI drops its in-memory copy when
+	// it adopts the relaunch). The clear is conditional on the row still
+	// holding that snooze: a timed one is a reminder and stays, including one
+	// the TUI set after this process read the row.
+	// The access stamp is what exempts it from a parked GROUP's sweep.
+	if err := storage.UpdateLastAccessed(row.ID); err != nil {
+		debuglog.Logger.Error("failed to persist last access after relaunch", "id", row.ID, "err", err)
+	}
+	if err := storage.ClearIndefiniteSessionSnooze(row.ID); err != nil {
+		debuglog.Logger.Error("failed to clear indefinite snooze after relaunch", "id", row.ID, "err", err)
+	}
 	// A relaunch may have *healed* the conversation id on the way in
 	// (adoptResolvedLaunchID promotes a resolved id over a stale one — the
 	// issue #226 path). The TUI gets away with not persisting that because its
@@ -334,19 +347,6 @@ func persistRelaunch(storage *session.StateDB, row *session.SessionRow, s *sessi
 	// is done, so an unsaved heal is recomputed and thrown away on every
 	// relaunch and the session stays pinned to a dead conversation. An empty id
 	// is `restart -fresh` dropping one, written only now that the launch worked.
-	// A relaunch from the CLI is the user picking the session back up. An
-	// "until I wake it" snooze left on the row would have the next TUI suspend
-	// it again the moment it went idle (the TUI drops its in-memory copy when
-	// it adopts the relaunch). A timed snooze is a reminder and stays.
-	// The access stamp is what exempts it from a parked GROUP's sweep.
-	if err := storage.UpdateLastAccessed(row.ID); err != nil {
-		debuglog.Logger.Error("failed to persist last access after relaunch", "id", row.ID, "err", err)
-	}
-	if session.IsSnoozeForever(row.SnoozedUntil) {
-		if err := storage.SetSessionSnooze(row.ID, time.Time{}); err != nil {
-			debuglog.Logger.Error("failed to clear indefinite snooze after relaunch", "id", row.ID, "err", err)
-		}
-	}
 	if id := s.ClaudeSessionID; id != row.ClaudeSessionID {
 		if err := storage.UpdateClaudeSessionID(row.ID, id); err != nil {
 			debuglog.Logger.Error("failed to persist healed conversation id after relaunch", "id", row.ID, "err", err)

@@ -126,14 +126,12 @@ type (
 		id  string
 		err error
 	}
-	// sessionsSuspendedMsg reports that the sweep (auto=true) or a manual command
-	// (auto=false) just hibernated n idle sessions, so Update can rebuild the list
-	// and show a toast. Persistence + action-log happen at the suspend site.
+	// sessionsSuspendedMsg reports that n sessions were just hibernated, so
+	// Update can rebuild the list and show a toast. Persistence + action-log
+	// happen at the suspend site.
 	sessionsSuspendedMsg struct {
 		n    int
-		auto bool
-		// snoozed: parked by an "until I wake it" snooze (see parkSnoozedNow).
-		snoozed bool
+		kind suspendKind
 	}
 	sessionRestartConfirmedMsg struct{ id string }
 	sessionCreateResultMsg     struct {
@@ -389,10 +387,11 @@ type Home struct {
 	// idle-suspend sweep, which lives there because it probes sysctl, expiry is
 	// clock arithmetic and a tiny SQLite write.)
 	groupSnooze map[string]time.Time
-	// groupSnoozedAt records when each group in groupSnooze was snoozed. Only
-	// an "until I wake it" group reads it: it parks the sessions that were
-	// already in it, untouched, at that moment (see parkIntent). Same goroutine
-	// and lifetime as groupSnooze.
+	// groupSnoozedAt records when each group in groupSnooze was snoozed, in
+	// whole seconds like the row. Only an "until I wake it" group reads it: it
+	// parks the sessions that were already in it, untouched, at that moment
+	// (see parkIntent). Same goroutine and lifetime as groupSnooze; every
+	// removal goes through clearGroupSnooze or dropGroupSnooze, which drop both.
 	groupSnoozedAt map[string]time.Time
 	// snoozeMuted is the resolved "is this session attention-muted" answer for
 	// every session, recomputed in rebuildFlatItems. Exists so fleet-wide
@@ -400,10 +399,9 @@ type Home struct {
 	// were stamped with instead of re-deriving the precedence rule — see
 	// snoozeState's doc. Keyed by session ID.
 	snoozeMuted map[string]bool
-	// lastSnoozeSweepAt throttles that sweep, mirroring lastSuspendSweepAt.
+	// lastSnoozeSweepAt throttles the snooze sweep (wake, then park), mirroring
+	// lastSuspendSweepAt.
 	lastSnoozeSweepAt time.Time
-	// lastParkSweepAt throttles maybeParkSnoozed the same way.
-	lastParkSweepAt time.Time
 	// attachAfterResumeID: when a suspended session is resumed via Enter, the
 	// resume runs async; this holds its id so the sessionRestartMsg handler
 	// attaches once the tmux is live again. Empty otherwise.
@@ -1432,10 +1430,10 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.n > 1 {
 				noun = "sessions"
 			}
-			switch {
-			case msg.snoozed:
+			switch msg.kind {
+			case suspendSnoozed:
 				h.setInfo(fmt.Sprintf("Suspended %d snoozed %s to free memory · enter to resume", msg.n, noun))
-			case msg.auto:
+			case suspendIdleSweep:
 				h.setInfo(fmt.Sprintf("Suspended %d idle %s to free memory · enter to resume", msg.n, noun))
 			default:
 				h.setInfo(fmt.Sprintf("Suspended %d %s · enter to resume", msg.n, noun))
@@ -1471,7 +1469,8 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.applySnoozeUntil(sc, msg.until, msg.durationID)
 		// An "until I wake it" snooze suspends what is already at rest now
-		// rather than on the next sweep. A no-op for a timed snooze.
+		// rather than on the next sweep. A no-op unless such a snooze (the
+		// session's own or its group's) covers something in this scope.
 		return h, h.parkSnoozedNow(h.inSnoozeScope(sc))
 
 	case accountPickedMsg:
@@ -2274,19 +2273,16 @@ func (h *Home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Restore group snoozes, dropping any that lapsed while fleet was
 		// closed so the very first frame is already correct (waiting for the
 		// sweep would paint a stale dim group for up to one interval).
-		if snoozed, err := h.storage.LoadSnoozedGroups(); err == nil {
+		if snoozed, snoozedAt, err := h.storage.LoadSnoozedGroupsAt(); err == nil {
 			now := time.Now()
-			snoozedAt, _ := h.storage.LoadGroupSnoozedAt()
 			for key, until := range snoozed {
 				if until.After(now) {
 					h.groupSnooze[key] = until
 					h.groupSnoozedAt[key] = snoozedAt[key]
 					continue
 				}
-				if err := h.storage.SetGroupSnooze(key, time.Time{}); err != nil {
-					debuglog.Logger.Error("failed to clear expired group snooze", "key", key, "err", err)
-				}
-				// Undo the auto-collapse, exactly as maybeWakeSnoozed does on
+				h.clearGroupSnooze(key)
+				// Undo the auto-collapse, exactly as wakeSnoozed does on
 				// the live path. Without this the two wake paths disagree: a
 				// "Tomorrow" snooze — the preset most likely to span a restart —
 				// would come back folded forever, with no marker left to
@@ -5426,9 +5422,7 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 	// Never hibernate the session the user is currently attached to — its
 	// LastAccessedAt doesn't refresh mid-attach, so it would look idle and get
 	// killed out from under them, ejecting them into a dead pane.
-	h.workerMu.Lock()
-	attached := h.attachedSessionID
-	h.workerMu.Unlock()
+	attached := h.attachedID()
 
 	// Gather idle candidates first (cheap, no I/O) so we can skip the sysctl probe
 	// entirely when there's nothing we could shed.
@@ -5481,9 +5475,7 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 		// Re-validate right before the irreversible kill: the user may have
 		// attached to or reactivated this session (Update thread) since we gathered
 		// candidates, so a stale snapshot must not kill live work or eject an attach.
-		h.workerMu.Lock()
-		attachedNow := h.attachedSessionID
-		h.workerMu.Unlock()
+		attachedNow := h.attachedID()
 		if c.s.GetStatus() != session.StatusIdle || c.s.ID == attachedNow {
 			continue
 		}
@@ -5513,7 +5505,7 @@ func (h *Home) maybeSuspendIdleSessions(sessions []*session.Session) {
 		// workerMu by Suspend(), so the ~2s tick re-derives the sidebar anyway;
 		// nothing here carries state the UI cannot recover on its own.
 		if !h.isAttaching.Load() {
-			h.send(sessionsSuspendedMsg{n: n, auto: true})
+			h.send(sessionsSuspendedMsg{n: n, kind: suspendIdleSweep})
 		}
 	} else {
 		// act==true but nothing was idle enough (e.g. balanced's 4h housekeeping
@@ -5852,9 +5844,12 @@ func (h *Home) handleExternalRelaunches(msg externalRelaunchMsg) (tea.Model, tea
 			// `fleet resume` / a `fleet send` wake picked the session back up.
 			// Ending its own "until I wake it" snooze and marking it accessed
 			// (which exempts it from a parked group's sweep) keep it from
-			// being suspended again the moment it settles.
-			h.endIndefiniteSnooze(s)
-			h.markSessionAccessed(s)
+			// being suspended again the moment it settles. Memory only: the
+			// CLI's persistRelaunch already wrote both to the row.
+			if session.IsSnoozeForever(s.SnoozedUntil()) {
+				s.SetSnoozedUntil(time.Time{})
+			}
+			s.MarkAccessed()
 		}
 		changed = true
 	}
@@ -5913,7 +5908,7 @@ func (h *Home) suspendIdleNow() tea.Cmd {
 	for _, s := range h.sessions {
 		// Only idle, and only if resumable — parking a session with no captured
 		// ClaudeSessionID would lose its conversation on the next Restart.
-		if s.GetStatus() == session.StatusIdle && s.GetClaudeSessionID() != "" {
+		if s.GetStatus() == session.StatusIdle && s.CanSuspend() {
 			targets = append(targets, s)
 		}
 	}
@@ -5921,34 +5916,66 @@ func (h *Home) suspendIdleNow() tea.Cmd {
 		h.setInfo("No idle sessions to suspend")
 		return nil
 	}
-	return h.suspendSessions(targets, false)
+	return h.suspendSessions(targets, suspendManual)
 }
 
+// suspendKind says which path suspended sessions, for the toast.
+type suspendKind int
+
+const (
+	suspendManual    suspendKind = iota // a palette command
+	suspendIdleSweep                    // the memory-pressure sweep
+	suspendSnoozed                      // an "until I wake it" snooze (see parkSnoozedNow)
+)
+
 // suspendSessions hibernates targets: the shared core of the manual suspend
-// commands and the snooze park. It marks each Suspended on the Update thread
-// BEFORE the background teardown, so the status worker sees Suspended and
-// short-circuits instead of racing tmux death into a spurious StatusError (and
-// the dot changes immediately); the kills run in the returned command.
-func (h *Home) suspendSessions(targets []*session.Session, snoozed bool) tea.Cmd {
+// commands and the snooze park. Each target is re-checked and marked Suspended
+// in one step (MarkSuspendedIfAtRest), on the Update thread and BEFORE the
+// background teardown, so the status worker sees Suspended and short-circuits
+// instead of racing tmux death into a spurious StatusError (and the dot changes
+// immediately). One that is no longer at rest is skipped. The kills run in the
+// returned command, each skipped if the session was picked back up since its
+// mark (SuspendMarked); a failed kill restores the status the mark replaced.
+func (h *Home) suspendSessions(targets []*session.Session, kind suspendKind) tea.Cmd {
+	type marked struct {
+		s     *session.Session
+		prior session.Status
+	}
+	var batch []marked
 	for _, s := range targets {
-		h.recordStatus(s.ID, s.GetStatus(), session.StatusSuspended)
-		s.SetStatus(session.StatusSuspended)
+		prior, ok := s.MarkSuspendedIfAtRest()
+		if !ok {
+			continue
+		}
+		h.recordStatus(s.ID, prior, session.StatusSuspended)
 		if err := h.storage.UpdateStatus(s.ID, string(session.StatusSuspended)); err != nil {
 			debuglog.Logger.Error("storage: UpdateStatus (pre-suspend)", "id", s.ID, "err", err)
 		}
+		batch = append(batch, marked{s, prior})
+	}
+	if len(batch) == 0 {
+		return nil
 	}
 	h.rebuildFlatItems()
 	return func() tea.Msg {
 		n := 0
-		for _, s := range targets {
-			if err := s.Suspend(); err != nil {
-				debuglog.Logger.Error("suspend failed", "id", s.ID, "title", s.Title, "snoozed", snoozed, "err", err)
+		for _, m := range batch {
+			did, err := m.s.SuspendMarked(m.prior)
+			if err != nil {
+				debuglog.Logger.Error("suspend failed", "id", m.s.ID, "title", m.s.Title, "kind", kind, "err", err)
+				h.recordStatus(m.s.ID, session.StatusSuspended, m.prior)
+				if err := h.storage.UpdateStatus(m.s.ID, string(m.prior)); err != nil {
+					debuglog.Logger.Error("storage: UpdateStatus (suspend rollback)", "id", m.s.ID, "err", err)
+				}
 				continue
 			}
-			h.logAction("suspend session", s.Title, true)
+			if !did {
+				continue // picked back up meanwhile; the resume owns its status now
+			}
+			h.logAction("suspend session", m.s.Title, true)
 			n++
 		}
-		return sessionsSuspendedMsg{n: n, snoozed: snoozed}
+		return sessionsSuspendedMsg{n: n, kind: kind}
 	}
 }
 
@@ -5976,7 +6003,11 @@ func (h *Home) suspendSelected() tea.Cmd {
 		h.setInfo("Can't suspend yet — no resumable session id captured")
 		return nil
 	}
-	return h.suspendSessions([]*session.Session{s}, false)
+	if s.Relaunching() {
+		h.setInfo("Can't suspend while the session is relaunching")
+		return nil
+	}
+	return h.suspendSessions([]*session.Session{s}, suspendManual)
 }
 
 func (h *Home) forkSelected() tea.Cmd {
@@ -6196,11 +6227,25 @@ func (h *Home) clearGroupSnooze(key string) {
 	if key == "" {
 		return
 	}
-	delete(h.groupSnooze, key)
-	delete(h.groupSnoozedAt, key)
+	h.dropGroupSnooze(key)
 	if err := h.storage.SetGroupSnooze(key, time.Time{}); err != nil {
 		debuglog.Logger.Error("failed to clear group snooze", "key", key, "err", err)
 	}
+}
+
+// dropGroupSnooze forgets a group's snooze in memory only, for when the row is
+// already gone (another fleet process woke it).
+func (h *Home) dropGroupSnooze(key string) {
+	delete(h.groupSnooze, key)
+	delete(h.groupSnoozedAt, key)
+}
+
+// attachedID is the session the user is attached to, "" when none. Written by
+// the attach path under workerMu, so read under it too.
+func (h *Home) attachedID() string {
+	h.workerMu.Lock()
+	defer h.workerMu.Unlock()
+	return h.attachedSessionID
 }
 
 // originHasCheckoutExcept reports whether any currently-known checkout other
@@ -6593,6 +6638,12 @@ func (h *Home) enterFocusMode() tea.Cmd {
 	h.focusMode = true
 	h.sidebarDirty = true // separator color changes
 	h.logAction("focus preview", s.Title, true)
+	// Typing into a session is picking it back up, as attaching is: end its
+	// "until I wake it" snooze and mark it accessed, or once focus ends the
+	// park sweep would suspend it (or a parked group's sweep would) as soon
+	// as it settles.
+	h.endIndefiniteSnooze(s)
+	h.markSessionAccessed(s)
 	return h.focusTick()
 }
 
@@ -7128,10 +7179,14 @@ func (h *Home) handleTick() (tea.Model, tea.Cmd) {
 	// the tree itself when something changed — so it runs before the
 	// unconditional rebuild below rather than after, and the woken rows are
 	// already un-dimmed on this frame.
-	h.maybeWakeSnoozed()
-	// Park sessions under an "until I wake it" snooze that have since come to
-	// rest. Self-throttled; returns nil when there's nothing to suspend.
-	parkCmd := h.maybeParkSnoozed()
+	//
+	// Then park sessions under an "until I wake it" snooze that have since come
+	// to rest, on the same throttle; nil when there's nothing to suspend.
+	var parkCmd tea.Cmd
+	if h.snoozeSweepDue(time.Now()) {
+		h.wakeSnoozed()
+		parkCmd = h.parkSnoozedNow(nil)
+	}
 
 	h.rebuildFlatItems()
 	h.refreshTips(!h.modalOpen())
