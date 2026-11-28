@@ -555,7 +555,7 @@ func renderGroupSnooze(until time.Time) string {
 	if until.IsZero() {
 		return ""
 	}
-	return "  " + DimStyle.Render(SnoozeGlyph+" "+formatSnoozeRemaining(until, time.Now()))
+	return "  " + DimStyle.Render(snoozeMarker(until, time.Now()))
 }
 
 // renderCheckoutHeader → "   ⎇ branch * #PR"  for a git checkout,
@@ -678,7 +678,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 	if item.Snooze.Muted {
 		snoozeRaw = "  " + SnoozeGlyph
 		if item.Snooze.OwnTimer {
-			snoozeRaw += " " + formatSnoozeRemaining(item.Snooze.Until, time.Now())
+			snoozeRaw = "  " + snoozeMarker(item.Snooze.Until, time.Now())
 		}
 	}
 
@@ -743,8 +743,7 @@ func renderSessionItem(item SidebarItem, width int, selected bool, slot int) str
 			// width-truncated, so no room for a suffix).
 			rendered += "  " + DimStyle.Render("suspended · enter to resume")
 		case item.Snooze.Muted && item.Snooze.OwnTimer:
-			rendered += "  " + DimStyle.Render(fmt.Sprintf("%s snoozed %s · z to wake",
-				SnoozeGlyph, formatSnoozeRemaining(item.Snooze.Until, time.Now())))
+			rendered += "  " + DimStyle.Render(snoozedRowHint(item.Snooze.Until, time.Now()))
 		case item.Snooze.Muted:
 			rendered += "  " + DimStyle.Render(SnoozeGlyph+" sleeping · group snoozed")
 		}

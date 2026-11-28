@@ -213,6 +213,11 @@ func (d *SnoozeDialog) View() string {
 
 	for i, dur := range SnoozeDurations {
 		wake := formatSnoozeWake(dur.Resolve(now), now)
+		if dur.ID == snoozeIndefiniteID {
+			// No wake time to show, so the column states the side effect —
+			// the one preset that suspends shouldn't do so unannounced.
+			wake = "frees RAM"
+		}
 		// Pad the RAW text before styling — padding a styled string counts the
 		// ANSI escape bytes and the columns come out ragged.
 		row := fmt.Sprintf(" %-12s %10s ", dur.Label, wake)

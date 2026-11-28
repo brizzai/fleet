@@ -124,7 +124,12 @@ type Session struct {
 	relaunchQuietTo  time.Time // until then, with no hook accepted since a relaunch, a Copilot SessionEnd is the killed process's (set for every agent, read for Copilot only)
 	suspendedPID     int       // agent a Suspend just killed; only the next Restart waits on it (see resumeWaitPID). Not retiredPID: RespawnClaude signals that one
 	suspendedAt      time.Time
-	forkParentID     string // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
+	// teardownMu makes SuspendMarked's "still parked?" check and its kill one
+	// step as far as a relaunch is concerned: Restart takes it before starting,
+	// so a resume that lands between the check and the kill waits for the kill
+	// instead of having its new agent killed by it.
+	teardownMu   sync.Mutex
+	forkParentID string // parent's claude session id while this fork hasn't diverged yet; lets us adopt the fork's own id deterministically (cleared on divergence)
 
 	// Negative cache for the rotation check, keyed by the FOREIGN session id that
 	// was rejected. A persistent foreign id (a nested agent) would otherwise rescan
@@ -582,6 +587,35 @@ func (s *Session) SetSnoozedUntil(until time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snoozedUntil = until
+}
+
+// SnoozeForever is the in-memory deadline of an "until I wake it" snooze. A
+// far-future time rather than a flag, so every existing `until.After(now)`
+// check — the precedence rule, the expiry sweep, the startup reconciliation —
+// keeps treating it as live and never lapses it, without knowing it exists.
+// Storage writes it as -1 (see snoozeToUnix), never as this timestamp.
+var SnoozeForever = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+
+// IsSnoozeForever reports whether a snooze deadline is the "until I wake it"
+// sentinel rather than a real wake time.
+func IsSnoozeForever(t time.Time) bool { return !t.Before(SnoozeForever) }
+
+// LastAccessed returns when the user last attached to, resumed, restarted or
+// otherwise acted on this session (thread-safe).
+func (s *Session) LastAccessed() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastAccessedAt
+}
+
+// AdoptLastAccessed moves LastAccessedAt forward to t, never back. Used when
+// another fleet process recorded a newer access in the row.
+func (s *Session) AdoptLastAccessed(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t.After(s.LastAccessedAt) {
+		s.LastAccessedAt = t
+	}
 }
 
 // IsSnoozed reports whether the session's own snooze is still in effect at now.
@@ -1114,6 +1148,9 @@ func (s *Session) negCacheRotation(owner, foreign string, foreignPID int) {
 // Restart kills and recreates the tmux session with the same config.
 func (s *Session) Restart() error {
 	debuglog.Logger.Info("session restart", "id", s.ID, "title", s.Title)
+	// Wait out a suspend that is mid-kill (see teardownMu).
+	s.teardownMu.Lock()
+	s.teardownMu.Unlock() //nolint:staticcheck // empty critical section: a barrier, not a guard
 	s.beginRelaunch()
 	defer s.endRelaunch()
 	// Resolve the id to resume BEFORE clearHookState() wipes the rejection state it
@@ -1268,14 +1305,71 @@ func (s *Session) RespawnClaude() error {
 // is persisted, so a later Restart() resumes it via `--resume <id>`. This is the
 // teardown half of Restart() with no recreate. Idempotent for an already-dead pane.
 func (s *Session) Suspend() error {
-	debuglog.Logger.Info("session suspend", "id", s.ID, "title", s.Title)
+	s.teardownMu.Lock()
+	defer s.teardownMu.Unlock()
 	// Mark suspended BEFORE tearing down tmux. The status pipeline short-circuits
 	// on StatusSuspended, so a concurrent UpdateStatus can't flip the row to error
 	// via its liveness gates, and UpdateHookStatus won't store the killed agent's
-	// "dead" death-rattle, during teardown. Restore the prior status if the kill
-	// fails (the session is still alive, so it must not read as suspended).
+	// "dead" death-rattle, during teardown.
 	oldStatus := s.GetStatus()
 	s.SetStatus(StatusSuspended)
+	return s.teardownLocked(oldStatus)
+}
+
+// MarkSuspendedIfAtRest marks the session suspended, in one step under its
+// lock, if it can be suspended without losing anything: at rest (idle or
+// finished), resumable (it has a conversation id), and not mid-relaunch. It
+// returns the status it replaced and whether it marked. The marking is the
+// half of a suspend the caller can do on the UI thread; SuspendMarked does the
+// kill later.
+func (s *Session) MarkSuspendedIfAtRest() (prior Status, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prior = s.Status
+	if !s.suspendableLocked() {
+		return prior, false
+	}
+	s.Status = StatusSuspended
+	return prior, true
+}
+
+// CanSuspend reports, without acting, what MarkSuspendedIfAtRest would decide.
+func (s *Session) CanSuspend() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.suspendableLocked()
+}
+
+// suspendableLocked is the one rule for "can be suspended without losing
+// anything". Caller holds mu.
+func (s *Session) suspendableLocked() bool {
+	if s.Status != StatusIdle && s.Status != StatusFinished {
+		return false
+	}
+	return s.ClaudeSessionID != "" && s.relaunching == 0
+}
+
+// SuspendMarked tears down a session MarkSuspendedIfAtRest marked, unless it
+// has been picked back up since (a resume moves it off StatusSuspended before
+// relaunching). It reports whether it suspended. prior is the status the mark
+// replaced, restored if the kill fails, since the agent is then still alive.
+func (s *Session) SuspendMarked(prior Status) (bool, error) {
+	s.teardownMu.Lock()
+	defer s.teardownMu.Unlock()
+	s.mu.RLock()
+	still := s.Status == StatusSuspended && s.relaunching == 0
+	s.mu.RUnlock()
+	if !still {
+		return false, nil
+	}
+	return true, s.teardownLocked(prior)
+}
+
+// teardownLocked is the kill half of a suspend, for a session already marked
+// StatusSuspended. Caller holds teardownMu. Restores restoreTo if the kill
+// fails, since the session is still alive and must not read as suspended.
+func (s *Session) teardownLocked(restoreTo Status) error {
+	debuglog.Logger.Info("session suspend", "id", s.ID, "title", s.Title)
 	s.mu.Lock()
 	s.suspendedPID, s.suspendedAt = s.ownerPID, time.Now()
 	s.mu.Unlock()
@@ -1286,7 +1380,7 @@ func (s *Session) Suspend() error {
 			s.mu.Lock()
 			s.retiredPID = 0
 			s.mu.Unlock()
-			s.SetStatus(oldStatus)
+			s.SetStatus(restoreTo)
 			debuglog.Logger.Error("session suspend: kill failed", "id", s.ID, "title", s.Title, "err", err)
 			return err
 		}

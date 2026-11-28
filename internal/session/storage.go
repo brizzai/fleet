@@ -273,6 +273,17 @@ func (s *StateDB) migrate() error {
 		debuglog.Logger.Error("migration failed: create snoozed_groups table", "error", err)
 		return err
 	}
+	// When the group was snoozed (unix seconds, 0 = unknown). An "until I wake
+	// it" group suspends only the sessions that were already in it, untouched,
+	// at that moment — a session created or opened since is the user working
+	// there on purpose.
+	if !s.hasColumn("snoozed_groups", "snoozed_at") {
+		_, err = s.db.Exec(`ALTER TABLE snoozed_groups ADD COLUMN snoozed_at INTEGER NOT NULL DEFAULT 0`)
+		if err != nil {
+			debuglog.Logger.Error("migration failed: add snoozed_at column", "error", err)
+			return err
+		}
+	}
 
 	// Per-repo PR cache: survives fleet restarts so we don't re-fire `gh` for
 	// every repo on launch. The worker carries pr_json forward (subject to a
@@ -350,7 +361,7 @@ func (s *StateDB) SaveSession(row *SessionRow) error {
 		row.CreatedAt.Unix(), row.LastAccessed.Unix(), boolToInt(row.Acknowledged),
 		row.ClaudeSessionID, row.WorkspaceName,
 		boolToInt(row.ManuallyRenamed), row.FirstPrompt, boolToInt(row.TitleGenerated),
-		row.PromptCount, timeToUnix(row.SnoozedUntil),
+		row.PromptCount, snoozeToUnix(row.SnoozedUntil),
 	)
 	if err != nil {
 		debuglog.Logger.Error("failed to save session", "id", row.ID, "error", err)
@@ -381,7 +392,7 @@ func (s *StateDB) LoadSessions() ([]*SessionRow, error) {
 		}
 		r.CreatedAt = time.Unix(createdAt, 0)
 		r.LastAccessed = time.Unix(lastAccessed, 0)
-		r.SnoozedUntil = unixToTime(snoozedUntil)
+		r.SnoozedUntil = unixToSnooze(snoozedUntil)
 		r.Acknowledged = ack != 0
 		r.ManuallyRenamed = manuallyRenamed != 0
 		r.TitleGenerated = titleGenerated != 0
@@ -410,6 +421,22 @@ func (s *StateDB) LoadSessionLaunch(id string) (row *SessionRow, ok bool, err er
 		return nil, false, err
 	}
 	return r, true, nil
+}
+
+// LoadSessionSnooze reads one session's snooze deadline and last access from
+// its row. ok is false when the row is gone. The park sweep calls it before
+// suspending, since another fleet process may have changed either since this
+// one loaded the session.
+func (s *StateDB) LoadSessionSnooze(id string) (until, lastAccessed time.Time, ok bool, err error) {
+	var u, la int64
+	err = s.db.QueryRow(`SELECT snoozed_until, last_accessed FROM sessions WHERE id = ?`, id).Scan(&u, &la)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	return unixToSnooze(u), unixToTime(la), true, nil
 }
 
 // DeleteSession removes a session by ID.
@@ -496,9 +523,20 @@ func (s *StateDB) UpdateStatus(id, status string) error {
 // SetSessionSnooze records (or clears, on the zero time) a session's snooze
 // deadline. Deliberately does not touch status — snooze is orthogonal to it.
 func (s *StateDB) SetSessionSnooze(id string, until time.Time) error {
-	_, err := s.db.Exec("UPDATE sessions SET snoozed_until = ? WHERE id = ?", timeToUnix(until), id)
+	_, err := s.db.Exec("UPDATE sessions SET snoozed_until = ? WHERE id = ?", snoozeToUnix(until), id)
 	if err != nil {
 		debuglog.Logger.Error("failed to set session snooze", "id", id, "until", until, "error", err)
+	}
+	return err
+}
+
+// ClearIndefiniteSessionSnooze ends a session's "until I wake it" snooze, and
+// only that: the write is conditional on the row still holding it, so a timed
+// snooze another process set in the meantime keeps its deadline.
+func (s *StateDB) ClearIndefiniteSessionSnooze(id string) error {
+	_, err := s.db.Exec("UPDATE sessions SET snoozed_until = 0 WHERE id = ? AND snoozed_until = ?", id, snoozeForeverUnix)
+	if err != nil {
+		debuglog.Logger.Error("failed to clear indefinite session snooze", "id", id, "error", err)
 	}
 	return err
 }
@@ -713,16 +751,24 @@ func (s *StateDB) LoadCollapsedGroups() ([]string, error) {
 }
 
 // SetGroupSnooze records (or clears, on the zero time) an umbrella snooze over
-// a sidebar group. Key space matches SetGroupCollapsed: "origin:<key>" for
-// origin headers, the repo path for checkout headers.
+// a sidebar group, stamped as snoozed now. Key space matches SetGroupCollapsed:
+// "origin:<key>" for origin headers, the repo path for checkout headers.
 func (s *StateDB) SetGroupSnooze(groupKey string, until time.Time) error {
+	return s.SetGroupSnoozeAt(groupKey, until, time.Now())
+}
+
+// SetGroupSnoozeAt is SetGroupSnooze with the snoozed_at stamp supplied, so a
+// caller that keeps the same fact in memory holds the value the row holds.
+// snoozed_at is whole seconds, like every timestamp it is compared against
+// after a reload (see parkIntent).
+func (s *StateDB) SetGroupSnoozeAt(groupKey string, until, at time.Time) error {
 	var err error
 	if until.IsZero() {
 		_, err = s.db.Exec("DELETE FROM snoozed_groups WHERE group_key = ?", groupKey)
 	} else {
 		_, err = s.db.Exec(
-			"INSERT OR REPLACE INTO snoozed_groups (group_key, snoozed_until) VALUES (?, ?)",
-			groupKey, until.Unix())
+			"INSERT OR REPLACE INTO snoozed_groups (group_key, snoozed_until, snoozed_at) VALUES (?, ?, ?)",
+			groupKey, snoozeToUnix(until), at.Unix())
 	}
 	if err != nil {
 		debuglog.Logger.Error("failed to set group snooze", "key", groupKey, "until", until, "error", err)
@@ -732,24 +778,49 @@ func (s *StateDB) SetGroupSnooze(groupKey string, until time.Time) error {
 
 // LoadSnoozedGroups returns every group's snooze deadline, keyed by group key.
 func (s *StateDB) LoadSnoozedGroups() (map[string]time.Time, error) {
-	rows, err := s.db.Query("SELECT group_key, snoozed_until FROM snoozed_groups")
+	until, _, err := s.LoadSnoozedGroupsAt()
+	return until, err
+}
+
+// LoadSnoozedGroupsAt returns every group's snooze deadline and when it was
+// snoozed, both keyed by group key. A row written before snoozed_at existed
+// reads as the zero time.
+func (s *StateDB) LoadSnoozedGroupsAt() (until, at map[string]time.Time, err error) {
+	rows, err := s.db.Query("SELECT group_key, snoozed_until, snoozed_at FROM snoozed_groups")
 	if err != nil {
 		debuglog.Logger.Error("failed to load snoozed groups", "error", err)
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	out := make(map[string]time.Time)
+	until = make(map[string]time.Time)
+	at = make(map[string]time.Time)
 	for rows.Next() {
 		var key string
-		var until int64
-		if err := rows.Scan(&key, &until); err != nil {
+		var u, a int64
+		if err := rows.Scan(&key, &u, &a); err != nil {
 			debuglog.Logger.Error("failed to scan snoozed group row", "error", err)
-			return nil, err
+			return nil, nil, err
 		}
-		out[key] = unixToTime(until)
+		until[key] = unixToSnooze(u)
+		at[key] = unixToTime(a)
 	}
-	return out, rows.Err()
+	return until, at, rows.Err()
+}
+
+// LoadGroupSnooze reads one group's snooze; ok is false when the group has
+// none. The park sweep reads it before suspending, since another fleet
+// process may have woken the group.
+func (s *StateDB) LoadGroupSnooze(groupKey string) (until, at time.Time, ok bool, err error) {
+	var u, a int64
+	err = s.db.QueryRow("SELECT snoozed_until, snoozed_at FROM snoozed_groups WHERE group_key = ?", groupKey).Scan(&u, &a)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	return unixToSnooze(u), unixToTime(a), true, nil
 }
 
 // SavePRCacheRow upserts a single repo's PR-refresh state. Called per-repo
@@ -858,6 +929,31 @@ func timeToUnix(t time.Time) int64 {
 		return 0
 	}
 	return t.Unix()
+}
+
+// snoozeForeverUnix is how an "until I wake it" snooze is stored. Negative on
+// purpose: an older fleet reads it through unixToTime as the zero time, i.e.
+// not snoozed, where a far-future timestamp would render a seven-digit
+// countdown after a downgrade. An older fleet deletes such a group row on
+// load. A session row usually keeps its -1, so upgrading again brings that
+// session's snooze back, until the older fleet rewrites the row whole
+// (SaveSession, e.g. on a rename), which stores 0.
+const snoozeForeverUnix = -1
+
+// snoozeToUnix encodes a snooze deadline, mapping SnoozeForever to -1.
+func snoozeToUnix(t time.Time) int64 {
+	if IsSnoozeForever(t) {
+		return snoozeForeverUnix
+	}
+	return timeToUnix(t)
+}
+
+// unixToSnooze decodes a snooze deadline, mapping -1 back to SnoozeForever.
+func unixToSnooze(sec int64) time.Time {
+	if sec == snoozeForeverUnix {
+		return SnoozeForever
+	}
+	return unixToTime(sec)
 }
 
 // unixToTime is timeToUnix's inverse: 0 (and anything non-positive) reads back

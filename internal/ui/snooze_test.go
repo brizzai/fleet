@@ -712,7 +712,7 @@ func TestMaybeWakeSnoozedExpires(t *testing.T) {
 		"/tmp/snz-new": now.Add(time.Hour),
 	}
 
-	if !h.maybeWakeSnoozed() {
+	if !runWakeSweep(h) {
 		t.Fatal("sweep reported no change despite an expired snooze")
 	}
 	if !lapsed.SnoozedUntil().IsZero() {
@@ -729,7 +729,7 @@ func TestMaybeWakeSnoozedExpires(t *testing.T) {
 	}
 
 	// Throttled: an immediate second call must not re-run.
-	if h.maybeWakeSnoozed() {
+	if h.snoozeSweepDue(time.Now()) && h.wakeSnoozed() {
 		t.Error("sweep ran again inside its throttle interval")
 	}
 }
@@ -770,7 +770,7 @@ func TestExpiredSnoozeFlagsIdleSessionUnread(t *testing.T) {
 	h.sessions = []*session.Session{idle, running, manual, underGroup}
 	h.groupSnooze = map[string]time.Time{"/tmp/snz-u-group": now.Add(-time.Second)}
 
-	if !h.maybeWakeSnoozed() {
+	if !runWakeSweep(h) {
 		t.Fatal("sweep reported no change despite expired snoozes")
 	}
 	if got := idle.GetStatus(); got != session.StatusFinished {
@@ -963,4 +963,9 @@ func TestJumpReachesSessionAfterSnoozeExpiry(t *testing.T) {
 	if landed := h.flatItems[h.cursor].Session; landed == nil || landed.ID != woken.ID {
 		t.Errorf("an expired snooze must not keep a session out of the rotation, got %v", landed)
 	}
+}
+
+// runWakeSweep is the wake half of the tick's snooze sweep, throttle included.
+func runWakeSweep(h *Home) bool {
+	return h.snoozeSweepDue(time.Now()) && h.wakeSnoozed()
 }

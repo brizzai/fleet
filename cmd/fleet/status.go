@@ -281,7 +281,10 @@ func printDetail(w io.Writer, ob *control.Observation) {
 	if !ob.LastActivity.IsZero() {
 		kv("activity", ago(ob.LastActivity)+" ago")
 	}
-	if until := ob.Row.SnoozedUntil; until.After(time.Now()) {
+	switch until := ob.Row.SnoozedUntil; {
+	case session.IsSnoozeForever(until):
+		kv("snoozed", "until woken")
+	case until.After(time.Now()):
 		kv("snoozed", "until "+until.Local().Format("Jan 2 15:04"))
 	}
 	if ob.LastPrompt != "" {
